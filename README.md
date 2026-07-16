@@ -43,6 +43,14 @@ npm run dev
 npm run demo:real
 ```
 
+在 Claude Code 与 Cursor Agent 已完成登录后，同时启用本地真实 Runtime：
+
+```bash
+npm run demo:real-runtimes
+```
+
+本地 Runtime 使用只读模式：Claude Code 采用 `--tools "" --permission-mode plan --safe-mode`，Cursor Agent 采用 `--mode ask --sandbox enabled`。每次调用都在独立临时目录运行并在结束后删除。Claude 单次调用默认设置 `$0.25` 预算上限，可通过 `CLAUDE_MAX_BUDGET_USD` 调整。
+
 随后在页面选择样本，把评测模式切换为“真实对测”。三个 Agent 分别监听：
 
 - `http://127.0.0.1:4181`：文件收纳员，A2A 1.0 HTTP+JSON；
@@ -74,7 +82,7 @@ npm test
 
 如果未配置真实 adapter，相关项会保留为 demo；调用失败会记录错误并继续执行其余选手。
 
-“本机已安装”不等于“平台已真实调用”。`GET /api/runtimes` 会探测 `claude`、`cursor-agent` 和 `doubao` 可执行文件；只有 `RUNTIME_ADAPTERS_JSON` 中存在对应隔离服务时，`runtimeReady` 才会为 `true`。当前主服务不会擅自调用本机 Claude Code，也不会把 Cursor Desktop 的 `cursor` 命令误认成可无头执行的 `cursor-agent`。
+“本机已安装”不等于“平台已真实调用”。`GET /api/runtimes` 会探测 `claude`、`cursor-agent` 和 `doubao` 的安装、登录与启用状态。远程隔离 adapter 通过 `RUNTIME_ADAPTERS_JSON` 启用；本地 CLI 必须显式设置 `ENABLE_LOCAL_CLAUDE_CODE=true` 或 `ENABLE_LOCAL_CURSOR_AGENT=true`。主服务不会擅自触发付费调用，也不会把 Cursor Desktop 的 `cursor` 命令误认成 `cursor-agent`。
 
 ## A2A 提交方式
 
@@ -175,6 +183,10 @@ npm test
 | `ALLOW_PRIVATE_AGENT_URLS` | `false` | 是否允许 localhost/私网 Agent URL，仅建议本地开发开启 |
 | `MODEL_REVIEWERS_JSON` | 内置三位 demo 评审 | 真实模型 adapter 配置 |
 | `RUNTIME_ADAPTERS_JSON` | 内置三种 demo runtime | 隔离 runtime adapter 配置 |
+| `ENABLE_LOCAL_CLAUDE_CODE` | `false` | 允许真实调用已登录的本机 Claude Code |
+| `ENABLE_LOCAL_CURSOR_AGENT` | `false` | 允许真实调用已登录的本机 Cursor Agent CLI |
+| `CLAUDE_MAX_BUDGET_USD` | `0.25` | Claude Code 单次无头调用预算上限 |
+| `LOCAL_RUNTIME_TIMEOUT_MS` | `180000` | 本地 CLI 单次执行时限 |
 
 ## Git 工作流
 

@@ -276,7 +276,7 @@ async function loadRuntimeHealth() {
   try {
     const response = await fetch('/api/runtimes');
     const runtimes = await response.json();
-    root.innerHTML = `<span>RUNTIME PROBE</span>${runtimes.map((runtime) => `<span class="runtime-chip ${runtime.installed ? 'installed' : ''} ${runtime.runtimeReady ? 'ready' : ''}" title="${escapeHtml(runtime.note)}">${escapeHtml(runtime.name)} · ${runtime.runtimeReady ? 'READY' : runtime.installed ? '未启用' : '缺失'}</span>`).join('')}`;
+    root.innerHTML = `<span>RUNTIME PROBE</span>${runtimes.map((runtime) => `<span class="runtime-chip ${runtime.installed ? 'installed' : ''} ${runtime.runtimeReady ? 'ready' : ''}" title="${escapeHtml(runtime.note)}">${escapeHtml(runtime.name)} · ${runtime.runtimeReady ? 'READY' : !runtime.installed ? '缺失' : !runtime.authenticated ? '未登录' : '未启用'}</span>`).join('')}`;
   } catch {
     root.innerHTML = '<span>RUNTIME PROBE</span><i>探测失败</i>';
   }

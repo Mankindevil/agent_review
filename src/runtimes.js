@@ -1,4 +1,11 @@
-import { stableNumber } from './utils.js';
+import { stableNumber, safeJson } from './utils.js';
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 export const RUNTIMES = [
   { id: 'claude-code', name: 'Claude Code', model: 'Claude Sonnet', badge: 'CC' },
@@ -8,6 +15,12 @@ export const RUNTIMES = [
 
 export async function buildSkill(runtime, card, mode) {
   const config = runtimeConfig(runtime.id);
+  if (mode === 'live' && config?.kind === 'local-cli') {
+    const prompt = `你正在参加独立 Agent 复刻测试。只根据下面的 A2A Agent Card 设计一个可执行 Skill，不得声称看过原 Agent 实现。只输出 JSON，字段：name(string), description(string), instructions(string[]), tools(string[])。\n\nAGENT CARD:\n${JSON.stringify(card, null, 2)}`;
+    const result = await callLocalCli(runtime.id, prompt);
+    const skill = safeJson(result.text);
+    return { runtime: runtime.name, runtimeId: runtime.id, model: runtime.model, mode: 'live', adapterKind: 'local-cli', skill, trace: result.trace };
+  }
   if (mode === 'live' && config?.url) {
     const response = await fetch(config.url, {
       method: 'POST',
@@ -40,6 +53,10 @@ export async function buildSkill(runtime, card, mode) {
 
 export async function runSkill(build, testCase, mode) {
   const config = runtimeConfig(build.runtimeId);
+  if (mode === 'live' && config?.kind === 'local-cli') {
+    const prompt = `严格执行下面的 Skill，处理用户原始请求。只输出给用户的最终结果，不要解释你是如何模拟 Skill 的，也不要使用未提供的外部事实。\n\nSKILL:\n${JSON.stringify(build.skill, null, 2)}\n\n用户原始请求：\n${testCase.prompt}`;
+    return (await callLocalCli(build.runtimeId, prompt)).text;
+  }
   if (mode === 'live' && config?.url) {
     const response = await fetch(config.url, {
       method: 'POST',
@@ -55,7 +72,50 @@ export async function runSkill(build, testCase, mode) {
 }
 
 function runtimeConfig(runtimeId) {
-  try { return JSON.parse(process.env.RUNTIME_ADAPTERS_JSON || '{}')[runtimeId]; } catch { return null; }
+  try {
+    const remote = JSON.parse(process.env.RUNTIME_ADAPTERS_JSON || '{}')[runtimeId];
+    if (remote) return remote;
+  } catch { return null; }
+  if (runtimeId === 'claude-code' && process.env.ENABLE_LOCAL_CLAUDE_CODE === 'true') return { kind: 'local-cli', command: 'claude' };
+  if (runtimeId === 'cursor' && process.env.ENABLE_LOCAL_CURSOR_AGENT === 'true') return { kind: 'local-cli', command: 'cursor-agent' };
+  return null;
+}
+
+async function callLocalCli(runtimeId, prompt) {
+  const workspace = await mkdtemp(path.join(tmpdir(), `agent-roast-${runtimeId}-`));
+  const startedAt = Date.now();
+  const timeout = Number(process.env.LOCAL_RUNTIME_TIMEOUT_MS || 180_000);
+  const budget = process.env.CLAUDE_MAX_BUDGET_USD || '0.25';
+  const command = runtimeId === 'claude-code' ? 'claude' : 'cursor-agent';
+  const args = runtimeId === 'claude-code'
+    ? ['-p', prompt, '--output-format', 'json', '--tools', '', '--permission-mode', 'plan', '--safe-mode', '--no-session-persistence', '--max-turns', '1', '--max-budget-usd', budget]
+    : ['-p', prompt, '--output-format', 'json', '--mode', 'ask', '--sandbox', 'enabled', '--trust', '--workspace', workspace];
+  try {
+    const { stdout, stderr } = await execFileAsync(command, args, { cwd: workspace, timeout, maxBuffer: 5_000_000, env: { ...process.env, NO_COLOR: '1' } });
+    const text = extractCliText(stdout);
+    if (!text.trim()) throw new Error(`${command} 没有返回可见结果`);
+    return { text, trace: { command, durationMs: Date.now() - startedAt, stdoutBytes: Buffer.byteLength(stdout), stderr: String(stderr || '').trim().slice(0, 500) } };
+  } catch (error) {
+    const detail = [error.stderr, error.stdout, error.message].filter(Boolean).join('\n');
+    if (/not logged|login|auth|unauthorized|api key/i.test(detail)) throw new Error(`AUTH_REQUIRED: ${command} 尚未完成账号授权`);
+    if (error.killed || error.signal) throw new Error(`${command} 超过 ${timeout}ms 执行时限`);
+    throw new Error(`${command} 执行失败：${String(detail).slice(0, 800)}`);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+}
+
+function extractCliText(stdout) {
+  const raw = String(stdout || '').trim();
+  try {
+    const payload = JSON.parse(raw);
+    if (typeof payload.result === 'string') return payload.result;
+    if (typeof payload.text === 'string') return payload.text;
+    if (typeof payload.message === 'string') return payload.message;
+    const content = payload.message?.content || payload.content;
+    if (Array.isArray(content)) return content.map((part) => part.text || '').filter(Boolean).join('\n');
+  } catch { /* Some CLI versions return plain text even when json is requested. */ }
+  return raw;
 }
 
 function inferTools(card) {

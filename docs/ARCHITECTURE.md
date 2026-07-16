@@ -95,6 +95,8 @@ A2A 1.0 JSON-RPC 使用 `SendMessage`，0.3 兼容调用使用 `message/send`。
 
 演示模式会生成确定性 skill 与输出；真实模式通过 `RUNTIME_ADAPTERS_JSON` 调用外部隔离 runtime 服务。这样 Web 服务本身不会直接执行用户提供的 shell 命令，避免远程代码执行。
 
+开发机也支持显式启用本地 CLI adapter。Claude Code 被限制为无工具、plan、安全模式和单次预算；Cursor Agent 被限制为 ask/read-only 与内置 sandbox。两个 CLI 都在随机临时目录执行，不接触仓库文件。只有安装、登录和环境开关同时满足时，Runtime Probe 才显示 `READY`。生产环境仍应使用远程容器 adapter，本地 CLI 仅用于受信任开发机验收。
+
 ### 3.5 同 prompt 对测与锐评分档
 
 每个用例同时发送给：
