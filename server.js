@@ -1,0 +1,79 @@
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import path from 'node:path';
+import { EventEmitter } from 'node:events';
+import { fileURLToPath } from 'node:url';
+import { EvaluationPipeline } from './src/pipeline.js';
+import { EvaluationStore } from './src/store.js';
+import { readJsonBody } from './src/utils.js';
+
+const root = path.dirname(fileURLToPath(import.meta.url));
+const publicRoot = path.join(root, 'public');
+const store = new EvaluationStore(process.env.DATA_FILE || path.join(root, 'data/evaluations.json'));
+const events = new EventEmitter();
+events.setMaxListeners(100);
+const pipeline = new EvaluationPipeline(store, events);
+await store.load();
+
+export const server = createServer(async (request, response) => {
+  try {
+    const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+    if (request.method === 'GET' && url.pathname === '/api/health') return json(response, 200, { ok: true, mode: 'full-stack', time: new Date().toISOString() });
+    if (request.method === 'GET' && url.pathname === '/api/evaluations') return json(response, 200, store.list().map(summary));
+    if (request.method === 'POST' && url.pathname === '/api/evaluations') {
+      const item = await pipeline.create(await readJsonBody(request));
+      return json(response, 202, item);
+    }
+    const match = url.pathname.match(/^\/api\/evaluations\/([^/]+)$/);
+    if (request.method === 'GET' && match) {
+      const item = store.get(match[1]);
+      return item ? json(response, 200, item) : json(response, 404, { error: '评测不存在' });
+    }
+    const eventMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/events$/);
+    if (request.method === 'GET' && eventMatch) return streamEvents(request, response, eventMatch[1]);
+    if (request.method === 'GET') return staticFile(url.pathname, response);
+    return json(response, 404, { error: '接口不存在' });
+  } catch (error) {
+    if (!error.statusCode || error.statusCode >= 500) console.error(error);
+    return json(response, error.statusCode || 500, { error: error.message || '服务器内部错误' });
+  }
+});
+
+function streamEvents(request, response, evaluationId) {
+  const item = store.get(evaluationId);
+  if (!item) return json(response, 404, { error: '评测不存在' });
+  response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+  const send = (value) => response.write(`data: ${JSON.stringify(value)}\n\n`);
+  send(item);
+  const listener = (value) => send(value);
+  events.on(evaluationId, listener);
+  const heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 15_000);
+  request.on('close', () => { clearInterval(heartbeat); events.off(evaluationId, listener); });
+}
+
+async function staticFile(pathname, response) {
+  const requested = pathname === '/' ? '/index.html' : pathname;
+  const target = path.normalize(path.join(publicRoot, requested));
+  if (!target.startsWith(publicRoot)) return json(response, 403, { error: '禁止访问' });
+  try {
+    const info = await stat(target);
+    if (!info.isFile()) throw new Error('not file');
+    response.writeHead(200, { 'content-type': contentType(target), 'cache-control': 'no-cache' });
+    createReadStream(target).pipe(response);
+  } catch {
+    if (!path.extname(pathname)) return staticFile('/index.html', response);
+    return json(response, 404, { error: '文件不存在' });
+  }
+}
+
+function contentType(file) {
+  return ({ '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' })[path.extname(file)] || 'application/octet-stream';
+}
+function json(response, status, payload) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); response.end(JSON.stringify(payload)); }
+function summary(item) { return { id: item.id, name: item.agentCard.name, createdAt: item.createdAt, status: item.status, progress: item.progress, tier: item.roast?.tier, score: item.averages?.submitted }; }
+
+if (process.env.NODE_ENV !== 'test') {
+  const port = Number(process.env.PORT || 4173);
+  server.listen(port, () => console.log(`Agent 锐评系统已启动：http://localhost:${port}`));
+}

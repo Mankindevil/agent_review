@@ -1,0 +1,27 @@
+{
+  "name": "合同风险猎手",
+  "description": "面向企业法务的合同审查 Agent：读取合同与制度文件，识别冲突条款，按风险等级给出证据、修改建议，并在信息不足时请求人工确认。",
+  "protocolVersion": "1.0",
+  "supportedInterfaces": [
+    {
+      "url": "https://agent.example.com/a2a",
+      "protocolBinding": "HTTP+JSON",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false
+  },
+  "defaultInputModes": ["text/plain", "application/pdf"],
+  "defaultOutputModes": ["application/json", "text/markdown"],
+  "skills": [
+    {
+      "id": "contract-review",
+      "name": "合同风险审查",
+      "description": "根据合同类型、公司制度和适用法域执行多步审查，定位风险并生成可追溯的修订建议。",
+      "tags": ["legal", "risk", "workflow", "human-in-the-loop"],
+      "examples": ["审查这份 SaaS 采购合同，重点关注数据出境、赔偿上限和自动续费。"]
+    }
+  ]
+}

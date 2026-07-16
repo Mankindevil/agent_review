@@ -1,0 +1,16 @@
+{
+  "name": "agent-roast-arena",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A2A Agent 复杂度、专业度与基准对测平台",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js",
+    "test": "node --test",
+    "check": "node --check server.js && node --check src/pipeline.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

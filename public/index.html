@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="用多模型盲审和同 prompt 实战对测，判断一个 A2A Agent 到底夯不夯。">
+  <title>锐评局 · Agent 公开处刑场</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="noise" aria-hidden="true"></div>
+  <header class="site-header">
+    <a class="brand" href="#" aria-label="锐评局首页">
+      <span class="brand-mark">锐</span>
+      <span><b>锐评局</b><small>AGENT VERDICT LAB</small></span>
+    </a>
+    <nav>
+      <button class="nav-button active" data-action="home">发起评测</button>
+      <button class="nav-button" data-action="history">往期战绩 <span id="history-count">0</span></button>
+    </nav>
+    <div class="system-state"><i></i><span>评测舱在线</span></div>
+  </header>
+
+  <main id="landing-view">
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="eyebrow"><span>A2A AGENT BENCHMARK</span><span>NO. 001</span></div>
+        <h1>你的 Agent<br>到底是不是<br><em>电子盆栽？</em></h1>
+        <p class="hero-deck">不听发布会，只看同题对打。先判断这事值不值得用 Agent，再让 GPT、Claude、豆包轮流挑刺，最后现场复刻、正面对线。</p>
+        <div class="hero-proof">
+          <div><b>03</b><span>模型交叉盲审</span></div>
+          <div><b>03</b><span>Runtime 现场复刻</span></div>
+          <div><b>01</b><span>不留情面锐评</span></div>
+        </div>
+      </div>
+
+      <div class="intake-card" id="submission-panel">
+        <div class="card-kicker"><span>INTAKE / 送检入口</span><strong>01</strong></div>
+        <div class="mode-switch" role="group" aria-label="评测模式">
+          <button class="selected" data-mode="demo"><span>演示评测</span><small>零配置，跑完整流程</small></button>
+          <button data-mode="live"><span>真实对测</span><small>调用 Agent 与已配置模型</small></button>
+        </div>
+
+        <label class="drop-zone" for="agent-file" id="drop-zone">
+          <input type="file" id="agent-file" accept=".json,.a2a.json,application/json">
+          <span class="drop-icon">↥</span>
+          <b>把 Agent Card 扔进来</b>
+          <small>支持 A2A 1.0，也兼容 0.3 的 url 写法 · 最大 1 MB</small>
+          <span class="file-name" id="file-name">选择 JSON 文件</span>
+        </label>
+
+        <div class="or"><span>或者直接粘贴</span></div>
+        <textarea id="agent-card" spellcheck="false" placeholder='{ "name": "...", "description": "...", "skills": [...] }'></textarea>
+
+        <div class="cases-head">
+          <div><b>同题对测用例</b><small>所有选手收到完全相同的 prompt</small></div>
+          <button class="text-button" id="add-case" type="button">＋ 添加用例</button>
+        </div>
+        <div id="case-list" class="case-list"></div>
+
+        <div class="form-actions">
+          <button class="sample-button" id="load-sample" type="button">载入狠活示例</button>
+          <button class="primary-button" id="start-evaluation" type="button"><span>送进评测舱</span><i>↗</i></button>
+        </div>
+        <p class="form-error" id="form-error" role="alert"></p>
+      </div>
+    </section>
+
+    <section class="method-strip" aria-label="评测方法">
+      <article><span>一审</span><b>该不该做</b><p>单轮模型能搞定的活，别披 Agent 马甲。</p></article>
+      <article><span>二审</span><b>够不够专</b><p>领域深度、流程、异常、契约、可评测性。</p></article>
+      <article><span>终审</span><b>到底谁赢</b><p>相同 prompt、不同实现，只比较可见结果。</p></article>
+      <div class="method-callout"><small>最终分档</small><strong>夯 / 中 / 拉</strong></div>
+    </section>
+  </main>
+
+  <main id="evaluation-view" class="evaluation-view hidden">
+    <section class="evaluation-top">
+      <button class="back-button" data-action="home">← 新评测</button>
+      <div class="run-heading">
+        <span class="run-id" id="run-id">RUN —</span>
+        <h2 id="agent-name">正在装载 Agent</h2>
+        <p id="agent-description"></p>
+      </div>
+      <div class="mode-pill" id="run-mode">DEMO</div>
+    </section>
+
+    <section class="live-deck" id="live-deck">
+      <div class="pulse-rail" aria-hidden="true"><i id="pulse-progress"></i><span id="pulse-dot"></span></div>
+      <div class="stage-copy">
+        <span>LIVE / 当前工位</span>
+        <h3 id="current-stage">等待评测舱</h3>
+        <p id="latest-log">正在建立隔离评测环境……</p>
+      </div>
+      <div class="progress-number"><b id="progress-number">0</b><span>%</span></div>
+      <ol class="stage-list">
+        <li data-threshold="6"><i></i><span>A2A 体检</span></li>
+        <li data-threshold="22"><i></i><span>复杂度</span></li>
+        <li data-threshold="52"><i></i><span>多模型盲审</span></li>
+        <li data-threshold="66"><i></i><span>现场复刻</span></li>
+        <li data-threshold="92"><i></i><span>同题对打</span></li>
+        <li data-threshold="100"><i></i><span>锐评</span></li>
+      </ol>
+    </section>
+
+    <section id="result-content" class="result-content"></section>
+  </main>
+
+  <aside class="history-drawer" id="history-drawer" aria-hidden="true">
+    <div class="drawer-head"><div><small>ARCHIVE</small><h2>往期战绩</h2></div><button data-action="close-history" aria-label="关闭">×</button></div>
+    <div id="history-list" class="history-list"></div>
+  </aside>
+  <div class="drawer-backdrop" id="drawer-backdrop" data-action="close-history"></div>
+
+  <template id="case-template">
+    <div class="case-row">
+      <span class="case-index"></span>
+      <div><input class="case-name" aria-label="用例名称" placeholder="用例名称"><textarea class="case-prompt" aria-label="测试 Prompt" placeholder="输入真实用户会说的原始 prompt"></textarea></div>
+      <button class="remove-case" type="button" aria-label="删除用例">×</button>
+    </div>
+  </template>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
