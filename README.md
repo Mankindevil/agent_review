@@ -5,13 +5,16 @@
 ## 已实现功能
 
 - A2A 1.0 Agent Card 校验，兼容 0.3 顶层 `url` 形态；
-- 文件拖拽、文件选择或 JSON 粘贴；
+- 文件拖拽、文件选择、JSON 粘贴、Agent Card URL 与服务根地址自动发现；
 - 1–5 个同 prompt 测试用例；
 - Agent 必要性五维评分与明确判断；
 - GPT、Claude、豆包三个模型视角的独立评分、评语和风险；
 - Claude Code、Cursor、Doubao 三种 runtime 的 skill 现场复刻抽象；
 - 提交 Agent 与三个复刻 skill 的逐用例输出和分数对比；
 - SSE 实时进度、可恢复的评测详情和本地历史记录；
+- 结构化执行日志：协议、评分、模型、Runtime、对测、耗时与真实/演示模式；
+- 本机 Runtime 探测，区分“已安装”“已配置可执行”和“缺失”；
+- 扫描光束、阶段切换、分数计数与判词盖章动效，支持 reduced-motion；
 - 演示/真实双模式；
 - 响应式前端、键盘焦点与 reduced-motion 支持；
 - Node 原生测试，无第三方运行依赖。
@@ -26,12 +29,30 @@
 npm start
 ```
 
-打开 `http://localhost:4173`，点击“载入狠活示例”，再点击“送进评测舱”即可完整体验。
+打开 `http://localhost:4173`，选择任一“本地真实样本”，再点击“送进评测舱”即可体验演示评测。
 
 开发模式：
 
 ```bash
 npm run dev
+```
+
+启动三个可实际调用的本地 A2A Agent 和评测平台：
+
+```bash
+npm run demo:real
+```
+
+随后在页面选择样本，把评测模式切换为“真实对测”。三个 Agent 分别监听：
+
+- `http://127.0.0.1:4181`：文件收纳员，A2A 1.0 HTTP+JSON；
+- `http://127.0.0.1:4182`：合同风险猎手，A2A 1.0 JSON-RPC；
+- `http://127.0.0.1:4183`：生产事故指挥官，A2A 0.3 JSON-RPC 兼容样本。
+
+每个服务都在 `/.well-known/agent-card.json` 暴露 Agent Card。也可以只运行示例 Agent：
+
+```bash
+npm run agents
 ```
 
 检查与测试：
@@ -52,6 +73,26 @@ npm test
 3. 调用 `RUNTIME_ADAPTERS_JSON` 配置的隔离 runtime 服务。
 
 如果未配置真实 adapter，相关项会保留为 demo；调用失败会记录错误并继续执行其余选手。
+
+“本机已安装”不等于“平台已真实调用”。`GET /api/runtimes` 会探测 `claude`、`cursor-agent` 和 `doubao` 可执行文件；只有 `RUNTIME_ADAPTERS_JSON` 中存在对应隔离服务时，`runtimeReady` 才会为 `true`。当前主服务不会擅自调用本机 Claude Code，也不会把 Cursor Desktop 的 `cursor` 命令误认成可无头执行的 `cursor-agent`。
+
+## A2A 提交方式
+
+| 页面入口 | 输入内容 | 适用场景 | 是否属于 A2A 标准发现 |
+|---|---|---|---|
+| 文件 / JSON | `.json`、`.a2a.json` 文件 | 评审草稿、离线或内网 Agent Card | 直接配置 |
+| 文件 / JSON | 粘贴完整 Agent Card | 调试与快速修改 | 直接配置 |
+| Card URL | Agent Card JSON 的完整 URL | Card 不在标准路径或由网关托管 | 直接配置 URL |
+| 服务地址发现 | 例如 `https://agent.example.com` | 公开 Agent 的标准自动发现 | `/.well-known/agent-card.json` |
+| Registry（规划中） | 企业目录中的 Agent ID | 大规模治理、权限与目录检索 | Registry API 尚未由 A2A 统一规定 |
+
+源码压缩包、Git 仓库、Docker 镜像不是 A2A 规定的发现形式。后续可以把它们作为“托管验收”入口：平台先在隔离环境部署，再要求部署结果暴露 Agent Card 与 A2A endpoint。认证信息同样不放入 Agent Card；私有 Agent 应通过独立的凭据引用或企业密钥管理接入。
+
+### 示例资产
+
+- `examples/submissions/`：三份可直接上传的 Agent Card；
+- `examples/use-cases.json`：每个 Agent 的真实 prompt 和验收点；
+- `examples/agents/server.js`：三个实际提供 well-known discovery 与 A2A 调用接口的本地服务。
 
 ## 模型评审配置
 

@@ -40,17 +40,40 @@
           <button class="selected" data-mode="demo"><span>演示评测</span><small>零配置，跑完整流程</small></button>
           <button data-mode="live"><span>真实对测</span><small>调用 Agent 与已配置模型</small></button>
         </div>
+        <div class="runtime-health" id="runtime-health" aria-live="polite"><span>RUNTIME PROBE</span><i>正在检查本机执行器…</i></div>
 
-        <label class="drop-zone" for="agent-file" id="drop-zone">
-          <input type="file" id="agent-file" accept=".json,.a2a.json,application/json">
-          <span class="drop-icon">↥</span>
-          <b>把 Agent Card 扔进来</b>
-          <small>支持 A2A 1.0，也兼容 0.3 的 url 写法 · 最大 1 MB</small>
-          <span class="file-name" id="file-name">选择 JSON 文件</span>
-        </label>
+        <div class="source-switch" role="group" aria-label="Agent 提交方式">
+          <button class="selected" data-source="direct">文件 / JSON</button>
+          <button data-source="card-url">Card URL</button>
+          <button data-source="service-url">服务地址发现</button>
+        </div>
 
-        <div class="or"><span>或者直接粘贴</span></div>
-        <textarea id="agent-card" spellcheck="false" placeholder='{ "name": "...", "description": "...", "skills": [...] }'></textarea>
+        <div id="direct-source">
+          <label class="drop-zone" for="agent-file" id="drop-zone">
+            <input type="file" id="agent-file" accept=".json,.a2a.json,application/json">
+            <span class="drop-icon">↥</span>
+            <b>把 Agent Card 扔进来</b>
+            <small>支持 A2A 1.0，也兼容 0.3 的 url 写法 · 最大 1 MB</small>
+            <span class="file-name" id="file-name">选择 JSON 文件</span>
+          </label>
+
+          <div class="or"><span>或者直接粘贴</span></div>
+          <textarea id="agent-card" spellcheck="false" placeholder='{ "name": "...", "description": "...", "skills": [...] }'></textarea>
+        </div>
+
+        <div id="url-source" class="url-source hidden">
+          <label for="agent-url" id="agent-url-label">Agent Card 完整 URL</label>
+          <div class="url-row"><input id="agent-url" type="url" placeholder="https://agent.example.com/.well-known/agent-card.json"><button id="resolve-agent" type="button">读取并校验</button></div>
+          <p id="url-help">直接读取指定的 Agent Card JSON 地址。</p>
+          <div class="resolved-card hidden" id="resolved-card"></div>
+        </div>
+
+        <div class="example-picks">
+          <span>本地真实样本</span>
+          <button type="button" data-example="file">文件收纳员</button>
+          <button type="button" data-example="contract">合同风险猎手</button>
+          <button type="button" data-example="incident">事故指挥官</button>
+        </div>
 
         <div class="cases-head">
           <div><b>同题对测用例</b><small>所有选手收到完全相同的 prompt</small></div>
@@ -58,10 +81,7 @@
         </div>
         <div id="case-list" class="case-list"></div>
 
-        <div class="form-actions">
-          <button class="sample-button" id="load-sample" type="button">载入狠活示例</button>
-          <button class="primary-button" id="start-evaluation" type="button"><span>送进评测舱</span><i>↗</i></button>
-        </div>
+        <div class="form-actions single"><button class="primary-button" id="start-evaluation" type="button"><span>送进评测舱</span><i>↗</i></button></div>
         <p class="form-error" id="form-error" role="alert"></p>
       </div>
     </section>
@@ -86,6 +106,7 @@
     </section>
 
     <section class="live-deck" id="live-deck">
+      <div class="scan-beam" aria-hidden="true"></div>
       <div class="pulse-rail" aria-hidden="true"><i id="pulse-progress"></i><span id="pulse-dot"></span></div>
       <div class="stage-copy">
         <span>LIVE / 当前工位</span>
@@ -101,6 +122,11 @@
         <li data-threshold="92"><i></i><span>同题对打</span></li>
         <li data-threshold="100"><i></i><span>锐评</span></li>
       </ol>
+    </section>
+
+    <section class="telemetry-panel">
+      <header><div><span>TRACE / 评测执行日志</span><b id="log-count">0 EVENTS</b></div><small>每一条都标明真实、演示或规则执行</small></header>
+      <div class="log-stream" id="log-stream"><p class="log-empty">等待第一条评测信号……</p></div>
     </section>
 
     <section id="result-content" class="result-content"></section>

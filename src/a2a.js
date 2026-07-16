@@ -43,11 +43,32 @@ export function assertSafeAgentUrl(rawUrl) {
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Agent 接口仅支持 HTTP(S)');
   const hostname = url.hostname.toLowerCase();
   const privateName = hostname === 'localhost' || hostname.endsWith('.local');
-  const privateIp = isIP(hostname) && (/^127\./.test(hostname) || /^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname) || hostname === '::1');
+  const privateIp = isIP(hostname) && (/^127\./.test(hostname) || /^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname) || /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) || hostname === '::1');
   if ((privateName || privateIp) && process.env.ALLOW_PRIVATE_AGENT_URLS !== 'true') {
     throw new Error('为防止 SSRF，默认禁止内网 Agent URL；本地开发可设置 ALLOW_PRIVATE_AGENT_URLS=true');
   }
   return url;
+}
+
+export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000) {
+  if (!['card-url', 'service-url'].includes(sourceType)) throw new Error('不支持的 Agent Card 发现方式');
+  const input = assertSafeAgentUrl(rawUrl);
+  const target = sourceType === 'service-url'
+    ? new URL('/.well-known/agent-card.json', input.origin)
+    : input;
+  const response = await fetch(target, {
+    headers: { accept: 'application/json, application/a2a+json' },
+    redirect: 'error',
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+  if (!response.ok) throw new Error(`Agent Card 获取失败：HTTP ${response.status}`);
+  const text = await response.text();
+  if (text.length > 1_000_000) throw new Error('Agent Card 超过 1 MB');
+  let card;
+  try { card = JSON.parse(text); } catch { throw new Error('远程地址没有返回合法 JSON'); }
+  const validation = validateAgentCard(card);
+  if (!validation.valid) throw new Error(`远程 Agent Card 校验失败：${validation.errors.join('；')}`);
+  return { card, resolvedUrl: target.toString(), validation };
 }
 
 export async function callA2AAgent(card, prompt, timeoutMs = 45_000) {
@@ -56,9 +77,10 @@ export async function callA2AAgent(card, prompt, timeoutMs = 45_000) {
   const url = assertSafeAgentUrl(target.url);
   const messageId = crypto.randomUUID();
   const isJsonRpc = target.binding === 'JSONRPC';
+  const isV1 = !String(target.version).startsWith('0.');
   const endpoint = isJsonRpc ? url : new URL(url.pathname.endsWith('/') ? 'message:send' : `${url.pathname}/message:send`, url);
   const body = isJsonRpc
-    ? { jsonrpc: '2.0', id: messageId, method: 'message/send', params: { message: { role: 'user', messageId, parts: [{ kind: 'text', text: prompt }] } } }
+    ? { jsonrpc: '2.0', id: messageId, method: isV1 ? 'SendMessage' : 'message/send', params: { message: { role: isV1 ? 'ROLE_USER' : 'user', messageId, parts: [isV1 ? { text: prompt } : { kind: 'text', text: prompt }] } } }
     : { message: { role: 'ROLE_USER', messageId, parts: [{ text: prompt }] }, configuration: { acceptedOutputModes: ['text/plain', 'application/json'] } };
   const response = await fetch(endpoint, {
     method: 'POST',

@@ -18,6 +18,14 @@ test('health endpoint responds', async () => {
   assert.equal((await response.json()).ok, true);
 });
 
+test('reports honest local runtime availability', async () => {
+  const response = await fetch(`${origin}/api/runtimes`);
+  const runtimes = await response.json();
+  assert.equal(response.status, 200);
+  assert.deepEqual(runtimes.map((runtime) => runtime.id), ['claude-code', 'cursor', 'doubao']);
+  assert.equal(runtimes.every((runtime) => typeof runtime.runtimeReady === 'boolean'), true);
+});
+
 test('creates and completes a demo evaluation', async () => {
   const card = {
     name: 'Workflow Agent', description: 'Multi-step API workflow with retries and human review.',
@@ -36,6 +44,8 @@ test('creates and completes a demo evaluation', async () => {
   assert.equal(result.status, 'completed');
   assert.equal(result.benchmark[0].entries.length, 4);
   assert.ok(result.roast.tier.label);
+  assert.ok(result.logs.length > 10);
+  assert.ok(result.logs.every((log) => log.source && log.phase && log.mode));
 });
 
 test('rejects malformed agent cards', async () => {

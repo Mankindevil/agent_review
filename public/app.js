@@ -1,4 +1,4 @@
-const state = { mode: 'demo', current: null, eventSource: null };
+const state = { mode: 'demo', sourceType: 'direct', current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -18,11 +18,31 @@ const sampleCard = {
   }]
 };
 
+const exampleCatalog = {
+  file: {
+    card: { name:'文件收纳员', description:'根据文件名和扩展名生成分类、重命名与目录整理建议，不执行不可逆文件操作。', version:'1.0.0', supportedInterfaces:[{url:'http://127.0.0.1:4181/a2a/v1',protocolBinding:'HTTP+JSON',protocolVersion:'1.0'}], capabilities:{streaming:false,pushNotifications:false}, defaultInputModes:['text/plain'],defaultOutputModes:['text/plain'],skills:[{id:'organize-files',name:'整理文件',description:'按类型和日期对文件清单分类并生成重命名映射。',tags:['files','rename'],examples:['把下载目录里的文件按类型整理。']}] },
+    cases: [{name:'下载目录整理',prompt:'请整理这些文件：会议记录.docx、报价单.xlsx、架构图.png。先给出移动映射，只预览，不实际修改。'}]
+  },
+  contract: {
+    card: { ...sampleCard, supportedInterfaces:[{url:'http://127.0.0.1:4182/a2a',protocolBinding:'JSONRPC',protocolVersion:'1.0'}], version:'1.2.0' },
+    cases: [
+      {name:'高风险条款审查',prompt:'请审查这份 SaaS 采购合同，重点看数据出境、赔偿上限和自动续费；按高、中、低风险列出原文、依据和修改建议。'},
+      {name:'信息不足场景',prompt:'只知道供应商要求使用其标准合同，请先判断还缺哪些信息，并给出下一步审查清单。'}
+    ]
+  },
+  incident: {
+    card: { name:'生产事故指挥官',description:'处理线上生产事故：整理时间线、判断影响、分派排障、维护状态并生成对内外通报。',version:'0.9.0',url:'http://127.0.0.1:4183/a2a',protocolVersion:'0.3',preferredTransport:'JSONRPC',capabilities:{streaming:false,pushNotifications:true},defaultInputModes:['text/plain'],defaultOutputModes:['text/plain'],skills:[{id:'incident-response',name:'生产事故响应',description:'根据告警和变更记录规划多线排障，在新证据到达时更新假设、回滚方案、责任人和沟通节奏。',tags:['incident','workflow','state','retry','monitor'],examples:['支付成功率在发布后从 99.9% 降到 82%，组织 P1 响应。']}] },
+    cases: [{name:'支付 P1',prompt:'10:05 发布 payment-api v2.8；10:08 支付成功率从 99.9% 降到 82%，华东错误最多。请组织 P1 响应，给出前 15 分钟行动、负责人、决策点、通报节奏和恢复验收条件。'}]
+  }
+};
+
 init();
 
 async function init() {
+  requestAnimationFrame(() => document.body.classList.add('ready'));
   addCase('高风险条款审查', '请审查这份 SaaS 采购合同，重点看数据出境、赔偿上限和自动续费；按高、中、低风险列出原文、依据和修改建议。');
   bindEvents();
+  loadRuntimeHealth();
   await loadHistory();
   const route = location.hash.match(/^#\/evaluation\/(.+)$/);
   if (route) openEvaluation(route[1]);
@@ -33,8 +53,14 @@ function bindEvents() {
     state.mode = button.dataset.mode;
     $$('.mode-switch button').forEach((item) => item.classList.toggle('selected', item === button));
   }));
+  $$('.source-switch button').forEach((button) => button.addEventListener('click', () => setSourceType(button.dataset.source)));
   $('#add-case').addEventListener('click', () => addCase('', ''));
-  $('#load-sample').addEventListener('click', loadSample);
+  $$('[data-example]').forEach((button) => button.addEventListener('click', () => loadSample(button.dataset.example)));
+  $('#resolve-agent').addEventListener('click', resolveRemoteCard);
+  $('#agent-url').addEventListener('input', () => {
+    state.resolvedCard = null;
+    $('#resolved-card').classList.add('hidden');
+  });
   $('#start-evaluation').addEventListener('click', submitEvaluation);
   $('#agent-file').addEventListener('change', (event) => readFile(event.target.files[0]));
   const drop = $('#drop-zone');
@@ -66,12 +92,46 @@ function addCase(name, prompt) {
 }
 
 function updateCaseNumbers() { $$('.case-row').forEach((row, index) => $('.case-index', row).textContent = String(index + 1).padStart(2, '0')); }
-function loadSample() {
-  $('#agent-card').value = JSON.stringify(sampleCard, null, 2);
-  $('#file-name').textContent = '已载入：合同风险猎手.a2a.json';
+function loadSample(id = 'contract') {
+  const example = exampleCatalog[id];
+  setSourceType('direct');
+  $('#agent-card').value = JSON.stringify(example.card, null, 2);
+  $('#file-name').textContent = `已载入：${example.card.name}.a2a.json`;
   $('#case-list').innerHTML = '';
-  addCase('高风险条款审查', '请审查这份 SaaS 采购合同，重点看数据出境、赔偿上限和自动续费；按高、中、低风险列出原文、依据和修改建议。');
-  addCase('信息不足场景', '只知道供应商要求使用其标准合同，请先判断还缺哪些信息，并给出下一步审查清单。');
+  example.cases.forEach((testCase) => addCase(testCase.name, testCase.prompt));
+}
+
+function setSourceType(sourceType) {
+  if (state.sourceType !== sourceType) {
+    state.resolvedCard = null;
+    $('#resolved-card').classList.add('hidden');
+  }
+  state.sourceType = sourceType;
+  $$('.source-switch button').forEach((button) => button.classList.toggle('selected', button.dataset.source === sourceType));
+  $('#direct-source').classList.toggle('hidden', sourceType !== 'direct');
+  $('#url-source').classList.toggle('hidden', sourceType === 'direct');
+  if (sourceType !== 'direct') {
+    const service = sourceType === 'service-url';
+    $('#agent-url-label').textContent = service ? 'A2A 服务根地址' : 'Agent Card 完整 URL';
+    $('#agent-url').placeholder = service ? 'https://agent.example.com' : 'https://agent.example.com/.well-known/agent-card.json';
+    $('#url-help').textContent = service ? '平台会按官方约定读取该域名的 /.well-known/agent-card.json。' : '直接读取指定的 Agent Card JSON 地址。';
+  }
+}
+
+async function resolveRemoteCard() {
+  showError('');
+  const button = $('#resolve-agent');
+  button.disabled = true; button.textContent = '读取中';
+  try {
+    const response = await fetch('/api/agent-cards/resolve', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sourceType:state.sourceType,url:$('#agent-url').value.trim()})});
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Agent Card 读取失败');
+    state.resolvedCard = payload.card;
+    $('#resolved-card').classList.remove('hidden');
+    $('#resolved-card').innerHTML = `<b>✓ ${escapeHtml(payload.card.name)}</b>${escapeHtml(payload.resolvedUrl)} · A2A ${escapeHtml(payload.validation.version)}`;
+    return payload.card;
+  } catch (error) { state.resolvedCard = null; showError(error.message); throw error; }
+  finally { button.disabled = false; button.textContent = '读取并校验'; }
 }
 
 async function readFile(file) {
@@ -84,7 +144,11 @@ async function readFile(file) {
 async function submitEvaluation() {
   showError('');
   let agentCard;
-  try { agentCard = JSON.parse($('#agent-card').value); } catch { return showError('Agent Card 不是合法 JSON。'); }
+  if (state.sourceType === 'direct') {
+    try { agentCard = JSON.parse($('#agent-card').value); } catch { return showError('Agent Card 不是合法 JSON。'); }
+  } else {
+    try { agentCard = state.resolvedCard || await resolveRemoteCard(); } catch { return; }
+  }
   const cases = $$('.case-row').map((row, index) => ({ name: $('.case-name', row).value.trim() || `案例 ${index + 1}`, prompt: $('.case-prompt', row).value.trim() })).filter((item) => item.prompt);
   if (!cases.length) return showError('至少填写一个测试 prompt。');
   const button = $('#start-evaluation');
@@ -120,27 +184,38 @@ function subscribe(id) {
 }
 
 function showEvaluation(item) {
+  const changedEvaluation = state.current?.id !== item.id;
+  const changedStage = state.lastStage !== item.stage;
   state.current = item;
+  state.lastStage = item.stage;
   if (location.hash !== `#/evaluation/${item.id}`) history.replaceState(null, '', `#/evaluation/${item.id}`);
   $('#landing-view').classList.add('hidden'); $('#evaluation-view').classList.remove('hidden');
   $('#run-id').textContent = `RUN / ${item.id.toUpperCase()}`;
   $('#agent-name').textContent = item.agentCard.name;
   $('#agent-description').textContent = item.agentCard.description;
-  $('#run-mode').textContent = item.mode === 'live' ? 'LIVE / 真实调用' : 'DEMO / 演示模拟';
+  $('#run-mode').textContent = item.overallMode === 'live' ? 'LIVE / 全链路真实' : item.mode === 'live' ? 'MIXED / Agent 实调' : 'DEMO / 演示模拟';
   $('#current-stage').textContent = item.stage;
   $('#latest-log').textContent = item.logs?.at(-1)?.text || '等待评测信号';
   $('#progress-number').textContent = item.progress;
   $('#pulse-progress').style.height = `${item.progress}%`;
   $('#pulse-dot').style.top = `calc(${Math.min(item.progress, 96)}% - 2px)`;
+  $('#live-deck').classList.toggle('running', item.status === 'running');
+  if (changedStage) {
+    $('.stage-copy').classList.remove('flash');
+    requestAnimationFrame(() => $('.stage-copy').classList.add('flash'));
+  }
   $$('.stage-list li').forEach((li) => li.classList.toggle('done', item.progress >= Number(li.dataset.threshold)));
+  renderLogs(item.logs || []);
   renderResult(item);
-  scrollTo({ top: 0, behavior: 'smooth' });
+  if (changedEvaluation) scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 function renderResult(item) {
   const root = $('#result-content');
   if (item.status === 'failed') { root.innerHTML = `<div class="failed-box"><b>评测中断</b><p>${escapeHtml(item.error)}</p></div>`; return; }
-  if (item.status !== 'completed') { root.innerHTML = '<div class="skeleton-grid"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>'; return; }
+  if (item.status !== 'completed') { state.completedRendered = null; root.classList.remove('reveal'); root.innerHTML = '<div class="skeleton-grid"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>'; return; }
+  if (state.completedRendered === item.id) return;
+  state.completedRendered = item.id;
   const complexity = item.complexity;
   root.innerHTML = `
     <section class="verdict-hero">
@@ -157,10 +232,12 @@ function renderResult(item) {
     ${renderBuilds(item.builds)}
     ${renderBattle(item.benchmark)}
   `;
+  root.classList.add('reveal');
+  animateCounters(root);
 }
 
 function scoreCard(kicker, score, title, body, highlight) {
-  return `<article class="score-card ${highlight ? 'highlight' : ''}"><header><span>${kicker}</span><span>/100</span></header><div class="score"><b>${score}</b><span>分</span></div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(body)}</p></article>`;
+  return `<article class="score-card ${highlight ? 'highlight' : ''}"><header><span>${kicker}</span><span>/100</span></header><div class="score"><b data-count="${score}">${score}</b><span>分</span></div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(body)}</p></article>`;
 }
 
 function renderComplexity(value) {
@@ -179,6 +256,46 @@ function renderBuilds(builds) {
 
 function renderBattle(rounds) {
   return `<div class="section-title"><h3>同 Prompt 对打</h3><span>SAME INPUT · VISIBLE OUTPUT ONLY</span></div>${rounds.map((round,index)=>{ const max=Math.max(...round.entries.map(e=>e.score)); return `<article class="battle-round"><div class="battle-prompt"><span>CASE ${String(index+1).padStart(2,'0')}<br>${escapeHtml(round.case.name)}</span><p>${escapeHtml(round.case.prompt)}</p></div><div class="battle-grid">${round.entries.map(entry=>`<div class="battle-entry"><header><h4>${escapeHtml(entry.name)}</h4><strong class="${entry.score===max?'winner':''}">${entry.score}</strong></header><span class="mode">${entry.mode.toUpperCase()}</span><details><summary>查看完整输出</summary><pre>${escapeHtml(entry.output)}</pre></details></div>`).join('')}</div></article>`; }).join('')}`;
+}
+
+function renderLogs(logs) {
+  $('#log-count').textContent = `${logs.length} EVENTS`;
+  const stream = $('#log-stream');
+  if (!logs.length) { stream.innerHTML = '<p class="log-empty">等待第一条评测信号……</p>'; return; }
+  const wasNearBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60;
+  stream.innerHTML = logs.slice(-80).map((log) => {
+    const time = new Date(log.at).toLocaleTimeString('zh-CN', { hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    const mode = log.mode || 'system';
+    return `<div class="log-line ${escapeHtml(log.level || 'info')} ${escapeHtml(mode)}"><span class="log-time">${time}</span><span class="log-source">${escapeHtml(log.source || 'SYSTEM')}</span><span class="log-phase">${escapeHtml(log.phase || 'pipeline')}</span><span class="log-message"><strong>${escapeHtml(log.text)}</strong>${log.detail ? `<small>${escapeHtml(log.detail)}</small>` : ''}</span><span class="log-mode">${escapeHtml(mode)}${Number.isFinite(log.durationMs) ? ` · ${log.durationMs}ms` : ''}</span></div>`;
+  }).join('');
+  if (wasNearBottom) stream.scrollTop = stream.scrollHeight;
+}
+
+async function loadRuntimeHealth() {
+  const root = $('#runtime-health');
+  try {
+    const response = await fetch('/api/runtimes');
+    const runtimes = await response.json();
+    root.innerHTML = `<span>RUNTIME PROBE</span>${runtimes.map((runtime) => `<span class="runtime-chip ${runtime.installed ? 'installed' : ''} ${runtime.runtimeReady ? 'ready' : ''}" title="${escapeHtml(runtime.note)}">${escapeHtml(runtime.name)} · ${runtime.runtimeReady ? 'READY' : runtime.installed ? '未启用' : '缺失'}</span>`).join('')}`;
+  } catch {
+    root.innerHTML = '<span>RUNTIME PROBE</span><i>探测失败</i>';
+  }
+}
+
+function animateCounters(root) {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  $$('[data-count]', root).forEach((element) => {
+    const target = Number(element.dataset.count);
+    const decimals = String(target).includes('.') ? 1 : 0;
+    const startedAt = performance.now();
+    const tick = (time) => {
+      const progress = Math.min(1, (time - startedAt) / 650);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      element.textContent = (target * eased).toFixed(decimals);
+      if (progress < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
 }
 
 async function loadHistory() {

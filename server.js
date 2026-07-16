@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { EvaluationPipeline } from './src/pipeline.js';
 import { EvaluationStore } from './src/store.js';
 import { readJsonBody } from './src/utils.js';
+import { resolveAgentCard } from './src/a2a.js';
+import { getRuntimeStatus } from './src/runtime-status.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.join(root, 'public');
@@ -20,6 +22,16 @@ export const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     if (request.method === 'GET' && url.pathname === '/api/health') return json(response, 200, { ok: true, mode: 'full-stack', time: new Date().toISOString() });
+    if (request.method === 'GET' && url.pathname === '/api/runtimes') return json(response, 200, await getRuntimeStatus());
+    if (request.method === 'POST' && url.pathname === '/api/agent-cards/resolve') {
+      const input = await readJsonBody(request);
+      try {
+        return json(response, 200, await resolveAgentCard(input.sourceType, input.url));
+      } catch (error) {
+        error.statusCode = /获取失败|fetch|timeout/i.test(error.message) ? 502 : 400;
+        throw error;
+      }
+    }
     if (request.method === 'GET' && url.pathname === '/api/evaluations') return json(response, 200, store.list().map(summary));
     if (request.method === 'POST' && url.pathname === '/api/evaluations') {
       const item = await pipeline.create(await readJsonBody(request));

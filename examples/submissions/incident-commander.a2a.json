@@ -1,0 +1,20 @@
+{
+  "name": "生产事故指挥官",
+  "description": "处理线上生产事故：整理时间线、判断影响、分派排障、维护状态并生成对内外通报。",
+  "version": "0.9.0",
+  "url": "http://127.0.0.1:4183/a2a",
+  "protocolVersion": "0.3",
+  "preferredTransport": "JSONRPC",
+  "capabilities": { "streaming": false, "pushNotifications": true },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [
+    {
+      "id": "incident-response",
+      "name": "生产事故响应",
+      "description": "根据告警和变更记录规划多线排障，在新证据到达时更新假设、回滚方案、责任人和沟通节奏。",
+      "tags": ["incident", "workflow", "state", "retry", "monitor"],
+      "examples": ["支付成功率在发布后从 99.9% 降到 82%，组织 P1 响应。"]
+    }
+  ]
+}

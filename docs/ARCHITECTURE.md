@@ -14,7 +14,7 @@
 
 ```text
 Browser
-  ├─ 上传 / 粘贴 Agent Card
+  ├─ 上传 / 粘贴 / URL 发现 Agent Card
   ├─ 提交 1–5 个同题用例
   ├─ EventSource 接收实时进度
   └─ 展示必要性、专业度、对战与锐评
@@ -26,6 +26,7 @@ Node HTTP API
   ├─ Model Reviewer Adapters
   ├─ Runtime Skill Adapters
   ├─ Output Judge
+  ├─ Runtime Availability Probe
   └─ JSON Store + SSE Event Bus
             │
       ┌─────┴───────────┐
@@ -46,7 +47,21 @@ A2A Agent endpoint   Model / Runtime endpoints
 - A2A 1.0 的 `supportedInterfaces`；
 - 兼容 A2A 0.3 常见的顶层 `url` 与 `preferredTransport`。
 
-真实调用优先选择 `supportedInterfaces` 第一项。支持 `HTTP+JSON` 的 `/message:send` 和 JSON-RPC 的 `message/send`，再从 Message 或 Artifact 的 parts 中提取文本结果。
+真实调用优先选择 `supportedInterfaces` 第一项。支持 `HTTP+JSON` 的 `message:send`、A2A 1.0 JSON-RPC 的 `SendMessage` 和 0.3 JSON-RPC 的 `message/send`，再从 Message 或 Artifact 的 parts 中提取文本结果。
+
+A2A 1.0 JSON-RPC 使用 `SendMessage`，0.3 兼容调用使用 `message/send`。HTTP+JSON 则在 Agent Card 声明的接口基址后调用 `message:send`。示例服务覆盖即时 `Message` 与包含 `Artifact` 的 `Task` 两类响应。
+
+### 3.1.1 提交与发现策略
+
+平台区分“Agent Card 如何进入平台”和“A2A 如何发现 Agent”：
+
+1. JSON 文件上传与文本粘贴会直接校验 Card，属于 A2A 的直接配置场景；
+2. Agent Card URL 直接获取指定 JSON，适合自定义路径或网关；
+3. 服务根地址会严格解析为同一 origin 下的 `/.well-known/agent-card.json`；
+4. 企业 Registry 是合理扩展，但 A2A 当前没有规定统一的 Registry API，因此本版本只预留产品入口，不伪造协议；
+5. Git 仓库、源码包和镜像属于平台托管部署输入，不是 A2A discovery。生产实现必须在沙箱部署成功后，再按 Agent Card 和 endpoint 进入相同评测流水线。
+
+远程发现拒绝重定向，限制响应为 1 MB，并复用 Agent URL 的 SSRF 防护。生产环境还需要 DNS 解析后的地址复核与域名 allowlist。
 
 ### 3.2 Agent 必要性评分
 
@@ -114,6 +129,17 @@ A2A Agent endpoint   Model / Runtime endpoints
 
 返回 `202` 与评测对象。后端在当前进程异步执行流水线。
 
+### `POST /api/agent-cards/resolve`
+
+```json
+{
+  "sourceType": "service-url",
+  "url": "https://agent.example.com"
+}
+```
+
+`service-url` 会读取标准 well-known 地址；`card-url` 会读取指定 URL。返回解析后的 Card、最终解析地址和协议校验结果。
+
 ### `GET /api/evaluations/:id`
 
 返回评测快照，包括 `progress`、`stage`、`logs`、各阶段结果和最终锐评。
@@ -125,7 +151,14 @@ SSE 流。每次数据事件都是完整评测快照，客户端断线后可直�
 ### 其他接口
 
 - `GET /api/health`：健康检查；
+- `GET /api/runtimes`：探测本机 CLI 是否存在，并区分是否已配置为可执行 adapter；
 - `GET /api/evaluations`：历史评测摘要。
+
+### 可观察性日志
+
+每条日志至少包含 `at`、`level`、`source`、`phase`、`text` 与 `mode`；可选包含脱敏后的 `detail` 和 `durationMs`。其中 `mode` 明确区分 `live`、`demo`、`rules` 与 `failed`，前端不会把混合评测展示成全真实。
+
+SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日志只记录协议、host 与 path，不记录查询参数、认证头或密钥。前端 Trace Console 展示最近 80 条，并且只在用户已经停留底部时自动跟随。
 
 ## 5. 安全边界
 
@@ -154,6 +187,10 @@ SSE 流。每次数据事件都是完整评测快照，客户端断线后可直�
 │   ├── styles.css          视觉系统与响应式布局
 │   └── app.js              表单、SSE、路由、历史与报告渲染
 ├── examples/               示例 A2A Agent Card
+│   ├── agents/server.js    三个可真实调用的本地 A2A 服务
+│   ├── submissions/        三种协议/复杂度样本 Card
+│   └── use-cases.json      Prompt 与结构化验收点
+├── scripts/real-demo.js    同时启动平台与本地 Agent
 ├── test/                   Node 原生单元与 API 测试
 └── docs/                   架构与实现文档
 ```
