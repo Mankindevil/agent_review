@@ -1,6 +1,6 @@
 import { mockProfessionalReview } from './scoring.js';
 import { PROFESSIONAL_REVIEW_SYSTEM_PROMPT, professionalReviewPrompt } from './prompts.js';
-import { safeJson } from './utils.js';
+import { safeJson, withTimeout } from './utils.js';
 
 export const DEFAULT_REVIEWERS = [
   { id: 'gpt', name: 'OpenAI 评审', model: 'GPT-5', kind: 'mock' },
@@ -30,24 +30,38 @@ export function configuredReviewers() {
   });
 }
 
-export async function reviewAgent(reviewer, card, complexity, mode) {
+export async function reviewAgent(reviewer, card, complexity, mode, signal) {
   if (mode !== 'live' || reviewer.kind === 'mock') return mockProfessionalReview(reviewer, card, complexity);
   const system = PROFESSIONAL_REVIEW_SYSTEM_PROMPT;
   const prompt = professionalReviewPrompt(card, complexity);
   const responseText = reviewer.kind === 'anthropic'
-    ? await callAnthropic(reviewer, system, prompt)
-    : await callOpenAICompatible(reviewer, system, prompt);
+    ? await callAnthropic(reviewer, system, prompt, signal)
+    : await callOpenAICompatible(reviewer, system, prompt, signal);
   const parsed = safeJson(responseText);
   return { reviewer: reviewer.name, model: reviewer.model, ...parsed, mode: 'live' };
 }
 
-async function callOpenAICompatible(config, system, prompt) {
-  const response = await fetch(config.baseUrl.replace(/\/$/, '') + '/chat/completions', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${resolveSecret(config.apiKeyEnv)}` },
-    body: JSON.stringify({ model: config.model, temperature: 0.2, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }),
-    signal: AbortSignal.timeout(60_000)
-  });
+async function callOpenAICompatible(config, system, prompt, signal) {
+  const timeoutMs = Number(process.env.MODEL_REVIEW_TIMEOUT_MS || 120_000);
+  let response;
+  try {
+    response = await fetch(config.baseUrl.replace(/\/$/, '') + '/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${resolveSecret(config.apiKeyEnv)}` },
+      body: JSON.stringify({
+        model: config.model,
+        temperature: 0.2,
+        max_tokens: Number(process.env.MODEL_REVIEW_MAX_TOKENS || 1200),
+        ...(config.id === 'doubao' ? { thinking: { type: 'disabled' } } : {}),
+        messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }]
+      }),
+      signal: withTimeout(signal, timeoutMs)
+    });
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason || error;
+    if (error.name === 'TimeoutError') throw new Error(`${config.name}（${config.model}）超过 ${Math.round(timeoutMs / 1000)} 秒未返回；可调整 MODEL_REVIEW_TIMEOUT_MS`);
+    throw error;
+  }
   if (!response.ok) throw new Error(`${config.name} 返回 HTTP ${response.status}`);
   const json = await response.json();
   const content = json.choices?.[0]?.message?.content;
@@ -55,13 +69,21 @@ async function callOpenAICompatible(config, system, prompt) {
   return content || '';
 }
 
-async function callAnthropic(config, system, prompt) {
-  const response = await fetch(config.baseUrl || 'https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': resolveSecret(config.apiKeyEnv), 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({ model: config.model, max_tokens: 1400, temperature: 0.2, system, messages: [{ role: 'user', content: prompt }] }),
-    signal: AbortSignal.timeout(60_000)
-  });
+async function callAnthropic(config, system, prompt, signal) {
+  const timeoutMs = Number(process.env.MODEL_REVIEW_TIMEOUT_MS || 120_000);
+  let response;
+  try {
+    response = await fetch(config.baseUrl || 'https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': resolveSecret(config.apiKeyEnv), 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: config.model, max_tokens: Number(process.env.MODEL_REVIEW_MAX_TOKENS || 1200), temperature: 0.2, system, messages: [{ role: 'user', content: prompt }] }),
+      signal: withTimeout(signal, timeoutMs)
+    });
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason || error;
+    if (error.name === 'TimeoutError') throw new Error(`${config.name}（${config.model}）超过 ${Math.round(timeoutMs / 1000)} 秒未返回；可调整 MODEL_REVIEW_TIMEOUT_MS`);
+    throw error;
+  }
   if (!response.ok) throw new Error(`${config.name} 返回 HTTP ${response.status}`);
   const json = await response.json();
   return json.content?.find((part) => part.type === 'text')?.text || '';

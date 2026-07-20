@@ -15,6 +15,11 @@ export function average(values) {
   return numbers.length ? numbers.reduce((sum, value) => sum + value, 0) / numbers.length : 0;
 }
 
+export function withTimeout(signal, timeoutMs) {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 export function safeJson(text) {
   const cleaned = String(text).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
   try { return JSON.parse(cleaned); } catch { /* Some CLIs add prose before or after the JSON value. */ }

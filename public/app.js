@@ -1,4 +1,4 @@
-const state = { mode: 'demo', sourceType: 'direct', current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null };
+const state = { mode: 'demo', sourceType: 'direct', current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -62,6 +62,7 @@ function bindEvents() {
     $('#resolved-card').classList.add('hidden');
   });
   $('#start-evaluation').addEventListener('click', submitEvaluation);
+  $('#stop-evaluation').addEventListener('click', stopEvaluation);
   $('#agent-file').addEventListener('change', (event) => readFile(event.target.files[0]));
   const drop = $('#drop-zone');
   ['dragenter','dragover'].forEach((name) => drop.addEventListener(name, (event) => { event.preventDefault(); drop.classList.add('dragging'); }));
@@ -170,7 +171,7 @@ async function openEvaluation(id) {
     if (!response.ok) throw new Error('评测不存在');
     const item = await response.json();
     showEvaluation(item);
-    if (!['completed','failed'].includes(item.status)) subscribe(id);
+    if (!isTerminal(item.status)) subscribe(id);
   } catch (error) { showError(error.message); showLanding(); }
 }
 
@@ -179,8 +180,31 @@ function subscribe(id) {
   state.eventSource.onmessage = (event) => {
     const item = JSON.parse(event.data);
     showEvaluation(item);
-    if (['completed','failed'].includes(item.status)) { state.eventSource.close(); loadHistory(); }
+    if (isTerminal(item.status)) { state.eventSource.close(); loadHistory(); }
   };
+}
+
+async function stopEvaluation() {
+  const item = state.current;
+  if (!item || isTerminal(item.status) || state.stopping) return;
+  const button = $('#stop-evaluation');
+  state.stopping = true;
+  button.disabled = true;
+  $('span', button).textContent = '正在停止';
+  try {
+    const response = await fetch(`/api/evaluations/${item.id}/cancel`, { method: 'POST' });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || '停止评测失败');
+    state.eventSource?.close();
+    showEvaluation(payload);
+    loadHistory();
+  } catch (error) {
+    $('span', button).textContent = error.message;
+    setTimeout(() => { if (!isTerminal(state.current?.status)) $('span', button).textContent = '停止本次评测'; }, 2200);
+  } finally {
+    state.stopping = false;
+    button.disabled = false;
+  }
 }
 
 function showEvaluation(item) {
@@ -200,6 +224,10 @@ function showEvaluation(item) {
   $('#pulse-progress').style.height = `${item.progress}%`;
   $('#pulse-dot').style.top = `calc(${Math.min(item.progress, 96)}% - 2px)`;
   $('#live-deck').classList.toggle('running', item.status === 'running');
+  const stopButton = $('#stop-evaluation');
+  stopButton.classList.toggle('hidden', !['queued','running'].includes(item.status));
+  stopButton.disabled = state.stopping;
+  if (!state.stopping) $('span', stopButton).textContent = '停止本次评测';
   if (changedStage) {
     $('.stage-copy').classList.remove('flash');
     requestAnimationFrame(() => $('.stage-copy').classList.add('flash'));
@@ -212,10 +240,16 @@ function showEvaluation(item) {
 
 function renderResult(item) {
   const root = $('#result-content');
-  if (item.status === 'failed') { root.innerHTML = `<div class="failed-box"><b>评测中断</b><p>${escapeHtml(item.error)}</p></div>`; return; }
-  if (item.status !== 'completed') { state.completedRendered = null; root.classList.remove('reveal'); root.innerHTML = '<div class="skeleton-grid"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>'; return; }
+  if (item.status !== 'completed') {
+    state.completedRendered = null;
+    root.classList.remove('reveal');
+    root.classList.add('streaming');
+    root.innerHTML = renderPartialResults(item);
+    return;
+  }
   if (state.completedRendered === item.id) return;
   state.completedRendered = item.id;
+  root.classList.remove('streaming');
   const complexity = item.complexity;
   const tier = normalizeTier(item.roast.tier);
   const sealText = tier.stamp || tier.label;
@@ -244,6 +278,29 @@ function renderResult(item) {
   `;
   root.classList.add('reveal');
   animateCounters(root);
+}
+
+function renderPartialResults(item) {
+  const reviews = item.professional?.reviews || [];
+  const builds = item.builds || [];
+  const rounds = (item.benchmark || []).filter((round) => round.entries?.length);
+  const terminal = terminalNotice(item);
+  const sections = [
+    item.complexity ? renderComplexity(item.complexity) : '',
+    reviews.length ? renderReviews(reviews) : '',
+    builds.length ? renderBuilds(builds) : '',
+    rounds.length ? renderBattle(rounds) : ''
+  ].filter(Boolean).join('');
+  const unlocked = Number(Boolean(item.complexity)) + Number(reviews.length > 0) + Number(builds.length > 0) + Number(rounds.length > 0);
+  const waiting = isTerminal(item.status) ? '' : `<div class="artifact-wait"><i></i><div><b>${escapeHtml(item.stage)}</b><span>新产物完成后会直接插入下方，不必等整场结束。</span></div><strong>${item.progress}%</strong></div>`;
+  return `${terminal}<section class="artifact-console"><header><div><small>LIVE ARTIFACTS / 阶段产物</small><h3>跑完一项，解锁一项</h3></div><span>${unlocked} / 4 组已出</span></header><div class="artifact-meter"><i style="--progress:${item.progress}%"></i></div>${waiting}</section>${sections || '<div class="artifact-empty"><b>评测舱已接单</b><span>首个阶段产物正在生成。</span></div>'}`;
+}
+
+function terminalNotice(item) {
+  if (item.status === 'cancelled') return '<div class="failed-box stopped"><b>评测已停止</b><p>停止前已经完成的阶段产物保留在下方，可以继续查看。</p></div>';
+  if (item.status === 'interrupted') return `<div class="failed-box interrupted"><b>检测到遗留的假运行状态</b><p>${escapeHtml(item.error || '服务重启后，旧执行任务已经不存在。')}</p></div>`;
+  if (item.status === 'failed') return `<div class="failed-box"><b>评测中断</b><p>${escapeHtml(item.error || '未知错误')}</p></div>`;
+  return '';
 }
 
 function scoreCard(kicker, score, title, body, highlight) {
@@ -320,6 +377,7 @@ function showLanding() { if(state.eventSource)state.eventSource.close(); state.c
 function openHistory() { $('#history-drawer').classList.add('open'); $('#drawer-backdrop').classList.add('open'); $('#history-drawer').setAttribute('aria-hidden','false'); loadHistory(); }
 function closeHistory() { $('#history-drawer').classList.remove('open'); $('#drawer-backdrop').classList.remove('open'); $('#history-drawer').setAttribute('aria-hidden','true'); }
 function showError(text) { $('#form-error').textContent = text; }
+function isTerminal(status) { return ['completed','failed','cancelled','interrupted'].includes(status); }
 function normalizeTier(tier = {}) {
   if (tier.code === 'OVERKILL' || tier.code === 'FLOP' || tier.label === '大炮打蚊子' || tier.label === '拉完了') return { ...tier, code: 'FLOP', label: '拉', stamp: '拉' };
   if (tier.code === 'MID' || tier.label === '有点东西，但不多') return { ...tier, code: 'NPC', label: 'NPC', stamp: 'NPC' };

@@ -11,7 +11,8 @@
 - OpenAI、Anthropic、豆包、DeepSeek 四个模型视角的独立评分、评语和风险；
 - Claude Code、Cursor、Doubao 三种 runtime 的 skill 现场复刻抽象；
 - 提交 Agent 与三个复刻 skill 的逐用例输出和分数对比；
-- SSE 实时进度、可恢复的评测详情和本地历史记录；
+- SSE 实时进度：复杂度、每位模型评语、每个 Runtime Skill 和每位对测选手完成后立即展示；
+- 可真正中止模型请求与本地 CLI 的停止按钮，以及服务重启后的遗留任务识别；
 - 结构化执行日志：协议、评分、模型、Runtime、对测、耗时与真实/演示模式；
 - 本机 Runtime 探测，区分“已安装”“已配置可执行”和“缺失”；
 - 扫描光束、阶段切换、分数计数与判词盖章动效，支持 reduced-motion；
@@ -110,6 +111,8 @@ npm test
 3. 调用显式启用的本机 Claude/Cursor、方舟豆包或 `RUNTIME_ADAPTERS_JSON` 隔离服务复刻 Skill。
 
 如果未配置真实 adapter，相关项会保留为 demo；调用失败会记录错误并继续执行其余选手。
+
+运行页不会等待最终锐评才出报告。后端在每位评审、每个 Runtime 和每个同题选手结束时持久化完整快照并通过 SSE 推送；前端按“跑完一项，解锁一项”持续追加阶段产物。运行中的评测可点击“停止本次评测”，后端会通过 `AbortController` 中止当前 HTTP 请求或 CLI 子进程，并保留已经完成的结果。若服务在任务期间重启，遗留的 `queued/running` 记录会被标记为 `interrupted`，不再显示假运行。
 
 “本机已安装”不等于“平台已真实调用”。`GET /api/runtimes` 会分别检查 Claude/Cursor 的 CLI、鉴权与启用开关；豆包既可以来自 `doubao` CLI，也可以在 `ARK_BASE_URL`、`ARK_API_KEY` 和豆包 endpoint 同时存在时直接使用方舟 API。远程隔离 adapter 仍可通过 `RUNTIME_ADAPTERS_JSON` 覆盖。主服务不会把 Cursor Desktop 的 `cursor` 命令误认成 `cursor-agent`。
 
@@ -250,6 +253,8 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 | `ARK_API_KEY` | 空 | 豆包与 DeepSeek 共用的方舟 Key；存在时也启用豆包 Runtime |
 | `REVIEW_MODEL_DOUBAO` | `ep-20260720110725-5rbml` | 豆包评审与 Runtime 共用的接入点 ID |
 | `REVIEW_MODEL_DEEPSEEK` | `ep-20260708162855-pcf9x` | DeepSeek 接入点 ID |
+| `MODEL_REVIEW_TIMEOUT_MS` | `180000` | 单次模型盲审超时；错误会显示模型 ID 与实际秒数 |
+| `MODEL_REVIEW_MAX_TOKENS` | `1200` | 单次模型盲审最大输出 token；豆包短评分同时关闭深度思考 |
 | `MODEL_REVIEWERS_JSON` | 内置四位 demo 评审 | 真实模型 adapter 高级配置 |
 | `RUNTIME_ADAPTERS_JSON` | 内置三种 demo runtime | 隔离 runtime adapter 配置 |
 | `ENABLE_LOCAL_CLAUDE_CODE` | `false` | 允许真实调用已登录的本机 Claude Code |

@@ -46,6 +46,15 @@ test('creates and completes a demo evaluation', async () => {
   assert.ok(result.roast.tier.label);
   assert.ok(result.logs.length > 10);
   assert.ok(result.logs.every((log) => log.source && log.phase && log.mode));
+
+  const cancelResponse = await fetch(`${origin}/api/evaluations/${created.id}/cancel`, { method: 'POST' });
+  assert.equal(cancelResponse.status, 200);
+  assert.equal((await cancelResponse.json()).status, 'completed', '停止接口应当对已结束评测保持幂等');
+});
+
+test('returns 404 when stopping an unknown evaluation', async () => {
+  const response = await fetch(`${origin}/api/evaluations/eval_missing/cancel`, { method: 'POST' });
+  assert.equal(response.status, 404);
 });
 
 test('rejects malformed agent cards', async () => {

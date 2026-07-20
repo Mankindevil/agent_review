@@ -93,7 +93,7 @@ A2A 1.0 JSON-RPC 使用 `SendMessage`，0.3 兼容调用使用 `message/send`。
 - 输出契约；
 - 可评测性。
 
-模型调用失败不会中止整场评测，失败评审会保留错误且不进入专业度平均分。OpenAI 与 Anthropic 默认通过 `OPENAI_BASE_URL` / `OPENAI_API_KEY` 接入 LLMX；豆包与 DeepSeek 通过 `ARK_BASE_URL` / `ARK_API_KEY` 接入火山方舟在线推理，分别使用独立 endpoint ID。任一网关未配置 Key 时，只把对应模型降级为演示评审，其余已配置模型仍可真实运行。`MODEL_REVIEWERS_JSON` 可覆盖为任意数量的 OpenAI-compatible 或 Anthropic Messages API。
+模型调用失败不会中止整场评测，失败评审会保留错误且不进入专业度平均分。OpenAI 与 Anthropic 默认通过 `OPENAI_BASE_URL` / `OPENAI_API_KEY` 接入 LLMX；豆包与 DeepSeek 通过 `ARK_BASE_URL` / `ARK_API_KEY` 接入火山方舟在线推理，分别使用独立 endpoint ID。豆包评审属于短结构化评分，Chat Completions 请求设置 `thinking.type=disabled` 并受 `MODEL_REVIEW_MAX_TOKENS` 限制，避免为短 JSON 生成长推理；超时由 `MODEL_REVIEW_TIMEOUT_MS` 统一控制。任一网关未配置 Key 时，只把对应模型降级为演示评审，其余已配置模型仍可真实运行。`MODEL_REVIEWERS_JSON` 可覆盖为任意数量的 OpenAI-compatible 或 Anthropic Messages API。
 
 模型评审、Runtime 构建 Skill 和 Runtime 执行 Skill 的 prompt 集中在 `src/prompts.js`。Runtime 构建要求单个 JSON 对象，但平台不会假设 CLI 永远严格服从格式：`safeJson()` 会从代码围栏或前后说明文字中提取第一个完整、可解析的平衡 JSON 值，随后再校验 Skill 的 `name`、`description`、`instructions` 和 `tools` 契约。这避免 Claude Code 或 Cursor Agent 输出简短前言时被误判为 0 分。
 
@@ -161,7 +161,11 @@ Doubao Runtime 不要求本机存在 `doubao` CLI。当 `ARK_BASE_URL`、`ARK_AP
 
 ### `GET /api/evaluations/:id/events`
 
-SSE 流。每次数据事件都是完整评测快照，客户端断线后可直接用 GET 恢复，不依赖事件增量。
+SSE 流。每次数据事件都是完整评测快照，客户端断线后可直接用 GET 恢复，不依赖事件增量。流水线在每位模型评审、每个 Runtime Skill 以及每个同题选手完成时更新 `professional.reviews`、`builds` 或 `benchmark[].entries`，前端可以立即渲染阶段产物。
+
+### `POST /api/evaluations/:id/cancel`
+
+幂等停止接口。运行中任务的 `AbortController` 会传播到模型 fetch、A2A fetch、本地 Claude/Cursor 子进程和方舟协议桥；状态更新为 `cancelled`，已持久化的阶段结果不删除。服务启动时还会把历史遗留的 `queued/running` 记录转为 `interrupted`，避免进程已消失而 UI 仍显示运行。
 
 ### 其他接口
 

@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { withTimeout } from './utils.js';
 
 const LEGACY_BINDINGS = { JSONRPC: 'JSONRPC', 'JSON-RPC': 'JSONRPC', HTTP_JSON: 'HTTP+JSON', 'HTTP+JSON': 'HTTP+JSON' };
 
@@ -71,7 +72,7 @@ export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000) {
   return { card, resolvedUrl: target.toString(), validation };
 }
 
-export async function callA2AAgent(card, prompt, timeoutMs = 45_000) {
+export async function callA2AAgent(card, prompt, timeoutMs = 45_000, signal) {
   const [target] = getInterfaces(card);
   if (!target) throw new Error('没有可调用的 A2A 接口');
   const url = assertSafeAgentUrl(target.url);
@@ -86,7 +87,7 @@ export async function callA2AAgent(card, prompt, timeoutMs = 45_000) {
     method: 'POST',
     headers: { 'content-type': isJsonRpc ? 'application/json' : 'application/a2a+json', 'a2a-version': target.version },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs)
+    signal: withTimeout(signal, timeoutMs)
   });
   if (!response.ok) throw new Error(`A2A 返回 HTTP ${response.status}`);
   const payload = await response.json();

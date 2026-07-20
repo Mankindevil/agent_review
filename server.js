@@ -18,6 +18,7 @@ const events = new EventEmitter();
 events.setMaxListeners(100);
 const pipeline = new EvaluationPipeline(store, events);
 await store.load();
+await pipeline.recoverInterrupted();
 
 export const server = createServer(async (request, response) => {
   try {
@@ -37,6 +38,11 @@ export const server = createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname === '/api/evaluations') {
       const item = await pipeline.create(await readJsonBody(request));
       return json(response, 202, item);
+    }
+    const cancelMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/cancel$/);
+    if (request.method === 'POST' && cancelMatch) {
+      const item = await pipeline.cancel(cancelMatch[1]);
+      return item ? json(response, 200, item) : json(response, 404, { error: '评测不存在' });
     }
     const match = url.pathname.match(/^\/api\/evaluations\/([^/]+)$/);
     if (request.method === 'GET' && match) {
