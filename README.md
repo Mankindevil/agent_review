@@ -49,6 +49,28 @@ npm run demo:real
 npm run demo:real-runtimes
 ```
 
+### 使用 DeepSeek 驱动 Claude Code
+
+DeepSeek 官方提供 Anthropic-compatible API，因此 Claude Code 不需要登录 Claude 账号。推荐使用不会把 Key 写入 shell 历史的方式：
+
+```bash
+cd "/Users/jintingzhou/Documents/Agent锐评系统"
+printf "DeepSeek API Key: "
+read -s DEEPSEEK_API_KEY
+echo
+export DEEPSEEK_API_KEY
+npm run demo:deepseek
+```
+
+该启动器会在当前进程内设置：
+
+- `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`；
+- Claude 主模型为 `deepseek-v4-pro[1m]`；
+- Haiku/Subagent 映射为 `deepseek-v4-flash`；
+- 启用 Claude Code 本地 adapter 和已经登录的 Cursor Agent adapter。
+
+Key 不会写入 `.env`、配置文件、评测记录或 Git。退出进程后可执行 `unset DEEPSEEK_API_KEY`。旧模型名 `deepseek-chat` / `deepseek-reasoner` 将于 2026-07-24 停用，本项目不再使用。
+
 本地 Runtime 使用只读模式：Claude Code 采用 `--tools "" --permission-mode plan --safe-mode`，Cursor Agent 采用 `--mode ask --sandbox enabled`。每次调用都在独立临时目录运行并在结束后删除。Claude 单次调用默认设置 `$0.25` 预算上限，可通过 `CLAUDE_MAX_BUDGET_USD` 调整。
 
 随后在页面选择样本，把评测模式切换为“真实对测”。三个 Agent 分别监听：

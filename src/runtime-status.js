@@ -33,6 +33,7 @@ export async function getRuntimeStatus() {
 }
 
 async function probeClaudeAuth() {
+  if (process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY) return true;
   try { const { stdout } = await execFileAsync('claude', ['auth', 'status'], { timeout: 3_000, maxBuffer: 64_000 }); return JSON.parse(stdout).loggedIn === true; } catch { return false; }
 }
 

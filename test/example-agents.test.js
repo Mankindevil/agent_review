@@ -20,6 +20,15 @@ test('discovers all examples from the well-known Agent Card path', async () => {
   }
 });
 
+test('serves a human-readable status page at each example root', async () => {
+  const response = await fetch(`${agents[0].origin}/`);
+  const html = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /text\/html/);
+  assert.match(html, /文件收纳员/);
+  assert.match(html, /\.well-known\/agent-card\.json/);
+});
+
 test('calls the A2A 1.0 HTTP+JSON file organizer', async () => {
   const card = (await resolveAgentCard('service-url', agents[0].origin)).card;
   const result = await callA2AAgent(card, '整理 会议记录.docx 和 报价单.xlsx，只预览');

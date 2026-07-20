@@ -67,6 +67,9 @@ function createAgentServer(definition, requestedPort) {
     if (request.method === 'GET' && url.pathname === '/.well-known/agent-card.json') {
       return sendJson(response, 200, buildCard(definition, origin), { etag: `"${definition.id}-${definition.version}"`, 'cache-control': 'public, max-age=60' });
     }
+    if (request.method === 'GET' && url.pathname === '/') {
+      return sendHtml(response, definition, origin);
+    }
     const isRest = definition.binding === 'HTTP+JSON' && request.method === 'POST' && url.pathname === '/a2a/v1/message:send';
     const isRpc = definition.binding === 'JSONRPC' && request.method === 'POST' && url.pathname === '/a2a';
     if (isRest || isRpc) {
@@ -120,6 +123,13 @@ async function readBody(request) {
 function sendJson(response, status, payload, headers = {}) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers });
   response.end(JSON.stringify(payload));
+}
+
+function sendHtml(response, definition, origin) {
+  const card = buildCard(definition, origin);
+  const endpoint = card.supportedInterfaces?.[0]?.url || card.url;
+  response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  response.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${definition.name} · A2A</title><style>body{max-width:760px;margin:9vh auto;padding:24px;font:15px/1.7 system-ui;color:#202428;background:#eef1f2}main{background:white;border:1px solid #bdc3c7;padding:32px;box-shadow:8px 8px 0 #202428}b{color:#e9352b}code{display:block;padding:10px;background:#202428;color:#c8f54b;overflow:auto}a{color:#315cf4}</style><main><small>A2A EXAMPLE AGENT</small><h1>${definition.name}</h1><p>${definition.description}</p><p><b>ONLINE</b> · A2A ${definition.protocolVersion} · ${definition.binding}</p><h3>Agent Card</h3><a href="/.well-known/agent-card.json">${origin}/.well-known/agent-card.json</a><h3>调用接口</h3><code>${endpoint}</code><p>这个根页面只用于人工检查。评测平台会读取 Agent Card，然后按照声明的 binding 调用接口。</p></main>`);
 }
 
 const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
