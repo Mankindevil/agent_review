@@ -209,11 +209,17 @@ SSE 流。每次数据事件都是完整评测快照，客户端断线后可直�
 
 可用的评审 key 来自评审配置 `id`；Runtime/对测 key 为 `claude-code`、`cursor`、`doubao`，提交 Agent 的对测 key 为 `submitted`。主任务非终态时返回 `409`，目标不存在或参数无效时返回 `400`。进度继续通过原 SSE 接口推送。
 
+### `DELETE /api/evaluations/:id`
+
+永久删除一条历史评测及其阶段结果。只有 `completed`、`failed`、`cancelled`、`interrupted` 终态记录可以删除；`queued`、`running`、`retrying` 返回 `409`，用户必须先停止任务。前端采用 3.5 秒内二次点击确认，删除当前正在查看的记录后自动回到评测首页。
+
 ### 其他接口
 
 - `GET /api/health`：健康检查；
 - `GET /api/runtimes`：探测本机 CLI 是否存在，并区分是否已配置为可执行 adapter；
 - `GET /api/evaluations`：历史评测摘要。
+
+前端对模型评语进行安全的结构化呈现：所有内容先 HTML 转义，再保留自然段、单换行、无序列表与编号列表。最终锐评首次渲染时，页面先平滑定位到判词区域，滚动结束或达到兜底时间后才触发盖章和计数动画；重新打开已完成的历史记录也遵循同一顺序，`prefers-reduced-motion` 下改为即时定位。
 
 ### 可观察性日志
 

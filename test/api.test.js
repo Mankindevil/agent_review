@@ -80,6 +80,11 @@ test('creates and completes a demo evaluation', async () => {
   const cancelResponse = await fetch(`${origin}/api/evaluations/${created.id}/cancel`, { method: 'POST' });
   assert.equal(cancelResponse.status, 200);
   assert.equal((await cancelResponse.json()).status, 'completed', '停止接口应当对已结束评测保持幂等');
+
+  const deleteResponse = await fetch(`${origin}/api/evaluations/${created.id}`, { method: 'DELETE' });
+  assert.equal(deleteResponse.status, 200);
+  assert.deepEqual(await deleteResponse.json(), { id: created.id, deleted: true });
+  assert.equal((await fetch(`${origin}/api/evaluations/${created.id}`)).status, 404);
 });
 
 test('returns 404 when stopping an unknown evaluation', async () => {
@@ -91,6 +96,11 @@ test('returns 404 when retrying an unknown evaluation', async () => {
   const response = await fetch(`${origin}/api/evaluations/eval_missing/retry`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'review', key: 'gpt' })
   });
+  assert.equal(response.status, 404);
+});
+
+test('returns 404 when deleting an unknown evaluation', async () => {
+  const response = await fetch(`${origin}/api/evaluations/eval_missing`, { method: 'DELETE' });
   assert.equal(response.status, 404);
 });
 

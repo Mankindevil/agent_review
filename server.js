@@ -53,6 +53,15 @@ export const server = createServer(async (request, response) => {
       return item ? json(response, 202, item) : json(response, 404, { error: '评测不存在' });
     }
     const match = url.pathname.match(/^\/api\/evaluations\/([^/]+)$/);
+    if (request.method === 'DELETE' && match) {
+      const item = store.get(match[1]);
+      if (!item) return json(response, 404, { error: '评测不存在' });
+      if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(item.status)) {
+        return json(response, 409, { error: '运行中的评测不能删除，请先停止本次评测' });
+      }
+      await store.delete(match[1]);
+      return json(response, 200, { id: match[1], deleted: true });
+    }
     if (request.method === 'GET' && match) {
       const item = store.get(match[1]);
       return item ? json(response, 200, item) : json(response, 404, { error: '评测不存在' });

@@ -29,4 +29,15 @@ export class EvaluationStore {
     await this.writeQueue;
     return item;
   }
+
+  async delete(id) {
+    const deleted = this.items.delete(id);
+    if (!deleted) return false;
+    this.writeQueue = this.writeQueue.then(async () => {
+      await mkdir(path.dirname(this.file), { recursive: true });
+      await writeFile(this.file, JSON.stringify(this.list(), null, 2));
+    });
+    await this.writeQueue;
+    return true;
+  }
 }

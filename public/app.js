@@ -1,4 +1,4 @@
-const state = { mode: 'demo', sourceType: 'direct', current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false };
+const state = { mode: 'demo', sourceType: 'direct', current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0 };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -73,6 +73,8 @@ function bindEvents() {
   document.addEventListener('click', (event) => {
     const retry = event.target.closest('[data-retry-type]');
     if (retry) { retryStep(retry); return; }
+    const deleteControl = event.target.closest('[data-delete-evaluation]');
+    if (deleteControl) { deleteEvaluation(deleteControl); return; }
     const action = event.target.closest('[data-action]')?.dataset.action;
     if (action === 'home') showLanding();
     if (action === 'history') openHistory();
@@ -268,28 +270,32 @@ function showEvaluation(item) {
   }
   $$('.stage-list li').forEach((li) => li.classList.toggle('done', item.progress >= Number(li.dataset.threshold)));
   renderLogs(item.logs || []);
-  renderResult(item);
-  if (changedEvaluation) scrollTo({ top: 0, behavior: 'smooth' });
+  const revealingVerdict = renderResult(item);
+  if (changedEvaluation && !revealingVerdict) scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 function renderResult(item) {
   const root = $('#result-content');
   if (item.status !== 'completed') {
+    state.verdictRevealToken += 1;
     state.completedRendered = null;
     root.classList.remove('reveal');
+    root.classList.remove('verdict-pending');
     root.classList.add('streaming');
     root.innerHTML = renderPartialResults(item);
-    return;
+    return false;
   }
-  if (state.completedRendered === item.id) return;
+  if (state.completedRendered === item.id) return false;
   state.completedRendered = item.id;
   root.classList.remove('streaming');
+  root.classList.remove('reveal');
+  root.classList.add('verdict-pending');
   const complexity = item.complexity;
   const tier = normalizeTier(item.roast.tier);
   const sealText = tier.stamp || tier.label;
   const tierCode = String(tier.code || 'NPC').toLowerCase();
   root.innerHTML = `
-    <section class="verdict-hero">
+    <section class="verdict-hero" id="final-verdict">
       <div class="verdict-seal verdict-seal--${escapeHtml(tierCode)}" role="img" aria-label="最终评级：${escapeHtml(tier.label)}">
         <div class="verdict-seal__plate">
           <span class="verdict-seal__eyebrow">AGENT RANK</span>
@@ -298,7 +304,7 @@ function renderResult(item) {
         </div>
         <i class="verdict-seal__impact" aria-hidden="true"></i>
       </div>
-      <div class="verdict-copy"><small>FINAL VERDICT / ${escapeHtml(tier.label)}</small><h3>${escapeHtml(item.roast.headline)}</h3><p>提交 Agent 实战均分 <b>${item.averages.submitted}</b>，对 Claude Code ${signed(item.roast.deltaClaude)}，对豆包 ${signed(item.roast.deltaDoubao)}。</p>${renderRecalculationNote(item)}</div>
+      <div class="verdict-copy"><small>FINAL VERDICT / ${escapeHtml(tier.label)}</small><h3>${renderLineBreaks(item.roast.headline)}</h3><p>提交 Agent 实战均分 <b>${item.averages.submitted}</b>，对 Claude Code ${signed(item.roast.deltaClaude)}，对豆包 ${signed(item.roast.deltaDoubao)}。</p>${renderRecalculationNote(item)}</div>
     </section>
     <div class="score-triad">
       ${scoreCard('01 / 必要性', complexity.score, complexity.verdict, complexity.reason, complexity.score >= 60)}
@@ -310,8 +316,8 @@ function renderResult(item) {
     ${renderBuilds(item.builds)}
     ${renderBattle(item.benchmark)}
   `;
-  root.classList.add('reveal');
-  animateCounters(root);
+  revealVerdictInView(root, item.id);
+  return true;
 }
 
 function renderPartialResults(item) {
@@ -339,7 +345,7 @@ function terminalNotice(item) {
 }
 
 function scoreCard(kicker, score, title, body, highlight) {
-  return `<article class="score-card ${highlight ? 'highlight' : ''}"><header><span>${kicker}</span><span>/100</span></header><div class="score"><b data-count="${score}">${score}</b><span>分</span></div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(body)}</p></article>`;
+  return `<article class="score-card ${highlight ? 'highlight' : ''}"><header><span>${kicker}</span><span>/100</span></header><div class="score"><b data-count="${score}">${score}</b><span>分</span></div><h4>${escapeHtml(title)}</h4><p>${renderLineBreaks(body)}</p></article>`;
 }
 
 function renderComplexity(value) {
@@ -349,7 +355,7 @@ function renderComplexity(value) {
 
 function renderReviews(reviews) {
   const labels = { domainDepth:'领域深度', workflowQuality:'流程设计', failureHandling:'异常处理', outputContract:'输出契约', evaluability:'可评测性' };
-  return `<div class="section-title"><h3>四方会审</h3><span>MULTI-MODEL BLIND REVIEW</span></div><div class="review-grid model-review-grid">${reviews.map(review=>`<article class="review-card"><div class="reviewer"><b>${escapeHtml(review.reviewer)}</b><span>${escapeHtml(review.model)} · ${review.mode?.toUpperCase()}</span></div><div class="review-score">${review.score}<small> / 100</small></div>${review.error?`<p class="risk">${escapeHtml(review.error)}</p>`:`<div class="mini-bars">${Object.entries(review.dimensions||{}).map(([key,score])=>`<div><span>${labels[key]||key}</span><i style="--value:${score}%"></i><b>${score}</b></div>`).join('')}</div><p>${escapeHtml(review.comment)}</p><div class="risk">⚠ ${escapeHtml(review.risk)}</div>`}<div class="review-actions">${retryButton('review', review.reviewerId || review.model, '重跑该模型')}</div></article>`).join('')}</div>`;
+  return `<div class="section-title"><h3>四方会审</h3><span>MULTI-MODEL BLIND REVIEW</span></div><div class="review-grid model-review-grid">${reviews.map(review=>`<article class="review-card"><div class="reviewer"><b>${escapeHtml(review.reviewer)}</b><span>${escapeHtml(review.model)} · ${review.mode?.toUpperCase()}</span></div><div class="review-score">${review.score}<small> / 100</small></div>${review.error?`<div class="risk"><b>执行失败</b>${renderStructuredText(review.error)}</div>`:`<div class="mini-bars">${Object.entries(review.dimensions||{}).map(([key,score])=>`<div><span>${labels[key]||key}</span><i style="--value:${score}%"></i><b>${score}</b></div>`).join('')}</div>${renderStructuredText(review.comment, 'review-comment')}<div class="risk"><b>⚠ 首要风险</b>${renderStructuredText(review.risk)}</div>`}<div class="review-actions">${retryButton('review', review.reviewerId || review.model, '重跑该模型')}</div></article>`).join('')}</div>`;
 }
 
 function renderBuilds(builds) {
@@ -423,15 +429,124 @@ function animateCounters(root) {
   });
 }
 
+function revealVerdictInView(root, evaluationId) {
+  const token = ++state.verdictRevealToken;
+  requestAnimationFrame(() => {
+    const verdict = $('#final-verdict', root);
+    if (!verdict || state.current?.id !== evaluationId || token !== state.verdictRevealToken) return;
+    const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const targetTop = Math.max(0, scrollY + verdict.getBoundingClientRect().top - 92);
+    let revealed = false;
+    const reveal = () => {
+      if (revealed) return;
+      revealed = true;
+      window.removeEventListener('scrollend', reveal);
+      if (state.current?.id !== evaluationId || token !== state.verdictRevealToken) return;
+      root.classList.remove('verdict-pending');
+      root.classList.add('reveal');
+      animateCounters(root);
+    };
+    scrollTo({ top: targetTop, behavior: reducedMotion ? 'auto' : 'smooth' });
+    if (reducedMotion) requestAnimationFrame(reveal);
+    else {
+      window.addEventListener('scrollend', reveal, { once: true });
+      setTimeout(reveal, 720);
+    }
+  });
+}
+
+function renderLineBreaks(value = '') {
+  return escapeHtml(value).replace(/\r\n?|\n/g, '<br>');
+}
+
+function renderStructuredText(value = '', className = 'review-prose') {
+  const lines = String(value).replace(/\r\n?/g, '\n').trim().split('\n');
+  const output = [];
+  let paragraph = [];
+  let listType = null;
+  let listItems = [];
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    output.push(`<p>${paragraph.map(escapeHtml).join('<br>')}</p>`);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (!listItems.length) return;
+    output.push(`<${listType}>${listItems.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</${listType}>`);
+    listItems = [];
+    listType = null;
+  };
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    const bullet = line.match(/^[-*•]\s+(.+)$/);
+    const numbered = line.match(/^\d+[.)、]\s*(.+)$/);
+    if (bullet || numbered) {
+      flushParagraph();
+      const nextType = numbered ? 'ol' : 'ul';
+      if (listType && listType !== nextType) flushList();
+      listType = nextType;
+      listItems.push((bullet || numbered)[1]);
+    } else if (!line) {
+      flushParagraph();
+      flushList();
+    } else {
+      flushList();
+      paragraph.push(line);
+    }
+  });
+  flushParagraph();
+  flushList();
+  return `<div class="${className}">${output.join('') || '<p>—</p>'}</div>`;
+}
+
 async function loadHistory() {
   try {
-    const items = await (await fetch('/api/evaluations')).json();
+    const response = await fetch('/api/evaluations');
+    const items = await response.json();
+    if (!response.ok) throw new Error(items.error || '历史记录读取失败');
     $('#history-count').textContent = items.length;
-    $('#history-list').innerHTML = items.length ? items.map(item=>{ const tier = item.tier ? normalizeTier(item.tier) : null; return `<button class="history-item" data-evaluation-id="${item.id}"><header><span>${formatTime(item.createdAt)}</span><span>${item.progress}%</span></header><h3>${escapeHtml(item.name)}</h3><p>${tier?`最终锐评：<span class="history-tier">${escapeHtml(tier.label)}</span> · 实战 ${item.score} 分`:escapeHtml(item.status)}</p></button>`; }).join('') : '<p>还没有战绩。第一个被公开处刑的 Agent 会是谁？</p>';
+    $('#history-list').innerHTML = items.length ? items.map(item=>{ const tier = item.tier ? normalizeTier(item.tier) : null; const canDelete = isTerminal(item.status); return `<article class="history-item"><button class="history-open" type="button" data-evaluation-id="${item.id}"><header><span>${formatTime(item.createdAt)}</span><span>${item.progress}%</span></header><h3>${escapeHtml(item.name)}</h3><p>${tier?`最终锐评：<span class="history-tier">${escapeHtml(tier.label)}</span> · 实战 ${item.score} 分`:escapeHtml(item.status)}</p></button><button class="history-delete" type="button" data-delete-evaluation="${item.id}" aria-label="${canDelete ? '删除' : '运行中，暂不可删除'} ${escapeHtml(item.name)} 的评测记录" title="${canDelete ? '删除这条战绩' : '请先停止本次评测'}"${canDelete ? '' : ' disabled'}><i aria-hidden="true">×</i><span>删除</span></button></article>`; }).join('') : '<p class="history-empty">还没有战绩。第一个被公开处刑的 Agent 会是谁？</p>';
   } catch { $('#history-list').innerHTML = '<p>历史记录暂时读取失败。</p>'; }
 }
 
-function showLanding() { if(state.eventSource)state.eventSource.close(); state.current=null; history.replaceState(null,'',location.pathname); $('#evaluation-view').classList.add('hidden'); $('#landing-view').classList.remove('hidden'); scrollTo({top:0,behavior:'smooth'}); }
+async function deleteEvaluation(button) {
+  const id = button.dataset.deleteEvaluation;
+  if (!id || button.disabled) return;
+  if (button.dataset.confirm !== 'true') {
+    button.dataset.confirm = 'true';
+    button.classList.add('confirming');
+    $('span', button).textContent = '再点一次确认';
+    setTimeout(() => {
+      if (!button.isConnected || button.disabled) return;
+      delete button.dataset.confirm;
+      button.classList.remove('confirming');
+      $('span', button).textContent = '删除';
+    }, 3500);
+    return;
+  }
+  button.disabled = true;
+  button.classList.add('deleting');
+  $('span', button).textContent = '删除中';
+  try {
+    const response = await fetch(`/api/evaluations/${id}`, { method: 'DELETE' });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || '删除失败');
+    if (state.current?.id === id) {
+      closeHistory();
+      showLanding();
+    }
+    await loadHistory();
+  } catch (error) {
+    button.disabled = false;
+    button.classList.remove('deleting');
+    button.classList.remove('confirming');
+    delete button.dataset.confirm;
+    $('span', button).textContent = error.message;
+    setTimeout(() => { if (button.isConnected) $('span', button).textContent = '删除'; }, 2400);
+  }
+}
+
+function showLanding() { if(state.eventSource)state.eventSource.close(); state.current=null; state.completedRendered=null; state.verdictRevealToken+=1; history.replaceState(null,'',location.pathname); $('#evaluation-view').classList.add('hidden'); $('#landing-view').classList.remove('hidden'); scrollTo({top:0,behavior:'smooth'}); }
 function openHistory() { $('#history-drawer').classList.add('open'); $('#drawer-backdrop').classList.add('open'); $('#history-drawer').setAttribute('aria-hidden','false'); loadHistory(); }
 function closeHistory() { $('#history-drawer').classList.remove('open'); $('#drawer-backdrop').classList.remove('open'); $('#history-drawer').setAttribute('aria-hidden','true'); }
 function showError(text) { $('#form-error').textContent = text; }
