@@ -16,8 +16,39 @@ export function average(values) {
 }
 
 export function safeJson(text) {
-  const cleaned = String(text).replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  return JSON.parse(cleaned);
+  const cleaned = String(text).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  try { return JSON.parse(cleaned); } catch { /* Some CLIs add prose before or after the JSON value. */ }
+
+  for (let start = 0; start < cleaned.length; start += 1) {
+    if (cleaned[start] !== '{' && cleaned[start] !== '[') continue;
+    const end = findJsonEnd(cleaned, start);
+    if (end === -1) continue;
+    try { return JSON.parse(cleaned.slice(start, end + 1)); } catch { /* Try the next balanced value. */ }
+  }
+  throw new SyntaxError('模型输出中未找到合法 JSON');
+}
+
+function findJsonEnd(text, start) {
+  const stack = [];
+  let quoted = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') { quoted = true; continue; }
+    if (char === '{' || char === '[') stack.push(char);
+    if (char === '}' || char === ']') {
+      const expected = char === '}' ? '{' : '[';
+      if (stack.pop() !== expected) return -1;
+      if (!stack.length) return index;
+    }
+  }
+  return -1;
 }
 
 export async function readJsonBody(request, limit = 1_000_000) {

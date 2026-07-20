@@ -93,7 +93,9 @@ A2A 1.0 JSON-RPC 使用 `SendMessage`，0.3 兼容调用使用 `message/send`。
 - 输出契约；
 - 可评测性。
 
-模型调用失败不会中止整场评测，失败评审会保留错误且不进入专业度平均分。`MODEL_REVIEWERS_JSON` 可配置 OpenAI-compatible 或 Anthropic Messages 风格的 API。
+模型调用失败不会中止整场评测，失败评审会保留错误且不进入专业度平均分。默认可通过 `OPENAI_BASE_URL`、`OPENAI_API_KEY` 和三项 `REVIEW_MODEL_*` 快捷配置 OpenAI-compatible 网关；`MODEL_REVIEWERS_JSON` 可覆盖为任意数量的 OpenAI-compatible 或 Anthropic Messages API。
+
+模型评审、Runtime 构建 Skill 和 Runtime 执行 Skill 的 prompt 集中在 `src/prompts.js`。Runtime 构建要求单个 JSON 对象，但平台不会假设 CLI 永远严格服从格式：`safeJson()` 会从代码围栏或前后说明文字中提取第一个完整、可解析的平衡 JSON 值，随后再校验 Skill 的 `name`、`description`、`instructions` 和 `tools` 契约。这避免 Claude Code 或 Cursor Agent 输出简短前言时被误判为 0 分。
 
 ### 3.4 Runtime 现场复刻
 
@@ -190,6 +192,7 @@ SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日
 │   ├── env.js              零依赖 .env 解析、优先级与加载
 │   ├── a2a.js              Agent Card 校验、binding 选择和 A2A client
 │   ├── pipeline.js         评测状态机与容错编排
+│   ├── prompts.js          模型评审、Skill 构建与同题执行 prompt
 │   ├── providers.js        多模型评审 adapter
 │   ├── runtimes.js         Skill 构建与 runtime 执行 adapter
 │   ├── scoring.js          必要性、输出与最终分档规则

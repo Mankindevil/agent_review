@@ -127,6 +127,20 @@ npm test
 
 ## 模型评审配置
 
+最简单的方式是在 `.env` 中填写统一的 OpenAI-compatible 网关。项目已经写入你提供的 Base URL，并为三位评审设置了可独立调整的默认模型：
+
+```env
+OPENAI_BASE_URL=https://llmx.tqx.ai/v1
+OPENAI_API_KEY=你稍后填写的Key
+REVIEW_MODEL_OPENAI=g5.4
+REVIEW_MODEL_ANTHROPIC=cs4.6
+REVIEW_MODEL_DEEPSEEK=dkc
+```
+
+只有 Base URL 和 Key 都存在时，真实模式才启用这组三模型评审；Key 留空时继续使用演示评审，不会产生无意义的鉴权报错。网关按 OpenAI Chat Completions 契约调用 `${OPENAI_BASE_URL}/chat/completions`。
+
+需要完全自定义评审数量或不同 endpoint 时，可以使用下面的 `MODEL_REVIEWERS_JSON`。该配置非空时优先级最高。
+
 `MODEL_REVIEWERS_JSON` 是一个 JSON 数组。OpenAI-compatible 示例：
 
 ```json
@@ -151,6 +165,17 @@ npm test
 ```
 
 配置只引用 API key 的环境变量名；密钥本身不应写入 JSON。
+
+## Prompt 文件
+
+所有由平台维护的模型与 Runtime prompt 已集中在 [`src/prompts.js`](./src/prompts.js)：
+
+- `PROFESSIONAL_REVIEW_SYSTEM_PROMPT`：多模型专业度评审的 system prompt；
+- `professionalReviewPrompt()`：包含复杂度背景和 Agent Card 的评审 user prompt；
+- `runtimeBuildSkillPrompt()`：Claude Code、Cursor Agent 现场复刻 Skill 的 prompt；
+- `runtimeRunSkillPrompt()`：用相同用户原始 prompt 执行复刻 Skill 的 prompt。
+
+用户提交的同题对测 prompt 不做改写，来源是前端表单或 `examples/use-cases.json`，后端保存在评测对象的 `cases[].prompt`。
 
 ## Runtime adapter 契约
 
@@ -207,6 +232,11 @@ npm test
 | `PORT` | `4173` | HTTP 端口 |
 | `DATA_FILE` | `data/evaluations.json` | 评测持久化文件 |
 | `ALLOW_PRIVATE_AGENT_URLS` | `false` | 是否允许 localhost/私网 Agent URL，仅建议本地开发开启 |
+| `OPENAI_BASE_URL` | `https://llmx.tqx.ai/v1` | OpenAI-compatible 多模型评审网关 |
+| `OPENAI_API_KEY` | 空 | 网关 Key，只填写在本机 `.env` 或部署密钥中 |
+| `REVIEW_MODEL_OPENAI` | `g5.4` | OpenAI 视角评审模型 |
+| `REVIEW_MODEL_ANTHROPIC` | `cs4.6` | Anthropic 视角评审模型 |
+| `REVIEW_MODEL_DEEPSEEK` | `dkc` | DeepSeek 视角评审模型 |
 | `MODEL_REVIEWERS_JSON` | 内置三位 demo 评审 | 真实模型 adapter 配置 |
 | `RUNTIME_ADAPTERS_JSON` | 内置三种 demo runtime | 隔离 runtime adapter 配置 |
 | `ENABLE_LOCAL_CLAUDE_CODE` | `false` | 允许真实调用已登录的本机 Claude Code |
