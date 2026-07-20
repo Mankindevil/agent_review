@@ -12,7 +12,7 @@
     "demo:real-runtimes": "ENABLE_LOCAL_CLAUDE_CODE=true ENABLE_LOCAL_CURSOR_AGENT=true node scripts/real-demo.js",
     "demo:deepseek": "node scripts/deepseek-demo.js",
     "test": "node --test",
-    "check": "node --check server.js && node --check src/pipeline.js && node --check public/app.js && node --check examples/agents/server.js && node --check src/runtime-status.js && node --check scripts/deepseek-demo.js"
+    "check": "node --check server.js && node --check src/env.js && node --check src/pipeline.js && node --check public/app.js && node --check examples/agents/server.js && node --check src/runtime-status.js && node --check scripts/deepseek-demo.js"
   },
   "engines": {
     "node": ">=20"

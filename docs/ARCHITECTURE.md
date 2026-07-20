@@ -36,6 +36,12 @@ A2A Agent endpoint   Model / Runtime endpoints
 
 当前版本刻意使用 Node.js 内置模块，不需要安装第三方依赖，降低首次运行成本。持久化默认使用 JSON 文件，适合单机 MVP；生产环境应替换为 PostgreSQL，并把执行流水线放入任务队列。
 
+### 2.1 配置加载
+
+`src/env.js` 在服务和 DeepSeek 启动器执行实际业务模块前加载项目根目录 `.env`，不依赖第三方 dotenv 包。解析器支持注释、`export`、单/双引号和空值，但环境 JSON 配置仍要求写在单行。加载时只补充尚不存在的变量，因此进程环境、CI Secret 或容器注入值始终优先于文件值。外部进程可通过 `ENV_FILE` 指定另一份配置文件。
+
+本机 `.env` 包含全部配置入口且被 Git 忽略；`.env.example` 只保留安全默认值和空的密钥占位，可进入版本控制。加载器不会输出变量值，API Key 也不得进入评测对象或日志。
+
 ## 3. 评测流水线
 
 ### 3.1 A2A 协议体检
@@ -178,7 +184,9 @@ SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日
 ```text
 .
 ├── server.js               HTTP API、SSE 与静态文件服务
+├── .env.example            可提交的完整环境变量模板
 ├── src/
+│   ├── env.js              零依赖 .env 解析、优先级与加载
 │   ├── a2a.js              Agent Card 校验、binding 选择和 A2A client
 │   ├── pipeline.js         评测状态机与容错编排
 │   ├── providers.js        多模型评审 adapter

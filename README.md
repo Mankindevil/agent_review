@@ -26,8 +26,11 @@
 要求 Node.js 20 或更高版本。
 
 ```bash
+test -f .env || cp .env.example .env
 npm start
 ```
+
+项目会在启动时自动读取根目录 `.env`；当前工作区已经生成该文件，首次克隆时可用上面的命令从模板创建。系统或终端中已经存在的同名环境变量优先级更高，便于 CI、容器和临时命令覆盖。
 
 打开 `http://localhost:4173`，选择任一“本地真实样本”，再点击“送进评测舱”即可体验演示评测。
 
@@ -55,10 +58,8 @@ DeepSeek 官方提供 Anthropic-compatible API，因此 Claude Code 不需要登
 
 ```bash
 cd "/Users/jintingzhou/Documents/Agent锐评系统"
-printf "DeepSeek API Key: "
-read -s DEEPSEEK_API_KEY
-echo
-export DEEPSEEK_API_KEY
+# 编辑被 Git 忽略的 .env，只填写这一项：
+# DEEPSEEK_API_KEY=你的真实Key
 npm run demo:deepseek
 ```
 
@@ -69,7 +70,7 @@ npm run demo:deepseek
 - Haiku/Subagent 映射为 `deepseek-v4-flash`；
 - 启用 Claude Code 本地 adapter 和已经登录的 Cursor Agent adapter。
 
-Key 不会写入 `.env`、配置文件、评测记录或 Git。退出进程后可执行 `unset DEEPSEEK_API_KEY`。旧模型名 `deepseek-chat` / `deepseek-reasoner` 将于 2026-07-24 停用，本项目不再使用。
+Key 只应写入本机 `.env` 或密钥管理系统，不要写入 `.env.example`。`.env` 已被 Git 忽略，Key 也不会进入日志或评测记录。旧模型名 `deepseek-chat` / `deepseek-reasoner` 将于 2026-07-24 停用，本项目不再使用。
 
 本地 Runtime 使用只读模式：Claude Code 采用 `--tools "" --permission-mode plan --safe-mode`，Cursor Agent 采用 `--mode ask --sandbox enabled`。每次调用都在独立临时目录运行并在结束后删除。Claude 单次调用默认设置 `$0.25` 预算上限，可通过 `CLAUDE_MAX_BUDGET_USD` 调整。
 
@@ -198,8 +199,11 @@ npm test
 
 ## 常用环境变量
 
+所有项目配置集中在根目录 `.env`，可提交的字段模板见 [`.env.example`](./.env.example)。加载优先级为“已有进程环境变量 > `.env` > 代码默认值”；需要使用另一份文件时，在启动进程中设置绝对路径 `ENV_FILE=/path/to/custom.env`。
+
 | 变量 | 默认值 | 说明 |
 |---|---|---|
+| `NODE_ENV` | `development` | 运行环境标识 |
 | `PORT` | `4173` | HTTP 端口 |
 | `DATA_FILE` | `data/evaluations.json` | 评测持久化文件 |
 | `ALLOW_PRIVATE_AGENT_URLS` | `false` | 是否允许 localhost/私网 Agent URL，仅建议本地开发开启 |
@@ -209,6 +213,10 @@ npm test
 | `ENABLE_LOCAL_CURSOR_AGENT` | `false` | 允许真实调用已登录的本机 Cursor Agent CLI |
 | `CLAUDE_MAX_BUDGET_USD` | `0.25` | Claude Code 单次无头调用预算上限 |
 | `LOCAL_RUNTIME_TIMEOUT_MS` | `180000` | 本地 CLI 单次执行时限 |
+| `DEEPSEEK_API_KEY` | 空 | DeepSeek 密钥，只填写在本机 `.env` 或部署密钥中 |
+| `DEEPSEEK_CLAUDE_MODEL` | `deepseek-v4-pro[1m]` | DeepSeek 启动器使用的 Claude Code 主模型 |
+| `ANTHROPIC_*` / `CLAUDE_CODE_*` | 见模板 | Anthropic-compatible endpoint 与 Claude Code 模型映射 |
+| `ENV_FILE` | 项目根目录 `.env` | 从进程环境指定另一份 env 文件 |
 
 ## Git 工作流
 
