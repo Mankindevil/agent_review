@@ -52,25 +52,31 @@ npm run demo:real
 npm run demo:real-runtimes
 ```
 
-### 使用 DeepSeek 驱动 Claude Code
+### 使用火山方舟 DeepSeek 驱动 Claude Code
 
-DeepSeek 官方提供 Anthropic-compatible API，因此 Claude Code 不需要登录 Claude 账号。推荐使用不会把 Key 写入 shell 历史的方式：
+当前默认让 Claude Code 使用火山方舟的 DeepSeek 在线推理接入点，不需要登录 Claude 账号。编辑被 Git 忽略的 `.env`：
 
 ```bash
 cd "/Users/jintingzhou/Documents/Agent锐评系统"
-# 编辑被 Git 忽略的 .env，只填写这一项：
-# DEEPSEEK_API_KEY=你的真实Key
+# ARK_API_KEY=你的方舟Key
+# CLAUDE_BACKEND=ark
+# CLAUDE_ARK_MODEL=ep-20260708162855-pcf9x
 npm run demo:deepseek
 ```
 
-该启动器会在当前进程内设置：
+方舟在线推理 endpoint 使用 OpenAI Chat Completions，而 Claude Code 使用 Anthropic Messages。项目会为每次 Claude 调用启动一个只监听 `127.0.0.1` 随机端口的短生命周期协议桥：
 
-- `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`；
-- Claude 主模型为 `deepseek-v4-pro[1m]`；
-- Haiku/Subagent 映射为 `deepseek-v4-flash`；
-- 启用 Claude Code 本地 adapter 和已经登录的 Cursor Agent adapter。
+- Claude Code 把 Anthropic Messages 请求发给本地协议桥；
+- 协议桥转换后调用 `${ARK_BASE_URL}/chat/completions`；
+- 主模型、Haiku、Sonnet、Opus 和 Subagent 都映射到指定 DeepSeek endpoint；
+- 无头执行使用评测专用 system prompt 覆盖 Claude Code 默认代码代理提示，禁止虚构 Bash、Explore 或子代理调用；
+- 调用结束立即关闭协议桥，不把方舟 Key 传给 Claude 子进程。
 
-Key 只应写入本机 `.env` 或密钥管理系统，不要写入 `.env.example`。`.env` 已被 Git 忽略，Key 也不会进入日志或评测记录。旧模型名 `deepseek-chat` / `deepseek-reasoner` 将于 2026-07-24 停用，本项目不再使用。
+如果模型偶发返回截断 JSON 或缺少 Skill 必填字段，运行时会携带纠错约束自动重试一次；认证、网络和命令执行错误不会被这种格式重试掩盖。
+
+Runtime Probe 与“现场复刻记录”会显示实际后端：Ark 模式下展示方舟 DeepSeek endpoint ID，不再把它误标为 Claude Sonnet。
+
+Key 只应写入本机 `.env` 或密钥管理系统，不要写入 `.env.example`。如需恢复 DeepSeek 官方 Anthropic-compatible API，可设置 `CLAUDE_BACKEND=deepseek` 并填写 `DEEPSEEK_API_KEY`。
 
 本地 Runtime 使用只读模式：Claude Code 采用 `--tools "" --permission-mode plan --safe-mode`，Cursor Agent 采用 `--mode ask --sandbox enabled`。每次调用都在独立临时目录运行并在结束后删除。Claude 单次调用默认设置 `$0.25` 预算上限，可通过 `CLAUDE_MAX_BUDGET_USD` 调整。
 
@@ -250,8 +256,10 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 | `ENABLE_LOCAL_CURSOR_AGENT` | `false` | 允许真实调用已登录的本机 Cursor Agent CLI |
 | `CLAUDE_MAX_BUDGET_USD` | `0.25` | Claude Code 单次无头调用预算上限 |
 | `LOCAL_RUNTIME_TIMEOUT_MS` | `180000` | 本地 CLI 单次执行时限 |
-| `DEEPSEEK_API_KEY` | 空 | DeepSeek 密钥，只填写在本机 `.env` 或部署密钥中 |
-| `DEEPSEEK_CLAUDE_MODEL` | `deepseek-v4-pro[1m]` | DeepSeek 启动器使用的 Claude Code 主模型 |
+| `CLAUDE_BACKEND` | `ark` | Claude Code 的 DeepSeek 后端：`ark` 或 `deepseek` |
+| `CLAUDE_ARK_MODEL` | `ep-20260708162855-pcf9x` | Claude Code 使用的方舟 DeepSeek 接入点 |
+| `DEEPSEEK_API_KEY` | 空 | 仅供 `CLAUDE_BACKEND=deepseek` 直连回退使用 |
+| `DEEPSEEK_CLAUDE_MODEL` | `deepseek-v4-pro[1m]` | DeepSeek 官方直连回退模型 |
 | `ANTHROPIC_*` / `CLAUDE_CODE_*` | 见模板 | Anthropic-compatible endpoint 与 Claude Code 模型映射 |
 | `ENV_FILE` | 项目根目录 `.env` | 从进程环境指定另一份 env 文件 |
 

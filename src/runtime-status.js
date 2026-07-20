@@ -2,7 +2,7 @@ import { access } from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { hasClaudeCredential } from './claude-env.js';
+import { hasClaudeCredential, shouldUseArkClaude } from './claude-env.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -14,11 +14,12 @@ export async function getRuntimeStatus() {
   const claudeEnabled = remoteConfig.includes('claude-code') || process.env.ENABLE_LOCAL_CLAUDE_CODE === 'true';
   const cursorEnabled = remoteConfig.includes('cursor') || process.env.ENABLE_LOCAL_CURSOR_AGENT === 'true';
   const doubaoApiReady = Boolean(process.env.ARK_BASE_URL && process.env.ARK_API_KEY && process.env.REVIEW_MODEL_DOUBAO);
+  const claudeBackend = shouldUseArkClaude() ? '火山方舟 DeepSeek' : process.env.DEEPSEEK_API_KEY ? 'DeepSeek 直连' : 'Claude';
   return [
     {
       id: 'claude-code', name: 'Claude Code', installed: claude.installed,
       version: claude.version, authenticated: claudeAuth, runtimeReady: Boolean(claude.installed && claudeEnabled && (claudeAuth || remoteConfig.includes('claude-code'))),
-      note: !claude.installed ? '未安装' : !claudeAuth ? '已安装但未登录' : claudeEnabled ? '本地 CLI adapter 已就绪' : '已登录；需显式启用本地 adapter'
+      note: !claude.installed ? '未安装' : !claudeAuth ? '已安装但未登录' : claudeEnabled ? `本地 CLI adapter 已就绪 · ${claudeBackend}` : `凭据已就绪（${claudeBackend}）；需显式启用本地 adapter`
     },
     {
       id: 'cursor', name: 'Cursor Agent', installed: cursorAgent.installed,

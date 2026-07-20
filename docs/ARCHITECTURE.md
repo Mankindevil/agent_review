@@ -105,7 +105,7 @@ A2A 1.0 JSON-RPC 使用 `SendMessage`，0.3 兼容调用使用 `message/send`。
 
 开发机也支持显式启用本地 CLI adapter。Claude Code 被限制为无工具、plan、安全模式和单次预算；Cursor Agent 被限制为 ask/read-only 与内置 sandbox。两个 CLI 都在随机临时目录执行，不接触仓库文件。只有安装、登录和环境开关同时满足时，Runtime Probe 才显示 `READY`。生产环境仍应使用远程容器 adapter，本地 CLI 仅用于受信任开发机验收。
 
-Claude Code 也可以使用 DeepSeek 官方 Anthropic-compatible endpoint。`src/claude-env.js` 会在启动 Claude 子进程时把 `DEEPSEEK_API_KEY` 仅在内存中映射为 `ANTHROPIC_AUTH_TOKEN`，并使用 `https://api.deepseek.com/anthropic`；`scripts/deepseek-demo.js` 复用同一映射。这种方式无需 Claude OAuth，Runtime Probe 也会把 DeepSeek Key 视为有效凭据。日志不记录环境变量或请求头。
+Claude Code 默认通过火山方舟 DeepSeek endpoint 运行。由于方舟在线推理是 OpenAI Chat Completions 协议，而 Claude Code 是 Anthropic Messages 协议，`src/ark-anthropic-proxy.js` 会为单次 CLI 调用启动仅监听 loopback 随机端口的短生命周期协议桥。桥接器负责消息块、非流式响应、合成 SSE 事件和 token-count 请求的转换；方舟 Key 仅由父进程持有，不传入 Claude 子进程。无头调用通过 `--system-prompt` 覆盖 Claude Code 默认代码代理提示，明确禁止 Bash、Explore、子代理等虚构工具调用。`CLAUDE_BACKEND=deepseek` 仍可回退到 DeepSeek 官方 Anthropic-compatible endpoint。
 
 Doubao Runtime 不要求本机存在 `doubao` CLI。当 `ARK_BASE_URL`、`ARK_API_KEY` 与 `REVIEW_MODEL_DOUBAO` 同时存在时，它会通过方舟 Chat Completions API 先构建结构化 Skill，再使用完全相同的用户 prompt 执行该 Skill；Runtime Probe 此时直接显示 `READY`。
 
@@ -192,7 +192,8 @@ SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日
 ├── .env.example            可提交的完整环境变量模板
 ├── src/
 │   ├── env.js              零依赖 .env 解析、优先级与加载
-│   ├── claude-env.js       DeepSeek 到 Claude Code 的进程内环境映射
+│   ├── ark-anthropic-proxy.js 方舟 OpenAI API 到 Anthropic Messages 的本地协议桥
+│   ├── claude-env.js       Claude Code 的 Ark / DeepSeek 环境映射
 │   ├── a2a.js              Agent Card 校验、binding 选择和 A2A client
 │   ├── pipeline.js         评测状态机与容错编排
 │   ├── prompts.js          模型评审、Skill 构建与同题执行 prompt

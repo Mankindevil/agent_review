@@ -1,6 +1,7 @@
 import { stableNumber, safeJson } from './utils.js';
 import { runtimeBuildSkillPrompt, runtimeRunSkillPrompt } from './prompts.js';
-import { applyDeepSeekClaudeEnv } from './claude-env.js';
+import { applyArkClaudeEnv, applyDeepSeekClaudeEnv, shouldUseArkClaude } from './claude-env.js';
+import { startArkAnthropicProxy } from './ark-anthropic-proxy.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,6 +9,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
+const CLAUDE_RUNTIME_SYSTEM_PROMPT = '你是 Agent 盲测平台中的隔离执行器。严格完成用户给出的单一任务并直接返回最终内容。当前会话没有任何工具，不得浏览文件、探索代码库、启动子代理，也不得输出或模拟 tool_call、Bash、Explore 等工具调用。';
 
 export const RUNTIMES = [
   { id: 'claude-code', name: 'Claude Code', model: 'Claude Sonnet', badge: 'CC' },
@@ -18,13 +20,17 @@ export const RUNTIMES = [
 export async function buildSkill(runtime, card, mode) {
   const config = runtimeConfig(runtime.id);
   if (mode === 'live' && config?.kind === 'local-cli') {
-    const result = await callLocalCli(runtime.id, runtimeBuildSkillPrompt(card));
-    const skill = validateGeneratedSkill(safeJson(result.text));
-    return { runtime: runtime.name, runtimeId: runtime.id, model: runtime.model, mode: 'live', adapterKind: 'local-cli', skill, trace: result.trace };
+    const { skill, result } = await generateValidatedSkill(
+      (prompt) => callLocalCli(runtime.id, prompt),
+      runtimeBuildSkillPrompt(card)
+    );
+    return { runtime: runtime.name, runtimeId: runtime.id, model: localRuntimeModel(runtime), mode: 'live', adapterKind: 'local-cli', skill, trace: result.trace };
   }
   if (mode === 'live' && config?.kind === 'model-api') {
-    const text = await callRuntimeModel(config, runtimeBuildSkillPrompt(card));
-    const skill = validateGeneratedSkill(safeJson(text));
+    const { skill } = await generateValidatedSkill(
+      async (prompt) => ({ text: await callRuntimeModel(config, prompt) }),
+      runtimeBuildSkillPrompt(card)
+    );
     return { runtime: runtime.name, runtimeId: runtime.id, model: config.model, mode: 'live', adapterKind: 'model-api', skill };
   }
   if (mode === 'live' && config?.url) {
@@ -55,6 +61,22 @@ export async function buildSkill(runtime, card, mode) {
       fingerprint: stableNumber(`${runtime.id}:${card.name}`, 100000, 999999).toString()
     }
   };
+}
+
+export async function generateValidatedSkill(generate, prompt, attempts = 2) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const retryHint = attempt
+      ? '\n\n上一次返回的内容不是完整、合法的 Skill JSON。请重新生成；只输出结构完整的单个 JSON 对象，尤其不要提前停止，也不要调用或模拟任何工具。'
+      : '';
+    const result = await generate(`${prompt}${retryHint}`);
+    try {
+      return { skill: validateGeneratedSkill(safeJson(result.text)), result, attempts: attempt + 1 };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(`Runtime 连续 ${attempts} 次未返回有效 Skill：${lastError?.message || '未知格式错误'}`);
 }
 
 export async function runSkill(build, testCase, mode) {
@@ -92,18 +114,29 @@ function runtimeConfig(runtimeId) {
   return null;
 }
 
+function localRuntimeModel(runtime) {
+  if (runtime.id !== 'claude-code') return runtime.model;
+  if (shouldUseArkClaude(process.env)) return process.env.CLAUDE_ARK_MODEL || process.env.REVIEW_MODEL_DEEPSEEK;
+  if (process.env.DEEPSEEK_API_KEY) return process.env.DEEPSEEK_CLAUDE_MODEL || 'deepseek-v4-pro[1m]';
+  return runtime.model;
+}
+
 async function callLocalCli(runtimeId, prompt) {
   const workspace = await mkdtemp(path.join(tmpdir(), `agent-roast-${runtimeId}-`));
+  let arkProxy;
   const startedAt = Date.now();
   const timeout = Number(process.env.LOCAL_RUNTIME_TIMEOUT_MS || 180_000);
   const budget = process.env.CLAUDE_MAX_BUDGET_USD || '0.25';
   const command = runtimeId === 'claude-code' ? 'claude' : 'cursor-agent';
   const args = runtimeId === 'claude-code'
-    ? ['-p', prompt, '--output-format', 'json', '--tools', '', '--permission-mode', 'plan', '--safe-mode', '--no-session-persistence', '--max-turns', '1', '--max-budget-usd', budget]
+    ? ['-p', prompt, '--system-prompt', CLAUDE_RUNTIME_SYSTEM_PROMPT, '--output-format', 'json', '--tools', '', '--permission-mode', 'plan', '--safe-mode', '--no-session-persistence', '--max-turns', '1', '--max-budget-usd', budget]
     : ['-p', prompt, '--output-format', 'json', '--mode', 'ask', '--sandbox', 'enabled', '--trust', '--workspace', workspace];
   try {
     const commandEnv = { ...process.env, NO_COLOR: '1' };
-    if (runtimeId === 'claude-code') applyDeepSeekClaudeEnv(commandEnv);
+    if (runtimeId === 'claude-code' && shouldUseArkClaude(commandEnv)) {
+      arkProxy = await startArkAnthropicProxy({ baseUrl: commandEnv.ARK_BASE_URL, apiKey: commandEnv.ARK_API_KEY, model: commandEnv.CLAUDE_ARK_MODEL || commandEnv.REVIEW_MODEL_DEEPSEEK });
+      applyArkClaudeEnv(commandEnv, arkProxy.baseUrl);
+    } else if (runtimeId === 'claude-code') applyDeepSeekClaudeEnv(commandEnv);
     const { stdout, stderr } = await execFileAsync(command, args, { cwd: workspace, timeout, maxBuffer: 5_000_000, env: commandEnv });
     const text = extractCliText(stdout);
     if (!text.trim()) throw new Error(`${command} 没有返回可见结果`);
@@ -114,6 +147,7 @@ async function callLocalCli(runtimeId, prompt) {
     if (error.killed || error.signal) throw new Error(`${command} 超过 ${timeout}ms 执行时限`);
     throw new Error(`${command} 执行失败：${String(detail).slice(0, 800)}`);
   } finally {
+    await arkProxy?.close();
     await rm(workspace, { recursive: true, force: true });
   }
 }
