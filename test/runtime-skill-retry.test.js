@@ -1,6 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSkill, generateValidatedSkill, runSkill } from '../src/runtimes.js';
+import { buildSkill, createSkillBundle, generateValidatedSkill, runSkill } from '../src/runtimes.js';
+
+test('materializes a read-only portable folder from normalized runtime output', () => {
+  const bundle = createSkillBundle({
+    runtime: 'Claude Code', runtimeId: 'claude-code', model: 'test-model', mode: 'live', adapterKind: 'local-cli', seed: 17,
+    skill: { name: 'contract-review', description: 'Review contracts safely', instructions: ['Read clauses', 'Report evidence'], tools: ['filesystem'] }
+  }, { name: 'Contract Agent', description: 'Review contracts', skills: [] });
+
+  assert.equal(bundle.root, 'contract-review');
+  assert.equal(bundle.source, 'normalized-runtime-output');
+  assert.deepEqual(bundle.files.map((file) => file.path), ['SKILL.md', 'skill.json', 'references/agent-card.json', '.agent-roast/manifest.json']);
+  assert.match(bundle.files[0].content, /## 执行流程/);
+  assert.match(bundle.files[0].content, /1\. Read clauses/);
+  assert.equal(JSON.parse(bundle.files[2].content).name, 'Contract Agent');
+  assert.equal(JSON.parse(bundle.files[3].content).seed, 17);
+});
 
 test('retries once when a runtime returns truncated or invalid Skill JSON', async () => {
   const prompts = [];

@@ -1,4 +1,4 @@
-const state = { mode: 'demo', sourceType: 'direct', current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0 };
+const state = { mode: 'demo', sourceType: 'direct', current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), skillRequestToken: 0 };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -75,6 +75,12 @@ function bindEvents() {
     if (retry) { retryStep(retry); return; }
     const deleteControl = event.target.closest('[data-delete-evaluation]');
     if (deleteControl) { deleteEvaluation(deleteControl); return; }
+    const skillDetail = event.target.closest('[data-skill-detail]');
+    if (skillDetail) { toggleSkillDetail(skillDetail); return; }
+    const skillFile = event.target.closest('[data-skill-file]');
+    if (skillFile) { selectSkillFile(skillFile); return; }
+    const copySkill = event.target.closest('[data-copy-skill]');
+    if (copySkill) { copySkillFile(copySkill); return; }
     const action = event.target.closest('[data-action]')?.dataset.action;
     if (action === 'home') showLanding();
     if (action === 'history') openHistory();
@@ -371,7 +377,94 @@ function renderReviews(reviews) {
 }
 
 function renderBuilds(builds) {
-  return `<div class="section-title"><h3>现场复刻记录</h3><span>RUNTIME SKILL BUILD</span></div><div class="build-list">${builds.map(build=>`<div class="build-row"><b>${escapeHtml(build.runtime)}</b><span>${escapeHtml(build.model||'—')}</span><code>${escapeHtml(build.skill?.name||build.error||'构建失败')}</code><span class="${build.error?'':'ok'}">${build.error?'失败':`✓ ${build.mode.toUpperCase()}`}</span>${retryButton('build', build.runtimeId, '重建并回放')}</div>`).join('')}</div>`;
+  return `<div class="section-title"><h3>现场复刻记录</h3><span>RUNTIME SKILL BUILD</span></div><div class="build-list">${builds.map(build=>`<article class="build-card" data-skill-runtime="${escapeHtml(build.runtimeId || '')}"><div class="build-row"><b>${escapeHtml(build.runtime)}</b><span>${escapeHtml(build.model||'—')}</span><code>${escapeHtml(build.skill?.name||build.error||'构建失败')}</code><span class="${build.error?'':'ok'}">${build.error?'失败':`✓ ${build.mode.toUpperCase()}`}</span>${build.error || !build.skill ? '' : `<button class="skill-detail-toggle" type="button" data-skill-detail="${escapeHtml(build.runtimeId)}" aria-expanded="false"><i aria-hidden="true">⌁</i><span>查看 Skill</span></button>`}${retryButton('build', build.runtimeId, '重建并回放')}</div><div class="skill-inspector hidden" data-skill-inspector><div class="skill-inspector-loading"><i></i><span>正在装载目录快照…</span></div></div></article>`).join('')}</div>`;
+}
+
+async function toggleSkillDetail(button) {
+  const card = button.closest('.build-card');
+  const inspector = $('[data-skill-inspector]', card);
+  const opening = inspector.classList.contains('hidden');
+  inspector.classList.toggle('hidden', !opening);
+  button.setAttribute('aria-expanded', String(opening));
+  $('span', button).textContent = opening ? '收起 Skill' : '查看 Skill';
+  if (!opening || inspector.dataset.loaded === 'true') return;
+  const evaluationId = state.current?.id;
+  const runtimeId = button.dataset.skillDetail;
+  if (!evaluationId || !runtimeId) return renderSkillError(inspector, '无法定位这条复刻记录');
+  const cacheKey = skillCacheKey(evaluationId, runtimeId);
+  const cached = state.skillBundles.get(cacheKey);
+  if (cached) return renderSkillInspector(inspector, cached);
+  const token = ++state.skillRequestToken;
+  inspector.dataset.requestToken = String(token);
+  try {
+    const response = await fetch(`/api/evaluations/${encodeURIComponent(evaluationId)}/builds/${encodeURIComponent(runtimeId)}/skill`);
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Skill 详情读取失败');
+    if (inspector.dataset.requestToken !== String(token) || state.current?.id !== evaluationId || !inspector.isConnected) return;
+    state.skillBundles.set(cacheKey, payload);
+    renderSkillInspector(inspector, payload);
+  } catch (error) {
+    if (inspector.dataset.requestToken === String(token) && state.current?.id === evaluationId && inspector.isConnected) renderSkillError(inspector, error.message);
+  }
+}
+
+function renderSkillInspector(inspector, bundle) {
+  const files = Array.isArray(bundle.files) ? bundle.files : [];
+  if (!files.length) return renderSkillError(inspector, '这个 Skill 快照中没有文件');
+  inspector.dataset.loaded = 'true';
+  inspector.innerHTML = `<header class="skill-inspector-head"><div><small>NORMALIZED SKILL SNAPSHOT</small><b>${escapeHtml(bundle.root)}/</b></div><span>${files.length} FILES · READ ONLY</span></header><div class="skill-browser"><nav class="skill-tree" aria-label="Skill 文件列表"><b><i>▾</i>${escapeHtml(bundle.root)}/</b>${files.map((file, index) => skillFileButton(file, index === 0)).join('')}</nav><section class="skill-preview">${skillPreviewMarkup(files[0])}</section></div><p class="skill-snapshot-note">Runtime 返回的结构化 Skill 已标准化为可移植目录；这里展示评测时使用的指令、原始 JSON、Agent Card 和运行清单。</p>`;
+}
+
+function skillFileButton(file, active) {
+  const parts = String(file.path || '').split('/');
+  const label = parts.pop() || 'untitled';
+  const directory = parts.length ? `${parts.join('/')}/` : '';
+  return `<button type="button" class="skill-file${active ? ' active' : ''}" data-skill-file="${escapeHtml(file.path)}" title="${escapeHtml(file.path)}"><i aria-hidden="true">${file.language === 'markdown' ? 'M↓' : '{ }'}</i><span>${directory ? `<small>${escapeHtml(directory)}</small>` : ''}${escapeHtml(label)}</span></button>`;
+}
+
+function skillPreviewMarkup(file) {
+  const content = String(file?.content || '');
+  const lines = content.split('\n');
+  return `<header><div><small>${escapeHtml(file?.language || 'text')}</small><b>${escapeHtml(file?.path || '—')}</b></div><button type="button" data-copy-skill="${escapeHtml(file?.path || '')}">复制内容</button></header><pre class="skill-source" tabindex="0">${lines.map((line, index) => `<span><i>${index + 1}</i><code>${escapeHtml(line) || '&nbsp;'}</code></span>`).join('')}</pre>`;
+}
+
+function selectSkillFile(button) {
+  const card = button.closest('.build-card');
+  const runtimeId = card?.dataset.skillRuntime;
+  const bundle = state.skillBundles.get(skillCacheKey(state.current?.id, runtimeId));
+  const file = bundle?.files?.find((candidate) => candidate.path === button.dataset.skillFile);
+  if (!file) return;
+  $$('.skill-file', card).forEach((item) => item.classList.toggle('active', item === button));
+  $('.skill-preview', card).innerHTML = skillPreviewMarkup(file);
+}
+
+async function copySkillFile(button) {
+  const card = button.closest('.build-card');
+  const runtimeId = card?.dataset.skillRuntime;
+  const bundle = state.skillBundles.get(skillCacheKey(state.current?.id, runtimeId));
+  const file = bundle?.files?.find((candidate) => candidate.path === button.dataset.copySkill);
+  if (!file) return;
+  const original = button.textContent;
+  try {
+    await navigator.clipboard.writeText(file.content);
+    button.textContent = '已复制';
+  } catch {
+    button.textContent = '复制失败';
+  }
+  setTimeout(() => { if (button.isConnected) button.textContent = original; }, 1500);
+}
+
+function renderSkillError(inspector, message) {
+  inspector.dataset.loaded = 'true';
+  inspector.innerHTML = `<div class="skill-inspector-error"><b>Skill 快照不可用</b><span>${escapeHtml(message)}</span></div>`;
+}
+
+function skillCacheKey(evaluationId, runtimeId) {
+  const build = state.current?.builds?.find((candidate) => candidate.runtimeId === runtimeId);
+  const input = JSON.stringify([build?.skill, build?.model, build?.mode, build?.adapterKind, build?.seed]);
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) hash = Math.imul(hash ^ input.charCodeAt(index), 16777619);
+  return `${evaluationId}:${runtimeId}:${(hash >>> 0).toString(36)}`;
 }
 
 function renderBattle(rounds) {

@@ -77,6 +77,16 @@ test('creates and completes a demo evaluation', async () => {
   assert.ok(result.logs.length > 10);
   assert.ok(result.logs.every((log) => log.source && log.phase && log.mode));
 
+  const skillResponse = await fetch(`${origin}/api/evaluations/${created.id}/builds/claude-code/skill`);
+  const skillBundle = await skillResponse.json();
+  assert.equal(skillResponse.status, 200);
+  assert.equal(skillBundle.files.length, 4);
+  assert.match(skillBundle.files.find((file) => file.path === 'SKILL.md').content, /## 执行流程/);
+  assert.equal(JSON.parse(skillBundle.files.find((file) => file.path === 'references/agent-card.json').content).name, card.name);
+
+  const missingSkillResponse = await fetch(`${origin}/api/evaluations/${created.id}/builds/not-a-runtime/skill`);
+  assert.equal(missingSkillResponse.status, 404);
+
   const retryResponse = await fetch(`${origin}/api/evaluations/${created.id}/retry`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'benchmark', key: 'submitted', caseIndex: 0 })
   });

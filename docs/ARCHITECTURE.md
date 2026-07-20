@@ -109,6 +109,20 @@ Claude Code 默认通过火山方舟 DeepSeek endpoint 运行。由于方舟在�
 
 Doubao Runtime 不要求本机存在 `doubao` CLI。当 `ARK_BASE_URL`、`ARK_API_KEY` 与 `REVIEW_MODEL_DOUBAO` 同时存在时，它会通过方舟 Chat Completions API 先构建结构化 Skill，再使用完全相同的用户 prompt 执行该 Skill；Runtime Probe 此时直接显示 `READY`。
 
+#### Skill 目录快照
+
+Runtime 构建阶段的跨执行器契约是结构化 Skill JSON，而不是允许 CLI 在宿主项目中任意写文件。详情接口会把该次评测实际使用的结构化产物确定性地标准化为一个只读、可移植目录：
+
+```text
+<skill-name>/
+├── SKILL.md                       人类可读的用途、边界、执行流程与工具声明
+├── skill.json                     Runtime 返回并通过校验的原始结构化 Skill
+├── references/agent-card.json     构建时唯一可见的输入 Agent Card
+└── .agent-roast/manifest.json     Runtime、模型、模式、adapter、seed 与 fingerprint
+```
+
+这个目录是规范化产物快照，不冒充已被清理的 CLI 临时工作区，也不会暴露环境变量、认证头或 API Key。接口按需生成，因此旧评测记录无需迁移即可查看。前端在“现场复刻记录”中按需请求，使用目录树和带行号的只读预览展示；文件内容进入 DOM 前统一 HTML 转义。
+
 ### 3.5 同 prompt 对测与锐评分档
 
 每个用例同时发送给：
@@ -183,6 +197,10 @@ OpenAI-compatible 模型、方舟模型 API 和 Claude Code 的 Ark 协议桥会
 
 返回评测快照，包括 `progress`、`stage`、`logs`、各阶段结果和最终锐评。
 
+### `GET /api/evaluations/:id/builds/:runtimeId/skill`
+
+返回指定 Runtime 复刻结果的标准化 Skill 目录快照，包含 `root`、`source` 与 `files[]`；每个文件提供相对 `path`、`language` 和完整 `content`。不存在的评测或 Runtime 返回 `404`，构建失败或无 Skill 产物返回 `409`。该接口只接受已落入评测记录的 runtimeId，不读取客户端指定的磁盘路径。
+
 ### `GET /api/evaluations/:id/events`
 
 SSE 流。每次数据事件都是完整评测快照，客户端断线后可直接用 GET 恢复，不依赖事件增量。流水线在每位模型评审、每个 Runtime Skill 以及每个同题选手完成时更新 `professional.reviews`、`builds` 或 `benchmark[].entries`，前端可以立即渲染阶段产物。
@@ -250,7 +268,7 @@ SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日
 │   ├── pipeline.js         评测、单步复核、派生结果重算与容错状态机
 │   ├── prompts.js          模型评审、Skill 构建与同题执行 prompt
 │   ├── providers.js        多模型评审 adapter
-│   ├── runtimes.js         Skill 构建与 runtime 执行 adapter
+│   ├── runtimes.js         Skill 构建、目录快照与 runtime 执行 adapter
 │   ├── scoring.js          必要性、输出与最终分档规则
 │   ├── store.js            JSON 持久化
 │   └── utils.js            ID、数值、请求体等通用工具

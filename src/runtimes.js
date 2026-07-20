@@ -17,6 +17,33 @@ export const RUNTIMES = [
   { id: 'doubao', name: 'Doubao Agent', model: 'Seed', badge: 'DB' }
 ];
 
+export function createSkillBundle(build, card) {
+  if (!build?.skill || build.error) throw new Error('该 Runtime 没有可查看的 Skill 产物');
+  const skill = validateGeneratedSkill(build.skill);
+  const root = slug(skill.name);
+  const metadata = {
+    schemaVersion: 1,
+    source: 'normalized-runtime-output',
+    runtimeId: build.runtimeId,
+    runtime: build.runtime,
+    model: build.model || null,
+    mode: build.mode,
+    adapterKind: build.adapterKind || (build.mode === 'demo' ? 'demo' : null),
+    seed: Number.isInteger(build.seed) ? build.seed : null,
+    fingerprint: skill.fingerprint || null
+  };
+  return {
+    root,
+    source: metadata.source,
+    files: [
+      { path: 'SKILL.md', language: 'markdown', content: skillMarkdown(skill) },
+      { path: 'skill.json', language: 'json', content: JSON.stringify(skill, null, 2) },
+      { path: 'references/agent-card.json', language: 'json', content: JSON.stringify(card || {}, null, 2) },
+      { path: '.agent-roast/manifest.json', language: 'json', content: JSON.stringify(metadata, null, 2) }
+    ]
+  };
+}
+
 export async function buildSkill(runtime, card, mode, { signal, seed, temperature = 0 } = {}) {
   const config = runtimeConfig(runtime.id);
   if (mode === 'live' && config?.kind === 'local-cli') {
@@ -215,6 +242,14 @@ function validateGeneratedSkill(skill) {
   if (!Array.isArray(skill.instructions) || !skill.instructions.length || skill.instructions.some((item) => typeof item !== 'string')) throw new Error('Runtime 返回的 Skill instructions 必须是非空字符串数组');
   if (!Array.isArray(skill.tools) || skill.tools.some((item) => typeof item !== 'string')) throw new Error('Runtime 返回的 Skill tools 必须是字符串数组');
   return skill;
+}
+
+function skillMarkdown(skill) {
+  const quotedName = JSON.stringify(skill.name);
+  const quotedDescription = JSON.stringify(skill.description);
+  const instructions = skill.instructions.map((instruction, index) => `${index + 1}. ${instruction}`).join('\n');
+  const tools = skill.tools.length ? skill.tools.map((tool) => `- \`${tool}\``).join('\n') : '- 无；仅使用文本推理';
+  return `---\nname: ${quotedName}\ndescription: ${quotedDescription}\n---\n\n# ${skill.name}\n\n${skill.description}\n\n## 执行流程\n\n${instructions}\n\n## 工具\n\n${tools}\n`;
 }
 
 function slug(input) {

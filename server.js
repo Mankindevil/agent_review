@@ -10,6 +10,7 @@ import { EvaluationStore } from './src/store.js';
 import { normalizeSeed, normalizeTemperature, readJsonBody } from './src/utils.js';
 import { resolveAgentCard } from './src/a2a.js';
 import { getRuntimeStatus } from './src/runtime-status.js';
+import { createSkillBundle } from './src/runtimes.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.join(root, 'public');
@@ -51,6 +52,20 @@ export const server = createServer(async (request, response) => {
     if (request.method === 'POST' && retryMatch) {
       const item = await pipeline.retry(retryMatch[1], await readJsonBody(request));
       return item ? json(response, 202, item) : json(response, 404, { error: '评测不存在' });
+    }
+    const skillMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/builds\/([^/]+)\/skill$/);
+    if (request.method === 'GET' && skillMatch) {
+      const item = store.get(skillMatch[1]);
+      if (!item) return json(response, 404, { error: '评测不存在' });
+      const runtimeId = decodeURIComponent(skillMatch[2]);
+      const build = item.builds?.find((candidate) => candidate.runtimeId === runtimeId);
+      if (!build) return json(response, 404, { error: 'Runtime 复刻记录不存在' });
+      if (build.error || !build.skill) return json(response, 409, { error: build.error || '该 Runtime 没有 Skill 产物' });
+      try {
+        return json(response, 200, createSkillBundle(build, item.agentCard));
+      } catch (error) {
+        return json(response, 409, { error: error.message || 'Skill 产物无法标准化' });
+      }
     }
     const match = url.pathname.match(/^\/api\/evaluations\/([^/]+)$/);
     if (request.method === 'DELETE' && match) {

@@ -10,6 +10,7 @@
 - Agent 必要性五维评分与明确判断；
 - OpenAI、Anthropic、豆包、DeepSeek 四个模型视角的独立评分、评语和风险；
 - Claude Code、Cursor、Doubao 三种 runtime 的 skill 现场复刻抽象；
+- 现场复刻记录支持展开 Skill 文件浏览器，逐个查看 `SKILL.md`、原始 `skill.json`、输入 Agent Card 与运行清单，并可复制完整内容；
 - 提交 Agent 与三个复刻 skill 的逐用例输出和分数对比；
 - SSE 实时进度：复杂度、每位模型评语、每个 Runtime Skill 和每位对测选手完成后立即展示；
 - 可真正中止模型请求与本地 CLI 的停止按钮，以及服务重启后的遗留任务识别；
