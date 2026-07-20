@@ -23,6 +23,14 @@ test('reports PandaAI readiness without exposing account credentials', () => {
   assert.deepEqual(publicFields.map((key) => config[key]), ['pandaai', true, true, true, true]);
 });
 
+test('normalizes a mainland mobile account to the SDK 86-prefixed format', () => {
+  const config = pandaDataConfig({
+    ...configuredEnv,
+    PANDA_DATA_USERNAME: '13800000000'
+  });
+  assert.equal(config.username, '8613800000000');
+});
+
 test('rejects disabled, incomplete and non-whitelisted Panda Data calls', async () => {
   await assert.rejects(() => queryPandaData('get_trade_cal', {}, { env: {} }), /未启用/);
   await assert.rejects(() => queryPandaData('get_trade_cal', {}, { env: { PANDA_DATA_ENABLED: 'true' } }), /未配置完整/);

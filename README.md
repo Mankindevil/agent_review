@@ -109,23 +109,24 @@ npm test
 
 ## PandaAI Quant 金融数据源
 
-金融分支通过官方 `panda_data` Python SDK 接入 PandaAI Quant。官方文档使用 `panda_data.init_token(username, password)` 登录，账号为 86 开头的账号；项目通过受限 Python bridge 调用 SDK，Node 服务不会把账号、密码或 JWT 返回给浏览器。
+金融分支通过官方 `panda_data` Python SDK 接入 PandaAI Quant。官方文档使用 `panda_data.init_token(username, password)` 登录，账号为 86 开头的账号；项目允许 `.env` 填写 11 位中国大陆手机号并自动补齐 `86`。受限 Python bridge 调用 SDK，Node 服务不会把账号、密码或 JWT 返回给浏览器。
 
 先安装 SDK：
 
 ```bash
-python3 -m pip install -r requirements-data.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-data.txt
 ```
 
 然后在被 Git 忽略的 `.env` 中配置：
 
 ```env
 PANDA_DATA_ENABLED=true
-PANDA_DATA_USERNAME=你的86开头账号
+PANDA_DATA_USERNAME=你的11位手机号或86开头账号
 PANDA_DATA_PASSWORD=你的密码
 PANDA_DATA_BASE_URL=http://pandadata.pandaaiquant.com
 PANDA_DATA_ACCESS_KEY=用于保护本系统数据查询网关的随机长字符串
-PANDA_DATA_PYTHON=python3
+PANDA_DATA_PYTHON=.venv/bin/python
 PANDA_DATA_TIMEOUT_MS=60000
 PANDA_DATA_MAX_ROWS=500
 ```
@@ -302,11 +303,11 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 | `DATA_FILE` | `data/evaluations.json` | 评测持久化文件 |
 | `ALLOW_PRIVATE_AGENT_URLS` | `false` | 是否允许 localhost/私网 Agent URL，仅建议本地开发开启 |
 | `PANDA_DATA_ENABLED` | `false` | 是否启用 PandaAI Quant 数据源 |
-| `PANDA_DATA_USERNAME` | 空 | 86 开头的数据服务账号，仅写入本机 `.env` |
+| `PANDA_DATA_USERNAME` | 空 | 11 位手机号或 86 开头的数据服务账号，仅写入本机 `.env` |
 | `PANDA_DATA_PASSWORD` | 空 | 数据服务密码，仅写入本机 `.env` |
 | `PANDA_DATA_BASE_URL` | `http://pandadata.pandaaiquant.com` | Panda Data SDK 服务地址，通常无需修改 |
 | `PANDA_DATA_ACCESS_KEY` | 空 | 保护本系统数据查询网关的独立 Bearer Key；为空时网关关闭 |
-| `PANDA_DATA_PYTHON` | `python3` | 安装了 `panda_data` SDK 的 Python 可执行文件 |
+| `PANDA_DATA_PYTHON` | `.venv/bin/python` | 安装了 `panda_data` SDK 的项目虚拟环境 Python |
 | `PANDA_DATA_TIMEOUT_MS` | `60000` | 单次 Panda Data SDK 调用时限 |
 | `PANDA_DATA_MAX_ROWS` | `500` | 单次响应最多返回的记录数 |
 | `PANDA_DATA_ALLOWED_METHODS` | 只读金融方法白名单 | 允许通过网关调用的 SDK 方法 |

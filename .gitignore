@@ -5,4 +5,5 @@
 data/evaluations.json
 coverage/
 node_modules/
+.venv/
 npm-debug.log*

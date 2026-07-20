@@ -11,7 +11,7 @@
     "demo:real": "node scripts/real-demo.js",
     "demo:real-runtimes": "ENABLE_LOCAL_CLAUDE_CODE=true ENABLE_LOCAL_CURSOR_AGENT=true node scripts/real-demo.js",
     "demo:deepseek": "node scripts/deepseek-demo.js",
-    "data:probe": "python3 scripts/panda-data-bridge.py --probe",
+    "data:probe": ".venv/bin/python scripts/panda-data-bridge.py --probe",
     "test": "node --test",
     "check": "node scripts/check-syntax.js"
   },

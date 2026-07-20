@@ -30,7 +30,8 @@ export function pandaDataConfig(env = process.env) {
   const allowedMethods = String(env.PANDA_DATA_ALLOWED_METHODS || DEFAULT_PANDA_DATA_METHODS.join(','))
     .split(',').map((value) => value.trim()).filter(Boolean);
   const enabled = env.PANDA_DATA_ENABLED === 'true';
-  const configured = Boolean(env.PANDA_DATA_USERNAME?.trim() && env.PANDA_DATA_PASSWORD);
+  const username = normalizeUsername(env.PANDA_DATA_USERNAME);
+  const configured = Boolean(username && env.PANDA_DATA_PASSWORD);
   const accessProtected = Boolean(env.PANDA_DATA_ACCESS_KEY);
   return {
     provider: 'pandaai',
@@ -43,10 +44,15 @@ export function pandaDataConfig(env = process.env) {
     timeoutMs: positiveInteger(env.PANDA_DATA_TIMEOUT_MS, 60_000),
     maxRows: positiveInteger(env.PANDA_DATA_MAX_ROWS, 500),
     allowedMethods: [...new Set(allowedMethods)],
-    username: env.PANDA_DATA_USERNAME || '',
+    username,
     password: env.PANDA_DATA_PASSWORD || '',
     accessKey: env.PANDA_DATA_ACCESS_KEY || ''
   };
+}
+
+function normalizeUsername(value) {
+  const username = String(value || '').trim();
+  return /^1\d{10}$/.test(username) ? `86${username}` : username;
 }
 
 export async function getPandaDataStatus(options = {}) {
