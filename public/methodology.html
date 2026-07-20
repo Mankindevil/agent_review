@@ -50,7 +50,7 @@
         <a href="#protocol"><i>00</i><span>A2A 准入</span></a>
         <a href="#necessity"><i>01</i><span>必要性</span></a>
         <a href="#professional"><i>02</i><span>专业度</span></a>
-        <a href="#runtime"><i>03</i><span>Runtime 复刻</span></a>
+        <a href="#runtime"><i>03</i><span>Description 直出</span></a>
         <a href="#battle"><i>04</i><span>同题对打</span></a>
         <a href="#verdict"><i>05</i><span>最终分档</span></a>
         <a href="#retry"><i>06</i><span>重试与重算</span></a>
@@ -184,17 +184,18 @@
         </section>
 
         <section class="rule-section" id="runtime">
-          <header><span>STAGE 03 / RECONSTRUCTION</span><h2>Runtime 现场复刻：先造 Skill，不在此处打分</h2><p>Claude Code、Cursor Agent、Doubao Agent 只拿到同一份 Agent Card，不拿原 Agent 源码、隐藏提示词或历史输出。</p></header>
+          <header><span>STAGE 03 / RECONSTRUCTION</span><h2>Runtime 现场直出：只凭 description 生成 Skill</h2><p>Claude Code、Cursor Agent、Doubao Agent 只拿到 Agent Card 顶层 description 的相同原文，不拿完整 Card、原 Agent 实现或历史输出。</p></header>
           <div class="process-line">
-            <div><i>1</i><b>读取 Card</b><span>相同公开描述</span></div>
+            <div><i>1</i><b>截取 description</b><span>唯一任务信息</span></div>
             <div><i>2</i><b>生成 Skill</b><span>name / description / instructions / tools</span></div>
             <div><i>3</i><b>结构校验</b><span>无效 JSON 自动纠错重试一次</span></div>
             <div><i>4</i><b>进入对打</b><span>用原始用户 prompt 执行</span></div>
           </div>
           <div class="rule-grid two">
-            <article class="rule-card"><h3>构建成功</h3><p>记录 Runtime、模型、执行模式、Skill 指纹、seed 和可见结构。构建阶段本身没有 0–100 分，避免拿“会写 Skill JSON”冒充任务能力。</p></article>
+            <article class="rule-card"><h3>信息防火墙</h3><p>复刻端看不到 name、skills、examples、tags、capabilities、接口地址和提交 Agent 输出。它不能在 Agent 上继续增强，只能把 description 临时解释成 Skill。</p></article>
             <article class="rule-card danger-card"><h3>构建失败</h3><p>该 Runtime 仍保留在对战表中，但每个测试用例都会生成失败条目，实战分强制为 <b>0</b>。其他 Runtime 与提交 Agent 继续执行。</p></article>
           </div>
+          <div class="mode-callout"><b>为什么只给 description</b><span>这条基线回答的是“强模型只看产品描述，现场直出 Skill 是否已经足够”。若把完整 Agent Card、skills 或原 Agent 输出交给 Runtime 再增强，比较对象就被污染，无法证明固定 Agent 流程带来了独立价值。</span></div>
         </section>
 
         <section class="rule-section" id="battle">

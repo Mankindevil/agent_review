@@ -81,7 +81,9 @@ clamp(x) = min(100, max(0, x))
 
 ## 3. Runtime Skill 复刻
 
-Claude Code、Cursor Agent 与 Doubao Agent 只接收同一 Agent Card，生成包含 `name`、`description`、`instructions`、`tools` 的 Skill。构建阶段不打 0–100 分。
+Claude Code、Cursor Agent 与 Doubao Agent 只接收 Agent Card 顶层 `description` 的同一段原文，生成包含 `name`、`description`、`instructions`、`tools` 的 Skill。它们不接收 Card 的 name、skills、examples、tags、capabilities、接口地址，也不接收提交 Agent 的实现或输出。构建阶段不打 0–100 分。
+
+这是刻意设置的 description-only 基线：它衡量“只把产品描述交给强模型，临时直出一个 Skill”能做到什么程度。若把完整 Card 或原 Agent 产物交给 Runtime 再增强，得到的就不再是独立基线，不能用于判断固定 Agent 流程是否真的带来增益。
 
 模型输出无效 JSON 或缺少 Skill 必填字段时，携带格式纠错提示再试一次。构建最终失败时，该 Runtime 在每个对测用例中记失败，实战分强制为 0；其他选手继续运行。
 

@@ -1,6 +1,6 @@
 # 锐评局：A2A Agent 公开评测系统
 
-一个可直接运行的全栈 MVP。用户提交 A2A Agent Card 和真实 prompt 后，平台依次判断 Agent 必要性、进行多模型专业度盲审、让不同 runtime 根据描述现场复刻 skill，再把所有选手放进同 prompt 竞技场，最终给出“夯 / 人上人 / NPC / 拉”的证据化锐评。
+一个可直接运行的全栈 MVP。用户提交 A2A Agent Card 和真实 prompt 后，平台依次判断 Agent 必要性、进行多模型专业度盲审、让不同 runtime 只凭 description 现场直出 Skill，再把所有选手放进同 prompt 竞技场，最终给出“夯 / 人上人 / NPC / 拉”的证据化锐评。
 
 ## 已实现功能
 
@@ -9,8 +9,8 @@
 - 1–5 个同 prompt 测试用例；
 - Agent 必要性五维评分与明确判断；
 - OpenAI、Anthropic、豆包、DeepSeek 四个模型视角的独立评分、评语和风险；
-- Claude Code、Cursor、Doubao 三种 runtime 的 skill 现场复刻抽象；
-- 现场复刻记录支持展开 Skill 文件浏览器，逐个查看 `SKILL.md`、原始 `skill.json`、输入 Agent Card 与运行清单，并可复制完整内容；
+- Claude Code、Cursor、Doubao 三种 runtime 的 description-only Skill 现场直出抽象；
+- 现场复刻采用 description-only 信息防火墙：Runtime 只收到顶层 `description` 原文；记录支持展开 Skill 文件浏览器，逐个查看 `SKILL.md`、原始 `skill.json`、输入 description 与运行清单，并可复制完整内容；
 - 提交 Agent 与三个复刻 skill 的逐用例输出和分数对比；
 - SSE 实时进度：复杂度、每位模型评语、每个 Runtime Skill 和每位对测选手完成后立即展示；
 - 可真正中止模型请求与本地 CLI 的停止按钮，以及服务重启后的遗留任务识别；
@@ -79,7 +79,7 @@ npm run demo:deepseek
 
 如果模型偶发返回截断 JSON 或缺少 Skill 必填字段，运行时会携带纠错约束自动重试一次；认证、网络和命令执行错误不会被这种格式重试掩盖。
 
-Runtime Probe 与“现场复刻记录”会显示实际后端：Ark 模式下展示方舟 DeepSeek endpoint ID，不再把它误标为 Claude Sonnet。
+Runtime Probe 与“Description 直出记录”会显示实际后端：Ark 模式下展示方舟 DeepSeek endpoint ID，不再把它误标为 Claude Sonnet。
 
 Key 只应写入本机 `.env` 或密钥管理系统，不要写入 `.env.example`。如需恢复 DeepSeek 官方 Anthropic-compatible API，可设置 `CLAUDE_BACKEND=deepseek` 并填写 `DEEPSEEK_API_KEY`。
 
@@ -112,7 +112,7 @@ npm test
 
 1. 调用 Agent Card 声明的 A2A endpoint；
 2. 调用 LLMX、火山方舟或 `MODEL_REVIEWERS_JSON` 配置的评审模型；
-3. 调用显式启用的本机 Claude/Cursor、方舟豆包或 `RUNTIME_ADAPTERS_JSON` 隔离服务复刻 Skill。
+3. 调用显式启用的本机 Claude/Cursor、方舟豆包或 `RUNTIME_ADAPTERS_JSON` 隔离服务，仅凭 description 直出 Skill。
 
 如果未配置真实 adapter，相关项会保留为 demo；调用失败会记录错误并继续执行其余选手。
 
@@ -193,10 +193,12 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 
 - `PROFESSIONAL_REVIEW_SYSTEM_PROMPT`：多模型专业度评审的 system prompt；
 - `professionalReviewPrompt()`：包含复杂度背景和 Agent Card 的评审 user prompt；
-- `runtimeBuildSkillPrompt()`：Claude Code、Cursor Agent 现场复刻 Skill 的 prompt；
+- `runtimeBuildSkillPrompt()`：Claude Code、Cursor Agent 仅凭顶层 description 直出 Skill 的 prompt；
 - `runtimeRunSkillPrompt()`：用相同用户原始 prompt 执行复刻 Skill 的 prompt。
 
 用户提交的同题对测 prompt 不做改写，来源是前端表单或 `examples/use-cases.json`，后端保存在评测对象的 `cases[].prompt`。
+
+专业度评审仍读取完整公开 Agent Card；只有“Runtime 直出 Skill”阶段执行信息隔离。`buildSkill()` 的函数签名直接接收 description 字符串，调用方无法把 Card 对象传入；本地 CLI、模型 API 与远程 adapter 也都只收到这段文本。这样比较的是“完整 Agent”与“仅凭产品描述临时生成的 Skill”，而不是在原 Agent 配置上二次增强。
 
 ## Runtime adapter 契约
 
@@ -222,7 +224,7 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 构建请求：
 
 ```json
-{ "action": "build_skill", "agentCard": {} }
+{ "action": "build_skill", "description": "Agent Card 顶层 description 原文", "inputPolicy": "description-only", "seed": 17, "temperature": 0 }
 ```
 
 应返回：

@@ -377,7 +377,7 @@ function renderReviews(reviews) {
 }
 
 function renderBuilds(builds) {
-  return `<div class="section-title"><h3>现场复刻记录</h3><span>RUNTIME SKILL BUILD</span></div><div class="build-list">${builds.map(build=>`<article class="build-card" data-skill-runtime="${escapeHtml(build.runtimeId || '')}"><div class="build-row"><b>${escapeHtml(build.runtime)}</b><span>${escapeHtml(build.model||'—')}</span><code>${escapeHtml(build.skill?.name||build.error||'构建失败')}</code><span class="${build.error?'':'ok'}">${build.error?'失败':`✓ ${build.mode.toUpperCase()}`}</span>${build.error || !build.skill ? '' : `<button class="skill-detail-toggle" type="button" data-skill-detail="${escapeHtml(build.runtimeId)}" aria-expanded="false"><i aria-hidden="true">⌁</i><span>查看 Skill</span></button>`}${retryButton('build', build.runtimeId, '重建并对测')}</div><div class="skill-inspector hidden" data-skill-inspector><div class="skill-inspector-loading"><i></i><span>正在装载目录快照…</span></div></div></article>`).join('')}</div>`;
+  return `<div class="section-title"><h3>Description 直出记录</h3><span>DESCRIPTION-ONLY SKILL BUILD</span></div><div class="build-list">${builds.map(build=>`<article class="build-card" data-skill-runtime="${escapeHtml(build.runtimeId || '')}"><div class="build-row"><b>${escapeHtml(build.runtime)}</b><span>${escapeHtml(build.model||'—')}</span><code>${escapeHtml(build.skill?.name||build.error||'构建失败')}</code><span class="${build.error?'':'ok'}">${build.error?'失败':`✓ ${build.mode.toUpperCase()}`}</span>${build.error || !build.skill ? '' : `<button class="skill-detail-toggle" type="button" data-skill-detail="${escapeHtml(build.runtimeId)}" aria-expanded="false"><i aria-hidden="true">⌁</i><span>查看 Skill</span></button>`}${retryButton('build', build.runtimeId, '重新直出并对测')}</div><div class="skill-inspector hidden" data-skill-inspector><div class="skill-inspector-loading"><i></i><span>正在装载目录快照…</span></div></div></article>`).join('')}</div>`;
 }
 
 async function toggleSkillDetail(button) {
@@ -412,14 +412,18 @@ function renderSkillInspector(inspector, bundle) {
   const files = Array.isArray(bundle.files) ? bundle.files : [];
   if (!files.length) return renderSkillError(inspector, '这个 Skill 快照中没有文件');
   inspector.dataset.loaded = 'true';
-  inspector.innerHTML = `<header class="skill-inspector-head"><div><small>NORMALIZED SKILL SNAPSHOT</small><b>${escapeHtml(bundle.root)}/</b></div><span>${files.length} FILES · READ ONLY</span></header><div class="skill-browser"><nav class="skill-tree" aria-label="Skill 文件列表"><b><i>▾</i>${escapeHtml(bundle.root)}/</b>${files.map((file, index) => skillFileButton(file, index === 0)).join('')}</nav><section class="skill-preview">${skillPreviewMarkup(files[0])}</section></div><p class="skill-snapshot-note">Runtime 返回的结构化 Skill 已标准化为可移植目录；这里展示评测时使用的指令、原始 JSON、Agent Card 和运行清单。</p>`;
+  const policyNote = bundle.legacyBaseline
+    ? '警告：这是信息防火墙上线前的历史产物，构建时可能使用过完整 Agent Card；请“重建并对测”后再把它视为公平基线。'
+    : '公平基线：复刻 Runtime 只收到顶层 description 原文，不会收到 Agent Card、skills、examples、capabilities、接口地址或提交 Agent 输出。';
+  inspector.innerHTML = `<header class="skill-inspector-head"><div><small>NORMALIZED SKILL SNAPSHOT</small><b>${escapeHtml(bundle.root)}/</b></div><span>${files.length} FILES · READ ONLY</span></header><div class="skill-browser"><nav class="skill-tree" aria-label="Skill 文件列表"><b><i>▾</i>${escapeHtml(bundle.root)}/</b>${files.map((file, index) => skillFileButton(file, index === 0)).join('')}</nav><section class="skill-preview">${skillPreviewMarkup(files[0])}</section></div><p class="skill-snapshot-note${bundle.legacyBaseline ? ' warning' : ''}">${escapeHtml(policyNote)}</p>`;
 }
 
 function skillFileButton(file, active) {
   const parts = String(file.path || '').split('/');
   const label = parts.pop() || 'untitled';
   const directory = parts.length ? `${parts.join('/')}/` : '';
-  return `<button type="button" class="skill-file${active ? ' active' : ''}" data-skill-file="${escapeHtml(file.path)}" title="${escapeHtml(file.path)}"><i aria-hidden="true">${file.language === 'markdown' ? 'M↓' : '{ }'}</i><span>${directory ? `<small>${escapeHtml(directory)}</small>` : ''}${escapeHtml(label)}</span></button>`;
+  const icon = file.language === 'markdown' ? 'M↓' : file.language === 'json' ? '{ }' : 'TXT';
+  return `<button type="button" class="skill-file${active ? ' active' : ''}" data-skill-file="${escapeHtml(file.path)}" title="${escapeHtml(file.path)}"><i aria-hidden="true">${icon}</i><span>${directory ? `<small>${escapeHtml(directory)}</small>` : ''}${escapeHtml(label)}</span></button>`;
 }
 
 function skillPreviewMarkup(file) {
@@ -461,7 +465,7 @@ function renderSkillError(inspector, message) {
 
 function skillCacheKey(evaluationId, runtimeId) {
   const build = state.current?.builds?.find((candidate) => candidate.runtimeId === runtimeId);
-  const input = JSON.stringify([build?.skill, build?.model, build?.mode, build?.adapterKind, build?.seed]);
+  const input = JSON.stringify([build?.skill, build?.model, build?.mode, build?.adapterKind, build?.baselineInput, build?.seed]);
   let hash = 2166136261;
   for (let index = 0; index < input.length; index += 1) hash = Math.imul(hash ^ input.charCodeAt(index), 16777619);
   return `${evaluationId}:${runtimeId}:${(hash >>> 0).toString(36)}`;

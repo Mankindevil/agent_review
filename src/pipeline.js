@@ -119,7 +119,7 @@ export class EvaluationPipeline {
     const index = builds.findIndex((build) => build.runtimeId === step.key);
     let next;
     try {
-      next = await buildSkill(runtime, item.agentCard, item.mode, { signal, ...phaseSampling(item, `build:${runtime.id}`) });
+      next = await buildSkill(runtime, item.agentCard.description, item.mode, { signal, ...phaseSampling(item, `build:${runtime.id}`) });
     } catch (error) {
       if (signal.aborted) throw signal.reason || error;
       next = { runtime: runtime.name, runtimeId: runtime.id, mode: item.mode, error: error.message };
@@ -218,17 +218,17 @@ export class EvaluationPipeline {
     const validProfessional = professionalReviews.filter((review) => review.score > 0);
     const professional = professionalSnapshot(professionalReviews);
     const professionalMode = professional.mode;
-    await this.update(item, { professional, progress: 52, stage: 'Runtime 现场复刻' }, { level: 'success', source: 'MODEL', phase: 'review', text: `${reviewers.length} 位模型评审已交卷`, detail: `有效评审 ${validProfessional.length} · 均分 ${professional.score}`, mode: professionalMode });
+    await this.update(item, { professional, progress: 52, stage: 'Runtime description-only 直出' }, { level: 'success', source: 'MODEL', phase: 'review', text: `${reviewers.length} 位模型评审已交卷`, detail: `有效评审 ${validProfessional.length} · 均分 ${professional.score}`, mode: professionalMode });
 
     const builds = [];
     for (const runtime of RUNTIMES) {
       signal?.throwIfAborted();
       const startedAt = Date.now();
-      await this.update(item, {}, { level: 'info', source: 'RUNTIME', phase: 'build', text: `${runtime.name} 开始复刻 skill`, mode: item.mode });
+      await this.update(item, {}, { level: 'info', source: 'RUNTIME', phase: 'build', text: `${runtime.name} 开始仅凭 description 直出 Skill`, mode: item.mode });
       try {
-        const build = await buildSkill(runtime, item.agentCard, item.mode, { signal, ...phaseSampling(item, `build:${runtime.id}`) });
+        const build = await buildSkill(runtime, item.agentCard.description, item.mode, { signal, ...phaseSampling(item, `build:${runtime.id}`) });
         builds.push(build);
-        await this.update(item, { builds: [...builds] }, { level: 'success', source: 'RUNTIME', phase: 'build', text: `${runtime.name} 复刻完成`, detail: build.skill?.name, mode: build.mode, durationMs: Date.now() - startedAt });
+        await this.update(item, { builds: [...builds] }, { level: 'success', source: 'RUNTIME', phase: 'build', text: `${runtime.name} description-only 直出完成`, detail: build.skill?.name, mode: build.mode, durationMs: Date.now() - startedAt });
       } catch (error) {
         if (signal?.aborted) throw signal.reason || error;
         builds.push({ runtime: runtime.name, runtimeId: runtime.id, mode: item.mode, error: error.message });

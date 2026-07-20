@@ -62,7 +62,7 @@ export const server = createServer(async (request, response) => {
       if (!build) return json(response, 404, { error: 'Runtime 复刻记录不存在' });
       if (build.error || !build.skill) return json(response, 409, { error: build.error || '该 Runtime 没有 Skill 产物' });
       try {
-        return json(response, 200, createSkillBundle(build, item.agentCard));
+        return json(response, 200, createSkillBundle(build, item.agentCard.description));
       } catch (error) {
         return json(response, 409, { error: error.message || 'Skill 产物无法标准化' });
       }

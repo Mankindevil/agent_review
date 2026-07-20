@@ -29,7 +29,7 @@
 2. **补齐网络隔离**：`src/a2a.js` 的文本 URL 检查不能阻止 DNS rebinding。生产环境应在解析后校验所有 A/AAAA 地址、固定连接目标，并配合容器出网 allowlist。
 3. **限制远程响应体**：Agent Card 有 1 MB 事后检查，但 A2A 输出、模型网关和 Runtime adapter 尚未使用流式字节上限。应在读取过程中截断并返回明确错误，避免异常响应占满内存。
 4. **增加身份与租户边界**：当前 API 适合本机 Demo，没有登录、CSRF、租户隔离、配额和删除审计。公网部署前必须补齐。
-5. **加固提示词边界**：Agent Card、Skill 与用户 prompt 都是不可信文本。应使用明确的数据分隔、提示注入检测和输出 schema，生产 Runtime 保持工具最小权限。
+5. **加固提示词边界**：评审阶段的 Agent Card、直出阶段的 description、生成后的 Skill 与用户 prompt 都是不可信文本。应使用明确的数据分隔、提示注入检测和输出 schema，生产 Runtime 保持工具最小权限；完整 Card 不得跨入 description-only 直出边界。
 
 ### P2：影响性能、维护与可访问性
 

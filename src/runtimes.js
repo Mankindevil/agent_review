@@ -17,13 +17,17 @@ export const RUNTIMES = [
   { id: 'doubao', name: 'Doubao Agent', model: 'Seed', badge: 'DB' }
 ];
 
-export function createSkillBundle(build, card) {
+export function createSkillBundle(build, description) {
   if (!build?.skill || build.error) throw new Error('该 Runtime 没有可查看的 Skill 产物');
   const skill = validateGeneratedSkill(build.skill);
   const root = slug(skill.name);
+  const sourceDescription = normalizeSourceDescription(description);
+  const descriptionOnly = build.baselineInput === 'description-only';
+  const inputPolicy = descriptionOnly ? 'description-only' : 'legacy-full-card-possible';
   const metadata = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     source: 'normalized-runtime-output',
+    inputPolicy,
     runtimeId: build.runtimeId,
     runtime: build.runtime,
     model: build.model || null,
@@ -32,39 +36,50 @@ export function createSkillBundle(build, card) {
     seed: Number.isInteger(build.seed) ? build.seed : null,
     fingerprint: skill.fingerprint || null
   };
+  const files = [
+    { path: 'SKILL.md', language: 'markdown', content: skillMarkdown(skill) },
+    { path: 'skill.json', language: 'json', content: JSON.stringify(skill, null, 2) },
+    { path: 'references/source-description.txt', language: 'text', content: sourceDescription }
+  ];
+  if (!descriptionOnly) {
+    files.push({
+      path: 'references/legacy-input-warning.txt',
+      language: 'text',
+      content: '这条 Skill 生成于 description-only 信息防火墙上线前，构建 Runtime 当时可能接收过完整 Agent Card。该产物不能作为公平基线；请点击“重建并对测”后重新评估。'
+    });
+  }
+  files.push({ path: '.agent-roast/manifest.json', language: 'json', content: JSON.stringify(metadata, null, 2) });
   return {
     root,
     source: metadata.source,
-    files: [
-      { path: 'SKILL.md', language: 'markdown', content: skillMarkdown(skill) },
-      { path: 'skill.json', language: 'json', content: JSON.stringify(skill, null, 2) },
-      { path: 'references/agent-card.json', language: 'json', content: JSON.stringify(card || {}, null, 2) },
-      { path: '.agent-roast/manifest.json', language: 'json', content: JSON.stringify(metadata, null, 2) }
-    ]
+    inputPolicy,
+    legacyBaseline: !descriptionOnly,
+    files
   };
 }
 
-export async function buildSkill(runtime, card, mode, { signal, seed, temperature = 0 } = {}) {
+export async function buildSkill(runtime, description, mode, { signal, seed, temperature = 0 } = {}) {
+  const sourceDescription = normalizeSourceDescription(description);
   const config = runtimeConfig(runtime.id);
   if (mode === 'live' && config?.kind === 'local-cli') {
     const { skill, result } = await generateValidatedSkill(
       (prompt) => callLocalCli(runtime.id, prompt, signal, { seed, temperature }),
-      runtimeBuildSkillPrompt(card)
+      runtimeBuildSkillPrompt(sourceDescription)
     );
-    return { runtime: runtime.name, runtimeId: runtime.id, model: localRuntimeModel(runtime), mode: 'live', adapterKind: 'local-cli', skill, trace: result.trace, seed };
+    return { runtime: runtime.name, runtimeId: runtime.id, model: localRuntimeModel(runtime), mode: 'live', adapterKind: 'local-cli', baselineInput: 'description-only', skill, trace: result.trace, seed };
   }
   if (mode === 'live' && config?.kind === 'model-api') {
     const { skill } = await generateValidatedSkill(
       async (prompt) => ({ text: await callRuntimeModel(config, prompt, signal, { seed, temperature }) }),
-      runtimeBuildSkillPrompt(card)
+      runtimeBuildSkillPrompt(sourceDescription)
     );
-    return { runtime: runtime.name, runtimeId: runtime.id, model: config.model, mode: 'live', adapterKind: 'model-api', skill, seed };
+    return { runtime: runtime.name, runtimeId: runtime.id, model: config.model, mode: 'live', adapterKind: 'model-api', baselineInput: 'description-only', skill, seed };
   }
   if (mode === 'live' && config?.url) {
     const response = await fetch(config.url, {
       method: 'POST',
       headers: runtimeAdapterHeaders(config),
-      body: JSON.stringify({ action: 'build_skill', agentCard: card, seed, temperature }),
+      body: JSON.stringify({ action: 'build_skill', description: sourceDescription, inputPolicy: 'description-only', seed, temperature }),
       signal: withTimeout(signal, 120_000)
     });
     if (!response.ok) throw new Error(`${runtime.name} runtime 返回 HTTP ${response.status}`);
@@ -75,28 +90,32 @@ export async function buildSkill(runtime, card, mode, { signal, seed, temperatur
       model: typeof payload.model === 'string' ? payload.model : runtime.model,
       mode: 'live',
       adapterKind: 'remote-http',
+      baselineInput: 'description-only',
       skill: validateGeneratedSkill(payload.skill),
       trace: payload.trace,
       seed
     };
   }
-  const tools = inferTools(card);
+  const tools = inferTools(sourceDescription);
+  const generatedName = slug(sourceDescription).slice(0, 64).replace(/-$/g, '') || 'description-baseline-skill';
   return {
     runtime: runtime.name,
     runtimeId: runtime.id,
     model: runtime.model,
     mode: 'demo',
+    adapterKind: 'demo',
+    baselineInput: 'description-only',
     seed,
     skill: {
-      name: slug(card.name),
-      description: card.description,
+      name: generatedName,
+      description: sourceDescription,
       instructions: [
-        `先确认任务是否属于：${(card.skills || []).map((skill) => skill.name).join('、')}`,
+        `仅根据任务描述确认范围：${sourceDescription}`,
         '拆解输入、执行核心步骤，并在缺少关键条件时明确请求补充。',
         '输出结果、依据与未解决风险，不虚构已完成的外部操作。'
       ],
       tools,
-      fingerprint: stableNumber(`${runtime.id}:${card.name}`, 100000, 999999).toString()
+      fingerprint: stableNumber(`${runtime.id}:${sourceDescription}`, 100000, 999999).toString()
     }
   };
 }
@@ -230,9 +249,14 @@ function extractCliText(stdout) {
   return raw;
 }
 
-function inferTools(card) {
-  const text = JSON.stringify(card).toLowerCase();
+function inferTools(description) {
+  const text = String(description).toLowerCase();
   return [text.includes('file') || text.includes('文件') ? 'filesystem' : null, text.includes('browser') || text.includes('网页') ? 'browser' : null, text.includes('api') ? 'http' : null].filter(Boolean);
+}
+
+function normalizeSourceDescription(description) {
+  if (typeof description !== 'string' || !description.trim()) throw new Error('Runtime description-only 基线缺少非空 description');
+  return description;
 }
 
 function validateGeneratedSkill(skill) {

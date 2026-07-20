@@ -94,8 +94,11 @@ test('creates and completes a demo evaluation', async () => {
   const skillBundle = await skillResponse.json();
   assert.equal(skillResponse.status, 200);
   assert.equal(skillBundle.files.length, 4);
+  assert.equal(skillBundle.inputPolicy, 'description-only');
+  assert.equal(skillBundle.legacyBaseline, false);
   assert.match(skillBundle.files.find((file) => file.path === 'SKILL.md').content, /## 执行流程/);
-  assert.equal(JSON.parse(skillBundle.files.find((file) => file.path === 'references/agent-card.json').content).name, card.name);
+  assert.equal(skillBundle.files.find((file) => file.path === 'references/source-description.txt').content, card.description);
+  assert.equal(skillBundle.files.some((file) => file.path === 'references/agent-card.json'), false);
 
   const missingSkillResponse = await fetch(`${origin}/api/evaluations/${created.id}/builds/not-a-runtime/skill`);
   assert.equal(missingSkillResponse.status, 404);

@@ -97,9 +97,11 @@ A2A 1.0 JSON-RPC 使用 `SendMessage`，0.3 兼容调用使用 `message/send`。
 
 模型评审、Runtime 构建 Skill 和 Runtime 执行 Skill 的 prompt 集中在 `src/prompts.js`。Runtime 构建要求单个 JSON 对象，但平台不会假设 CLI 永远严格服从格式：`safeJson()` 会从代码围栏或前后说明文字中提取第一个完整、可解析的平衡 JSON 值，随后再校验 Skill 的 `name`、`description`、`instructions` 和 `tools` 契约。这避免 Claude Code 或 Cursor Agent 输出简短前言时被误判为 0 分。
 
-### 3.4 Runtime 现场复刻
+### 3.4 Runtime description-only 现场直出
 
-`src/runtimes.js` 当前声明 Claude Code、Cursor Agent、Doubao Agent 三个 adapter。每个 adapter 只拿到相同的 Agent Card，不拿提交 Agent 的实现，再生成统一结构的 skill：名称、描述、指令、工具和 fingerprint。
+`src/runtimes.js` 当前声明 Claude Code、Cursor Agent、Doubao Agent 三个 adapter。Runtime 构建边界只接收 Agent Card 顶层 `description` 字符串，再生成统一结构的 skill：名称、描述、指令、工具和 fingerprint。完整 Card 只用于协议校验、必要性与专业度评审，以及调用提交 Agent；它不会跨入复刻边界。
+
+这道 description-only 信息防火墙同时存在于四层：流水线调用 `buildSkill(runtime, item.agentCard.description, ...)`；`buildSkill()` 拒绝非字符串输入；本地 CLI / 模型 API prompt 只插入 description；远程 adapter 请求体只发送 `description` 与 `inputPolicy`，不含 `agentCard`。因此 Runtime 看不到 name、skills、examples、tags、capabilities、接口地址和提交 Agent 输出。
 
 演示模式会生成确定性 skill 与输出。真实模式按优先级使用 `RUNTIME_ADAPTERS_JSON` 外部隔离服务、显式启用的本地 Claude/Cursor CLI，或火山方舟豆包 model API。所有实现只接收平台生成的 prompt，不执行用户提交的 shell 命令。
 
@@ -117,20 +119,20 @@ Runtime 构建阶段的跨执行器契约是结构化 Skill JSON，而不是允�
 <skill-name>/
 ├── SKILL.md                       人类可读的用途、边界、执行流程与工具声明
 ├── skill.json                     Runtime 返回并通过校验的原始结构化 Skill
-├── references/agent-card.json     构建时唯一可见的输入 Agent Card
-└── .agent-roast/manifest.json     Runtime、模型、模式、adapter、seed 与 fingerprint
+├── references/source-description.txt  构建时唯一可见的任务描述原文
+└── .agent-roast/manifest.json         Runtime、输入策略、模型、模式、adapter、seed 与 fingerprint
 ```
 
-这个目录是规范化产物快照，不冒充已被清理的 CLI 临时工作区，也不会暴露环境变量、认证头或 API Key。接口按需生成，因此旧评测记录无需迁移即可查看。前端在“现场复刻记录”中按需请求，使用目录树和带行号的只读预览展示；文件内容进入 DOM 前统一 HTML 转义。
+这个目录是规范化产物快照，不冒充已被清理的 CLI 临时工作区，也不会暴露完整 Agent Card、环境变量、认证头或 API Key。新产物在 manifest 中记录 `inputPolicy: description-only`。信息防火墙上线前的旧评测缺少该字段，详情接口会增加 `references/legacy-input-warning.txt` 并在前端警告“不能作为公平基线”，用户必须“重建并对测”后才能得到合规基线。前端使用目录树和带行号的只读预览展示；文件内容进入 DOM 前统一 HTML 转义。
 
 ### 3.5 同 prompt 对测与锐评分档
 
 每个用例同时发送给：
 
 - 用户提交的 A2A Agent；
-- Claude Code 复刻 skill；
-- Cursor 复刻 skill；
-- Doubao 复刻 skill。
+- Claude Code description 直出 skill；
+- Cursor description 直出 skill；
+- Doubao description 直出 skill。
 
 当前 output judge 使用任务完成、证据、结构与可用性四维启发式打分。生产版应使用独立 judge 模型、规则校验器和人工抽检，并随机化选手顺序以减少位置偏差。复杂度信号会区分“只整理文件”与“跨文件核对、风险取证、人工确认”：出现文件本身不会自动证明 Agent 必要性。
 
@@ -199,7 +201,7 @@ OpenAI-compatible 模型、方舟模型 API 和 Claude Code 的 Ark 协议桥会
 
 ### `GET /api/evaluations/:id/builds/:runtimeId/skill`
 
-返回指定 Runtime 复刻结果的标准化 Skill 目录快照，包含 `root`、`source` 与 `files[]`；每个文件提供相对 `path`、`language` 和完整 `content`。不存在的评测或 Runtime 返回 `404`，构建失败或无 Skill 产物返回 `409`。该接口只接受已落入评测记录的 runtimeId，不读取客户端指定的磁盘路径。
+返回指定 Runtime 直出结果的标准化 Skill 目录快照，包含 `root`、`source`、`inputPolicy`、`legacyBaseline` 与 `files[]`；每个文件提供相对 `path`、`language` 和完整 `content`。不存在的评测或 Runtime 返回 `404`，构建失败或无 Skill 产物返回 `409`。该接口只接受已落入评测记录的 runtimeId，不读取客户端指定的磁盘路径，也不返回完整 Agent Card。
 
 ### `GET /api/evaluations/:id/events`
 
