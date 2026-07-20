@@ -21,6 +21,17 @@ test('health endpoint responds', async () => {
   assert.equal(health.modelTemperature, 0);
 });
 
+test('serves the scoring methodology document in the web UI', async () => {
+  const response = await fetch(`${origin}/methodology.html`);
+  const html = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /text\/html/);
+  assert.match(html, /每一分/);
+  assert.match(html, /clamp\(18 \+ 10C/);
+  assert.match(html, /夯 \/ 人上人 \/ NPC \/ 拉/);
+  assert.match(html, /最新结果替换旧结果/);
+});
+
 test('reports honest local runtime availability', async () => {
   const response = await fetch(`${origin}/api/runtimes`);
   const runtimes = await response.json();

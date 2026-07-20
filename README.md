@@ -22,7 +22,7 @@
 - 响应式前端、键盘焦点与 reduced-motion 支持；
 - Node 原生测试，无第三方运行依赖。
 
-详细实现、评分规则、接口和生产化建议见 [架构文档](./docs/ARCHITECTURE.md)。
+详细实现与接口见 [架构文档](./docs/ARCHITECTURE.md)，逐项公式和阈值见 [评测与打分规则](./docs/SCORING.md)。项目启动后也可以直接打开 `http://localhost:4173/methodology.html`，或点击顶部“评测规则”。
 
 ## 快速启动
 

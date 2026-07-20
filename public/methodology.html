@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="锐评局 A2A Agent 评测各阶段的校验、打分公式、阈值与最终分档规则。">
+  <title>评测规则说明书 · 锐评局</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/methodology.css">
+</head>
+<body class="methodology-page">
+  <div class="noise" aria-hidden="true"></div>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="返回锐评局首页">
+      <span class="brand-mark">锐</span>
+      <span><b>锐评局</b><small>AGENT VERDICT LAB</small></span>
+    </a>
+    <nav>
+      <a class="nav-button" href="/">发起评测</a>
+      <a class="nav-button active" href="/methodology.html" aria-current="page">评测规则</a>
+    </nav>
+    <div class="system-state"><i></i><span>规则公开可复核</span></div>
+  </header>
+
+  <main class="methodology-shell">
+    <section class="method-hero" id="overview">
+      <div class="method-hero__index"><span>SPEC</span><strong>01</strong><small>SCORING<br>CONTRACT</small></div>
+      <div class="method-hero__copy">
+        <div class="method-kicker"><span>PUBLIC EVALUATION SPECIFICATION</span><span>IMPLEMENTED / V0.1</span></div>
+        <h1>每一分，<br>到底怎么来的？</h1>
+        <p>这不是一句“模型觉得不错”。下面公开当前代码实际执行的校验条件、公式、失败处理和最终分档顺序。看完后，你应该能够用同一份输入手工复算大部分结果。</p>
+      </div>
+      <aside class="method-warning">
+        <span>先说结论</span>
+        <b>评分是可比较的工程信号，不是真理。</b>
+        <p>当前必要性与输出质量使用透明启发式；专业度由多模型给分。它适合产品验收和相对比较，不应替代法律、医疗或安全审计。</p>
+      </aside>
+    </section>
+
+    <section class="rule-strip" aria-label="规则摘要">
+      <article><b>GATE</b><span>A2A 校验不通过</span><strong>拒绝评测</strong></article>
+      <article><b>5 × 20%</b><span>Agent 必要性</span><strong>五维等权</strong></article>
+      <article><b>DEFAULT 4</b><span>模型专业度</span><strong>有效分均值</strong></article>
+      <article><b>4 TIERS</b><span>最终评级</span><strong>夯 / 人上人 / NPC / 拉</strong></article>
+    </section>
+
+    <div class="method-layout">
+      <aside class="method-toc" aria-label="本页目录">
+        <small>STAGE INDEX</small>
+        <a href="#protocol"><i>00</i><span>A2A 准入</span></a>
+        <a href="#necessity"><i>01</i><span>必要性</span></a>
+        <a href="#professional"><i>02</i><span>专业度</span></a>
+        <a href="#runtime"><i>03</i><span>Runtime 复刻</span></a>
+        <a href="#battle"><i>04</i><span>同题对打</span></a>
+        <a href="#verdict"><i>05</i><span>最终分档</span></a>
+        <a href="#retry"><i>06</i><span>重试与重算</span></a>
+        <a href="#boundaries"><i>07</i><span>边界与改进</span></a>
+      </aside>
+
+      <div class="method-content">
+        <section class="rule-section" id="protocol">
+          <header><span>STAGE 00 / GATE</span><h2>A2A 协议准入</h2><p>这一阶段只决定“能不能进入考场”，不产生分数。</p></header>
+          <div class="rule-grid two">
+            <article class="rule-card">
+              <h3>必须满足</h3>
+              <ul class="check-list">
+                <li>Agent Card 是 JSON 对象；</li>
+                <li>存在非空 <code>name</code> 与 <code>description</code>；</li>
+                <li>至少声明一个 <code>skill</code>；</li>
+                <li>每个 skill 都有 <code>id / name / description</code>；</li>
+                <li>存在 A2A 1.0 <code>supportedInterfaces</code>，或兼容 0.3 的顶层 <code>url</code>。</li>
+              </ul>
+            </article>
+            <article class="rule-card danger-card">
+              <h3>失败如何处理</h3>
+              <div class="score-big">HTTP 400</div>
+              <p>任一必填项缺失，创建评测直接失败，不会用 0 分假装跑完。Card URL / 服务发现还会检查 HTTP(S)、私网地址限制、1 MB 响应上限与禁止重定向。</p>
+              <small>支持 HTTP+JSON、A2A 1.0 JSON-RPC <code>SendMessage</code> 和 0.3 <code>message/send</code>。</small>
+            </article>
+          </div>
+        </section>
+
+        <section class="rule-section" id="necessity">
+          <header><span>STAGE 01 / RULE ENGINE</span><h2>Agent 必要性：五维等权</h2><p>判断固定 Agent 流程是否真的比一次模型调用更有价值。满分 100，五个维度各占 20%。</p></header>
+          <div class="notation">
+            <div><b>C</b><span>命中的复杂信号组数量，最多 8 组</span></div>
+            <div><b>S</b><span>是否出现简单变换信号，当前为 0 或 1</span></div>
+            <div><b>K</b><span>Card 中声明的 skill 数量</span></div>
+            <div><b>N</b><span>测试用例数量，范围 1–5</span></div>
+            <div><b>U</b><span>是否提供测试用例；正常提交恒为 1</span></div>
+            <div><b>B</b><span>能力加分：流式 +5、推送 +6、扩展 +4</span></div>
+          </div>
+          <p class="signal-note"><b>复杂信号组：</b>多步编排、人机确认、外部系统、文件文档、跨文档核对、证据/合规、状态/异步、规划/重试。每组无论命中几次只计一次。<br><b>简单信号：</b>整理文件、重命名、摘要、翻译、改写、分类、format 等。</p>
+          <div class="formula-list">
+            <article><span>步骤深度</span><code>clamp(18 + 10C − 5S)</code><small>复杂步骤加分；简单变换扣分。</small></article>
+            <article><span>工具依赖</span><code>clamp(12 + 9C + 3K)</code><small>复杂信号与 skill 数共同反映工具编排需求。</small></article>
+            <article><span>状态与分支</span><code>clamp(10 + 8C + B)</code><small>Card 声明的 streaming、push 与 extensions 进入能力加分。</small></article>
+            <article><span>不确定性</span><code>clamp(22 + 8U + 5C)</code><small>需要澄清、判断和恢复的任务更适合 Agent。</small></article>
+            <article><span>复用价值</span><code>clamp(26 + 7K + 4N + 4C)</code><small>skill 与测试场景越多，固定流程复用价值越高。</small></article>
+          </div>
+          <div class="equation"><span>必要性总分</span><strong>round((五维分数之和) ÷ 5)</strong><small>所有维度先限制到 0–100。</small></div>
+          <div class="thresholds">
+            <div class="bad"><b>0–35</b><span>模型直出更划算</span><small>最终评级强制为“拉”</small></div>
+            <div class="mid"><b>36–59</b><span>Agent 价值存疑</span><small>允许继续实战对比</small></div>
+            <div class="good"><b>60–100</b><span>值得 Agent 化</span><small>多步、外部依赖或状态信号充分</small></div>
+          </div>
+        </section>
+
+        <section class="rule-section" id="professional">
+          <header><span>STAGE 02 / MODEL PANEL</span><h2>专业度：多模型独立盲审</h2><p>评审只看公开 Agent Card；必要性分只作为背景，不能直接复制为专业度分。</p></header>
+          <div class="dimension-table" role="table" aria-label="专业度评审维度">
+            <div class="table-head" role="row"><span>维度</span><span>主要看什么</span><span>常见失分项</span></div>
+            <div role="row"><b>领域深度</b><span>约束、术语、证据与业务边界</span><small>只有泛化描述，没有领域规则</small></div>
+            <div role="row"><b>流程设计</b><span>步骤顺序、分支、工具与人工节点</span><small>“分析并输出”式空流程</small></div>
+            <div role="row"><b>异常处理</b><span>超时、缺参、失败恢复、回滚与升级</span><small>默认永远成功</small></div>
+            <div role="row"><b>输出契约</b><span>格式、字段、证据和完成定义</span><small>只有自然语言承诺，无可解析结构</small></div>
+            <div role="row"><b>可评测性</b><span>示例、验收点、成功/失败判据</span><small>无法从可见结果判断是否完成</small></div>
+          </div>
+          <div class="rule-grid two">
+            <article class="rule-card">
+              <h3>单模型返回</h3>
+              <pre>{
+  "score": 0-100,
+  "dimensions": { "五个维度": 0-100 },
+  "comment": "简评",
+  "risk": "首要风险"
+}</pre>
+              <p>当前后端使用模型返回的 <code>score</code> 作为该评审总分，不会再从五个维度二次求平均。</p>
+            </article>
+            <article class="rule-card">
+              <h3>汇总公式</h3>
+              <div class="equation compact"><strong>有效评审分之和 ÷ 有效评审数</strong></div>
+              <ul>
+                <li>成功且 <code>score &gt; 0</code> 才进入平均；</li>
+                <li>调用失败保留错误并显示 0，但不进入平均；</li>
+                <li>全部失败时专业度为 0；</li>
+                <li>专业度目前用于报告与审计，<b>不直接决定最终四档评级</b>。</li>
+              </ul>
+            </article>
+          </div>
+          <div class="mode-callout"><b>DEMO 模式</b><span>使用输入 Card、评审 ID 和 seed 生成确定性模拟分；它用于走通产品流程，不代表真实模型意见。</span></div>
+        </section>
+
+        <section class="rule-section" id="runtime">
+          <header><span>STAGE 03 / RECONSTRUCTION</span><h2>Runtime 现场复刻：先造 Skill，不在此处打分</h2><p>Claude Code、Cursor Agent、Doubao Agent 只拿到同一份 Agent Card，不拿原 Agent 源码、隐藏提示词或历史输出。</p></header>
+          <div class="process-line">
+            <div><i>1</i><b>读取 Card</b><span>相同公开描述</span></div>
+            <div><i>2</i><b>生成 Skill</b><span>name / description / instructions / tools</span></div>
+            <div><i>3</i><b>结构校验</b><span>无效 JSON 自动纠错重试一次</span></div>
+            <div><i>4</i><b>进入对打</b><span>用原始用户 prompt 执行</span></div>
+          </div>
+          <div class="rule-grid two">
+            <article class="rule-card"><h3>构建成功</h3><p>记录 Runtime、模型、执行模式、Skill 指纹、seed 和可见结构。构建阶段本身没有 0–100 分，避免拿“会写 Skill JSON”冒充任务能力。</p></article>
+            <article class="rule-card danger-card"><h3>构建失败</h3><p>该 Runtime 仍保留在对战表中，但每个测试用例都会生成失败条目，实战分强制为 <b>0</b>。其他 Runtime 与提交 Agent 继续执行。</p></article>
+          </div>
+        </section>
+
+        <section class="rule-section" id="battle">
+          <header><span>STAGE 04 / ARENA</span><h2>同 Prompt 对打：只看可见最终输出</h2><p>每个用例分别运行提交 Agent 与三个复刻 Skill。评分器不读取隐藏思维链，也不因为模型品牌加分。</p></header>
+          <div class="judge-grid">
+            <article><span>任务完成</span><b>76</b><p>输出长度大于 25 字符；否则 42。</p></article>
+            <article><span>依据证据</span><b>83</b><p>出现“因为 / 依据 / evidence / source / 文件 / 步骤 / 结果”等信号；否则 60。</p></article>
+            <article><span>结构表达</span><b>82</b><p>存在换行、项目符号或编号列表；否则 62。</p></article>
+            <article><span>可用性</span><b>45–75</b><p><code>45 + min(输出长度, 900) ÷ 30</code></p></article>
+          </div>
+          <div class="equation"><span>单局实战分</span><strong>round(clamp(四维均值 + seed 稳定扰动))</strong><small>稳定扰动范围 −5 到 +5；执行失败时无论公式结果多少都覆盖为 0。</small></div>
+          <div class="rule-grid two">
+            <article class="rule-card"><h3>多用例汇总</h3><p>每个选手的实战均分 = 该选手所有测试用例分数的算术平均，保留 1 位小数。</p></article>
+            <article class="rule-card"><h3>“同 Prompt”的含义</h3><p>提交 Agent 收到原始 prompt；Runtime 执行提示会带上刚生成的 Skill，但其中的用户原始 prompt 不改写。当前评分不使用用例中额外的结构化验收点。</p></article>
+          </div>
+          <div class="mode-callout warning"><b>当前启发式的已知偏差</b><span>较长、有列表、出现“依据”等词的输出更容易得分；它无法验证事实真假或领域结论正确性。生产版应增加规则断言、独立 Judge 与人工抽检。</span></div>
+        </section>
+
+        <section class="rule-section" id="verdict">
+          <header><span>STAGE 05 / FINAL VERDICT</span><h2>最终分档：按顺序命中第一条</h2><p>设 A 为提交 Agent 实战均分，C 为 Claude Code 均分，D 为豆包均分，N 为必要性分。</p></header>
+          <div class="verdict-ladder">
+            <article class="tier-flop"><i>1</i><strong>拉</strong><code>N &lt; 36</code><p>任务不值得 Agent 化。即使实战分高，也先判“拉”。</p></article>
+            <article class="tier-hard"><i>2</i><strong>夯</strong><code>A − C ≥ 3</code><p>提交 Agent 明显压过 Claude Code 复刻基线。</p></article>
+            <article class="tier-elite"><i>3</i><strong>人上人</strong><code>0 ≤ A − C &lt; 3</code><p>不低于 Claude Code，但领先不足 3 分。</p></article>
+            <article class="tier-flop"><i>4</i><strong>拉</strong><code>A − D &lt; 0</code><p>低于 Claude，同时连豆包基线也没守住。</p></article>
+            <article class="tier-npc"><i>5</i><strong>NPC</strong><code>其他情况</code><p>低于 Claude，但不低于豆包。</p></article>
+          </div>
+          <p class="order-note">顺序很重要：必要性不足拥有最高优先级；“低于豆包”的判断发生在“不低于 Claude”的判断之后。专业度均分当前不会改变这棵分档决策树。</p>
+        </section>
+
+        <section class="rule-section" id="retry">
+          <header><span>STAGE 06 / REVIEW CONTROL</span><h2>单步重试与综合重算</h2><p>重试不是多跑几次挑最高分，而是用最新结果替换旧结果。</p></header>
+          <div class="rule-grid three">
+            <article class="rule-card"><h3>重跑模型</h3><p>只替换指定 reviewer 的专业度结果，再计算有效评审平均。</p></article>
+            <article class="rule-card"><h3>重建 Runtime</h3><p>替换 Skill，并自动回放所有已有测试用例，避免构建物与输出版本错位。</p></article>
+            <article class="rule-card"><h3>重跑一局</h3><p>只替换某个用例中的某位选手结果。</p></article>
+          </div>
+          <div class="equation"><span>重试完成后</span><strong>专业度 → 各选手均分 → 差值 → 最终分档，全部重算</strong><small>前后摘要、耗时与目标 key 写入 retryHistory；最多保留最近 100 条。</small></div>
+          <div class="seed-box"><b>固定 Seed</b><p>根 seed 会为每个 reviewer、Runtime、用例和 Judge 派生稳定子 seed；单步重试沿用相同子 seed。OpenAI-compatible 与方舟链路会发送 seed，Cursor CLI 和外部 A2A Agent 只能尽力复现。</p></div>
+        </section>
+
+        <section class="rule-section" id="boundaries">
+          <header><span>STAGE 07 / DISCLOSURE</span><h2>你应该如何解读结果</h2><p>报告同时标注 LIVE、DEMO、RULES、FAILED 或 MIXED，避免把模拟产物误认为真实调用。</p></header>
+          <div class="boundary-list">
+            <article><b>能说明</b><p>同一套公开规则下的相对表现、Agent Card 的工程完整度、可见输出质量、各适配器是否成功。</p></article>
+            <article><b>不能说明</b><p>事实绝对正确、业务长期稳定、生产安全、成本最优，或某个模型品牌的普遍能力。</p></article>
+            <article><b>下一版重点</b><p>结构化验收断言、匿名随机排序、独立 Judge、重复采样置信区间、成本与耗时进入报告。</p></article>
+          </div>
+          <footer class="source-note">
+            <div><span>SOURCE OF TRUTH</span><b>当前页面对应实际代码</b></div>
+            <p><code>src/scoring.js</code> 负责必要性、输出分和分档；<code>src/prompts.js</code> 定义专业评审与复刻约束；<code>src/pipeline.js</code> 负责失败、重试和汇总。</p>
+            <a href="/">带着规则去发起评测 <i>↗</i></a>
+          </footer>
+        </section>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

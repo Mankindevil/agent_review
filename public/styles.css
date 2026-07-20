@@ -30,7 +30,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 .brand b { display: block; letter-spacing: .18em; font-size: 15px; }
 .brand small { display: block; font: 8px/1.5 var(--mono); letter-spacing: .15em; color: var(--muted); }
 .site-header nav { display: flex; height: 100%; }
-.nav-button { border: 0; border-bottom: 3px solid transparent; background: transparent; padding: 0 20px; cursor: pointer; color: var(--muted); }
+.nav-button { display:grid; place-items:center; border: 0; border-bottom: 3px solid transparent; background: transparent; padding: 0 20px; cursor: pointer; color: var(--muted); text-decoration:none; }
 .nav-button.active, .nav-button:hover { color: var(--ink); border-color: var(--red); }
 .nav-button span { border-radius: 10px; padding: 1px 6px; color: white; background: var(--ink); font: 10px var(--mono); }
 .system-state { display: flex; gap: 8px; align-items: center; font: 11px var(--mono); color: var(--muted); }

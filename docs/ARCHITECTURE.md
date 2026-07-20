@@ -250,6 +250,8 @@ SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日
 │   └── utils.js            ID、数值、请求体等通用工具
 ├── public/
 │   ├── index.html          单页应用语义结构
+│   ├── methodology.html    可在网页查看的完整评分规则说明书
+│   ├── methodology.css     规则页面的审计式布局与响应式样式
 │   ├── styles.css          视觉系统与响应式布局
 │   └── app.js              表单、SSE、路由、历史与报告渲染
 ├── examples/               示例 A2A Agent Card
@@ -258,7 +260,9 @@ SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日
 │   └── use-cases.json      Prompt 与结构化验收点
 ├── scripts/real-demo.js    同时启动平台与本地 Agent
 ├── test/                   Node 原生单元与 API 测试
-└── docs/                   架构与实现文档
+└── docs/
+    ├── ARCHITECTURE.md     架构与实现文档
+    └── SCORING.md          打分公式、阈值、失败处理与分档顺序
 ```
 
 ## 7. 生产化路线
