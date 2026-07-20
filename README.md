@@ -100,12 +100,12 @@ npm test
 真实模式会：
 
 1. 调用 Agent Card 声明的 A2A endpoint；
-2. 调用 `MODEL_REVIEWERS_JSON` 配置的评审模型；
-3. 调用 `RUNTIME_ADAPTERS_JSON` 配置的隔离 runtime 服务。
+2. 调用 LLMX、火山方舟或 `MODEL_REVIEWERS_JSON` 配置的评审模型；
+3. 调用显式启用的本机 Claude/Cursor、方舟豆包或 `RUNTIME_ADAPTERS_JSON` 隔离服务复刻 Skill。
 
 如果未配置真实 adapter，相关项会保留为 demo；调用失败会记录错误并继续执行其余选手。
 
-“本机已安装”不等于“平台已真实调用”。`GET /api/runtimes` 会探测 `claude`、`cursor-agent` 和 `doubao` 的安装、登录与启用状态。远程隔离 adapter 通过 `RUNTIME_ADAPTERS_JSON` 启用；本地 CLI 必须显式设置 `ENABLE_LOCAL_CLAUDE_CODE=true` 或 `ENABLE_LOCAL_CURSOR_AGENT=true`。主服务不会擅自触发付费调用，也不会把 Cursor Desktop 的 `cursor` 命令误认成 `cursor-agent`。
+“本机已安装”不等于“平台已真实调用”。`GET /api/runtimes` 会分别检查 Claude/Cursor 的 CLI、鉴权与启用开关；豆包既可以来自 `doubao` CLI，也可以在 `ARK_BASE_URL`、`ARK_API_KEY` 和豆包 endpoint 同时存在时直接使用方舟 API。远程隔离 adapter 仍可通过 `RUNTIME_ADAPTERS_JSON` 覆盖。主服务不会把 Cursor Desktop 的 `cursor` 命令误认成 `cursor-agent`。
 
 ## A2A 提交方式
 
@@ -183,7 +183,7 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 
 ## Runtime adapter 契约
 
-真实 Cursor / Claude Code 等执行器应运行在独立隔离服务中。Web 服务通过 `RUNTIME_ADAPTERS_JSON` 指向它们：
+生产环境中的 Cursor / Claude Code 等执行器应运行在独立隔离服务中，Web 服务通过 `RUNTIME_ADAPTERS_JSON` 指向它们。开发机可显式启用受限的本地 CLI；豆包也可直接使用已配置的火山方舟 endpoint：
 
 ```json
 {
@@ -241,8 +241,8 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 | `REVIEW_MODEL_OPENAI` | `g5.4` | OpenAI 视角评审模型 |
 | `REVIEW_MODEL_ANTHROPIC` | `cs4.6` | Anthropic 视角评审模型 |
 | `ARK_BASE_URL` | `https://ark.cn-beijing.volces.com/api/v3` | 火山方舟在线推理兼容网关 |
-| `ARK_API_KEY` | 空 | 豆包与 DeepSeek 共用的方舟 Key |
-| `REVIEW_MODEL_DOUBAO` | `ep-20260720110725-5rbml` | 豆包接入点 ID |
+| `ARK_API_KEY` | 空 | 豆包与 DeepSeek 共用的方舟 Key；存在时也启用豆包 Runtime |
+| `REVIEW_MODEL_DOUBAO` | `ep-20260720110725-5rbml` | 豆包评审与 Runtime 共用的接入点 ID |
 | `REVIEW_MODEL_DEEPSEEK` | `ep-20260708162855-pcf9x` | DeepSeek 接入点 ID |
 | `MODEL_REVIEWERS_JSON` | 内置四位 demo 评审 | 真实模型 adapter 高级配置 |
 | `RUNTIME_ADAPTERS_JSON` | 内置三种 demo runtime | 隔离 runtime adapter 配置 |
@@ -267,6 +267,6 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 
 ## 当前边界
 
-这是工程化 MVP，不是已经具备科学效度的排行榜。单次输出分数不代表稳定能力；真实生产评测必须增加重复运行、匿名随机排序、独立 judge、规则校验、人工抽查、成本/耗时统计和置信区间。Cursor 与 Claude Code 也没有被主服务直接执行——它们通过明确的隔离 runtime 契约接入，这是有意的安全边界。
+这是工程化 MVP，不是已经具备科学效度的排行榜。单次输出分数不代表稳定能力；真实生产评测必须增加重复运行、匿名随机排序、独立 judge、规则校验、人工抽查、成本/耗时统计和置信区间。本地 Claude/Cursor adapter 仅用于受信任开发机，使用只读参数和随机临时目录；生产环境仍应改用隔离 runtime 服务。
 
 协议实现参考 A2A 官方 1.0 规范：`https://a2a-protocol.org/latest/specification`。

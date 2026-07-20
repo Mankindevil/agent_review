@@ -1,5 +1,6 @@
 import { stableNumber, safeJson } from './utils.js';
 import { runtimeBuildSkillPrompt, runtimeRunSkillPrompt } from './prompts.js';
+import { applyDeepSeekClaudeEnv } from './claude-env.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -20,6 +21,11 @@ export async function buildSkill(runtime, card, mode) {
     const result = await callLocalCli(runtime.id, runtimeBuildSkillPrompt(card));
     const skill = validateGeneratedSkill(safeJson(result.text));
     return { runtime: runtime.name, runtimeId: runtime.id, model: runtime.model, mode: 'live', adapterKind: 'local-cli', skill, trace: result.trace };
+  }
+  if (mode === 'live' && config?.kind === 'model-api') {
+    const text = await callRuntimeModel(config, runtimeBuildSkillPrompt(card));
+    const skill = validateGeneratedSkill(safeJson(text));
+    return { runtime: runtime.name, runtimeId: runtime.id, model: config.model, mode: 'live', adapterKind: 'model-api', skill };
   }
   if (mode === 'live' && config?.url) {
     const response = await fetch(config.url, {
@@ -56,6 +62,9 @@ export async function runSkill(build, testCase, mode) {
   if (mode === 'live' && config?.kind === 'local-cli') {
     return (await callLocalCli(build.runtimeId, runtimeRunSkillPrompt(build.skill, testCase.prompt))).text;
   }
+  if (mode === 'live' && config?.kind === 'model-api') {
+    return callRuntimeModel(config, runtimeRunSkillPrompt(build.skill, testCase.prompt));
+  }
   if (mode === 'live' && config?.url) {
     const response = await fetch(config.url, {
       method: 'POST',
@@ -77,6 +86,9 @@ function runtimeConfig(runtimeId) {
   } catch { return null; }
   if (runtimeId === 'claude-code' && process.env.ENABLE_LOCAL_CLAUDE_CODE === 'true') return { kind: 'local-cli', command: 'claude' };
   if (runtimeId === 'cursor' && process.env.ENABLE_LOCAL_CURSOR_AGENT === 'true') return { kind: 'local-cli', command: 'cursor-agent' };
+  if (runtimeId === 'doubao' && process.env.ARK_BASE_URL && process.env.ARK_API_KEY) {
+    return { kind: 'model-api', baseUrl: process.env.ARK_BASE_URL, apiKeyEnv: 'ARK_API_KEY', model: process.env.REVIEW_MODEL_DOUBAO || 'ep-20260720110725-5rbml' };
+  }
   return null;
 }
 
@@ -90,7 +102,9 @@ async function callLocalCli(runtimeId, prompt) {
     ? ['-p', prompt, '--output-format', 'json', '--tools', '', '--permission-mode', 'plan', '--safe-mode', '--no-session-persistence', '--max-turns', '1', '--max-budget-usd', budget]
     : ['-p', prompt, '--output-format', 'json', '--mode', 'ask', '--sandbox', 'enabled', '--trust', '--workspace', workspace];
   try {
-    const { stdout, stderr } = await execFileAsync(command, args, { cwd: workspace, timeout, maxBuffer: 5_000_000, env: { ...process.env, NO_COLOR: '1' } });
+    const commandEnv = { ...process.env, NO_COLOR: '1' };
+    if (runtimeId === 'claude-code') applyDeepSeekClaudeEnv(commandEnv);
+    const { stdout, stderr } = await execFileAsync(command, args, { cwd: workspace, timeout, maxBuffer: 5_000_000, env: commandEnv });
     const text = extractCliText(stdout);
     if (!text.trim()) throw new Error(`${command} 没有返回可见结果`);
     return { text, trace: { command, durationMs: Date.now() - startedAt, stdoutBytes: Buffer.byteLength(stdout), stderr: String(stderr || '').trim().slice(0, 500) } };
@@ -102,6 +116,23 @@ async function callLocalCli(runtimeId, prompt) {
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
+}
+
+async function callRuntimeModel(config, prompt) {
+  const baseUrl = config.baseUrl.replace(/\/$/, '');
+  const endpoint = baseUrl.endsWith('/chat/completions') ? baseUrl : baseUrl + '/chat/completions';
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env[config.apiKeyEnv]}` },
+    body: JSON.stringify({ model: config.model, temperature: 0.2, messages: [{ role: 'user', content: prompt }] }),
+    signal: AbortSignal.timeout(120_000)
+  });
+  if (!response.ok) throw new Error(`Doubao runtime 返回 HTTP ${response.status}`);
+  const payload = await response.json();
+  const content = payload.choices?.[0]?.message?.content;
+  const text = Array.isArray(content) ? content.map((part) => typeof part === 'string' ? part : part?.text || '').filter(Boolean).join('\n') : content;
+  if (!text) throw new Error('Doubao runtime 没有返回可见结果');
+  return text;
 }
 
 function extractCliText(stdout) {

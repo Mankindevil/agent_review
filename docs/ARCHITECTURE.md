@@ -101,11 +101,13 @@ A2A 1.0 JSON-RPC 使用 `SendMessage`，0.3 兼容调用使用 `message/send`。
 
 `src/runtimes.js` 当前声明 Claude Code、Cursor Agent、Doubao Agent 三个 adapter。每个 adapter 只拿到相同的 Agent Card，不拿提交 Agent 的实现，再生成统一结构的 skill：名称、描述、指令、工具和 fingerprint。
 
-演示模式会生成确定性 skill 与输出；真实模式通过 `RUNTIME_ADAPTERS_JSON` 调用外部隔离 runtime 服务。这样 Web 服务本身不会直接执行用户提供的 shell 命令，避免远程代码执行。
+演示模式会生成确定性 skill 与输出。真实模式按优先级使用 `RUNTIME_ADAPTERS_JSON` 外部隔离服务、显式启用的本地 Claude/Cursor CLI，或火山方舟豆包 model API。所有实现只接收平台生成的 prompt，不执行用户提交的 shell 命令。
 
 开发机也支持显式启用本地 CLI adapter。Claude Code 被限制为无工具、plan、安全模式和单次预算；Cursor Agent 被限制为 ask/read-only 与内置 sandbox。两个 CLI 都在随机临时目录执行，不接触仓库文件。只有安装、登录和环境开关同时满足时，Runtime Probe 才显示 `READY`。生产环境仍应使用远程容器 adapter，本地 CLI 仅用于受信任开发机验收。
 
-Claude Code 也可以使用 DeepSeek 官方 Anthropic-compatible endpoint。`scripts/deepseek-demo.js` 只从父进程读取 `DEEPSEEK_API_KEY`，在内存中映射为 `ANTHROPIC_AUTH_TOKEN`，并把 base URL 固定为 `https://api.deepseek.com/anthropic`。这种方式无需 Claude OAuth；Runtime Probe 会把进程内 token 视为已认证。脚本不持久化 Key，日志也不记录环境变量或请求头。
+Claude Code 也可以使用 DeepSeek 官方 Anthropic-compatible endpoint。`src/claude-env.js` 会在启动 Claude 子进程时把 `DEEPSEEK_API_KEY` 仅在内存中映射为 `ANTHROPIC_AUTH_TOKEN`，并使用 `https://api.deepseek.com/anthropic`；`scripts/deepseek-demo.js` 复用同一映射。这种方式无需 Claude OAuth，Runtime Probe 也会把 DeepSeek Key 视为有效凭据。日志不记录环境变量或请求头。
+
+Doubao Runtime 不要求本机存在 `doubao` CLI。当 `ARK_BASE_URL`、`ARK_API_KEY` 与 `REVIEW_MODEL_DOUBAO` 同时存在时，它会通过方舟 Chat Completions API 先构建结构化 Skill，再使用完全相同的用户 prompt 执行该 Skill；Runtime Probe 此时直接显示 `READY`。
 
 ### 3.5 同 prompt 对测与锐评分档
 
@@ -178,7 +180,7 @@ SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日
 - 请求体限制为 1 MB；前端也限制上传文件大小。
 - A2A endpoint 只允许 HTTP(S)。
 - 默认拒绝 localhost、`.local` 与常见私有 IPv4 地址，减少 SSRF 风险；开发环境可显式设置 `ALLOW_PRIVATE_AGENT_URLS=true`。
-- Runtime 通过 HTTP adapter 接入，不在主服务执行用户命令。
+- Runtime 使用受限本地 CLI、方舟模型 API 或远程 HTTP adapter，均不执行用户提交的命令。
 - API key 只从环境变量读取，不写入评测记录或返回前端。
 - 生产版仍需补充 DNS 重绑定防护、出网 allowlist、容器隔离、租户鉴权、配额、审计日志和敏感输出脱敏。
 
@@ -190,6 +192,7 @@ SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日
 ├── .env.example            可提交的完整环境变量模板
 ├── src/
 │   ├── env.js              零依赖 .env 解析、优先级与加载
+│   ├── claude-env.js       DeepSeek 到 Claude Code 的进程内环境映射
 │   ├── a2a.js              Agent Card 校验、binding 选择和 A2A client
 │   ├── pipeline.js         评测状态机与容错编排
 │   ├── prompts.js          模型评审、Skill 构建与同题执行 prompt
