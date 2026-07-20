@@ -87,7 +87,7 @@ Claude Code、Cursor Agent 与 Doubao Agent 只接收同一 Agent Card，生成�
 ## 6. 重试、Seed 与执行模式
 
 - 重跑模型：替换指定评审结果；
-- 重建 Runtime：替换 Skill 并回放全部用例；
+- 重建 Runtime：替换 Skill，并重新执行全部同 Prompt 对测用例；
 - 重跑一局：替换指定用例、指定选手结果。
 
 重试不取历史最高分。最新结果原位替换后，专业度、各选手均分、差值和最终评级全部重算，前后摘要写入 `retryHistory`。

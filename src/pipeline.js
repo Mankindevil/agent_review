@@ -126,7 +126,7 @@ export class EvaluationPipeline {
     }
     if (index === -1) builds.push(next); else builds[index] = next;
     item.builds = builds;
-    await this.update(item, { builds, stage: `${step.shortLabel} 已重建，正在回放测试用例` }, {
+    await this.update(item, { builds, stage: `${step.shortLabel} 已重建，正在重新执行同 Prompt 对测` }, {
       level: next.error ? 'error' : 'success', source: 'RETRY', phase: 'build',
       text: next.error ? `${step.shortLabel} 重建仍失败` : `${step.shortLabel} Skill 重建完成`,
       detail: next.error || next.skill?.name, mode: next.error ? 'failed' : next.mode
@@ -135,9 +135,9 @@ export class EvaluationPipeline {
       signal.throwIfAborted();
       await this.replaceBenchmarkEntry(item, caseIndex, step.key, signal);
       const entry = item.benchmark[caseIndex].entries.find((candidate) => candidate.id === step.key);
-      await this.update(item, { benchmark: item.benchmark, stage: `${step.shortLabel} 回放 ${caseIndex + 1}/${item.benchmark.length}` }, {
+      await this.update(item, { benchmark: item.benchmark, stage: `${step.shortLabel} 对测 ${caseIndex + 1}/${item.benchmark.length}` }, {
         level: entry?.mode === 'failed' ? 'error' : 'success', source: 'RETRY', phase: 'benchmark',
-        text: `${step.shortLabel} 完成「${item.benchmark[caseIndex].case.name}」回放`, detail: `score=${entry?.score ?? 0}`, mode: entry?.mode || item.mode
+        text: `${step.shortLabel} 完成「${item.benchmark[caseIndex].case.name}」重新对测`, detail: `score=${entry?.score ?? 0}`, mode: entry?.mode || item.mode
       });
     }
   }

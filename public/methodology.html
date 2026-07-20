@@ -187,7 +187,7 @@
           <header><span>STAGE 06 / REVIEW CONTROL</span><h2>单步重试与综合重算</h2><p>重试不是多跑几次挑最高分，而是用最新结果替换旧结果。</p></header>
           <div class="rule-grid three">
             <article class="rule-card"><h3>重跑模型</h3><p>只替换指定 reviewer 的专业度结果，再计算有效评审平均。</p></article>
-            <article class="rule-card"><h3>重建 Runtime</h3><p>替换 Skill，并自动回放所有已有测试用例，避免构建物与输出版本错位。</p></article>
+            <article class="rule-card"><h3>重建 Runtime</h3><p>替换 Skill，并重新执行所有同 Prompt 对测用例，避免构建物与输出版本错位。</p></article>
             <article class="rule-card"><h3>重跑一局</h3><p>只替换某个用例中的某位选手结果。</p></article>
           </div>
           <div class="equation"><span>重试完成后</span><strong>专业度 → 各选手均分 → 差值 → 最终分档，全部重算</strong><small>前后摘要、耗时与目标 key 写入 retryHistory；最多保留最近 100 条。</small></div>

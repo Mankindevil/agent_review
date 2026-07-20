@@ -147,7 +147,7 @@ Runtime 构建阶段的跨执行器契约是结构化 Skill JSON，而不是允�
 只有 `completed`、`failed`、`cancelled`、`interrupted` 终态允许发起单步重试，避免主流水线和复核任务同时修改同一评测。重试分为三类：
 
 - `review`：只重新调用指定评审模型，原位替换该模型结果；
-- `build`：重新生成指定 Runtime Skill，并自动用新 Skill 回放全部已有测试用例；
+- `build`：重新生成指定 Runtime Skill，并自动用新 Skill 重新执行全部同 Prompt 对测用例；
 - `benchmark`：只重跑指定用例中的指定选手，适合处理单次网络或模型抖动。
 
 执行期间评测状态改为 `retrying`，复用 SSE、日志和停止机制。旧结果会保持可见，直到新结果返回；随后相同 `key` 的结果被替换而不是追加。平台再从事实结果重新派生 `professional`、`averages`、`coverage`、`overallMode` 和 `roast`，因此等级与判词不会沿用过期缓存。
