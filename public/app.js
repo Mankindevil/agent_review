@@ -322,7 +322,7 @@ function renderResult(item) {
         </div>
         <i class="verdict-seal__impact" aria-hidden="true"></i>
       </div>
-      <div class="verdict-copy"><small>FINAL VERDICT / ${escapeHtml(tier.label)}</small><h3>${renderLineBreaks(item.roast.headline)}</h3><p>提交 Agent 实战均分 <b>${item.averages.submitted}</b>，对 Claude Code ${signed(item.roast.deltaClaude)}，对豆包 ${signed(item.roast.deltaDoubao)}。</p>${renderRecalculationNote(item)}</div>
+      <div class="verdict-copy"><small>FINAL VERDICT / ${escapeHtml(tier.label)}</small><h3>${renderHeadline(item.roast.headline)}</h3><p>提交 Agent 实战均分 <b>${item.averages.submitted}</b>，对 Claude Code ${signed(item.roast.deltaClaude)}，对豆包 ${signed(item.roast.deltaDoubao)}。</p>${renderRecalculationNote(item)}</div>
     </section>
     <div class="score-triad">
       ${scoreCard('01 / 必要性', complexity.score, complexity.verdict, complexity.reason, complexity.score >= 60)}
@@ -562,6 +562,10 @@ function revealVerdictInView(root, evaluationId) {
 
 function renderLineBreaks(value = '') {
   return escapeHtml(value).replace(/\r\n?|\n/g, '<br>');
+}
+
+function renderHeadline(value = '') {
+  return escapeHtml(String(value).replace(/\s*[\r\n]+\s*/g, ' ').trim());
 }
 
 function renderStructuredText(value = '', className = 'review-prose') {

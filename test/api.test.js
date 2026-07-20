@@ -39,6 +39,14 @@ test('keeps the history count inline in the top navigation', async () => {
   assert.match(css, /\.nav-button\s*\{[^}]*display:flex;[^}]*white-space:nowrap;/);
 });
 
+test('lets the final verdict use the available desktop width', async () => {
+  const response = await fetch(`${origin}/styles.css`);
+  const css = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(css, /\.verdict-hero h3\s*\{[^}]*max-width:none;[^}]*text-wrap:balance;/);
+  assert.doesNotMatch(css, /\.verdict-hero h3\s*\{[^}]*max-width:18ch;/);
+});
+
 test('returns JSON 404 for unknown API routes instead of the SPA shell', async () => {
   const response = await fetch(`${origin}/api/not-a-real-route`);
   assert.equal(response.status, 404);
