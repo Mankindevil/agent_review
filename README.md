@@ -1,6 +1,6 @@
 # 锐评局：A2A Agent 公开评测系统
 
-一个可直接运行的全栈 MVP。用户提交 A2A Agent Card 和真实 prompt 后，平台依次判断 Agent 必要性、进行多模型专业度盲审、让不同 runtime 根据描述现场复刻 skill，再把所有选手放进同 prompt 竞技场，最终给出“夯 / 中 / 拉”的证据化锐评。
+一个可直接运行的全栈 MVP。用户提交 A2A Agent Card 和真实 prompt 后，平台依次判断 Agent 必要性、进行多模型专业度盲审、让不同 runtime 根据描述现场复刻 skill，再把所有选手放进同 prompt 竞技场，最终给出“夯 / 人上人 / NPC / 拉”的证据化锐评。
 
 ## 已实现功能
 

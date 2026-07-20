@@ -217,10 +217,20 @@ function renderResult(item) {
   if (state.completedRendered === item.id) return;
   state.completedRendered = item.id;
   const complexity = item.complexity;
+  const tier = normalizeTier(item.roast.tier);
+  const sealText = tier.stamp || tier.label;
+  const tierCode = String(tier.code || 'NPC').toLowerCase();
   root.innerHTML = `
     <section class="verdict-hero">
-      <div class="verdict-stamp">${escapeHtml(item.roast.tier.stamp)}</div>
-      <div><small>FINAL VERDICT / ${escapeHtml(item.roast.tier.label)}</small><h3>${escapeHtml(item.roast.headline)}</h3><p>提交 Agent 实战均分 <b>${item.averages.submitted}</b>，对 Claude Code ${signed(item.roast.deltaClaude)}，对豆包 ${signed(item.roast.deltaDoubao)}。</p></div>
+      <div class="verdict-seal verdict-seal--${escapeHtml(tierCode)}" role="img" aria-label="最终评级：${escapeHtml(tier.label)}">
+        <div class="verdict-seal__plate">
+          <span class="verdict-seal__eyebrow">AGENT RANK</span>
+          <strong data-length="${sealText.length}">${escapeHtml(sealText)}</strong>
+          <span class="verdict-seal__caption">锐评局 · 终审</span>
+        </div>
+        <i class="verdict-seal__impact" aria-hidden="true"></i>
+      </div>
+      <div class="verdict-copy"><small>FINAL VERDICT / ${escapeHtml(tier.label)}</small><h3>${escapeHtml(item.roast.headline)}</h3><p>提交 Agent 实战均分 <b>${item.averages.submitted}</b>，对 Claude Code ${signed(item.roast.deltaClaude)}，对豆包 ${signed(item.roast.deltaDoubao)}。</p></div>
     </section>
     <div class="score-triad">
       ${scoreCard('01 / 必要性', complexity.score, complexity.verdict, complexity.reason, complexity.score >= 60)}
@@ -302,7 +312,7 @@ async function loadHistory() {
   try {
     const items = await (await fetch('/api/evaluations')).json();
     $('#history-count').textContent = items.length;
-    $('#history-list').innerHTML = items.length ? items.map(item=>`<button class="history-item" data-evaluation-id="${item.id}"><header><span>${formatTime(item.createdAt)}</span><span>${item.progress}%</span></header><h3>${escapeHtml(item.name)}</h3><p>${item.tier?`最终锐评：<span class="history-tier">${escapeHtml(item.tier.label)}</span> · 实战 ${item.score} 分`:escapeHtml(item.status)}</p></button>`).join('') : '<p>还没有战绩。第一个被公开处刑的 Agent 会是谁？</p>';
+    $('#history-list').innerHTML = items.length ? items.map(item=>{ const tier = item.tier ? normalizeTier(item.tier) : null; return `<button class="history-item" data-evaluation-id="${item.id}"><header><span>${formatTime(item.createdAt)}</span><span>${item.progress}%</span></header><h3>${escapeHtml(item.name)}</h3><p>${tier?`最终锐评：<span class="history-tier">${escapeHtml(tier.label)}</span> · 实战 ${item.score} 分`:escapeHtml(item.status)}</p></button>`; }).join('') : '<p>还没有战绩。第一个被公开处刑的 Agent 会是谁？</p>';
   } catch { $('#history-list').innerHTML = '<p>历史记录暂时读取失败。</p>'; }
 }
 
@@ -310,6 +320,11 @@ function showLanding() { if(state.eventSource)state.eventSource.close(); state.c
 function openHistory() { $('#history-drawer').classList.add('open'); $('#drawer-backdrop').classList.add('open'); $('#history-drawer').setAttribute('aria-hidden','false'); loadHistory(); }
 function closeHistory() { $('#history-drawer').classList.remove('open'); $('#drawer-backdrop').classList.remove('open'); $('#history-drawer').setAttribute('aria-hidden','true'); }
 function showError(text) { $('#form-error').textContent = text; }
+function normalizeTier(tier = {}) {
+  if (tier.code === 'OVERKILL' || tier.code === 'FLOP' || tier.label === '大炮打蚊子' || tier.label === '拉完了') return { ...tier, code: 'FLOP', label: '拉', stamp: '拉' };
+  if (tier.code === 'MID' || tier.label === '有点东西，但不多') return { ...tier, code: 'NPC', label: 'NPC', stamp: 'NPC' };
+  return tier;
+}
 function escapeHtml(value='') { return String(value).replace(/[&<>'"]/g, char=>({ '&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;' })[char]); }
 function signed(value) { return `${value>=0?'+':''}${value} 分`; }
 function formatTime(value) { return new Intl.DateTimeFormat('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date(value)); }

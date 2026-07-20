@@ -74,21 +74,25 @@ export function buildRoast(submittedAverage, claudeAverage, doubaoAverage, profe
   const deltaDoubao = round(submittedAverage - doubaoAverage, 1);
   let tier;
   if (complexity.score < 36) {
-    tier = { code: 'OVERKILL', label: '大炮打蚊子', tone: 'warning', stamp: '不值' };
+    tier = { code: 'FLOP', label: '拉', tone: 'danger', stamp: '拉' };
   } else if (deltaClaude >= 3) {
     tier = { code: 'HARD', label: '夯', tone: 'excellent', stamp: '夯' };
+  } else if (deltaClaude >= 0) {
+    tier = { code: 'ELITE', label: '人上人', tone: 'great', stamp: '人上人' };
   } else if (deltaDoubao < 0) {
-    tier = { code: 'FLOP', label: '拉完了', tone: 'danger', stamp: '拉' };
+    tier = { code: 'FLOP', label: '拉', tone: 'danger', stamp: '拉' };
   } else {
-    tier = { code: 'MID', label: '有点东西，但不多', tone: 'neutral', stamp: '中' };
+    tier = { code: 'NPC', label: 'NPC', tone: 'neutral', stamp: 'NPC' };
   }
   const headline = tier.code === 'HARD'
     ? '不是套壳：它在同题对打里真把 Claude 复刻版压住了。'
+    : tier.code === 'ELITE'
+      ? '能和 Claude 正面对线，这个 Agent 已经挤出路人局。'
     : tier.code === 'FLOP'
-      ? '流程画得挺热闹，结果连豆包基线都没守住。'
-      : tier.code === 'OVERKILL'
+      ? complexity.score < 36
         ? '这活一个好提示词就能干，硬上 Agent 属于给订书机装自动驾驶。'
-        : '能跑，也有专业味，但离“非它不可”还差一轮硬证据。';
+        : '流程画得挺热闹，结果连豆包基线都没守住。'
+      : '能跑，但还没跑出基线包围圈：标准 NPC 表现。';
   return { tier, headline, deltaClaude, deltaDoubao, professionalAverage: round(professionalAverage, 1) };
 }
 

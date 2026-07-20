@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { extractAgentText, getInterfaces, validateAgentCard } from '../src/a2a.js';
-import { scoreComplexity } from '../src/scoring.js';
+import { buildRoast, scoreComplexity } from '../src/scoring.js';
 
 const card = {
   name: 'Research Agent',
@@ -30,4 +30,13 @@ test('complex workflows score above trivial transforms', () => {
   const complex = scoreComplexity(card, [{ prompt: 'Research and verify this claim across sources' }]);
   const simple = scoreComplexity({ ...card, description: 'Rename and organize files', capabilities: {}, skills: [{ id: 'files', name: 'Files', description: '整理文件和重命名' }] }, [{ prompt: '整理文件' }]);
   assert.ok(complex.score > simple.score);
+});
+
+test('uses only 夯, 人上人, NPC and 拉 verdict tiers', () => {
+  const agentWorthy = { score: 70 };
+  assert.equal(buildRoast(90, 85, 78, 80, agentWorthy).tier.label, '夯');
+  assert.equal(buildRoast(86, 85, 78, 80, agentWorthy).tier.label, '人上人');
+  assert.equal(buildRoast(80, 85, 78, 80, agentWorthy).tier.label, 'NPC');
+  assert.equal(buildRoast(70, 85, 78, 80, agentWorthy).tier.label, '拉');
+  assert.equal(buildRoast(90, 70, 60, 80, { score: 20 }).tier.label, '拉');
 });
