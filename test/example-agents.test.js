@@ -25,29 +25,29 @@ test('serves a human-readable status page at each example root', async () => {
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(response.headers.get('content-type'), /text\/html/);
-  assert.match(html, /文件收纳员/);
+  assert.match(html, /因子显微镜/);
   assert.match(html, /\.well-known\/agent-card\.json/);
 });
 
-test('calls the A2A 1.0 HTTP+JSON file organizer', async () => {
+test('calls the A2A 1.0 HTTP+JSON factor researcher', async () => {
   const card = (await resolveAgentCard('service-url', agents[0].origin)).card;
-  const result = await callA2AAgent(card, '整理 会议记录.docx 和 报价单.xlsx，只预览');
-  assert.match(result.text, /会议记录\.docx/);
-  assert.match(result.text, /仅预览/);
+  const result = await callA2AAgent(card, '检验经营现金流收益率因子的 Rank IC 与五分组表现');
+  assert.match(result.text, /Rank IC/);
+  assert.match(result.text, /不构成投资建议/);
 });
 
-test('calls the A2A 1.0 JSON-RPC contract reviewer with SendMessage', async () => {
+test('calls the A2A 1.0 JSON-RPC strategy backtester with SendMessage', async () => {
   const card = (await resolveAgentCard('card-url', `${agents[1].origin}/.well-known/agent-card.json`)).card;
-  const result = await callA2AAgent(card, '审查数据出境、赔偿上限和自动续费');
-  assert.match(result.text, /数据出境/);
-  assert.match(result.text, /赔偿上限/);
+  const result = await callA2AAgent(card, '回测沪深 300 月度动量策略，计入手续费和滑点');
+  assert.match(result.text, /沪深 300/);
+  assert.match(result.text, /手续费/);
 });
 
-test('calls the A2A 0.3 JSON-RPC incident agent and extracts task artifacts', async () => {
+test('calls the A2A 0.3 JSON-RPC portfolio risk agent and extracts task artifacts', async () => {
   const card = (await resolveAgentCard('service-url', agents[2].origin)).card;
-  const result = await callA2AAgent(card, '支付成功率下降，请组织 P1 响应');
-  assert.match(result.text, /P1 事故作战板/);
-  assert.match(result.text, /验收/);
+  const result = await callA2AAgent(card, '科技 42%，模拟板块下跌 10% 的冲击');
+  assert.match(result.text, /组合风险快照/);
+  assert.match(result.text, /-4\.2%/);
 });
 
 test('runs a complete live-mode platform evaluation against a real A2A agent', async () => {
@@ -56,7 +56,7 @@ test('runs a complete live-mode platform evaluation against a real A2A agent', a
   const pipeline = new EvaluationPipeline(store, new EventEmitter());
   const created = await pipeline.create({
     mode: 'live', agentCard: card,
-    cases: [{ name: '真实合同测试', prompt: '审查数据出境、赔偿上限和自动续费，并给出依据。' }]
+    cases: [{ name: '真实回测测试', prompt: '回测沪深 300 月度动量策略，计入手续费、滑点并报告最大回撤。' }]
   });
   let result;
   for (let attempt = 0; attempt < 80; attempt += 1) {
@@ -67,7 +67,7 @@ test('runs a complete live-mode platform evaluation against a real A2A agent', a
   assert.equal(result.status, 'completed');
   const submitted = result.benchmark[0].entries.find((entry) => entry.id === 'submitted');
   assert.equal(submitted.mode, 'live');
-  assert.match(submitted.output, /数据出境/);
+  assert.match(submitted.output, /沪深 300/);
   assert.equal(result.builds.every((build) => build.mode === 'demo'), true, '未配置 runtime 时必须明确保留 demo 标签');
   assert.deepEqual(result.coverage, { agent: 'live', models: 'demo', runtimes: 'demo' });
   assert.equal(result.overallMode, 'mixed');

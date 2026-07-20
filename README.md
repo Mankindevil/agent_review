@@ -1,14 +1,16 @@
-# 锐评局：A2A Agent 公开评测系统
+# 锐评局：金融 A2A Agent 公开评测系统
 
-一个可直接运行的全栈 MVP。用户提交 A2A Agent Card 和真实 prompt 后，平台依次判断 Agent 必要性、进行多模型专业度盲审、让不同 runtime 只凭 description 现场直出 Skill，再把所有选手放进同 prompt 竞技场，最终给出“夯 / 人上人 / NPC / 拉”的证据化锐评。
+一个面向 A2A 金融智能体黑客松的全栈评测系统。用户提交 Agent Card 和真实投研任务后，平台依次判断 Agent 必要性，按研究严谨性、数据纪律、回测可信度、风险合规、可复现性进行四模型审稿，让不同 runtime 只凭 description 现场直出 Skill，再把所有选手放进同题研究压测，最终给出“夯 / 人上人 / NPC / 拉”的证据化锐评。
+
+未接入主办方 Data / Research Skills 时，平台只审查研究设计与输出纪律，不验证金融数字真伪，也不会把模拟结果包装成真实回测。接入数据能力后可在现有同题执行层增加 point-in-time 数据复算、回测结果校验和结构化验收断言。
 
 ## 已实现功能
 
 - A2A 1.0 Agent Card 校验，兼容 0.3 顶层 `url` 形态；
 - 文件拖拽、文件选择、JSON 粘贴、Agent Card URL 与服务根地址自动发现；
 - 1–5 个同 prompt 测试用例；
-- Agent 必要性五维评分与明确判断；
-- OpenAI、Anthropic、豆包、DeepSeek 四个模型视角的独立评分、评语和风险；
+- 投研 Agent 必要性五维评分，识别金融数据、时点、因子、回测、组合风险、协作、证据与合规信号；
+- OpenAI、Anthropic、豆包、DeepSeek 从研究严谨性、数据纪律、回测可信度、风险合规、可复现性独立审稿；
 - Claude Code、Cursor、Doubao 三种 runtime 的 description-only Skill 现场直出抽象；
 - 现场复刻采用 description-only 信息防火墙：Runtime 只收到顶层 `description` 原文；记录支持展开 Skill 文件浏览器，逐个查看 `SKILL.md`、原始 `skill.json`、输入 description 与运行清单，并可复制完整内容；
 - 提交 Agent 与三个复刻 skill 的逐用例输出和分数对比；
@@ -88,9 +90,9 @@ Key 只应写入本机 `.env` 或密钥管理系统，不要写入 `.env.example
 
 随后在页面选择样本，把评测模式切换为“真实对测”。三个 Agent 分别监听：
 
-- `http://127.0.0.1:4181`：文件收纳员，A2A 1.0 HTTP+JSON；
-- `http://127.0.0.1:4182`：合同风险猎手，A2A 1.0 JSON-RPC；
-- `http://127.0.0.1:4183`：生产事故指挥官，A2A 0.3 JSON-RPC 兼容样本。
+- `http://127.0.0.1:4181`：因子显微镜，A2A 1.0 HTTP+JSON；
+- `http://127.0.0.1:4182`：策略验钞机，A2A 1.0 JSON-RPC；
+- `http://127.0.0.1:4183`：组合风控台，A2A 0.3 JSON-RPC 兼容样本。
 
 每个服务都在 `/.well-known/agent-card.json` 暴露 Agent Card。也可以只运行示例 Agent：
 
@@ -104,6 +106,49 @@ npm run agents
 npm run check
 npm test
 ```
+
+## PandaAI Quant 金融数据源
+
+金融分支通过官方 `panda_data` Python SDK 接入 PandaAI Quant。官方文档使用 `panda_data.init_token(username, password)` 登录，账号为 86 开头的账号；项目通过受限 Python bridge 调用 SDK，Node 服务不会把账号、密码或 JWT 返回给浏览器。
+
+先安装 SDK：
+
+```bash
+python3 -m pip install -r requirements-data.txt
+```
+
+然后在被 Git 忽略的 `.env` 中配置：
+
+```env
+PANDA_DATA_ENABLED=true
+PANDA_DATA_USERNAME=你的86开头账号
+PANDA_DATA_PASSWORD=你的密码
+PANDA_DATA_BASE_URL=http://pandadata.pandaaiquant.com
+PANDA_DATA_ACCESS_KEY=用于保护本系统数据查询网关的随机长字符串
+PANDA_DATA_PYTHON=python3
+PANDA_DATA_TIMEOUT_MS=60000
+PANDA_DATA_MAX_ROWS=500
+```
+
+`GET /api/data-source` 返回非敏感状态；`GET /api/data-source?probe=1` 额外检查本机 SDK。受保护的数据查询网关示例：
+
+```http
+POST /api/data-source/query
+Authorization: Bearer <PANDA_DATA_ACCESS_KEY>
+Content-Type: application/json
+
+{
+  "method": "get_stock_daily",
+  "params": {
+    "symbol": ["000001.SZ"],
+    "start_date": "20250101",
+    "end_date": "20250131",
+    "fields": []
+  }
+}
+```
+
+只有 `PANDA_DATA_ALLOWED_METHODS` 白名单中的 SDK 方法可以调用，结果会按 `PANDA_DATA_MAX_ROWS` 截断。`PANDA_DATA_ACCESS_KEY` 留空时查询网关强制关闭，避免公开部署后被匿名消耗数据额度。接口字段以 [PandaAI Quant 数据 API 文档](https://www.pandaaiquant.com/data-service/api-docs?api=data_fetch_doc) 和比赛提供的本地接口文档为准。
 
 ## 演示模式与真实模式
 
@@ -256,6 +301,15 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 | `PORT` | `4173` | HTTP 端口 |
 | `DATA_FILE` | `data/evaluations.json` | 评测持久化文件 |
 | `ALLOW_PRIVATE_AGENT_URLS` | `false` | 是否允许 localhost/私网 Agent URL，仅建议本地开发开启 |
+| `PANDA_DATA_ENABLED` | `false` | 是否启用 PandaAI Quant 数据源 |
+| `PANDA_DATA_USERNAME` | 空 | 86 开头的数据服务账号，仅写入本机 `.env` |
+| `PANDA_DATA_PASSWORD` | 空 | 数据服务密码，仅写入本机 `.env` |
+| `PANDA_DATA_BASE_URL` | `http://pandadata.pandaaiquant.com` | Panda Data SDK 服务地址，通常无需修改 |
+| `PANDA_DATA_ACCESS_KEY` | 空 | 保护本系统数据查询网关的独立 Bearer Key；为空时网关关闭 |
+| `PANDA_DATA_PYTHON` | `python3` | 安装了 `panda_data` SDK 的 Python 可执行文件 |
+| `PANDA_DATA_TIMEOUT_MS` | `60000` | 单次 Panda Data SDK 调用时限 |
+| `PANDA_DATA_MAX_ROWS` | `500` | 单次响应最多返回的记录数 |
+| `PANDA_DATA_ALLOWED_METHODS` | 只读金融方法白名单 | 允许通过网关调用的 SDK 方法 |
 | `OPENAI_BASE_URL` | `https://llmx.tqx.ai/v1` | OpenAI-compatible 多模型评审网关 |
 | `OPENAI_API_KEY` | 空 | 网关 Key，只填写在本机 `.env` 或部署密钥中 |
 | `REVIEW_MODEL_OPENAI` | `g5.4` | OpenAI 视角评审模型 |
@@ -283,7 +337,7 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 
 ## Git 工作流
 
-项目使用 `codex/agent-review-platform` 功能分支开发。建议后续遵循：
+通用版本保留在 `codex/agent-review-platform`，金融版本在 `codex/finance-roast` 独立开发。建议后续遵循：
 
 1. 每个功能或修复使用独立 `codex/<topic>` 分支；
 2. 提交信息使用动词开头并描述用户可见结果；

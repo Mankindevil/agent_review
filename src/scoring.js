@@ -1,16 +1,16 @@
 import { average, clamp, round, stableNumber } from './utils.js';
 
 const COMPLEX_SIGNALS = [
-  /多步|multi[- ]?step|workflow|编排|orchestrat/i,
-  /审批|human.in.the.loop|确认|澄清|clarif/i,
-  /外部系统|api|database|数据库|检索|browser|工具/i,
-  /文件|document|pdf|合同|附件|artifact/i,
-  /制度|跨文档|multiple documents|交叉核对|cross[- ]?check/i,
-  /证据|风险|冲突|审查|verify|validation|合规/i,
-  /状态|记忆|memory|异步|async|long.running/i,
-  /规划|plan|分支|重试|retry|监控|monitor/i
+  /行情|财务|指数|行业|交易日历|data skill|数据查询|数据库|api/i,
+  /时点|截止日|样本期|滚动窗口|交易日|频率|复权|point.in.time|as.of/i,
+  /因子|ic|rank.?ic|分组回测|中性化|标准化|winsori[sz]|factor/i,
+  /回测|基准|手续费|滑点|换手|撮合|停牌|涨跌停|backtest/i,
+  /组合|持仓|风险暴露|归因|再平衡|回撤|压力测试|portfolio|drawdown/i,
+  /多步|multi[- ]?step|workflow|编排|orchestrat|多智能体|agent 协同/i,
+  /证据|来源|图表|研究报告|可解释|假设|局限|evidence|source/i,
+  /合规|权限|授权数据|投资建议|人工确认|human.in.the.loop|审计|reproduc/i
 ];
-const SIMPLE_SIGNALS = [/整理文件|重命名|摘要|翻译|改写|分类|format|summari[sz]e|translate|rename/i];
+const SIMPLE_SIGNALS = [/查股价|查行情|公司简介|新闻摘要|整理文件|重命名|摘要|翻译|改写|format|summari[sz]e|translate|rename/i];
 
 export function scoreComplexity(card, useCases = []) {
   const text = [card.description, ...(card.skills || []).flatMap((skill) => [skill.name, skill.description, ...(skill.tags || []), ...(skill.examples || [])]), ...useCases.map((item) => item.prompt)].join(' ');
@@ -19,19 +19,19 @@ export function scoreComplexity(card, useCases = []) {
   const skills = card.skills?.length || 0;
   const capabilityBonus = (card.capabilities?.streaming ? 5 : 0) + (card.capabilities?.pushNotifications ? 6 : 0) + (card.capabilities?.extensions?.length ? 4 : 0);
   const dimensions = {
-    stepDepth: clamp(18 + complexHits * 10 - simpleHits * 5),
-    toolDependency: clamp(12 + complexHits * 9 + skills * 3),
-    stateAndBranching: clamp(10 + complexHits * 8 + capabilityBonus),
-    uncertainty: clamp(22 + (useCases.length ? 8 : 0) + complexHits * 5),
-    repeatValue: clamp(26 + skills * 7 + useCases.length * 4 + complexHits * 4)
+    researchDepth: clamp(18 + complexHits * 10 - simpleHits * 5),
+    dataDependency: clamp(12 + complexHits * 9 + skills * 3),
+    temporalState: clamp(10 + complexHits * 8 + capabilityBonus),
+    decisionUncertainty: clamp(22 + (useCases.length ? 8 : 0) + complexHits * 5),
+    workflowReuse: clamp(26 + skills * 7 + useCases.length * 4 + complexHits * 4)
   };
   const score = round(average(Object.values(dimensions)));
   const verdict = score < 36 ? '模型直出更划算' : score < 60 ? 'Agent 价值存疑' : '值得 Agent 化';
   const reason = score < 36
-    ? '任务大多是单轮变换，固定流程带来的维护成本高于稳定性收益。'
+    ? '任务更像单次行情查询或文本变换，固定投研流程的维护成本高于稳定性收益。'
     : score < 60
-      ? '存在一些工具或多步信号，但还需证明流程复用率与失败恢复价值。'
-      : '任务包含多步决策、外部依赖或状态管理，Agent 编排能提供稳定收益。';
+      ? '存在数据或多步研究信号，但还需证明时点管理、回测复用与失败恢复价值。'
+      : '任务包含数据时点、研究编排、回测或组合风险约束，固定 Agent 工作流有明确价值。';
   return { score, verdict, reason, dimensions };
 }
 
@@ -39,11 +39,11 @@ export function mockProfessionalReview(reviewer, card, complexity, evaluationSee
   const seed = `${evaluationSeed ?? 'default'}:${reviewer.id}:${card.name}:${card.description}`;
   const base = stableNumber(seed, 66, 88) + (complexity.score >= 60 ? 2 : -2);
   const dimensions = {
-    domainDepth: clamp(base + stableNumber(`${seed}:depth`, -7, 6)),
-    workflowQuality: clamp(base + stableNumber(`${seed}:workflow`, -8, 7)),
-    failureHandling: clamp(base + stableNumber(`${seed}:failure`, -13, 3)),
-    outputContract: clamp(base + stableNumber(`${seed}:contract`, -8, 6)),
-    evaluability: clamp(base + stableNumber(`${seed}:eval`, -9, 6))
+    researchRigor: clamp(base + stableNumber(`${seed}:research`, -7, 6)),
+    dataDiscipline: clamp(base + stableNumber(`${seed}:data`, -8, 7)),
+    backtestIntegrity: clamp(base + stableNumber(`${seed}:backtest`, -13, 3)),
+    riskCompliance: clamp(base + stableNumber(`${seed}:risk`, -8, 6)),
+    reproducibility: clamp(base + stableNumber(`${seed}:reproducibility`, -9, 6))
   };
   const score = round(average(Object.values(dimensions)));
   const strongest = Object.entries(dimensions).sort((a, b) => b[1] - a[1])[0][0];
@@ -62,12 +62,12 @@ export function mockProfessionalReview(reviewer, card, complexity, evaluationSee
 
 export function judgeOutput(prompt, output, identity) {
   const content = String(output || '');
-  const lengthFit = clamp(45 + Math.min(content.length, 900) / 30);
-  const structure = /\n|[-*]\s|\d+[.)]/.test(content) ? 82 : 62;
-  const evidence = /因为|依据|evidence|source|文件|步骤|结果/i.test(content) ? 83 : 60;
-  const instruction = content.length > 25 ? 76 : 42;
-  const score = round(clamp(average([lengthFit, structure, evidence, instruction]) + stableNumber(`${identity}:${prompt}`, -5, 5)));
-  return { score, dimensions: { taskCompletion: instruction, reasoningEvidence: evidence, structure, usefulness: round(lengthFit) } };
+  const taskCompletion = content.length > 80 ? 80 : content.length > 25 ? 66 : 38;
+  const dataEvidence = /数据来源|来源[:：]|截至|as.?of|样本(?:期|区间)|起止日期|频率|口径|复权|交易日/i.test(content) ? 86 : 48;
+  const methodRigor = /\bIC\b|Rank.?IC|分组回测|基准|年化|最大回撤|夏普|换手|手续费|滑点|因子暴露|风险归因|置信区间/i.test(content) ? 86 : 50;
+  const riskDisclosure = /风险提示|假设|局限|不构成.{0,8}投资建议|未来收益|回撤|压力测试|授权数据/i.test(content) ? 88 : 44;
+  const score = round(clamp(average([taskCompletion, dataEvidence, methodRigor, riskDisclosure]) + stableNumber(`${identity}:${prompt}`, -4, 4)));
+  return { score, dimensions: { taskCompletion, dataEvidence, methodRigor, riskDisclosure } };
 }
 
 export function buildRoast(submittedAverage, claudeAverage, doubaoAverage, professionalAverage, complexity) {
@@ -86,17 +86,17 @@ export function buildRoast(submittedAverage, claudeAverage, doubaoAverage, profe
     tier = { code: 'NPC', label: 'NPC', tone: 'neutral', stamp: 'NPC' };
   }
   const headline = tier.code === 'HARD'
-    ? '不是套壳：它在同题对打里真把 Claude 复刻版压住了。'
+    ? '不是研报生成器套壳：它在同题研究里真把 Claude 复刻版压住了。'
     : tier.code === 'ELITE'
-      ? '能和 Claude 正面对线，这个 Agent 已经挤出路人局。'
-    : tier.code === 'FLOP'
+      ? '研究链路经得住同题对线，这个 Agent 已经挤出路人局。'
+      : tier.code === 'FLOP'
       ? complexity.score < 36
-        ? '这活一个好提示词就能干，硬上 Agent 属于给订书机装自动驾驶。'
-        : '流程画得挺热闹，结果连豆包基线都没守住。'
-      : '能跑，但还没跑出基线包围圈：标准 NPC 表现。';
+        ? '查一次数据就收工，硬上 Agent 属于给行情快照配基金经理。'
+        : '回测图画得挺热闹，结果连豆包研究基线都没守住。'
+      : '能跑，但研究证据还没跑出基线包围圈：标准 NPC 表现。';
   return { tier, headline, deltaClaude, deltaDoubao, professionalAverage: round(professionalAverage, 1) };
 }
 
 function labelDimension(key) {
-  return ({ domainDepth: '领域深度', workflowQuality: '流程设计', failureHandling: '异常处理', outputContract: '输出契约', evaluability: '可评测性' })[key] || key;
+  return ({ researchRigor: '研究严谨性', dataDiscipline: '数据纪律', backtestIntegrity: '回测可信度', riskCompliance: '风险合规', reproducibility: '可复现性' })[key] || key;
 }

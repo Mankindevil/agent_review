@@ -1,128 +1,101 @@
-# 评测与打分规则
+# 金融评测与打分规则
 
-本文件记录当前版本实际执行的评测规则。网页版本源码为 [`public/methodology.html`](../public/methodology.html)，运行项目后访问 `/methodology.html`。规则实现以 `src/a2a.js`、`src/scoring.js`、`src/prompts.js` 和 `src/pipeline.js` 为准。
+本文件记录金融版本当前实际执行的规则。网页说明见 [`public/methodology.html`](../public/methodology.html)，实现以 `src/a2a.js`、`src/scoring.js`、`src/prompts.js` 和 `src/pipeline.js` 为准。
 
 ## 0. A2A 准入
 
-准入只决定能否创建评测，不计分。Agent Card 必须：
+准入只决定能否创建评测，不计分。Agent Card 必须是 JSON 对象，包含非空 `name`、`description`，至少声明一个具备 `id / name / description` 的 skill，并提供 A2A 1.0 `supportedInterfaces` 或兼容 0.3 的顶层 `url`。
 
-- 是 JSON 对象，包含非空 `name`、`description`；
-- 至少声明一个 skill，且每个 skill 都有 `id`、`name`、`description`；
-- 包含 A2A 1.0 `supportedInterfaces`，或兼容 0.3 的顶层 `url`。
+Card URL / 服务发现还检查 HTTP(S)、私网 URL 策略、1 MB 响应上限与禁止重定向。失败返回 HTTP 400，不进入后续阶段。
 
-失败返回 HTTP 400，不进入后续阶段。Card URL / 服务发现还检查 HTTP(S)、私网 URL 策略、1 MB 响应上限与禁止重定向。
+## 1. 投研 Agent 必要性
 
-## 1. Agent 必要性
+程序拼接 Card 描述、skills 的名称/描述/tags/examples 和全部测试 prompt，扫描 8 组金融复杂信号：
 
-程序先把以下字段以空格拼成一段文本：Card 的 `description`；每个 skill 的 `name`、`description`、`tags[]`、`examples[]`；全部测试用例的 `prompt`。URL、Runtime 输出和源码不参与必要性信号匹配。
+| 组 | 信号 |
+|---|---|
+| G1 | 行情、财务、指数、行业、交易日历、Data Skill、API |
+| G2 | 截止日、样本期、滚动窗口、交易日、频率、复权、point-in-time |
+| G3 | 因子、IC、Rank IC、分组回测、中性化、标准化 |
+| G4 | 回测、基准、手续费、滑点、换手、撮合、停牌、涨跌停 |
+| G5 | 组合、持仓、风险暴露、归因、再平衡、回撤、压力测试 |
+| G6 | 多步、workflow、编排、多智能体、Agent 协同 |
+| G7 | 证据、来源、图表、研究报告、可解释、假设、局限 |
+| G8 | 合规、权限、授权数据、投资建议、人工确认、审计、可复现 |
 
-变量定义：
+简单问答组 `S` 匹配查股价、查行情、公司简介、新闻摘要、整理文件、重命名、摘要、翻译、改写等单轮任务。变量：
 
-- `C`（Complex signal groups）：命中的复杂信号组数量，取值 0–8；
-- `S`（Simple-transform signal）：是否命中简单变换组，取值 0 或 1；
-- `K`（Skill count）：Card 的 skill 数量；字母 S 已用于简单信号，因此取 skill 中的 K；
-- `N`（Number of use cases）：测试用例数量，正常范围 1–5；
-- `U`（Use-case indicator）：有测试用例为 1，否则为 0；正常提交恒为 1；
-- `B`（Capability bonus）：`streaming=true` 加 5，`pushNotifications=true` 加 6，`extensions` 非空加 4，可叠加，范围 0–15。
+- `C`：命中的复杂信号组数量，0–8；
+- `S`：是否命中简单问答组，0 或 1；
+- `K`：skill 数量；
+- `N`：测试用例数量；
+- `U`：是否存在测试用例；
+- `B`：`streaming +5`、`pushNotifications +6`、非空 `extensions +4`。
 
-这些变量只在“必要性”阶段内有效。最终分档章节会重新定义局部变量，其中 `C` 表示 Claude Code 均分；它与本节表示 Complex signals 的 `C` 不会进入同一个公式。
-
-复杂信号分为 8 个正则组。每个组扫描一次完整拼接文本，不区分英文大小写；组内任意词出现即命中该组。同组重复出现只计 1，不同组可以由同一段文字同时命中。
-
-| 组 | 含义 | 当前匹配词 | 命中效果 |
-|---|---|---|---|
-| G1 | 多步编排 | 多步、multi-step / multi step、workflow、编排、`orchestrat*` | `C + 1` |
-| G2 | 人机节点 | 审批、human-in-the-loop、确认、澄清、`clarif*` | `C + 1` |
-| G3 | 外部系统 | 外部系统、API、database、数据库、检索、browser、工具 | `C + 1` |
-| G4 | 文件文档 | 文件、document、PDF、合同、附件、artifact | `C + 1` |
-| G5 | 跨文档核对 | 制度、跨文档、multiple documents、交叉核对、cross-check / cross check | `C + 1` |
-| G6 | 证据与合规 | 证据、风险、冲突、审查、verify、validation、合规 | `C + 1` |
-| G7 | 状态与异步 | 状态、记忆、memory、异步、async、long-running | `C + 1` |
-| G8 | 规划与恢复 | 规划、plan、分支、重试、retry、监控、monitor | `C + 1` |
-
-简单变换组匹配：整理文件、重命名、摘要、翻译、改写、分类、format、summarize / summarise、translate、rename。无论命中多少个词都只令 `S=1`。复杂组与简单组可同时命中，例如“整理文件”会命中 G4，同时令 `S=1`。
-
-`clamp` 的默认上下限是 0 和 100，准确实现为：
+五维公式：
 
 ```text
-clamp(x) = min(100, max(0, x))
+研究链路       = clamp(18 + 10C - 5S)
+数据依赖       = clamp(12 + 9C + 3K)
+时点与状态     = clamp(10 + 8C + B)
+决策不确定性   = clamp(22 + 8U + 5C)
+工作流复用     = clamp(26 + 7K + 4N + 4C)
+必要性总分     = round(五维算术平均)
 ```
 
-因此 `x < 0` 返回 0，`0 ≤ x ≤ 100` 返回 x，`x > 100` 返回 100。
+`clamp(x) = min(100, max(0, x))`。阈值：0–35 为“模型直出更划算”，36–59 为“Agent 价值存疑”，60–100 为“值得 Agent 化”。必要性低于 36 时最终评级强制为“拉”。
 
-五维公式均限制在 0–100：
+## 2. 金融专业度审稿
+
+每个模型评审只看公开 Agent Card，按以下五维分别给出 0–100 分：
+
+1. `researchRigor`：研究严谨性；
+2. `dataDiscipline`：数据来源、口径、时点与授权纪律；
+3. `backtestIntegrity`：未来函数、历史成分、成交时点、成本、滑点和可交易性；
+4. `riskCompliance`：回撤、暴露、压力测试、局限与非投资建议；
+5. `reproducibility`：参数、版本、样本期、seed 与输出契约。
+
+后端使用模型返回的 `score` 作为该模型总分。仅成功且 `score > 0` 的评审进入算术平均；全部失败时专业度为 0。专业度用于报告和审计，目前不直接改变最终四档决策树。
+
+## 3. Description-only 研究基线
+
+Claude Code、Cursor Agent 与 Doubao Agent 只收到顶层 `description` 原文，不能看到 name、skills、examples、tags、capabilities、接口、源码或提交 Agent 的输出。
+
+生成的金融 Skill 必须记录数据来源、口径、截止时点、样本区间，防范未来数据泄漏，报告基准、交易成本、风险与局限，并声明不构成投资建议。构建失败时该 Runtime 的各局实战分为 0，其他选手继续执行。
+
+## 4. 同题研究实战分
+
+评分只读取可见输出：
 
 ```text
-步骤深度   = clamp(18 + 10C - 5S)
-工具依赖   = clamp(12 + 9C + 3K)
-状态与分支 = clamp(10 + 8C + B)
-不确定性   = clamp(22 + 8U + 5C)
-复用价值   = clamp(26 + 7K + 4N + 4C)
-必要性总分 = round(五维算术平均)
+任务完成 = 长度 > 80 ? 80 : 长度 > 25 ? 66 : 38
+数据证据 = 命中来源/截至/样本区间/频率/口径/复权/交易日 ? 86 : 48
+方法严谨 = 命中 IC/分组回测/基准/年化/回撤/夏普/换手/成本/暴露/置信区间 ? 86 : 50
+风险披露 = 命中风险提示/假设/局限/不构成投资建议/未来收益/压力测试 ? 88 : 44
+单局分   = round(clamp(四维平均 + 稳定扰动[-4, +4]))
 ```
 
-手算示例：若 `C=5、S=0、K=1、N=2、U=1、B=5`，五维依次为 68、60、55、55、61；总分为 `round((68+60+55+55+61)/5) = round(59.8) = 60`。
+执行失败时覆盖为 0。每个选手的最终实战分是全部测试用例的算术平均，保留 1 位小数。
 
-当前命中属于可审计的关键词/正则启发式，不是语义理解，可能存在漏判或字符串误命中。算法保持透明是为了便于复算，不代表必要性分是客观真理。
-
-阈值：
-
-- 0–35：模型直出更划算，最终评级强制为“拉”；
-- 36–59：Agent 价值存疑；
-- 60–100：值得 Agent 化。
-
-## 2. 多模型专业度
-
-每个评审只看公开 Card，并独立给出领域深度、流程设计、异常处理、输出契约、可评测性五个维度，以及总分、评语与首要风险。
-
-后端使用模型返回的 `score` 作为该模型总分，不从五维二次计算。仅 `score > 0` 的成功评审进入专业度算术平均；调用失败保留 0 分和错误，但不进入平均。全部失败时专业度为 0。
-
-专业度进入报告与审计，但当前不直接参与最终四档决策树。Demo 模式的评审是由 Card、reviewer ID 与 seed 确定生成的模拟结果。
-
-## 3. Runtime Skill 复刻
-
-Claude Code、Cursor Agent 与 Doubao Agent 只接收 Agent Card 顶层 `description` 的同一段原文，生成包含 `name`、`description`、`instructions`、`tools` 的 Skill。它们不接收 Card 的 name、skills、examples、tags、capabilities、接口地址，也不接收提交 Agent 的实现或输出。构建阶段不打 0–100 分。
-
-这是刻意设置的 description-only 基线：它衡量“只把产品描述交给强模型，临时直出一个 Skill”能做到什么程度。若把完整 Card 或原 Agent 产物交给 Runtime 再增强，得到的就不再是独立基线，不能用于判断固定 Agent 流程是否真的带来增益。
-
-模型输出无效 JSON 或缺少 Skill 必填字段时，携带格式纠错提示再试一次。构建最终失败时，该 Runtime 在每个对测用例中记失败，实战分强制为 0；其他选手继续运行。
-
-## 4. 同 Prompt 实战分
-
-评分只读取可见输出。四维基础分：
-
-```text
-任务完成 = 输出长度 > 25 ? 76 : 42
-依据证据 = 命中 因为/依据/evidence/source/文件/步骤/结果 ? 83 : 60
-结构表达 = 含换行、项目符号或编号 ? 82 : 62
-可用性   = clamp(45 + min(输出长度, 900) / 30)
-单局分   = round(clamp(四维平均 + 稳定扰动[-5, +5]))
-```
-
-执行失败时覆盖为 0。每个选手的最终实战分为其全部测试用例分数的算术平均，保留 1 位小数。
-
-当前启发式偏好较长、有结构、带依据词的输出，不能验证事实真假。生产版本需要结构化验收断言、独立 Judge 与人工抽检。
+这套启发式能检查“有没有交代研究纪律”，不能仅凭文本验证行情、财务数据或回测收益真假。接入主办方 Data / Research Skills 后，应增加 point-in-time 快照复算、回测结果哈希、结构化验收断言和人工抽检。
 
 ## 5. 最终分档
 
-设 `A` 为提交 Agent 均分，`C` 为 Claude Code 均分，`D` 为豆包均分，`N` 为必要性分。按顺序命中第一条：
+设 `A` 为提交 Agent 均分，`C` 为 Claude Code 均分，`D` 为豆包均分，`N` 为必要性分，按顺序命中第一条：
 
 1. `N < 36`：拉；
 2. `A - C >= 3`：夯；
 3. `A - C >= 0`：人上人；
 4. `A - D < 0`：拉；
-5. 其他情况：NPC。
+5. 其他：NPC。
 
-因此必要性不足拥有最高优先级。专业度当前不改变这棵分档树。
+## 6. 模式、重试与数据边界
 
-## 6. 重试、Seed 与执行模式
+- `demo`：完整走通流程，但模型、Runtime 或提交 Agent 输出可能是确定性模拟；
+- `live`：真实调用对应适配器；
+- `mixed`：部分真实、部分模拟或失败；
+- `failed`：该步骤执行失败。
 
-- 重跑模型：替换指定评审结果；
-- 重建 Runtime：替换 Skill，并重新执行全部同 Prompt 对测用例；
-- 重跑一局：替换指定用例、指定选手结果。
+重试会替换旧结果并重算专业度、实战均分与最终评级，不取历史最高分。根 seed 为 reviewer、Runtime、用例和 Judge 派生稳定子 seed。
 
-重试不取历史最高分。最新结果原位替换后，专业度、各选手均分、差值和最终评级全部重算，前后摘要写入 `retryHistory`。
-
-根 seed 为 reviewer、Runtime、用例与 Judge 派生稳定子 seed。OpenAI-compatible 与方舟链路会发送 seed；Cursor CLI 和外部 A2A Agent 只能尽力复现。
-
-结果中的 `mode` 会区分 `live`、`demo`、`rules`、`failed` 与 `mixed`，不得将混合或模拟评测解释为全链路真实结果。
+金融结果只有在真实数据与投研 Skills 成功调用、数据版本和时点可审计、回测配置可复现时，才可以解释为一次真实技术实验；无论何种模式，系统输出都不构成投资建议。

@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="锐评局 A2A Agent 评测各阶段的校验、打分公式、阈值与最终分档规则。">
-  <title>评测规则说明书 · 锐评局</title>
+  <meta name="description" content="金融锐评局公开评分合同：A2A 准入、投研必要性、数据纪律、回测可信度、风险合规与同题压测。">
+  <title>金融评测规则说明书 · 锐评局</title>
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/methodology.css">
 </head>
@@ -13,7 +13,7 @@
   <header class="site-header">
     <a class="brand" href="/" aria-label="返回锐评局首页">
       <span class="brand-mark">锐</span>
-      <span><b>锐评局</b><small>AGENT VERDICT LAB</small></span>
+      <span><b>锐评局</b><small>FINANCE AGENT VERDICT</small></span>
     </a>
     <nav>
       <a class="nav-button" href="/">发起评测</a>
@@ -27,20 +27,20 @@
       <div class="method-hero__index"><span>SPEC</span><strong>01</strong><small>SCORING<br>CONTRACT</small></div>
       <div class="method-hero__copy">
         <div class="method-kicker"><span>PUBLIC EVALUATION SPECIFICATION</span><span>IMPLEMENTED / V0.1</span></div>
-        <h1>每一分，<br>到底怎么来的？</h1>
-        <p>这不是一句“模型觉得不错”。下面公开当前代码实际执行的校验条件、公式、失败处理和最终分档顺序。看完后，你应该能够用同一份输入手工复算大部分结果。</p>
+        <h1>一条净值曲线，<br>到底有几分可信？</h1>
+        <p>这不是一句“模型觉得不错”。下面公开当前代码实际执行的 A2A 校验、金融研究硬指标、失败处理和最终分档顺序。看完后，你应该能分清研究设计审查与真实数据验算的边界。</p>
       </div>
       <aside class="method-warning">
         <span>先说结论</span>
-        <b>评分是可比较的工程信号，不是真理。</b>
-        <p>当前必要性与输出质量使用透明启发式；专业度由多模型给分。它适合产品验收和相对比较，不应替代法律、医疗或安全审计。</p>
+        <b>能审研究纪律，不凭空验证收益。</b>
+        <p>未接入主办方 Data / Research Skills 时，系统只检查数据时点、回测口径、风险披露与可复现性，绝不把模拟输出当成真实金融结论。</p>
       </aside>
     </section>
 
     <section class="rule-strip" aria-label="规则摘要">
       <article><b>GATE</b><span>A2A 校验不通过</span><strong>拒绝评测</strong></article>
-      <article><b>5 × 20%</b><span>Agent 必要性</span><strong>五维等权</strong></article>
-      <article><b>DEFAULT 4</b><span>模型专业度</span><strong>有效分均值</strong></article>
+      <article><b>5 × 20%</b><span>投研 Agent 必要性</span><strong>五维等权</strong></article>
+      <article><b>DEFAULT 4</b><span>金融研究审稿</span><strong>有效分均值</strong></article>
       <article><b>4 TIERS</b><span>最终评级</span><strong>夯 / 人上人 / NPC / 拉</strong></article>
     </section>
 
@@ -48,10 +48,10 @@
       <aside class="method-toc" aria-label="本页目录">
         <small>STAGE INDEX</small>
         <a href="#protocol"><i>00</i><span>A2A 准入</span></a>
-        <a href="#necessity"><i>01</i><span>必要性</span></a>
-        <a href="#professional"><i>02</i><span>专业度</span></a>
+        <a href="#necessity"><i>01</i><span>投研必要性</span></a>
+        <a href="#professional"><i>02</i><span>金融专业度</span></a>
         <a href="#runtime"><i>03</i><span>Description 直出</span></a>
-        <a href="#battle"><i>04</i><span>同题对打</span></a>
+        <a href="#battle"><i>04</i><span>同题研究压测</span></a>
         <a href="#verdict"><i>05</i><span>最终分档</span></a>
         <a href="#retry"><i>06</i><span>重试与重算</span></a>
         <a href="#boundaries"><i>07</i><span>边界与改进</span></a>
@@ -81,7 +81,7 @@
         </section>
 
         <section class="rule-section" id="necessity">
-          <header><span>STAGE 01 / RULE ENGINE</span><h2>Agent 必要性：五维等权</h2><p>判断固定 Agent 流程是否真的比一次模型调用更有价值。满分 100，五个维度各占 20%。</p></header>
+          <header><span>STAGE 01 / RULE ENGINE</span><h2>投研 Agent 必要性：五维等权</h2><p>判断任务是否真的需要数据、时点、回测、风险与多步研究链路，而不是一次行情问答。满分 100，五个维度各占 20%。</p></header>
           <div class="notation">
             <div><b>C</b><span><strong>Complex signal groups</strong>命中的复杂信号组数，取值 0–8</span></div>
             <div><b>S</b><span><strong>Simple-transform signal</strong>是否命中简单变换组，取值 0 或 1</span></div>
@@ -104,39 +104,39 @@
                 <li>拼接 Card 描述、每个 skill 的名称/描述/tags/examples，以及全部测试 prompt；</li>
                 <li>8 个复杂信号正则分别扫描一次完整文本，不区分中英文大小写；</li>
                 <li>某组匹配至少一次，该组记 1；同组重复出现不累计；</li>
-                <li>同一段文字可以同时命中不同组，例如“跨文档合同审查”会命中 3 组。</li>
+                <li>同一段文字可以同时命中不同组，例如“历史成分股月频因子回测”会命中时点、因子与回测组。</li>
               </ol>
             </article>
           </div>
           <div class="signal-matrix" aria-label="复杂信号命中表">
             <header><span>组</span><span>含义</span><span>当前匹配词；任一出现即命中</span><span>计数</span></header>
-            <article><i>G1</i><b>多步编排</b><code>多步 / multi-step / multi step / workflow / 编排 / orchestrat*</code><strong>C +1</strong></article>
-            <article><i>G2</i><b>人机节点</b><code>审批 / human-in-the-loop / 确认 / 澄清 / clarif*</code><strong>C +1</strong></article>
-            <article><i>G3</i><b>外部系统</b><code>外部系统 / API / database / 数据库 / 检索 / browser / 工具</code><strong>C +1</strong></article>
-            <article><i>G4</i><b>文件文档</b><code>文件 / document / PDF / 合同 / 附件 / artifact</code><strong>C +1</strong></article>
-            <article><i>G5</i><b>跨文档核对</b><code>制度 / 跨文档 / multiple documents / 交叉核对 / cross-check</code><strong>C +1</strong></article>
-            <article><i>G6</i><b>证据与合规</b><code>证据 / 风险 / 冲突 / 审查 / verify / validation / 合规</code><strong>C +1</strong></article>
-            <article><i>G7</i><b>状态与异步</b><code>状态 / 记忆 / memory / 异步 / async / long-running</code><strong>C +1</strong></article>
-            <article><i>G8</i><b>规划与恢复</b><code>规划 / plan / 分支 / 重试 / retry / 监控 / monitor</code><strong>C +1</strong></article>
+            <article><i>G1</i><b>金融数据</b><code>行情 / 财务 / 指数 / 行业 / 交易日历 / Data Skill / API</code><strong>C +1</strong></article>
+            <article><i>G2</i><b>时点纪律</b><code>截止日 / 样本期 / 滚动窗口 / 频率 / 复权 / point-in-time</code><strong>C +1</strong></article>
+            <article><i>G3</i><b>因子统计</b><code>因子 / IC / Rank IC / 分组回测 / 中性化 / 标准化</code><strong>C +1</strong></article>
+            <article><i>G4</i><b>交易回测</b><code>回测 / 基准 / 手续费 / 滑点 / 换手 / 停牌 / 涨跌停</code><strong>C +1</strong></article>
+            <article><i>G5</i><b>组合风险</b><code>组合 / 持仓 / 风险暴露 / 归因 / 再平衡 / 回撤 / 压力测试</code><strong>C +1</strong></article>
+            <article><i>G6</i><b>流程编排</b><code>多步 / workflow / 编排 / 多智能体 / Agent 协同</code><strong>C +1</strong></article>
+            <article><i>G7</i><b>证据解释</b><code>证据 / 来源 / 图表 / 研究报告 / 可解释 / 假设 / 局限</code><strong>C +1</strong></article>
+            <article><i>G8</i><b>合规审计</b><code>合规 / 权限 / 授权数据 / 投资建议 / 人工确认 / 可复现</code><strong>C +1</strong></article>
           </div>
-          <div class="simple-signal"><b>S / 简单变换组</b><p><code>整理文件 / 重命名 / 摘要 / 翻译 / 改写 / 分类 / format / summarize / translate / rename</code></p><span>命中任意个都只令 S=1。复杂组与简单组可同时命中：例如“整理文件”会令 G4 命中、同时令 S=1。</span></div>
+          <div class="simple-signal"><b>S / 单轮金融问答组</b><p><code>查股价 / 查行情 / 公司简介 / 新闻摘要 / 摘要 / 翻译 / 改写</code></p><span>命中任意个都只令 S=1。单次查询没有时点对齐、组合状态或回测链路时，优先交给一次模型调用。</span></div>
           <div class="formula-list">
-            <article><span>步骤深度</span><code>clamp(18 + 10C − 5S)</code><small>复杂步骤加分；简单变换扣分。</small></article>
-            <article><span>工具依赖</span><code>clamp(12 + 9C + 3K)</code><small>复杂信号与 skill 数共同反映工具编排需求。</small></article>
-            <article><span>状态与分支</span><code>clamp(10 + 8C + B)</code><small>Card 声明的 streaming、push 与 extensions 进入能力加分。</small></article>
-            <article><span>不确定性</span><code>clamp(22 + 8U + 5C)</code><small>需要澄清、判断和恢复的任务更适合 Agent。</small></article>
-            <article><span>复用价值</span><code>clamp(26 + 7K + 4N + 4C)</code><small>skill 与测试场景越多，固定流程复用价值越高。</small></article>
+            <article><span>研究链路</span><code>clamp(18 + 10C − 5S)</code><small>数据、回测和风险环节加分；单轮问答扣分。</small></article>
+            <article><span>数据依赖</span><code>clamp(12 + 9C + 3K)</code><small>复杂信号与 Skill 数共同反映数据和工具依赖。</small></article>
+            <article><span>时点与状态</span><code>clamp(10 + 8C + B)</code><small>Card 声明的 streaming、push 与 extensions 进入能力加分。</small></article>
+            <article><span>决策不确定性</span><code>clamp(22 + 8U + 5C)</code><small>需要假设、归因、约束和失败恢复的任务更适合 Agent。</small></article>
+            <article><span>工作流复用</span><code>clamp(26 + 7K + 4N + 4C)</code><small>Skill 与测试场景越多，固定研究流程复用价值越高。</small></article>
           </div>
           <div class="equation"><span>必要性总分</span><strong>round((五维分数之和) ÷ 5)</strong><small>所有维度先限制到 0–100。</small></div>
           <article class="worked-example">
             <header><div><span>WORKED EXAMPLE / 手算示例</span><h3>5 组复杂信号、1 个 Skill、2 个用例、仅开启流式能力</h3></div><strong>60</strong></header>
             <div class="example-inputs"><code>C=5</code><code>S=0</code><code>K=1</code><code>N=2</code><code>U=1</code><code>B=5</code></div>
             <div class="example-math">
-              <p><b>步骤深度</b><span>clamp(18 + 10×5 − 5×0)</span><strong>68</strong></p>
-              <p><b>工具依赖</b><span>clamp(12 + 9×5 + 3×1)</span><strong>60</strong></p>
-              <p><b>状态与分支</b><span>clamp(10 + 8×5 + 5)</span><strong>55</strong></p>
-              <p><b>不确定性</b><span>clamp(22 + 8×1 + 5×5)</span><strong>55</strong></p>
-              <p><b>复用价值</b><span>clamp(26 + 7×1 + 4×2 + 4×5)</span><strong>61</strong></p>
+              <p><b>研究链路</b><span>clamp(18 + 10×5 − 5×0)</span><strong>68</strong></p>
+              <p><b>数据依赖</b><span>clamp(12 + 9×5 + 3×1)</span><strong>60</strong></p>
+              <p><b>时点与状态</b><span>clamp(10 + 8×5 + 5)</span><strong>55</strong></p>
+              <p><b>决策不确定性</b><span>clamp(22 + 8×1 + 5×5)</span><strong>55</strong></p>
+              <p><b>工作流复用</b><span>clamp(26 + 7×1 + 4×2 + 4×5)</span><strong>61</strong></p>
             </div>
             <footer><code>round((68 + 60 + 55 + 55 + 61) ÷ 5) = round(59.8) = 60</code><span>落入“值得 Agent 化”区间。</span></footer>
           </article>
@@ -149,14 +149,14 @@
         </section>
 
         <section class="rule-section" id="professional">
-          <header><span>STAGE 02 / MODEL PANEL</span><h2>专业度：多模型独立盲审</h2><p>评审只看公开 Agent Card；必要性分只作为背景，不能直接复制为专业度分。</p></header>
-          <div class="dimension-table" role="table" aria-label="专业度评审维度">
+          <header><span>STAGE 02 / MODEL PANEL</span><h2>金融专业度：多模型独立审稿</h2><p>评审只看公开 Agent Card；没有声明的数据口径、时点与风险控制一律按缺失处理，不脑补实现。</p></header>
+          <div class="dimension-table" role="table" aria-label="金融专业度评审维度">
             <div class="table-head" role="row"><span>维度</span><span>主要看什么</span><span>常见失分项</span></div>
-            <div role="row"><b>领域深度</b><span>约束、术语、证据与业务边界</span><small>只有泛化描述，没有领域规则</small></div>
-            <div role="row"><b>流程设计</b><span>步骤顺序、分支、工具与人工节点</span><small>“分析并输出”式空流程</small></div>
-            <div role="row"><b>异常处理</b><span>超时、缺参、失败恢复、回滚与升级</span><small>默认永远成功</small></div>
-            <div role="row"><b>输出契约</b><span>格式、字段、证据和完成定义</span><small>只有自然语言承诺，无可解析结构</small></div>
-            <div role="row"><b>可评测性</b><span>示例、验收点、成功/失败判据</span><small>无法从可见结果判断是否完成</small></div>
+            <div role="row"><b>研究严谨性</b><span>问题定义、假设、统计方法、基准与稳健性</span><small>只谈收益，不说明假设和对照组</small></div>
+            <div role="row"><b>数据纪律</b><span>来源、口径、截止时点、历史成分与授权边界</span><small>未来函数、幸存者偏差、复权含糊</small></div>
+            <div role="row"><b>回测可信度</b><span>成交时点、成本、滑点、可交易性和样本外验证</span><small>信号即成交、零成本、忽略停牌涨跌停</small></div>
+            <div role="row"><b>风险合规</b><span>回撤、暴露、压力测试、局限和非投资建议</span><small>承诺收益、荐股或绕过授权数据</small></div>
+            <div role="row"><b>可复现性</b><span>参数、版本、样本期、随机种子与输出契约</span><small>只有结论，无法重复实验</small></div>
           </div>
           <div class="rule-grid two">
             <article class="rule-card">
@@ -199,19 +199,19 @@
         </section>
 
         <section class="rule-section" id="battle">
-          <header><span>STAGE 04 / ARENA</span><h2>同 Prompt 对打：只看可见最终输出</h2><p>每个用例分别运行提交 Agent 与三个复刻 Skill。评分器不读取隐藏思维链，也不因为模型品牌加分。</p></header>
+          <header><span>STAGE 04 / ARENA</span><h2>同题研究压测：只看可见最终输出</h2><p>每个用例分别运行提交 Agent 与三个复刻 Skill。评分器不读取隐藏思维链，也不因为收益数字更夸张而加分。</p></header>
           <div class="judge-grid">
-            <article><span>任务完成</span><b>76</b><p>输出长度大于 25 字符；否则 42。</p></article>
-            <article><span>依据证据</span><b>83</b><p>出现“因为 / 依据 / evidence / source / 文件 / 步骤 / 结果”等信号；否则 60。</p></article>
-            <article><span>结构表达</span><b>82</b><p>存在换行、项目符号或编号列表；否则 62。</p></article>
-            <article><span>可用性</span><b>45–75</b><p><code>45 + min(输出长度, 900) ÷ 30</code></p></article>
+            <article><span>任务完成</span><b>38–80</b><p>输出大于 80 字为 80；26–80 字为 66；否则 38。</p></article>
+            <article><span>数据证据</span><b>48 / 86</b><p>是否交代来源、截至时点、样本区间、频率、口径或复权。</p></article>
+            <article><span>方法严谨</span><b>50 / 86</b><p>是否报告 IC、基准、收益风险、换手、成本、暴露或置信区间。</p></article>
+            <article><span>风险披露</span><b>44 / 88</b><p>是否声明假设、局限、回撤、压力测试与不构成投资建议。</p></article>
           </div>
-          <div class="equation"><span>单局实战分</span><strong>round(clamp(四维均值 + seed 稳定扰动))</strong><small>稳定扰动范围 −5 到 +5；执行失败时无论公式结果多少都覆盖为 0。</small></div>
+          <div class="equation"><span>单局实战分</span><strong>round(clamp(四维均值 + seed 稳定扰动))</strong><small>稳定扰动范围 −4 到 +4；执行失败时无论公式结果多少都覆盖为 0。</small></div>
           <div class="rule-grid two">
             <article class="rule-card"><h3>多用例汇总</h3><p>每个选手的实战均分 = 该选手所有测试用例分数的算术平均，保留 1 位小数。</p></article>
             <article class="rule-card"><h3>“同 Prompt”的含义</h3><p>提交 Agent 收到原始 prompt；Runtime 执行提示会带上刚生成的 Skill，但其中的用户原始 prompt 不改写。当前评分不使用用例中额外的结构化验收点。</p></article>
           </div>
-          <div class="mode-callout warning"><b>当前启发式的已知偏差</b><span>较长、有列表、出现“依据”等词的输出更容易得分；它无法验证事实真假或领域结论正确性。生产版应增加规则断言、独立 Judge 与人工抽检。</span></div>
+          <div class="mode-callout warning"><b>数据接入边界</b><span>当前规则能识别研究纪律信号，但不能凭文本验证行情、财务数据和回测数字真假。接入主办方 Data / Research Skills 后，应增加时点快照复算、回测结果哈希、结构化断言与人工抽检。</span></div>
         </section>
 
         <section class="rule-section" id="verdict">
@@ -241,8 +241,8 @@
           <header><span>STAGE 07 / DISCLOSURE</span><h2>你应该如何解读结果</h2><p>报告同时标注 LIVE、DEMO、RULES、FAILED 或 MIXED，避免把模拟产物误认为真实调用。</p></header>
           <div class="boundary-list">
             <article><b>能说明</b><p>同一套公开规则下的相对表现、Agent Card 的工程完整度、可见输出质量、各适配器是否成功。</p></article>
-            <article><b>不能说明</b><p>事实绝对正确、业务长期稳定、生产安全、成本最优，或某个模型品牌的普遍能力。</p></article>
-            <article><b>下一版重点</b><p>结构化验收断言、匿名随机排序、独立 Judge、重复采样置信区间、成本与耗时进入报告。</p></article>
+            <article><b>不能说明</b><p>没有真实 Data Skills 时，不能证明回测收益、因子有效性或组合风险数值正确，更不能作为投资建议。</p></article>
+            <article><b>数据接入后</b><p>增加 point-in-time 快照复算、历史成分校验、成本敏感性、样本外测试、结果哈希和独立 Judge。</p></article>
           </div>
           <footer class="source-note">
             <div><span>SOURCE OF TRUTH</span><b>当前页面对应实际代码</b></div>

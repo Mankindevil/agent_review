@@ -42,7 +42,7 @@ export async function reviewAgent(reviewer, card, complexity, mode, signal, samp
 }
 
 export function normalizeProfessionalReview(value) {
-  const dimensionKeys = ['domainDepth', 'workflowQuality', 'failureHandling', 'outputContract', 'evaluability'];
+  const dimensionKeys = ['researchRigor', 'dataDiscipline', 'backtestIntegrity', 'riskCompliance', 'reproducibility'];
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('专业度评审必须返回 JSON 对象');
   assertScore(value.score, 'score');
   if (!value.dimensions || typeof value.dimensions !== 'object' || Array.isArray(value.dimensions)) throw new TypeError('专业度评审缺少 dimensions 对象');

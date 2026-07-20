@@ -213,8 +213,8 @@ export class EvaluationPipeline {
       const startedAt = Date.now();
       await this.update(item, {
         progress: 28 + professionalReviews.length * 8,
-        stage: `${reviewer.name} 正在盲审`,
-        activeWork: { type: 'review', key: reviewer.id, label: `${reviewer.name} 正在盲审`, target: reviewer.model, detail: '五维评分、评语与首要风险生成中', index: professionalReviews.length + 1, total: reviewers.length, retry: false }
+        stage: `${reviewer.name} 正在审稿`,
+        activeWork: { type: 'review', key: reviewer.id, label: `${reviewer.name} 正在审稿`, target: reviewer.model, detail: '五项金融研究指标、评语与首要风险生成中', index: professionalReviews.length + 1, total: reviewers.length, retry: false }
       }, {
         level: 'info', source: 'MODEL', phase: 'review', text: `${reviewer.model} 接过了答卷`, mode: item.mode
       });
@@ -350,7 +350,7 @@ function resolveRetryStep(item, input = {}) {
     const existing = item.professional?.reviews?.find((review) => [retryReviewResultKey(review), review.model, review.reviewer].includes(key));
     const reviewer = configuredReviewers().find((candidate) => [retryReviewerKey(candidate), candidate.model, candidate.name].includes(key) || (existing && candidate.name === existing.reviewer));
     if (!reviewer) throw badRetryRequest('评审模型不存在或当前未配置');
-    return { type, key: retryReviewerKey(reviewer), reviewerName: reviewer.name, label: `重新盲审 · ${reviewer.model}`, shortLabel: reviewer.name };
+    return { type, key: retryReviewerKey(reviewer), reviewerName: reviewer.name, label: `重新审稿 · ${reviewer.model}`, shortLabel: reviewer.name };
   }
   if (type === 'build') {
     const runtime = RUNTIMES.find((candidate) => candidate.id === key);
@@ -501,6 +501,6 @@ function makeEntry(id, name, output, testCase, mode, seed) {
 function mockSubmittedOutput(card, testCase) {
   const skillNames = (card.skills || []).map((skill) => skill.name).join('、');
   const quality = stableNumber(`${card.name}:${testCase.prompt}`, 0, 2);
-  const detail = quality > 0 ? '\n3. 验收依据：逐项核对输入约束，保留可追溯的处理说明。' : '';
-  return `已调用「${card.name}」处理该请求。\n1. 能力匹配：${skillNames}\n2. 处理结果：已按 Agent Card 声明的流程完成「${testCase.prompt}」。${detail}\n4. 边界：未提供的外部数据不会被推测为事实。`;
+  const detail = quality > 0 ? '\n4. 稳健性：检查基准、最大回撤、换手、手续费与滑点，并记录敏感性分析。' : '';
+  return `已调用「${card.name}」处理该金融研究请求。\n1. 能力匹配：${skillNames}\n2. 数据口径：记录数据来源、样本区间、频率、复权方式与截至时点；未接入的数据不编造。\n3. 研究方法：按请求执行因子 IC / Rank IC、分组回测或风险归因，并区分事实、假设与推断。${detail}\n5. 风险提示：历史结果不代表未来收益，仅用于技术研究，不构成投资建议。`;
 }

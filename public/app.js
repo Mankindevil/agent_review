@@ -14,36 +14,36 @@ const DEFAULT_RUNTIME_PLAN = [
 ];
 
 const sampleCard = {
-  name: '合同风险猎手',
-  description: '面向企业法务的合同审查 Agent：读取合同与制度文件，识别冲突条款，按风险等级给出证据、修改建议，并在信息不足时请求人工确认。',
+  name: '因子显微镜',
+  description: '面向量化研究者的因子研究 Agent：调用授权行情与财务数据 Skills，完成时点对齐、清洗、中性化、IC/Rank IC、分组回测和稳定性解释，并记录数据口径与风险提示。',
   protocolVersion: '1.0',
   supportedInterfaces: [{ url: 'https://agent.example.com/a2a', protocolBinding: 'HTTP+JSON', protocolVersion: '1.0' }],
   capabilities: { streaming: true, pushNotifications: false },
   defaultInputModes: ['text/plain', 'application/pdf'],
   defaultOutputModes: ['application/json', 'text/markdown'],
   skills: [{
-    id: 'contract-review', name: '合同风险审查',
-    description: '根据合同类型、公司制度和适用法域执行多步审查，定位风险并生成可追溯的修订建议。',
-    tags: ['legal', 'risk', 'workflow', 'human-in-the-loop'],
-    examples: ['审查这份 SaaS 采购合同，重点关注数据出境、赔偿上限和自动续费。']
+    id: 'factor-research', name: '因子研究',
+    description: '按指定股票池、样本期与调仓频率构造因子，处理极值、缺失和行业市值暴露，输出 IC、分组收益、换手与稳健性结论。',
+    tags: ['factor', 'point-in-time', 'IC', 'backtest', 'risk'],
+    examples: ['在沪深 300 成分股内检验经营现金流收益率因子，使用月频调仓并报告 Rank IC 和五分组回测。']
   }]
 };
 
 const exampleCatalog = {
-  file: {
-    card: { name:'文件收纳员', description:'根据文件名和扩展名生成分类、重命名与目录整理建议，不执行不可逆文件操作。', version:'1.0.0', supportedInterfaces:[{url:'http://127.0.0.1:4181/a2a/v1',protocolBinding:'HTTP+JSON',protocolVersion:'1.0'}], capabilities:{streaming:false,pushNotifications:false}, defaultInputModes:['text/plain'],defaultOutputModes:['text/plain'],skills:[{id:'organize-files',name:'整理文件',description:'按类型和日期对文件清单分类并生成重命名映射。',tags:['files','rename'],examples:['把下载目录里的文件按类型整理。']}] },
-    cases: [{name:'下载目录整理',prompt:'请整理这些文件：会议记录.docx、报价单.xlsx、架构图.png。先给出移动映射，只预览，不实际修改。'}]
+  factor: {
+    card: { ...sampleCard, supportedInterfaces:[{url:'http://127.0.0.1:4181/a2a/v1',protocolBinding:'HTTP+JSON',protocolVersion:'1.0'}], version:'1.0.0' },
+    cases: [{name:'现金流因子检验',prompt:'在沪深 300 成分股内检验经营现金流收益率因子。样本期 2019-01-01 至 2024-12-31，月频调仓。请说明数据时点和清洗口径，输出 Rank IC、五分组回测、换手、最大回撤及风险提示。'}]
   },
-  contract: {
-    card: { ...sampleCard, supportedInterfaces:[{url:'http://127.0.0.1:4182/a2a',protocolBinding:'JSONRPC',protocolVersion:'1.0'}], version:'1.2.0' },
+  backtest: {
+    card: { name:'策略验钞机', description:'把自然语言策略转成可审计回测：锁定股票池、样本区间、信号与成交时点，调用行情和回测 Skills，计入手续费、滑点与不可交易约束，输出收益、回撤、换手和风险暴露。', version:'1.2.0', supportedInterfaces:[{url:'http://127.0.0.1:4182/a2a',protocolBinding:'JSONRPC',protocolVersion:'1.0'}], capabilities:{streaming:false,pushNotifications:false}, defaultInputModes:['text/plain'],defaultOutputModes:['text/markdown'],skills:[{id:'strategy-backtest',name:'策略回测',description:'解析自然语言策略并执行防未来函数的基准回测与敏感性检验。',tags:['backtest','transaction-cost','benchmark','risk'],examples:['回测沪深 300 月度动量策略，计入双边成本并和指数比较。']}] },
     cases: [
-      {name:'高风险条款审查',prompt:'请审查这份 SaaS 采购合同，重点看数据出境、赔偿上限和自动续费；按高、中、低风险列出原文、依据和修改建议。'},
-      {name:'信息不足场景',prompt:'只知道供应商要求使用其标准合同，请先判断还缺哪些信息，并给出下一步审查清单。'}
+      {name:'月度动量回测',prompt:'回测沪深 300 股票池内 12-1 月动量策略，2018-01-01 至 2024-12-31，月末产生信号、下一交易日开盘成交。双边手续费 8bp、滑点 5bp。请对比沪深 300，报告年化收益、最大回撤、夏普、换手和风险暴露。'},
+      {name:'防泄漏审计',prompt:'请先审计这条策略是否存在未来函数、幸存者偏差或财务数据发布日期错配；数据不足时不要编造收益，列出缺口和可复现配置。'}
     ]
   },
-  incident: {
-    card: { name:'生产事故指挥官',description:'处理线上生产事故：整理时间线、判断影响、分派排障、维护状态并生成对内外通报。',version:'0.9.0',url:'http://127.0.0.1:4183/a2a',protocolVersion:'0.3',preferredTransport:'JSONRPC',capabilities:{streaming:false,pushNotifications:true},defaultInputModes:['text/plain'],defaultOutputModes:['text/plain'],skills:[{id:'incident-response',name:'生产事故响应',description:'根据告警和变更记录规划多线排障，在新证据到达时更新假设、回滚方案、责任人和沟通节奏。',tags:['incident','workflow','state','retry','monitor'],examples:['支付成功率在发布后从 99.9% 降到 82%，组织 P1 响应。']}] },
-    cases: [{name:'支付 P1',prompt:'10:05 发布 payment-api v2.8；10:08 支付成功率从 99.9% 降到 82%，华东错误最多。请组织 P1 响应，给出前 15 分钟行动、负责人、决策点、通报节奏和恢复验收条件。'}]
+  portfolio: {
+    card: { name:'组合风控台',description:'面向组合经理的持仓分析 Agent：调用持仓、行情、行业与风险 Skills，按时点计算集中度、风格和行业暴露，执行压力测试并生成可解释的再平衡研究方案。',version:'0.9.0',url:'http://127.0.0.1:4183/a2a',protocolVersion:'0.3',preferredTransport:'JSONRPC',capabilities:{streaming:false,pushNotifications:true},defaultInputModes:['text/plain'],defaultOutputModes:['text/markdown'],skills:[{id:'portfolio-risk',name:'组合风险分析',description:'基于指定持仓快照完成集中度、风险暴露、情景压力测试和再平衡约束检查。',tags:['portfolio','risk-exposure','stress-test','rebalance','audit'],examples:['分析组合行业集中度，并模拟科技板块下跌 10% 的冲击。']}] },
+    cases: [{name:'组合压力测试',prompt:'截至 2026-06-30，组合中科技 42%、金融 18%、消费 15%、医药 10%、现金 15%。请分析集中度与风险暴露，模拟科技板块下跌 10% 的一阶冲击，并在单行业不超过 30%、换手不超过 15% 的约束下给出研究性再平衡方案。'}]
   }
 };
 
@@ -51,9 +51,10 @@ init();
 
 async function init() {
   requestAnimationFrame(() => document.body.classList.add('ready'));
-  addCase('高风险条款审查', '请审查这份 SaaS 采购合同，重点看数据出境、赔偿上限和自动续费；按高、中、低风险列出原文、依据和修改建议。');
+  addCase('现金流因子检验', '在沪深 300 成分股内检验经营现金流收益率因子。样本期 2019-01-01 至 2024-12-31，月频调仓。请说明数据时点和清洗口径，输出 Rank IC、五分组回测、换手、最大回撤及风险提示。');
   bindEvents();
   loadEvaluationDefaults();
+  loadDataSourceHealth();
   loadRuntimeHealth();
   await loadHistory();
   const route = location.hash.match(/^#\/evaluation\/(.+)$/);
@@ -337,7 +338,7 @@ function renderResult(item) {
     </section>
     <div class="score-triad">
       ${scoreCard('01 / 必要性', complexity.score, complexity.verdict, complexity.reason, complexity.score >= 60)}
-      ${scoreCard('02 / 专业度', item.professional.score, '多模型交叉盲审', `${item.professional.reviews.filter(r=>r.score>0).length} 位评审从五个维度独立打分。`, false)}
+      ${scoreCard('02 / 金融专业度', item.professional.score, '四模型独立审稿', `${item.professional.reviews.filter(r=>r.score>0).length} 位评审从五个金融硬指标独立打分。`, false)}
       ${scoreCard('03 / 实战力', item.averages.submitted, '提交 Agent 同题均分', `Claude ${item.averages['claude-code']} · Cursor ${item.averages.cursor} · 豆包 ${item.averages.doubao}`, true)}
     </div>
     ${renderComplexity(complexity)}
@@ -379,12 +380,12 @@ function scoreCard(kicker, score, title, body, highlight) {
 }
 
 function renderComplexity(value) {
-  const labels = { stepDepth:'步骤深度',toolDependency:'工具依赖',stateAndBranching:'状态与分支',uncertainty:'不确定性',repeatValue:'复用价值' };
-  return `<div class="section-title"><h3>为什么需要（或不需要）Agent</h3><span>AGENT NECESSITY</span></div><div class="review-grid">${Object.entries(value.dimensions).map(([key,score])=>`<article class="review-card"><div class="reviewer"><b>${labels[key]}</b><span>${score}/100</span></div><div class="review-score">${score}<small> SIGNAL</small></div><div class="mini-bars"><div><span>强度</span><i style="--value:${score}%"></i><b>${score}</b></div></div></article>`).join('')}</div>`;
+  const labels = { researchDepth:'研究链路',dataDependency:'数据依赖',temporalState:'时点与状态',decisionUncertainty:'决策不确定性',workflowReuse:'工作流复用' };
+  return `<div class="section-title"><h3>这项投研工作为什么需要（或不需要）Agent</h3><span>RESEARCH AGENT NECESSITY</span></div><div class="review-grid">${Object.entries(value.dimensions).map(([key,score])=>`<article class="review-card"><div class="reviewer"><b>${labels[key]||key}</b><span>${score}/100</span></div><div class="review-score">${score}<small> SIGNAL</small></div><div class="mini-bars"><div><span>强度</span><i style="--value:${score}%"></i><b>${score}</b></div></div></article>`).join('')}</div>`;
 }
 
 function renderReviews(reviews, item) {
-  const labels = { domainDepth:'领域深度', workflowQuality:'流程设计', failureHandling:'异常处理', outputContract:'输出契约', evaluability:'可评测性' };
+  const labels = { researchRigor:'研究严谨性', dataDiscipline:'数据纪律', backtestIntegrity:'回测可信度', riskCompliance:'风险合规', reproducibility:'可复现性' };
   const activity = activityOfType(item, 'review');
   const plan = activity ? reviewPlanFor(item, reviews) : [];
   const cards = reviews.map((review) => {
@@ -398,7 +399,7 @@ function renderReviews(reviews, item) {
     const active = activityMatches(activity, reviewer.id);
     if (!completed && !active) cards.push(`<article class="review-card review-card-queued">${renderQueuedWork(reviewer.name, reviewer.model, index + 1, plan.length)}</article>`);
   });
-  return `<div class="section-title"><h3>四方会审</h3><span>MULTI-MODEL BLIND REVIEW</span></div><div class="review-grid model-review-grid">${cards.join('')}</div>`;
+  return `<div class="section-title"><h3>四方研究审稿</h3><span>MULTI-MODEL FINANCE REVIEW</span></div><div class="review-grid model-review-grid">${cards.join('')}</div>`;
 }
 
 function renderBuilds(builds, item) {
@@ -539,8 +540,8 @@ function activeActivity(item) {
     const reviews = item.professional?.reviews || [];
     const reviewPlan = reviewPlanFor(item, reviews);
     const nextReviewer = reviewPlan.find((reviewer) => !reviews.some((review) => reviewMatchesPlan(review, reviewer)));
-    if (nextReviewer && (/盲审/.test(item.stage || '') || (item.progress >= 22 && item.progress <= 52 && !(item.builds?.length)))) {
-      return { type:'review', key:nextReviewer.id, label:`${nextReviewer.name} 正在盲审`, target:nextReviewer.model, detail:'正在等待该模型返回五维评分与评语', retry:false, index:reviews.length + 1, total:reviewPlan.length };
+    if (nextReviewer && (/盲审|审稿/.test(item.stage || '') || (item.progress >= 22 && item.progress <= 52 && !(item.builds?.length)))) {
+      return { type:'review', key:nextReviewer.id, label:`${nextReviewer.name} 正在审稿`, target:nextReviewer.model, detail:'正在等待研究严谨性、数据纪律、回测可信度、风险合规与可复现性评分', retry:false, index:reviews.length + 1, total:reviewPlan.length };
     }
     const builds = item.builds || [];
     const runtimePlan = runtimePlanFor(item);
@@ -640,6 +641,19 @@ async function loadRuntimeHealth() {
     root.innerHTML = `<span>RUNTIME PROBE</span>${runtimes.map((runtime) => `<span class="runtime-chip ${runtime.installed ? 'installed' : ''} ${runtime.runtimeReady ? 'ready' : ''}" title="${escapeHtml(runtime.note)}">${escapeHtml(runtime.name)} · ${runtime.runtimeReady ? 'READY' : !runtime.installed ? '缺失' : !runtime.authenticated ? '未登录' : '未启用'}</span>`).join('')}`;
   } catch {
     root.innerHTML = '<span>RUNTIME PROBE</span><i>探测失败</i>';
+  }
+}
+
+async function loadDataSourceHealth() {
+  const root = $('#data-source-health');
+  try {
+    const response = await fetch('/api/data-source?probe=1');
+    const source = await response.json();
+    if (!response.ok) throw new Error(source.error || '数据源状态读取失败');
+    const stateLabel = source.ready ? 'READY' : source.enabled && source.configured && source.installed === false ? 'SDK 缺失' : source.enabled ? '账号未配置' : '未启用';
+    root.innerHTML = `<span>DATA SOURCE</span><span class="runtime-chip ${source.configured ? 'installed' : ''} ${source.ready ? 'ready' : ''}" title="PandaAI Quant 官方 panda_data SDK">PandaAI Quant · ${stateLabel}</span><i>${source.ready ? `${source.allowedMethods.length} 个只读方法` : '在 .env 配置 PANDA_DATA_*'}</i>`;
+  } catch {
+    root.innerHTML = '<span>DATA SOURCE</span><i>PandaAI Quant 状态读取失败</i>';
   }
 }
 

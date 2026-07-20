@@ -3,35 +3,39 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="用多模型盲审和同 prompt 实战对测，判断一个 A2A Agent 到底夯不夯。">
-  <title>锐评局 · Agent 公开处刑场</title>
-  <link rel="stylesheet" href="/styles.css?v=20260720-loading2">
+  <meta name="description" content="金融 A2A Agent 公开评测：审数据、查回测、压基线，判断一套投研智能体到底夯不夯。">
+  <title>锐评局 · 金融 Agent 研究终审台</title>
+  <link rel="stylesheet" href="/styles.css?v=20260720-finance1">
 </head>
 <body>
   <div class="noise" aria-hidden="true"></div>
   <header class="site-header">
     <a class="brand" href="#" aria-label="锐评局首页">
       <span class="brand-mark">锐</span>
-      <span><b>锐评局</b><small>AGENT VERDICT LAB</small></span>
+      <span><b>锐评局</b><small>FINANCE AGENT VERDICT</small></span>
     </a>
     <nav>
       <button class="nav-button active" data-action="home">发起评测</button>
       <a class="nav-button" href="/methodology.html">评测规则</a>
       <button class="nav-button" data-action="history">往期战绩 <span id="history-count">0</span></button>
     </nav>
-    <div class="system-state"><i></i><span>评测舱在线</span></div>
+    <div class="system-state"><i></i><span>研究终审台在线</span></div>
   </header>
 
   <main id="landing-view">
     <section class="hero">
       <div class="hero-copy">
-        <div class="eyebrow"><span>A2A AGENT BENCHMARK</span><span>NO. 001</span></div>
-        <h1>你的 Agent<br>到底是不是<br><em>电子盆栽？</em></h1>
-        <p class="hero-deck">不听发布会，只看同题对打。先判断这事值不值得用 Agent，再让 OpenAI、Anthropic、豆包、DeepSeek 轮流挑刺，最后现场复刻、正面对线。</p>
+        <div class="eyebrow"><span>A2A FINANCE BENCHMARK</span><span>RESEARCH / 001</span></div>
+        <h1>收益曲线<br>那么漂亮，<br><em>经得住查账吗？</em></h1>
+        <p class="hero-deck">不看故事，只查研究链路。先验数据时点和回测口径，再让四个模型交叉审稿，最后只凭 description 现场复刻、同题压测。</p>
+        <div class="market-tape" aria-label="金融评测关注项">
+          <svg viewBox="0 0 520 118" role="img" aria-label="一条包含回撤的研究净值曲线"><path class="market-grid" d="M0 24H520M0 59H520M0 94H520"/><path class="market-line" d="M0 92 C38 85 44 67 78 71 S126 87 154 54 S208 37 239 45 S284 80 316 58 S364 18 397 30 S442 65 520 14"/></svg>
+          <span>POINT-IN-TIME</span><span>COST &amp; SLIPPAGE</span><span>DRAWDOWN</span><span>NO ADVICE</span>
+        </div>
         <div class="hero-proof">
-          <div><b>04</b><span>模型交叉盲审</span></div>
-          <div><b>03</b><span>Description 直出</span></div>
-          <div><b>01</b><span>不留情面锐评</span></div>
+          <div><b>05</b><span>金融硬指标</span></div>
+          <div><b>04</b><span>模型交叉审稿</span></div>
+          <div><b>03</b><span>研究基线复刻</span></div>
         </div>
       </div>
 
@@ -48,6 +52,7 @@
             <small>尽力复现 · 可覆盖</small>
           </label>
         </div>
+        <div class="runtime-health data-health" id="data-source-health" aria-live="polite"><span>DATA SOURCE</span><i>正在检查 PandaAI Quant…</i></div>
         <div class="runtime-health" id="runtime-health" aria-live="polite"><span>RUNTIME PROBE</span><i>正在检查本机执行器…</i></div>
 
         <div class="source-switch" role="group" aria-label="Agent 提交方式">
@@ -78,9 +83,9 @@
 
         <div class="example-picks">
           <span>本地真实样本</span>
-          <button type="button" data-example="file">文件收纳员</button>
-          <button type="button" data-example="contract">合同风险猎手</button>
-          <button type="button" data-example="incident">事故指挥官</button>
+          <button type="button" data-example="factor">因子显微镜</button>
+          <button type="button" data-example="backtest">策略验钞机</button>
+          <button type="button" data-example="portfolio">组合风控台</button>
         </div>
 
         <div class="cases-head">
@@ -89,15 +94,15 @@
         </div>
         <div id="case-list" class="case-list"></div>
 
-        <div class="form-actions single"><button class="primary-button" id="start-evaluation" type="button"><span>送进评测舱</span><i>↗</i></button></div>
+        <div class="form-actions single"><button class="primary-button" id="start-evaluation" type="button"><span>送进研究终审台</span><i>↗</i></button></div>
         <p class="form-error" id="form-error" role="alert"></p>
       </div>
     </section>
 
     <section class="method-strip" aria-label="评测方法">
-      <article><span>一审</span><b>该不该做</b><p>单轮模型能搞定的活，别披 Agent 马甲。</p></article>
-      <article><span>二审</span><b>够不够专</b><p>领域深度、流程、异常、契约、可评测性。</p></article>
-      <article><span>终审</span><b>到底谁赢</b><p>相同 prompt、不同实现，只比较可见结果。</p></article>
+      <article><span>一审</span><b>该不该 Agent 化</b><p>查一次行情就收工的活，别包装成投研工作流。</p></article>
+      <article><span>二审</span><b>研究经不经查</b><p>数据纪律、回测可信度、风险合规与可复现性。</p></article>
+      <article><span>终审</span><b>同题到底谁赢</b><p>同一金融任务、相同输入，只比较可见研究结果。</p></article>
       <div class="method-callout"><small>最终分档</small><strong>夯 / 人上人 / NPC / 拉</strong></div>
     </section>
   </main>
@@ -127,10 +132,10 @@
       <div class="progress-number"><b id="progress-number">0</b><span>%</span></div>
       <ol class="stage-list">
         <li data-threshold="6"><i></i><span>A2A 体检</span></li>
-        <li data-threshold="22"><i></i><span>复杂度</span></li>
-        <li data-threshold="52"><i></i><span>多模型盲审</span></li>
-        <li data-threshold="66"><i></i><span>现场复刻</span></li>
-        <li data-threshold="92"><i></i><span>同题对打</span></li>
+        <li data-threshold="22"><i></i><span>投研必要性</span></li>
+        <li data-threshold="52"><i></i><span>四方审稿</span></li>
+        <li data-threshold="66"><i></i><span>基线复刻</span></li>
+        <li data-threshold="92"><i></i><span>同题压测</span></li>
         <li data-threshold="100"><i></i><span>锐评</span></li>
       </ol>
     </section>
@@ -157,6 +162,6 @@
     </div>
   </template>
 
-  <script type="module" src="/app.js?v=20260720-loading2"></script>
+  <script type="module" src="/app.js?v=20260720-finance1"></script>
 </body>
 </html>

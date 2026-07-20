@@ -1,0 +1,20 @@
+{
+  "name": "因子显微镜",
+  "description": "面向量化研究者的因子研究 Agent：调用授权行情与财务数据 Skills，完成时点对齐、清洗、中性化、IC/Rank IC、分组回测和稳定性解释。",
+  "version": "1.0.0",
+  "supportedInterfaces": [
+    { "url": "http://127.0.0.1:4181/a2a/v1", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0" }
+  ],
+  "capabilities": { "streaming": false, "pushNotifications": false },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/markdown"],
+  "skills": [
+    {
+      "id": "factor-research",
+      "name": "因子研究",
+      "description": "按股票池、样本期与调仓频率构造因子，处理极值、缺失和行业市值暴露，输出 IC、分组收益、换手与稳健性结论。",
+      "tags": ["factor", "point-in-time", "IC", "backtest"],
+      "examples": ["检验经营现金流收益率因子的 Rank IC 与五分组表现。"]
+    }
+  ]
+}

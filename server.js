@@ -1,6 +1,7 @@
 import './src/env.js';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
+import { timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -11,6 +12,7 @@ import { normalizeSeed, normalizeTemperature, readJsonBody } from './src/utils.j
 import { resolveAgentCard } from './src/a2a.js';
 import { getRuntimeStatus } from './src/runtime-status.js';
 import { createSkillBundle } from './src/runtimes.js';
+import { getPandaDataStatus, pandaDataConfig, queryPandaData } from './src/panda-data.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.join(root, 'public');
@@ -26,9 +28,20 @@ export const server = createServer(async (request, response) => {
     const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     if (request.method === 'GET' && url.pathname === '/api/health') return json(response, 200, {
       ok: true, mode: 'full-stack', time: new Date().toISOString(),
-      evaluationSeed: normalizeSeed(process.env.EVALUATION_SEED), modelTemperature: normalizeTemperature(process.env.MODEL_TEMPERATURE, 0)
+      evaluationSeed: normalizeSeed(process.env.EVALUATION_SEED), modelTemperature: normalizeTemperature(process.env.MODEL_TEMPERATURE, 0),
+      dataSource: await getPandaDataStatus()
     });
     if (request.method === 'GET' && url.pathname === '/api/runtimes') return json(response, 200, await getRuntimeStatus());
+    if (request.method === 'GET' && url.pathname === '/api/data-source') {
+      return json(response, 200, await getPandaDataStatus({ probe: url.searchParams.get('probe') === '1' }));
+    }
+    if (request.method === 'POST' && url.pathname === '/api/data-source/query') {
+      const config = pandaDataConfig();
+      if (!config.accessProtected) return json(response, 503, { error: 'PANDA_DATA_ACCESS_KEY 未配置，数据查询网关保持关闭' });
+      if (!authorizedDataRequest(request, config.accessKey)) return json(response, 401, { error: 'PandaAI 数据查询鉴权失败' });
+      const input = await readJsonBody(request, 100_000);
+      return json(response, 200, await queryPandaData(String(input.method || ''), input.params || {}));
+    }
     if (request.method === 'POST' && url.pathname === '/api/agent-cards/resolve') {
       const input = await readJsonBody(request);
       try {
@@ -121,6 +134,15 @@ async function staticFile(pathname, response) {
 
 function contentType(file) {
   return ({ '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' })[path.extname(file)] || 'application/octet-stream';
+}
+function authorizedDataRequest(request, expected) {
+  const authorization = String(request.headers.authorization || '');
+  const supplied = authorization.startsWith('Bearer ')
+    ? authorization.slice(7)
+    : String(request.headers['x-panda-data-access-key'] || '');
+  const left = Buffer.from(supplied);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
 }
 function json(response, status, payload) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); response.end(JSON.stringify(payload)); }
 function summary(item) { return { id: item.id, name: item.agentCard.name, createdAt: item.createdAt, status: item.status, progress: item.progress, tier: item.roast?.tier, score: item.averages?.submitted }; }

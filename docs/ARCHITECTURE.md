@@ -46,6 +46,12 @@ A2A Agent endpoint   Model / Runtime endpoints
 
 ## 3. 评测流水线
 
+### 3.0 PandaAI Quant 数据源
+
+金融分支在 `src/panda-data.js` 中提供 PandaAI Quant 数据适配器，通过 `scripts/panda-data-bridge.py` 调用官方 `panda_data` SDK。bridge 每次调用先使用 `.env` 中的账号密码执行 `init_token`，再调用白名单方法；凭据和会话 token 不进入请求体、日志或响应。
+
+`GET /api/data-source` 返回非敏感配置状态，`POST /api/data-source/query` 需要独立的 `PANDA_DATA_ACCESS_KEY`。调用层同时限制方法白名单、请求体大小、执行超时、最大返回行数与最大输出字节数。该网关用于金融 Agent/Data Skill 的受控数据读取，不提供交易或写入能力。
+
 ### 3.1 A2A 协议体检
 
 `src/a2a.js` 校验：
@@ -136,7 +142,7 @@ Runtime 构建阶段的跨执行器契约是结构化 Skill JSON，而不是允�
 - Cursor description 直出 skill；
 - Doubao description 直出 skill。
 
-当前 output judge 使用任务完成、证据、结构与可用性四维启发式打分。生产版应使用独立 judge 模型、规则校验器和人工抽检，并随机化选手顺序以减少位置偏差。复杂度信号会区分“只整理文件”与“跨文件核对、风险取证、人工确认”：出现文件本身不会自动证明 Agent 必要性。
+当前金融 output judge 使用任务完成、数据证据、方法严谨与风险披露四维启发式打分。它能审查是否交代数据来源、截止时点、样本区间、基准、成本、回撤和风险提示，但不能在没有 Data / Research Skills 时验证金融数字真伪。生产版应增加 point-in-time 数据复算、结构化断言、独立 judge 与人工抽检，并随机化选手顺序以减少位置偏差。
 
 最终只使用四个分档：
 

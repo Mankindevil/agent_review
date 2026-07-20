@@ -1,0 +1,20 @@
+{
+  "name": "组合风控台",
+  "description": "面向组合经理的持仓分析 Agent：调用持仓、行情、行业与风险 Skills，按时点计算集中度、风格和行业暴露，执行压力测试并生成可解释的再平衡研究方案。",
+  "version": "0.9.0",
+  "url": "http://127.0.0.1:4183/a2a",
+  "protocolVersion": "0.3",
+  "preferredTransport": "JSONRPC",
+  "capabilities": { "streaming": false, "pushNotifications": true },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/markdown"],
+  "skills": [
+    {
+      "id": "portfolio-risk",
+      "name": "组合风险分析",
+      "description": "基于指定持仓快照完成集中度、风险暴露、情景压力测试和再平衡约束检查。",
+      "tags": ["portfolio", "risk-exposure", "stress-test", "rebalance"],
+      "examples": ["分析行业集中度，并模拟科技板块下跌 10% 的冲击。"]
+    }
+  ]
+}

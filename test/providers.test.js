@@ -54,7 +54,7 @@ test('disables deep thinking and caps output for the Doubao short-form review', 
   process.env.MODEL_REVIEW_MAX_TOKENS = '777';
   globalThis.fetch = async (_url, options) => {
     requestBody = JSON.parse(options.body);
-    return new Response(JSON.stringify({ choices: [{ message: { content: '{"score":20,"dimensions":{"domainDepth":20,"workflowQuality":20,"failureHandling":20,"outputContract":20,"evaluability":20},"comment":"short","risk":"none"}' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"score":20,"dimensions":{"researchRigor":20,"dataDiscipline":20,"backtestIntegrity":20,"riskCompliance":20,"reproducibility":20},"comment":"short","risk":"none"}' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   try {
     const result = await reviewAgent({ id: 'doubao', name: '豆包评审', model: 'ep-test', kind: 'openai-compatible', baseUrl: 'https://ark.example/api/v3', apiKeyEnv: 'ARK_API_KEY' }, { name: 'A', description: 'B', skills: [] }, { score: 10 }, 'live', undefined, { seed: 73021, temperature: 0 });
@@ -70,9 +70,9 @@ test('disables deep thinking and caps output for the Doubao short-form review', 
 });
 
 test('rejects reviewer payloads that violate the scoring contract', () => {
-  const valid = { score: 80, dimensions: { domainDepth: 80, workflowQuality: 80, failureHandling: 80, outputContract: 80, evaluability: 80 }, comment: 'clear', risk: 'known' };
+  const valid = { score: 80, dimensions: { researchRigor: 80, dataDiscipline: 80, backtestIntegrity: 80, riskCompliance: 80, reproducibility: 80 }, comment: 'clear', risk: 'known' };
   assert.equal(normalizeProfessionalReview(valid).score, 80);
   assert.throws(() => normalizeProfessionalReview({ ...valid, score: 130 }), /0–100/);
-  assert.throws(() => normalizeProfessionalReview({ ...valid, dimensions: { ...valid.dimensions, evaluability: '80' } }), /0–100/);
+  assert.throws(() => normalizeProfessionalReview({ ...valid, dimensions: { ...valid.dimensions, reproducibility: '80' } }), /0–100/);
   assert.throws(() => normalizeProfessionalReview({ ...valid, comment: '' }), /comment/);
 });

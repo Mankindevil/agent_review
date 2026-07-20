@@ -19,6 +19,47 @@ test('health endpoint responds', async () => {
   assert.equal(health.ok, true);
   assert.equal(Number.isInteger(health.evaluationSeed), true);
   assert.equal(health.modelTemperature, 0);
+  assert.equal(health.dataSource.provider, 'pandaai');
+  assert.equal(typeof health.dataSource.configured, 'boolean');
+});
+
+test('reports PandaAI data source status without credentials', async () => {
+  const response = await fetch(`${origin}/api/data-source`);
+  const status = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(status.provider, 'pandaai');
+  assert.equal('username' in status, false);
+  assert.equal('password' in status, false);
+});
+
+test('keeps the PandaAI query gateway closed without its independent access key', async () => {
+  const previous = process.env.PANDA_DATA_ACCESS_KEY;
+  delete process.env.PANDA_DATA_ACCESS_KEY;
+  try {
+    const response = await fetch(`${origin}/api/data-source/query`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ method: 'get_trade_cal', params: {} })
+    });
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /ACCESS_KEY/);
+  } finally {
+    if (previous === undefined) delete process.env.PANDA_DATA_ACCESS_KEY; else process.env.PANDA_DATA_ACCESS_KEY = previous;
+  }
+});
+
+test('rejects an invalid PandaAI query gateway key before contacting the provider', async () => {
+  const previous = process.env.PANDA_DATA_ACCESS_KEY;
+  process.env.PANDA_DATA_ACCESS_KEY = 'test-gateway-key';
+  try {
+    const response = await fetch(`${origin}/api/data-source/query`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer wrong-key' },
+      body: JSON.stringify({ method: 'get_trade_cal', params: {} })
+    });
+    assert.equal(response.status, 401);
+  } finally {
+    if (previous === undefined) delete process.env.PANDA_DATA_ACCESS_KEY; else process.env.PANDA_DATA_ACCESS_KEY = previous;
+  }
 });
 
 test('serves the scoring methodology document in the web UI', async () => {
@@ -26,7 +67,9 @@ test('serves the scoring methodology document in the web UI', async () => {
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(response.headers.get('content-type'), /text\/html/);
-  assert.match(html, /每一分/);
+  assert.match(html, /净值曲线/);
+  assert.match(html, /数据纪律/);
+  assert.match(html, /回测可信度/);
   assert.match(html, /clamp\(18 \+ 10C/);
   assert.match(html, /clamp\(x\) = min\(100, max\(0, x\)\)/);
   assert.match(html, /Complex signal groups/);
@@ -61,8 +104,8 @@ test('serves localized loading effects with reduced-motion support', async () =>
   assert.match(app, /review-card-queued/);
   const indexResponse = await fetch(`${origin}/`);
   const index = await indexResponse.text();
-  assert.match(index, /app\.js\?v=20260720-loading2/);
-  assert.match(index, /styles\.css\?v=20260720-loading2/);
+  assert.match(index, /app\.js\?v=20260720-finance1/);
+  assert.match(index, /styles\.css\?v=20260720-finance1/);
 });
 
 test('lets the final verdict use the available desktop width', async () => {

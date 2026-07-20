@@ -1,0 +1,20 @@
+{
+  "name": "策略验钞机",
+  "description": "把自然语言策略转成可审计回测：锁定股票池、样本区间、信号与成交时点，计入手续费、滑点与不可交易约束，输出收益、回撤、换手和风险暴露。",
+  "version": "1.2.0",
+  "supportedInterfaces": [
+    { "url": "http://127.0.0.1:4182/a2a", "protocolBinding": "JSONRPC", "protocolVersion": "1.0" }
+  ],
+  "capabilities": { "streaming": false, "pushNotifications": false },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/markdown"],
+  "skills": [
+    {
+      "id": "strategy-backtest",
+      "name": "策略回测",
+      "description": "解析自然语言策略并执行防未来函数的基准回测与敏感性检验。",
+      "tags": ["backtest", "transaction-cost", "benchmark", "risk"],
+      "examples": ["回测沪深 300 月度动量策略，计入双边成本并和指数比较。"]
+    }
+  ]
+}

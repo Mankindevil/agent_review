@@ -1,27 +1,20 @@
 {
-  "name": "合同风险猎手",
-  "description": "面向企业法务的合同审查 Agent：读取合同与制度文件，识别冲突条款，按风险等级给出证据、修改建议，并在信息不足时请求人工确认。",
-  "protocolVersion": "1.0",
+  "name": "因子显微镜",
+  "description": "面向量化研究者的因子研究 Agent：调用授权行情与财务数据 Skills，完成时点对齐、清洗、中性化、IC/Rank IC、分组回测和稳定性解释，并记录数据口径与风险提示。",
+  "version": "1.0.0",
   "supportedInterfaces": [
-    {
-      "url": "https://agent.example.com/a2a",
-      "protocolBinding": "HTTP+JSON",
-      "protocolVersion": "1.0"
-    }
+    { "url": "https://agent.example.com/a2a", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0" }
   ],
-  "capabilities": {
-    "streaming": true,
-    "pushNotifications": false
-  },
-  "defaultInputModes": ["text/plain", "application/pdf"],
+  "capabilities": { "streaming": true, "pushNotifications": false },
+  "defaultInputModes": ["text/plain", "application/json"],
   "defaultOutputModes": ["application/json", "text/markdown"],
   "skills": [
     {
-      "id": "contract-review",
-      "name": "合同风险审查",
-      "description": "根据合同类型、公司制度和适用法域执行多步审查，定位风险并生成可追溯的修订建议。",
-      "tags": ["legal", "risk", "workflow", "human-in-the-loop"],
-      "examples": ["审查这份 SaaS 采购合同，重点关注数据出境、赔偿上限和自动续费。"]
+      "id": "factor-research",
+      "name": "因子研究",
+      "description": "按指定股票池、样本期与调仓频率构造因子，处理极值、缺失和行业市值暴露，输出 IC、分组收益、换手与稳健性结论。",
+      "tags": ["factor", "point-in-time", "IC", "backtest", "risk"],
+      "examples": ["在沪深 300 成分股内检验经营现金流收益率因子，使用月频调仓并报告 Rank IC 和五分组回测。"]
     }
   ]
 }

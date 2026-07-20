@@ -3,38 +3,34 @@ import { pathToFileURL } from 'node:url';
 
 const definitions = [
   {
-    id: 'file-organizer', port: 4181, binding: 'HTTP+JSON', protocolVersion: '1.0',
-    name: '文件收纳员', version: '1.0.0',
-    description: '根据文件名和扩展名生成分类、重命名与目录整理建议，不执行不可逆文件操作。',
+    id: 'factor-researcher', port: 4181, binding: 'HTTP+JSON', protocolVersion: '1.0',
+    name: '因子显微镜', version: '1.0.0',
+    description: '面向量化研究者的因子研究 Agent：调用授权行情与财务数据 Skills，完成时点对齐、清洗、中性化、IC/Rank IC、分组回测和稳定性解释。',
     capabilities: { streaming: false, pushNotifications: false },
-    skills: [{ id: 'organize-files', name: '整理文件', description: '按类型和日期对文件清单分类并生成重命名映射。', tags: ['files', 'rename'], examples: ['把下载目录里的文件按类型整理。'] }],
-    handle(prompt) {
-      const names = [...String(prompt).matchAll(/[\w\u4e00-\u9fff-]+\.(?:pdf|docx?|xlsx?|png|jpe?g|zip|txt)/gi)].map((match) => match[0]);
-      const files = names.length ? names : ['会议记录.docx', '报价单.xlsx', '架构图.png'];
-      const folders = { pdf: '文档', doc: '文档', docx: '文档', xls: '表格', xlsx: '表格', png: '图片', jpg: '图片', jpeg: '图片', zip: '归档', txt: '文档' };
-      const mapping = files.map((file) => `${file} → ${folders[file.split('.').pop().toLowerCase()] || '其他'}/${file}`);
-      return `整理方案（仅预览，不修改文件）\n${mapping.map((value, index) => `${index + 1}. ${value}`).join('\n')}\n验收：无文件丢失；重名时追加序号；确认后再执行。`;
+    skills: [{ id: 'factor-research', name: '因子研究', description: '按股票池、样本期与调仓频率构造因子，处理极值、缺失和行业市值暴露，输出 IC、分组收益、换手与稳健性结论。', tags: ['factor', 'point-in-time', 'IC', 'backtest'], examples: ['检验经营现金流收益率因子的 Rank IC 与五分组表现。'] }],
+    handle() {
+      return '因子研究单（DEMO）\n1. 数据口径：沪深 300 历史成分；样本期 2019-01-01 至 2024-12-31；财务字段按公告日 point-in-time 对齐；月频调仓。\n2. 方法：1%/99% 缩尾、行业内缺失值填充、行业与对数市值中性化，计算月度 Rank IC 和五分组多空。\n3. 待执行指标：Rank IC 均值/IR、分组单调性、年化收益、最大回撤、换手；基准为沪深 300，手续费与滑点需在回测 Skill 中显式配置。\n4. 数据状态：当前示例未连接主办方 Data Skills，因此不编造数值。\n风险提示：存在样本选择、数据时点和交易成本偏差；结果仅用于技术研究，不构成投资建议。';
     }
   },
   {
-    id: 'contract-reviewer', port: 4182, binding: 'JSONRPC', protocolVersion: '1.0',
-    name: '合同风险猎手', version: '1.2.0',
-    description: '面向企业采购的多步骤合同审查 Agent，定位原文、判断风险、给出依据与可直接使用的修改建议。',
+    id: 'strategy-backtester', port: 4182, binding: 'JSONRPC', protocolVersion: '1.0',
+    name: '策略验钞机', version: '1.2.0',
+    description: '把自然语言策略转成可审计回测：锁定股票池、样本区间、信号与成交时点，计入手续费、滑点与不可交易约束，输出收益、回撤、换手和风险暴露。',
     capabilities: { streaming: false, pushNotifications: false },
-    skills: [{ id: 'contract-review', name: '合同风险审查', description: '交叉核对合同、公司制度与审查清单，识别责任、数据、续费和争议解决风险，并对缺失信息请求确认。', tags: ['legal', 'risk', 'evidence', 'human-in-the-loop'], examples: ['审查 SaaS 采购合同的赔偿上限、数据出境和自动续费。'] }],
+    skills: [{ id: 'strategy-backtest', name: '策略回测', description: '解析自然语言策略并执行防未来函数的基准回测与敏感性检验。', tags: ['backtest', 'transaction-cost', 'benchmark', 'risk'], examples: ['回测沪深 300 月度动量策略，计入双边成本并和指数比较。'] }],
     handle(prompt) {
-      if (/只知道|信息不足|标准合同/.test(prompt)) return '无法直接定稿。还需：①合同全文及附件；②签约主体与适用法域；③数据类型和存储地；④合同金额与可接受责任上限；⑤公司采购红线。下一步：补齐材料后按条款原文—风险—依据—修订文本四列复审。';
-      return '合同锐审结果\n1. 高风险｜数据出境：须明确数据地域、分包商和跨境机制；建议加入事前书面同意与删除证明。\n2. 高风险｜赔偿上限：若供应商责任仅限最近一个月费用，无法覆盖数据事件；建议一般责任为年度费用，保密与数据违规不受该上限限制。\n3. 中风险｜自动续费：建议至少提前 30 日通知，并赋予客户无责关闭续费的权利。\n验收依据：每项均包含风险级别、问题、理由和可谈判方向；最终文本需法务结合原合同确认。';
+      if (/审计|未来函数|数据不足|缺口/.test(prompt)) return '回测前置审计\n1. 未来函数：月末信号必须在下一交易日开盘成交；财务字段按公告日进入可用集。\n2. 幸存者偏差：股票池必须使用历史成分，不得用当前沪深 300 成分回填历史。\n3. 可交易性：补充停牌、涨跌停、退市、复权口径与成交量约束。\n4. 可复现配置：仍缺 Data Skills 版本、行情频率、无风险利率与随机种子，因此不输出虚构收益。\n风险提示：审计通过不等于未来有效，结果仅用于研究，不构成投资建议。';
+      return '策略回测单（DEMO）\n口径：沪深 300 历史成分，2018-01-01 至 2024-12-31；12-1 月动量，月末信号、下一交易日开盘成交；双边手续费 8bp、滑点 5bp；基准为沪深 300。\n待报告：年化收益、超额收益、夏普、最大回撤、月均换手、行业和风格风险暴露，并做成本 ±5bp 敏感性检验。\n数据状态：未连接主办方回测 Skill，不能生成可信数值。\n风险提示：历史回测受数据质量、样本选择和市场制度变化影响，不代表未来收益，不构成投资建议。';
     }
   },
   {
-    id: 'incident-commander', port: 4183, binding: 'JSONRPC', protocolVersion: '0.3',
-    name: '生产事故指挥官', version: '0.9.0',
-    description: '处理线上生产事故：整理时间线、判断影响、分派排障、维护状态并生成对内外通报。',
+    id: 'portfolio-risk-manager', port: 4183, binding: 'JSONRPC', protocolVersion: '0.3',
+    name: '组合风控台', version: '0.9.0',
+    description: '面向组合经理的持仓分析 Agent：调用持仓、行情、行业与风险 Skills，按时点计算集中度、风格和行业暴露，执行压力测试并生成可解释的再平衡研究方案。',
     capabilities: { streaming: false, pushNotifications: true },
-    skills: [{ id: 'incident-response', name: '生产事故响应', description: '根据告警和变更记录规划多线排障，在新证据到达时更新假设、回滚方案、责任人和沟通节奏。', tags: ['incident', 'workflow', 'state', 'retry', 'monitor'], examples: ['支付成功率在发布后从 99.9% 降到 82%，组织 P1 响应。'] }],
-    handle(prompt) {
-      return `P1 事故作战板\n影响：${/支付/.test(prompt) ? '支付链路成功率异常，直接影响交易' : '核心链路异常，影响范围待量化'}。\n0–5 分钟：冻结发布；值班负责人建立事件频道；指标负责人核对错误率、延迟和区域分布。\n5–15 分钟：变更线对比最近发布并准备回滚；依赖线检查上游超时；数据线确认是否存在重复写入。\n决策点：回滚能恢复且无数据迁移风险时立即回滚；否则切流并降级非核心能力。\n通报：每 15 分钟更新影响、动作、结果、下一决策点。\n验收：成功率恢复至基线并稳定 30 分钟；补齐时间线、根因、行动项和负责人。`;
+    skills: [{ id: 'portfolio-risk', name: '组合风险分析', description: '基于指定持仓快照完成集中度、风险暴露、情景压力测试和再平衡约束检查。', tags: ['portfolio', 'risk-exposure', 'stress-test', 'rebalance'], examples: ['分析行业集中度，并模拟科技板块下跌 10% 的冲击。'] }],
+    handle() {
+      return '组合风险快照（截至 2026-06-30）\n1. 集中度：科技 42%，高于单行业 30% 约束 12pct；现金 15% 提供部分缓冲。\n2. 压力测试：假设科技持仓线性下跌 10%、其他资产不变且忽略相关性二阶变化，组合一阶冲击约 -4.2%。\n3. 研究性再平衡：科技降至 30% 需卖出 12%；在换手不超过 15% 的约束下，可将 6% 转入低相关行业、6% 转入现金或宽基，实际方案需结合个券流动性与风险模型复核。\n4. 数据缺口：尚无个券、风格因子、波动率和相关性数据，无法计算 VaR 或完整风险贡献。\n风险提示：压力情景是简化假设，不代表真实损失；以上仅用于研究，不构成投资建议。';
     }
   }
 ];
@@ -79,7 +75,7 @@ function createAgentServer(definition, requestedPort) {
       const message = isRpc ? body.params?.message : body.message;
       const prompt = (message?.parts || []).map((part) => part.text || '').join('\n');
       const output = definition.handle(prompt);
-      const result = definition.id === 'incident-commander'
+      const result = definition.id === 'portfolio-risk-manager'
         ? taskResult(output, message?.messageId)
         : messageResult(output, message?.messageId, definition.protocolVersion);
       return sendJson(response, 200, isRpc ? { jsonrpc: '2.0', id: body.id, result } : result);

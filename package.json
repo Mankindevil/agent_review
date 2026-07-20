@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A2A Agent 复杂度、专业度与基准对测平台",
+  "description": "金融 A2A Agent 研究严谨性、数据纪律与同题基准对测平台",
   "scripts": {
     "dev": "node --watch server.js",
     "start": "node server.js",
@@ -11,6 +11,7 @@
     "demo:real": "node scripts/real-demo.js",
     "demo:real-runtimes": "ENABLE_LOCAL_CLAUDE_CODE=true ENABLE_LOCAL_CURSOR_AGENT=true node scripts/real-demo.js",
     "demo:deepseek": "node scripts/deepseek-demo.js",
+    "data:probe": "python3 scripts/panda-data-bridge.py --probe",
     "test": "node --test",
     "check": "node scripts/check-syntax.js"
   },
