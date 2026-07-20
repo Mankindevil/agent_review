@@ -128,6 +128,18 @@ Doubao Runtime 不要求本机存在 `doubao` CLI。当 `ARK_BASE_URL`、`ARK_AP
 - 提交 Agent 低于 Claude Code、但不低于豆包基线：`NPC`；
 - 提交 Agent 低于豆包基线：`拉`。
 
+### 3.6 单步重试与派生结果重算
+
+只有 `completed`、`failed`、`cancelled`、`interrupted` 终态允许发起单步重试，避免主流水线和复核任务同时修改同一评测。重试分为三类：
+
+- `review`：只重新调用指定评审模型，原位替换该模型结果；
+- `build`：重新生成指定 Runtime Skill，并自动用新 Skill 回放全部已有测试用例；
+- `benchmark`：只重跑指定用例中的指定选手，适合处理单次网络或模型抖动。
+
+执行期间评测状态改为 `retrying`，复用 SSE、日志和停止机制。旧结果会保持可见，直到新结果返回；随后相同 `key` 的结果被替换而不是追加。平台再从事实结果重新派生 `professional`、`averages`、`coverage`、`overallMode` 和 `roast`，因此等级与判词不会沿用过期缓存。
+
+每次尝试写入 `retryHistory`，记录步骤类型、目标 key、用例索引、开始时间、耗时以及前后结果摘要，最多保留最近 100 条。意外异常会恢复重试前状态；用户停止则进入 `cancelled` 并保留已落盘产物。服务启动时也会把遗留 `retrying` 状态恢复为 `interrupted`。
+
 ## 4. 数据与接口
 
 ### `POST /api/evaluations`
@@ -165,7 +177,25 @@ SSE 流。每次数据事件都是完整评测快照，客户端断线后可直�
 
 ### `POST /api/evaluations/:id/cancel`
 
-幂等停止接口。运行中任务的 `AbortController` 会传播到模型 fetch、A2A fetch、本地 Claude/Cursor 子进程和方舟协议桥；状态更新为 `cancelled`，已持久化的阶段结果不删除。服务启动时还会把历史遗留的 `queued/running` 记录转为 `interrupted`，避免进程已消失而 UI 仍显示运行。
+幂等停止接口。运行中或重试中的任务，其 `AbortController` 会传播到模型 fetch、A2A fetch、本地 Claude/Cursor 子进程和方舟协议桥；状态更新为 `cancelled`，已持久化的阶段结果不删除。服务启动时还会把历史遗留的 `queued/running/retrying` 记录转为 `interrupted`，避免进程已消失而 UI 仍显示运行。
+
+### `POST /api/evaluations/:id/retry`
+
+返回 `202` 并异步执行一个精确复核步骤。请求示例：
+
+```json
+{ "type": "review", "key": "gpt" }
+```
+
+```json
+{ "type": "build", "key": "claude-code" }
+```
+
+```json
+{ "type": "benchmark", "key": "submitted", "caseIndex": 0 }
+```
+
+可用的评审 key 来自评审配置 `id`；Runtime/对测 key 为 `claude-code`、`cursor`、`doubao`，提交 Agent 的对测 key 为 `submitted`。主任务非终态时返回 `409`，目标不存在或参数无效时返回 `400`。进度继续通过原 SSE 接口推送。
 
 ### 其他接口
 
@@ -199,7 +229,7 @@ SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日
 │   ├── ark-anthropic-proxy.js 方舟 OpenAI API 到 Anthropic Messages 的本地协议桥
 │   ├── claude-env.js       Claude Code 的 Ark / DeepSeek 环境映射
 │   ├── a2a.js              Agent Card 校验、binding 选择和 A2A client
-│   ├── pipeline.js         评测状态机与容错编排
+│   ├── pipeline.js         评测、单步复核、派生结果重算与容错状态机
 │   ├── prompts.js          模型评审、Skill 构建与同题执行 prompt
 │   ├── providers.js        多模型评审 adapter
 │   ├── runtimes.js         Skill 构建与 runtime 执行 adapter

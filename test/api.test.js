@@ -47,6 +47,20 @@ test('creates and completes a demo evaluation', async () => {
   assert.ok(result.logs.length > 10);
   assert.ok(result.logs.every((log) => log.source && log.phase && log.mode));
 
+  const retryResponse = await fetch(`${origin}/api/evaluations/${created.id}/retry`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'benchmark', key: 'submitted', caseIndex: 0 })
+  });
+  assert.equal(retryResponse.status, 202);
+  assert.equal((await retryResponse.json()).status, 'retrying');
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    result = await (await fetch(`${origin}/api/evaluations/${created.id}`)).json();
+    if (result.status === 'completed' && result.retryHistory?.length === 1) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(result.retryHistory.length, 1);
+  assert.equal(result.retryHistory[0].type, 'benchmark');
+  assert.ok(result.roast.tier.label, '重试完成后应重新生成最终锐评');
+
   const cancelResponse = await fetch(`${origin}/api/evaluations/${created.id}/cancel`, { method: 'POST' });
   assert.equal(cancelResponse.status, 200);
   assert.equal((await cancelResponse.json()).status, 'completed', '停止接口应当对已结束评测保持幂等');
@@ -54,6 +68,13 @@ test('creates and completes a demo evaluation', async () => {
 
 test('returns 404 when stopping an unknown evaluation', async () => {
   const response = await fetch(`${origin}/api/evaluations/eval_missing/cancel`, { method: 'POST' });
+  assert.equal(response.status, 404);
+});
+
+test('returns 404 when retrying an unknown evaluation', async () => {
+  const response = await fetch(`${origin}/api/evaluations/eval_missing/retry`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'review', key: 'gpt' })
+  });
   assert.equal(response.status, 404);
 });
 

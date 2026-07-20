@@ -26,7 +26,7 @@ export class EvaluationPipeline {
     this.activeRuns.set(evaluation.id, controller);
     queueMicrotask(() => this.run(evaluation.id, controller.signal)
       .catch((error) => this.fail(evaluation.id, error))
-      .finally(() => this.activeRuns.delete(evaluation.id)));
+      .finally(() => { if (this.activeRuns.get(evaluation.id) === controller) this.activeRuns.delete(evaluation.id); }));
     return evaluation;
   }
 
@@ -37,18 +37,144 @@ export class EvaluationPipeline {
     const reason = new Error('用户停止了本次评测');
     reason.name = 'AbortError';
     this.activeRuns.get(evaluationId)?.abort(reason);
-    await this.update(item, { status: 'cancelled', stage: '评测已停止', stoppedAt: now() }, {
+    await this.update(item, { status: 'cancelled', stage: '评测已停止', stoppedAt: now(), retrying: null }, {
       level: 'error', source: 'SYSTEM', phase: 'cancelled', text: '用户停止了本次评测', detail: '已保留停止前完成的所有阶段产物', mode: item.mode
     });
     return item;
   }
 
+  async retry(evaluationId, input) {
+    const item = this.store.get(evaluationId);
+    if (!item) return null;
+    if (!isTerminal(item.status)) throw Object.assign(new Error('主评测仍在执行，请结束后再单独重试步骤'), { statusCode: 409 });
+    const step = resolveRetryStep(item, input);
+    const previous = retryTargetSummary(item, step);
+    const previousStatus = item.status;
+    const controller = new AbortController();
+    this.activeRuns.set(evaluationId, controller);
+    await this.update(item, { status: 'retrying', stage: step.label, retrying: step }, {
+      level: 'info', source: 'RETRY', phase: step.type, text: step.label, detail: '旧结果保留至新结果返回，完成后自动重算总评', mode: item.mode
+    });
+    queueMicrotask(() => this.runRetry(item, step, previous, previousStatus, controller.signal)
+      .catch((error) => this.failRetry(item, step, previous, previousStatus, error))
+      .finally(() => { if (this.activeRuns.get(evaluationId) === controller) this.activeRuns.delete(evaluationId); }));
+    return item;
+  }
+
   async recoverInterrupted() {
-    for (const item of this.store.list().filter((value) => ['queued', 'running'].includes(value.status))) {
+    for (const item of this.store.list().filter((value) => ['queued', 'running', 'retrying'].includes(value.status))) {
       await this.update(item, { status: 'interrupted', stage: '服务重启，评测已中断', stoppedAt: now(), error: '执行进程在评测期间重启；已保留重启前完成的阶段产物。' }, {
         level: 'error', source: 'SYSTEM', phase: 'interrupted', text: '检测到未完成的遗留评测', detail: '执行进程已重启，旧任务不再实际运行', mode: item.mode
       });
     }
+  }
+
+  async runRetry(item, step, previous, previousStatus, signal) {
+    const startedAt = Date.now();
+    signal.throwIfAborted();
+    if (step.type === 'review') await this.retryReview(item, step, signal);
+    if (step.type === 'build') await this.retryBuild(item, step, signal);
+    if (step.type === 'benchmark') await this.retryBenchmark(item, step, signal);
+    signal.throwIfAborted();
+    const result = retryTargetSummary(item, step);
+    appendRetryHistory(item, step, previous, result, Date.now() - startedAt);
+    const derived = recalculateDerived(item);
+    const completed = hasCompleteBenchmark(item);
+    await this.update(item, {
+      ...derived,
+      status: completed ? 'completed' : previousStatus,
+      stage: completed ? '单步复核完成，锐评已重算' : '单步复核完成',
+      retrying: null,
+      ...(completed ? { completedAt: now() } : {})
+    }, {
+      level: result.error ? 'error' : 'success', source: 'RETRY', phase: step.type,
+      text: result.error ? `${step.shortLabel} 重试仍失败` : `${step.shortLabel} 重试完成，综合评分已更新`,
+      detail: retryDeltaText(previous, result), mode: result.mode || item.mode, durationMs: Date.now() - startedAt
+    });
+  }
+
+  async retryReview(item, step, signal) {
+    const reviewer = configuredReviewers().find((candidate) => retryReviewerKey(candidate) === step.key || candidate.model === step.key || candidate.name === step.key);
+    const reviews = [...(item.professional?.reviews || [])];
+    const index = reviews.findIndex((review) => retryReviewResultKey(review) === step.key || review.model === step.key || review.reviewer === step.key || review.reviewer === step.reviewerName);
+    let next;
+    try {
+      next = { ...(await reviewAgent(reviewer, item.agentCard, item.complexity, item.mode, signal)), reviewerId: reviewer.id };
+    } catch (error) {
+      if (signal.aborted) throw signal.reason || error;
+      next = { reviewerId: reviewer.id, reviewer: reviewer.name, model: reviewer.model, score: 0, error: error.message, mode: item.mode };
+    }
+    if (index === -1) reviews.push(next); else reviews[index] = next;
+    item.professional = professionalSnapshot(reviews);
+  }
+
+  async retryBuild(item, step, signal) {
+    const runtime = RUNTIMES.find((candidate) => candidate.id === step.key);
+    const builds = [...(item.builds || [])];
+    const index = builds.findIndex((build) => build.runtimeId === step.key);
+    let next;
+    try {
+      next = await buildSkill(runtime, item.agentCard, item.mode, { signal });
+    } catch (error) {
+      if (signal.aborted) throw signal.reason || error;
+      next = { runtime: runtime.name, runtimeId: runtime.id, mode: item.mode, error: error.message };
+    }
+    if (index === -1) builds.push(next); else builds[index] = next;
+    item.builds = builds;
+    await this.update(item, { builds, stage: `${step.shortLabel} 已重建，正在回放测试用例` }, {
+      level: next.error ? 'error' : 'success', source: 'RETRY', phase: 'build',
+      text: next.error ? `${step.shortLabel} 重建仍失败` : `${step.shortLabel} Skill 重建完成`,
+      detail: next.error || next.skill?.name, mode: next.error ? 'failed' : next.mode
+    });
+    for (let caseIndex = 0; caseIndex < (item.benchmark || []).length; caseIndex += 1) {
+      signal.throwIfAborted();
+      await this.replaceBenchmarkEntry(item, caseIndex, step.key, signal);
+      const entry = item.benchmark[caseIndex].entries.find((candidate) => candidate.id === step.key);
+      await this.update(item, { benchmark: item.benchmark, stage: `${step.shortLabel} 回放 ${caseIndex + 1}/${item.benchmark.length}` }, {
+        level: entry?.mode === 'failed' ? 'error' : 'success', source: 'RETRY', phase: 'benchmark',
+        text: `${step.shortLabel} 完成「${item.benchmark[caseIndex].case.name}」回放`, detail: `score=${entry?.score ?? 0}`, mode: entry?.mode || item.mode
+      });
+    }
+  }
+
+  async retryBenchmark(item, step, signal) {
+    await this.replaceBenchmarkEntry(item, step.caseIndex, step.key, signal);
+  }
+
+  async replaceBenchmarkEntry(item, caseIndex, competitorId, signal) {
+    const roundItem = item.benchmark?.[caseIndex];
+    if (!roundItem) throw new Error(`用例 ${caseIndex + 1} 不存在`);
+    const testCase = roundItem.case;
+    let output;
+    let mode = item.mode;
+    let name = item.agentCard.name;
+    try {
+      if (competitorId === 'submitted') {
+        output = item.mode === 'live' ? (await callA2AAgent(item.agentCard, testCase.prompt, 45_000, signal)).text : mockSubmittedOutput(item.agentCard, testCase);
+      } else {
+        const build = item.builds?.find((candidate) => candidate.runtimeId === competitorId);
+        if (!build || build.error) throw new Error(build?.error || '对应 Runtime Skill 尚未生成');
+        name = build.runtime;
+        mode = build.mode;
+        output = await runSkill(build, testCase, item.mode, { signal });
+      }
+    } catch (error) {
+      if (signal.aborted) throw signal.reason || error;
+      output = `执行失败：${error.message}`;
+      mode = 'failed';
+      if (competitorId !== 'submitted') name = item.builds?.find((candidate) => candidate.runtimeId === competitorId)?.runtime || competitorId;
+    }
+    const next = makeEntry(competitorId, name, output, testCase, mode);
+    const entryIndex = roundItem.entries.findIndex((entry) => entry.id === competitorId);
+    if (entryIndex === -1) roundItem.entries.push(next); else roundItem.entries[entryIndex] = next;
+  }
+
+  async failRetry(item, step, previous, previousStatus, error) {
+    if (item.status === 'cancelled') return;
+    appendRetryHistory(item, step, previous, { error: error.message }, 0);
+    await this.update(item, { status: previousStatus, stage: '单步复核异常', retrying: null }, {
+      level: 'error', source: 'RETRY', phase: step.type, text: `${step.shortLabel} 重试异常`, detail: error.message, mode: item.mode
+    });
   }
 
   async run(evaluationId, signal) {
@@ -75,12 +201,12 @@ export class EvaluationPipeline {
         level: 'info', source: 'MODEL', phase: 'review', text: `${reviewer.model} 接过了答卷`, mode: item.mode
       });
       try {
-        const review = await reviewAgent(reviewer, item.agentCard, complexity, item.mode, signal);
+        const review = { ...(await reviewAgent(reviewer, item.agentCard, complexity, item.mode, signal)), reviewerId: reviewer.id };
         professionalReviews.push(review);
         await this.update(item, { professional: professionalSnapshot(professionalReviews) }, { level: 'success', source: 'MODEL', phase: 'review', text: `${reviewer.model} 完成盲审 · ${review.score}/100`, mode: review.mode, durationMs: Date.now() - startedAt });
       } catch (error) {
         if (signal?.aborted) throw signal.reason || error;
-        professionalReviews.push({ reviewer: reviewer.name, model: reviewer.model, score: 0, error: error.message, mode: item.mode });
+        professionalReviews.push({ reviewerId: reviewer.id, reviewer: reviewer.name, model: reviewer.model, score: 0, error: error.message, mode: item.mode });
         await this.update(item, { professional: professionalSnapshot(professionalReviews) }, { level: 'error', source: 'MODEL', phase: 'review', text: `${reviewer.model} 调用失败`, detail: error.message, mode: item.mode, durationMs: Date.now() - startedAt });
       }
     }
@@ -177,6 +303,94 @@ export class EvaluationPipeline {
 function professionalSnapshot(reviews) {
   const valid = reviews.filter((review) => review.score > 0);
   return { score: round(average(valid.map((review) => review.score)), 1), mode: summarizeModes(reviews.map((review) => review.mode)), reviews: [...reviews] };
+}
+
+function resolveRetryStep(item, input = {}) {
+  const type = String(input.type || '').trim();
+  const key = String(input.key || '').trim();
+  if (type === 'review') {
+    const existing = item.professional?.reviews?.find((review) => [retryReviewResultKey(review), review.model, review.reviewer].includes(key));
+    const reviewer = configuredReviewers().find((candidate) => [retryReviewerKey(candidate), candidate.model, candidate.name].includes(key) || (existing && candidate.name === existing.reviewer));
+    if (!reviewer) throw badRetryRequest('评审模型不存在或当前未配置');
+    return { type, key: retryReviewerKey(reviewer), reviewerName: reviewer.name, label: `重新盲审 · ${reviewer.model}`, shortLabel: reviewer.name };
+  }
+  if (type === 'build') {
+    const runtime = RUNTIMES.find((candidate) => candidate.id === key);
+    if (!runtime) throw badRetryRequest('Runtime 构建步骤不存在');
+    return { type, key: runtime.id, label: `重新复刻 · ${runtime.name}`, shortLabel: runtime.name };
+  }
+  if (type === 'benchmark') {
+    const caseIndex = Number(input.caseIndex);
+    const roundItem = item.benchmark?.[caseIndex];
+    const allowed = new Set(['submitted', ...RUNTIMES.map((runtime) => runtime.id)]);
+    if (!Number.isInteger(caseIndex) || !roundItem) throw badRetryRequest('对测用例不存在');
+    if (!allowed.has(key)) throw badRetryRequest('对测选手不存在');
+    const name = key === 'submitted'
+      ? item.agentCard.name
+      : item.builds?.find((build) => build.runtimeId === key)?.runtime || RUNTIMES.find((runtime) => runtime.id === key)?.name || key;
+    return { type, key, caseIndex, label: `重新对测 · ${roundItem.case.name} / ${name}`, shortLabel: `${roundItem.case.name} / ${name}` };
+  }
+  throw badRetryRequest('不支持的重试类型；可选 review、build、benchmark');
+}
+
+function badRetryRequest(message) { return Object.assign(new Error(message), { statusCode: 400 }); }
+function retryReviewerKey(reviewer) { return reviewer.id || reviewer.model || reviewer.name; }
+function retryReviewResultKey(review) { return review.reviewerId || review.model || review.reviewer; }
+
+function retryTargetSummary(item, step) {
+  if (step.type === 'review') {
+    const review = item.professional?.reviews?.find((candidate) => retryReviewResultKey(candidate) === step.key || candidate.model === step.key || candidate.reviewer === step.key || candidate.reviewer === step.reviewerName);
+    return review ? { score: review.score, model: review.model, mode: review.mode, ...(review.error ? { error: review.error } : {}) } : { error: '暂无旧结果' };
+  }
+  if (step.type === 'build') {
+    const build = item.builds?.find((candidate) => candidate.runtimeId === step.key);
+    return build ? { model: build.model, mode: build.mode, skill: build.skill?.name, ...(build.error ? { error: build.error } : {}) } : { error: '暂无旧结果' };
+  }
+  const entry = item.benchmark?.[step.caseIndex]?.entries?.find((candidate) => candidate.id === step.key);
+  return entry ? { score: entry.score, name: entry.name, mode: entry.mode, ...(entry.mode === 'failed' ? { error: String(entry.output || '').slice(0, 300) } : {}) } : { error: '暂无旧结果' };
+}
+
+function appendRetryHistory(item, step, previous, result, durationMs) {
+  const history = [...(item.retryHistory || []), {
+    id: id('retry'), at: now(), type: step.type, key: step.key,
+    ...(Number.isInteger(step.caseIndex) ? { caseIndex: step.caseIndex } : {}),
+    label: step.label, previous, result, durationMs
+  }];
+  item.retryHistory = history.slice(-100);
+}
+
+function retryDeltaText(previous, result) {
+  if (result.error) return result.error;
+  if (Number.isFinite(previous?.score) && Number.isFinite(result?.score)) {
+    const delta = round(result.score - previous.score, 1);
+    return `score ${previous.score} → ${result.score}（${delta >= 0 ? '+' : ''}${delta}）`;
+  }
+  return previous?.error ? `旧结果失败；本次已恢复为 ${result.mode || '可用'} 模式` : '结果已替换并纳入综合评分';
+}
+
+function hasCompleteBenchmark(item) {
+  const competitors = ['submitted', ...RUNTIMES.map((runtime) => runtime.id)];
+  return item.cases?.length > 0
+    && item.benchmark?.length === item.cases.length
+    && item.benchmark.every((roundItem) => competitors.every((competitor) => roundItem.entries?.some((entry) => entry.id === competitor)));
+}
+
+function recalculateDerived(item) {
+  const professional = professionalSnapshot(item.professional?.reviews || []);
+  const runtimeMode = summarizeModes((item.builds || []).map((build) => build.error ? 'failed' : build.mode));
+  const coverage = { agent: item.mode === 'live' ? 'live' : 'demo', models: professional.mode, runtimes: runtimeMode };
+  const derived = { professional, coverage, overallMode: summarizeModes(Object.values(coverage)) };
+  if (!hasCompleteBenchmark(item)) return derived;
+  const competitorIds = ['submitted', ...RUNTIMES.map((runtime) => runtime.id)];
+  const averages = Object.fromEntries(competitorIds.map((competitor) => {
+    const scores = item.benchmark.flatMap((roundItem) => roundItem.entries.filter((entry) => entry.id === competitor).map((entry) => entry.score));
+    return [competitor, round(average(scores), 1)];
+  }));
+  return {
+    ...derived,
+    averages,
+    roast: buildRoast(averages.submitted, averages['claude-code'], averages.doubao, professional.score, item.complexity)
+  };
 }
 
 function isTerminal(status) { return ['completed', 'failed', 'cancelled', 'interrupted'].includes(status); }

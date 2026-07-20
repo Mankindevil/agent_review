@@ -69,6 +69,8 @@ function bindEvents() {
   ['dragleave','drop'].forEach((name) => drop.addEventListener(name, (event) => { event.preventDefault(); drop.classList.remove('dragging'); }));
   drop.addEventListener('drop', (event) => readFile(event.dataTransfer.files[0]));
   document.addEventListener('click', (event) => {
+    const retry = event.target.closest('[data-retry-type]');
+    if (retry) { retryStep(retry); return; }
     const action = event.target.closest('[data-action]')?.dataset.action;
     if (action === 'home') showLanding();
     if (action === 'history') openHistory();
@@ -207,6 +209,32 @@ async function stopEvaluation() {
   }
 }
 
+async function retryStep(button) {
+  const item = state.current;
+  if (!item || !isTerminal(item.status) || button.disabled) return;
+  const original = button.innerHTML;
+  $$('[data-retry-type]').forEach((control) => { control.disabled = true; });
+  button.innerHTML = '<i>↻</i> 正在派发';
+  try {
+    const body = { type: button.dataset.retryType, key: button.dataset.retryKey };
+    if (button.dataset.caseIndex !== undefined) body.caseIndex = Number(button.dataset.caseIndex);
+    const response = await fetch(`/api/evaluations/${item.id}/retry`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || '单步重试失败');
+    state.eventSource?.close();
+    showEvaluation(payload);
+    subscribe(item.id);
+  } catch (error) {
+    button.innerHTML = escapeHtml(error.message);
+    setTimeout(() => {
+      button.innerHTML = original;
+      $$('[data-retry-type]').forEach((control) => { control.disabled = false; });
+    }, 2200);
+  }
+}
+
 function showEvaluation(item) {
   const changedEvaluation = state.current?.id !== item.id;
   const changedStage = state.lastStage !== item.stage;
@@ -223,9 +251,9 @@ function showEvaluation(item) {
   $('#progress-number').textContent = item.progress;
   $('#pulse-progress').style.height = `${item.progress}%`;
   $('#pulse-dot').style.top = `calc(${Math.min(item.progress, 96)}% - 2px)`;
-  $('#live-deck').classList.toggle('running', item.status === 'running');
+  $('#live-deck').classList.toggle('running', ['running','retrying'].includes(item.status));
   const stopButton = $('#stop-evaluation');
-  stopButton.classList.toggle('hidden', !['queued','running'].includes(item.status));
+  stopButton.classList.toggle('hidden', !['queued','running','retrying'].includes(item.status));
   stopButton.disabled = state.stopping;
   if (!state.stopping) $('span', stopButton).textContent = '停止本次评测';
   if (changedStage) {
@@ -264,7 +292,7 @@ function renderResult(item) {
         </div>
         <i class="verdict-seal__impact" aria-hidden="true"></i>
       </div>
-      <div class="verdict-copy"><small>FINAL VERDICT / ${escapeHtml(tier.label)}</small><h3>${escapeHtml(item.roast.headline)}</h3><p>提交 Agent 实战均分 <b>${item.averages.submitted}</b>，对 Claude Code ${signed(item.roast.deltaClaude)}，对豆包 ${signed(item.roast.deltaDoubao)}。</p></div>
+      <div class="verdict-copy"><small>FINAL VERDICT / ${escapeHtml(tier.label)}</small><h3>${escapeHtml(item.roast.headline)}</h3><p>提交 Agent 实战均分 <b>${item.averages.submitted}</b>，对 Claude Code ${signed(item.roast.deltaClaude)}，对豆包 ${signed(item.roast.deltaDoubao)}。</p>${renderRecalculationNote(item)}</div>
     </section>
     <div class="score-triad">
       ${scoreCard('01 / 必要性', complexity.score, complexity.verdict, complexity.reason, complexity.score >= 60)}
@@ -293,7 +321,8 @@ function renderPartialResults(item) {
   ].filter(Boolean).join('');
   const unlocked = Number(Boolean(item.complexity)) + Number(reviews.length > 0) + Number(builds.length > 0) + Number(rounds.length > 0);
   const waiting = isTerminal(item.status) ? '' : `<div class="artifact-wait"><i></i><div><b>${escapeHtml(item.stage)}</b><span>新产物完成后会直接插入下方，不必等整场结束。</span></div><strong>${item.progress}%</strong></div>`;
-  return `${terminal}<section class="artifact-console"><header><div><small>LIVE ARTIFACTS / 阶段产物</small><h3>跑完一项，解锁一项</h3></div><span>${unlocked} / 4 组已出</span></header><div class="artifact-meter"><i style="--progress:${item.progress}%"></i></div>${waiting}</section>${sections || '<div class="artifact-empty"><b>评测舱已接单</b><span>首个阶段产物正在生成。</span></div>'}`;
+  const retryCount = item.retryHistory?.length ? ` · ${item.retryHistory.length} 次复核` : '';
+  return `${terminal}<section class="artifact-console"><header><div><small>LIVE ARTIFACTS / 阶段产物</small><h3>${item.status === 'retrying' ? '单步复核中，旧结果继续可见' : '跑完一项，解锁一项'}</h3></div><span>${unlocked} / 4 组已出${retryCount}</span></header><div class="artifact-meter"><i style="--progress:${item.progress}%"></i></div>${waiting}</section>${sections || '<div class="artifact-empty"><b>评测舱已接单</b><span>首个阶段产物正在生成。</span></div>'}`;
 }
 
 function terminalNotice(item) {
@@ -314,15 +343,28 @@ function renderComplexity(value) {
 
 function renderReviews(reviews) {
   const labels = { domainDepth:'领域深度', workflowQuality:'流程设计', failureHandling:'异常处理', outputContract:'输出契约', evaluability:'可评测性' };
-  return `<div class="section-title"><h3>四方会审</h3><span>MULTI-MODEL BLIND REVIEW</span></div><div class="review-grid model-review-grid">${reviews.map(review=>`<article class="review-card"><div class="reviewer"><b>${escapeHtml(review.reviewer)}</b><span>${escapeHtml(review.model)} · ${review.mode?.toUpperCase()}</span></div><div class="review-score">${review.score}<small> / 100</small></div>${review.error?`<p class="risk">${escapeHtml(review.error)}</p>`:`<div class="mini-bars">${Object.entries(review.dimensions||{}).map(([key,score])=>`<div><span>${labels[key]||key}</span><i style="--value:${score}%"></i><b>${score}</b></div>`).join('')}</div><p>${escapeHtml(review.comment)}</p><div class="risk">⚠ ${escapeHtml(review.risk)}</div>`}</article>`).join('')}</div>`;
+  return `<div class="section-title"><h3>四方会审</h3><span>MULTI-MODEL BLIND REVIEW</span></div><div class="review-grid model-review-grid">${reviews.map(review=>`<article class="review-card"><div class="reviewer"><b>${escapeHtml(review.reviewer)}</b><span>${escapeHtml(review.model)} · ${review.mode?.toUpperCase()}</span></div><div class="review-score">${review.score}<small> / 100</small></div>${review.error?`<p class="risk">${escapeHtml(review.error)}</p>`:`<div class="mini-bars">${Object.entries(review.dimensions||{}).map(([key,score])=>`<div><span>${labels[key]||key}</span><i style="--value:${score}%"></i><b>${score}</b></div>`).join('')}</div><p>${escapeHtml(review.comment)}</p><div class="risk">⚠ ${escapeHtml(review.risk)}</div>`}<div class="review-actions">${retryButton('review', review.reviewerId || review.model, '重跑该模型')}</div></article>`).join('')}</div>`;
 }
 
 function renderBuilds(builds) {
-  return `<div class="section-title"><h3>现场复刻记录</h3><span>RUNTIME SKILL BUILD</span></div><div class="build-list">${builds.map(build=>`<div class="build-row"><b>${escapeHtml(build.runtime)}</b><span>${escapeHtml(build.model||'—')}</span><code>${escapeHtml(build.skill?.name||build.error||'构建失败')}</code><span class="${build.error?'':'ok'}">${build.error?'失败':`✓ ${build.mode.toUpperCase()}`}</span></div>`).join('')}</div>`;
+  return `<div class="section-title"><h3>现场复刻记录</h3><span>RUNTIME SKILL BUILD</span></div><div class="build-list">${builds.map(build=>`<div class="build-row"><b>${escapeHtml(build.runtime)}</b><span>${escapeHtml(build.model||'—')}</span><code>${escapeHtml(build.skill?.name||build.error||'构建失败')}</code><span class="${build.error?'':'ok'}">${build.error?'失败':`✓ ${build.mode.toUpperCase()}`}</span>${retryButton('build', build.runtimeId, '重建并回放')}</div>`).join('')}</div>`;
 }
 
 function renderBattle(rounds) {
-  return `<div class="section-title"><h3>同 Prompt 对打</h3><span>SAME INPUT · VISIBLE OUTPUT ONLY</span></div>${rounds.map((round,index)=>{ const max=Math.max(...round.entries.map(e=>e.score)); return `<article class="battle-round"><div class="battle-prompt"><span>CASE ${String(index+1).padStart(2,'0')}<br>${escapeHtml(round.case.name)}</span><p>${escapeHtml(round.case.prompt)}</p></div><div class="battle-grid">${round.entries.map(entry=>`<div class="battle-entry"><header><h4>${escapeHtml(entry.name)}</h4><strong class="${entry.score===max?'winner':''}">${entry.score}</strong></header><span class="mode">${entry.mode.toUpperCase()}</span><details><summary>查看完整输出</summary><pre>${escapeHtml(entry.output)}</pre></details></div>`).join('')}</div></article>`; }).join('')}`;
+  return `<div class="section-title"><h3>同 Prompt 对打</h3><span>SAME INPUT · VISIBLE OUTPUT ONLY</span></div>${rounds.map((round,index)=>{ const max=Math.max(...round.entries.map(e=>e.score)); return `<article class="battle-round"><div class="battle-prompt"><span>CASE ${String(index+1).padStart(2,'0')}<br>${escapeHtml(round.case.name)}</span><p>${escapeHtml(round.case.prompt)}</p></div><div class="battle-grid">${round.entries.map(entry=>`<div class="battle-entry"><header><h4>${escapeHtml(entry.name)}</h4><strong class="${entry.score===max?'winner':''}">${entry.score}</strong></header><div class="battle-actions"><span class="mode">${entry.mode.toUpperCase()}</span>${retryButton('benchmark', entry.id, '重跑这一局', index)}</div><details><summary>查看完整输出</summary><pre>${escapeHtml(entry.output)}</pre></details></div>`).join('')}</div></article>`; }).join('')}`;
+}
+
+function retryButton(type, key, label, caseIndex) {
+  if (!isTerminal(state.current?.status) || !key) return '';
+  const caseAttribute = Number.isInteger(caseIndex) ? ` data-case-index="${caseIndex}"` : '';
+  return `<button class="retry-step" type="button" data-retry-type="${escapeHtml(type)}" data-retry-key="${escapeHtml(key)}"${caseAttribute} aria-label="${escapeHtml(label)}"><i aria-hidden="true">↻</i>${escapeHtml(label)}</button>`;
+}
+
+function renderRecalculationNote(item) {
+  const count = item.retryHistory?.length || 0;
+  if (!count) return '';
+  const latest = item.retryHistory.at(-1);
+  return `<div class="recalc-note"><i>↻</i><span>已基于 <b>${count}</b> 次单步复核重新计分<br><small>最近：${escapeHtml(latest.label)} · ${formatTime(latest.at)}</small></span></div>`;
 }
 
 function renderLogs(logs) {

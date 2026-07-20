@@ -44,6 +44,11 @@ export const server = createServer(async (request, response) => {
       const item = await pipeline.cancel(cancelMatch[1]);
       return item ? json(response, 200, item) : json(response, 404, { error: '评测不存在' });
     }
+    const retryMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/retry$/);
+    if (request.method === 'POST' && retryMatch) {
+      const item = await pipeline.retry(retryMatch[1], await readJsonBody(request));
+      return item ? json(response, 202, item) : json(response, 404, { error: '评测不存在' });
+    }
     const match = url.pathname.match(/^\/api\/evaluations\/([^/]+)$/);
     if (request.method === 'GET' && match) {
       const item = store.get(match[1]);
