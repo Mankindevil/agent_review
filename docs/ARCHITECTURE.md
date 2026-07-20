@@ -36,6 +36,8 @@ A2A Agent endpoint   Model / Runtime endpoints
 
 当前版本刻意使用 Node.js 内置模块，不需要安装第三方依赖，降低首次运行成本。持久化默认使用 JSON 文件，写入采用同目录临时文件与原子 rename，适合单进程 MVP；生产环境应替换为 PostgreSQL，并把执行流水线放入任务队列。
 
+运行中的评测对象使用 `activeWork` 暴露当前实际工作项，而不是让前端猜测日志：`type` 区分 protocol / review / build / benchmark，`key` 定位模型、Runtime 或选手，`caseIndex` 定位用例，`label` / `detail` / `index` / `total` 驱动局部加载状态。首次流水线和单步重试共用这套契约；成功、失败、停止或服务恢复时都会清空 `activeWork`。前端因此能在对应评审卡、Description 直出行或对测卡中显示加载扫描带，同时保留已经完成的旧结果。
+
 ### 2.1 配置加载
 
 `src/env.js` 在服务和 DeepSeek 启动器执行实际业务模块前加载项目根目录 `.env`，不依赖第三方 dotenv 包。解析器支持注释、`export`、单/双引号和空值，但环境 JSON 配置仍要求写在单行。加载时只补充尚不存在的变量，因此进程环境、CI Secret 或容器注入值始终优先于文件值。外部进程可通过 `ENV_FILE` 指定另一份配置文件。

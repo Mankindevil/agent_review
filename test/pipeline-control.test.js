@@ -64,7 +64,11 @@ test('persists each completed reviewer, runtime and benchmark entry incrementall
   assert.ok(snapshots.some((item) => item.professional?.reviews?.length === 1));
   assert.ok(snapshots.some((item) => item.builds?.length === 1));
   assert.ok(snapshots.some((item) => item.benchmark?.[0]?.entries?.length === 1));
+  assert.ok(snapshots.some((item) => item.activeWork?.type === 'review'));
+  assert.ok(snapshots.some((item) => item.activeWork?.type === 'build'));
+  assert.ok(snapshots.some((item) => item.activeWork?.type === 'benchmark'));
   assert.equal(store.get(created.id).status, 'completed');
+  assert.equal(store.get(created.id).activeWork, null);
   assert.equal(store.get(created.id).seed, 424242);
   assert.equal(store.get(created.id).temperature, 0);
   assert.equal(store.get(created.id).professional.reviews.every((review) => Number.isInteger(review.seed)), true);
@@ -80,10 +84,13 @@ test('retries an individual stage and recalculates the derived verdict', async (
 
   await pipeline.retry(created.id, { type: 'review', key: 'gpt' });
   assert.equal(store.get(created.id).status, 'retrying');
+  assert.equal(store.get(created.id).activeWork.type, 'review');
+  assert.equal(store.get(created.id).activeWork.retry, true);
   item = await waitFor(store, created.id, (value) => value.status === 'completed' && value.retryHistory?.length === 1);
   assert.equal(item.retryHistory[0].type, 'review');
   assert.equal(item.professional.reviews.find((review) => review.reviewerId === 'gpt').score > 0, true);
   assert.ok(item.roast?.tier);
+  assert.equal(item.activeWork, null);
 
   await pipeline.retry(created.id, { type: 'benchmark', key: 'submitted', caseIndex: 0 });
   item = await waitFor(store, created.id, (value) => value.status === 'completed' && value.retryHistory?.length === 2);

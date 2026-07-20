@@ -44,6 +44,21 @@ test('keeps the history count inline in the top navigation', async () => {
   assert.match(css, /\.nav-button\s*\{[^}]*display:flex;[^}]*white-space:nowrap;/);
 });
 
+test('serves localized loading effects with reduced-motion support', async () => {
+  const [cssResponse, appResponse] = await Promise.all([
+    fetch(`${origin}/styles.css`),
+    fetch(`${origin}/app.js`)
+  ]);
+  const [css, app] = await Promise.all([cssResponse.text(), appResponse.text()]);
+  assert.equal(cssResponse.status, 200);
+  assert.equal(appResponse.status, 200);
+  assert.match(css, /\.work-loader\s*\{/);
+  assert.match(css, /@keyframes work-scan/);
+  assert.match(css, /\.scan-beam,\.intake-card::after,\.work-loader::after/);
+  assert.match(app, /function renderWorkLoader/);
+  assert.match(app, /activityOfType\(item, 'build'\)/);
+});
+
 test('lets the final verdict use the available desktop width', async () => {
   const response = await fetch(`${origin}/styles.css`);
   const css = await response.text();

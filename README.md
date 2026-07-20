@@ -13,6 +13,7 @@
 - 现场复刻采用 description-only 信息防火墙：Runtime 只收到顶层 `description` 原文；记录支持展开 Skill 文件浏览器，逐个查看 `SKILL.md`、原始 `skill.json`、输入 description 与运行清单，并可复制完整内容；
 - 提交 Agent 与三个复刻 skill 的逐用例输出和分数对比；
 - SSE 实时进度：复杂度、每位模型评语、每个 Runtime Skill 和每位对测选手完成后立即展示；
+- 首次评测与单步重试都有定位到当前工作项的加载动效：评审卡、Description 直出行或对测选手卡会显示 LIVE/RETRY 扫描带、目标与序号；支持 reduced-motion；
 - 可真正中止模型请求与本地 CLI 的停止按钮，以及服务重启后的遗留任务识别；
 - 模型复审、Runtime 重建、单用例单选手重跑三种单步重试；新结果替换旧结果后自动重算均分、覆盖模式、等级与锐评，并保留复核审计历史；
 - 可在页面或 `.env` 固定评测 seed；平台为每个模型、Runtime 和用例派生稳定子 seed，并默认使用 temperature 0；

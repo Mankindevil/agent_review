@@ -330,29 +330,30 @@ function renderResult(item) {
       ${scoreCard('03 / 实战力', item.averages.submitted, '提交 Agent 同题均分', `Claude ${item.averages['claude-code']} · Cursor ${item.averages.cursor} · 豆包 ${item.averages.doubao}`, true)}
     </div>
     ${renderComplexity(complexity)}
-    ${renderReviews(item.professional.reviews)}
-    ${renderBuilds(item.builds)}
-    ${renderBattle(item.benchmark)}
+    ${renderReviews(item.professional.reviews, item)}
+    ${renderBuilds(item.builds, item)}
+    ${renderBattle(item.benchmark, item)}
   `;
   revealVerdictInView(root, item.id);
   return true;
 }
 
 function renderPartialResults(item) {
+  const activity = activeActivity(item);
   const reviews = item.professional?.reviews || [];
   const builds = item.builds || [];
-  const rounds = (item.benchmark || []).filter((round) => round.entries?.length);
+  const rounds = (item.benchmark || []).filter((round, index) => round.entries?.length || (activity?.type === 'benchmark' && activity.caseIndex === index));
   const terminal = terminalNotice(item);
   const sections = [
     item.complexity ? renderComplexity(item.complexity) : '',
-    reviews.length ? renderReviews(reviews) : '',
-    builds.length ? renderBuilds(builds) : '',
-    rounds.length ? renderBattle(rounds) : ''
+    reviews.length || activity?.type === 'review' ? renderReviews(reviews, item) : '',
+    builds.length || activity?.type === 'build' ? renderBuilds(builds, item) : '',
+    rounds.length || activity?.type === 'benchmark' ? renderBattle(rounds, item) : ''
   ].filter(Boolean).join('');
   const unlocked = Number(Boolean(item.complexity)) + Number(reviews.length > 0) + Number(builds.length > 0) + Number(rounds.length > 0);
-  const waiting = isTerminal(item.status) ? '' : `<div class="artifact-wait"><i></i><div><b>${escapeHtml(item.stage)}</b><span>新产物完成后会直接插入下方，不必等整场结束。</span></div><strong>${item.progress}%</strong></div>`;
+  const waiting = isTerminal(item.status) ? '' : renderWorkLoader(activity, 'console', true);
   const retryCount = item.retryHistory?.length ? ` · ${item.retryHistory.length} 次复核` : '';
-  return `${terminal}<section class="artifact-console"><header><div><small>LIVE ARTIFACTS / 阶段产物</small><h3>${item.status === 'retrying' ? '单步复核中，旧结果继续可见' : '跑完一项，解锁一项'}</h3></div><span>${unlocked} / 4 组已出${retryCount}</span></header><div class="artifact-meter"><i style="--progress:${item.progress}%"></i></div>${waiting}</section>${sections || '<div class="artifact-empty"><b>评测舱已接单</b><span>首个阶段产物正在生成。</span></div>'}`;
+  return `${terminal}<section class="artifact-console"><header><div><small>LIVE ARTIFACTS / 阶段产物</small><h3>${item.status === 'retrying' ? '单步复核中，旧结果继续可见' : '跑完一项，解锁一项'}</h3></div><span>${unlocked} / 4 组已出${retryCount}</span></header><div class="artifact-meter"><i style="--progress:${item.progress}%"></i></div>${waiting}</section>${sections}`;
 }
 
 function terminalNotice(item) {
@@ -371,13 +372,28 @@ function renderComplexity(value) {
   return `<div class="section-title"><h3>为什么需要（或不需要）Agent</h3><span>AGENT NECESSITY</span></div><div class="review-grid">${Object.entries(value.dimensions).map(([key,score])=>`<article class="review-card"><div class="reviewer"><b>${labels[key]}</b><span>${score}/100</span></div><div class="review-score">${score}<small> SIGNAL</small></div><div class="mini-bars"><div><span>强度</span><i style="--value:${score}%"></i><b>${score}</b></div></div></article>`).join('')}</div>`;
 }
 
-function renderReviews(reviews) {
+function renderReviews(reviews, item) {
   const labels = { domainDepth:'领域深度', workflowQuality:'流程设计', failureHandling:'异常处理', outputContract:'输出契约', evaluability:'可评测性' };
-  return `<div class="section-title"><h3>四方会审</h3><span>MULTI-MODEL BLIND REVIEW</span></div><div class="review-grid model-review-grid">${reviews.map(review=>`<article class="review-card"><div class="reviewer"><b>${escapeHtml(review.reviewer)}</b><span>${escapeHtml(review.model)} · ${review.mode?.toUpperCase()}</span></div><div class="review-score">${review.score}<small> / 100</small></div>${review.error?`<div class="risk"><b>执行失败</b>${renderStructuredText(review.error)}</div>`:`<div class="mini-bars">${Object.entries(review.dimensions||{}).map(([key,score])=>`<div><span>${labels[key]||key}</span><i style="--value:${score}%"></i><b>${score}</b></div>`).join('')}</div>${renderStructuredText(review.comment, 'review-comment')}<div class="risk"><b>⚠ 首要风险</b>${renderStructuredText(review.risk)}</div>`}<div class="review-actions">${retryButton('review', review.reviewerId || review.model, '重跑该模型')}</div></article>`).join('')}</div>`;
+  const activity = activityOfType(item, 'review');
+  const cards = reviews.map((review) => {
+    const key = review.reviewerId || review.model;
+    const working = activityMatches(activity, key);
+    return `<article class="review-card${working ? ' work-active' : ''}"><div class="reviewer"><b>${escapeHtml(review.reviewer)}</b><span>${escapeHtml(review.model)} · ${review.mode?.toUpperCase()}</span></div><div class="review-score">${review.score}<small> / 100</small></div>${review.error?`<div class="risk"><b>执行失败</b>${renderStructuredText(review.error)}</div>`:`<div class="mini-bars">${Object.entries(review.dimensions||{}).map(([dimension,score])=>`<div><span>${labels[dimension]||dimension}</span><i style="--value:${score}%"></i><b>${score}</b></div>`).join('')}</div>${renderStructuredText(review.comment, 'review-comment')}<div class="risk"><b>⚠ 首要风险</b>${renderStructuredText(review.risk)}</div>`}<div class="review-actions">${retryButton('review', key, '重跑该模型')}</div>${working ? renderWorkLoader(activity, 'card') : ''}</article>`;
+  });
+  if (activity && !reviews.some((review) => activityMatches(activity, review.reviewerId || review.model))) cards.push(`<article class="review-card review-card-loading work-active">${renderWorkLoader(activity, 'card')}</article>`);
+  return `<div class="section-title"><h3>四方会审</h3><span>MULTI-MODEL BLIND REVIEW</span></div><div class="review-grid model-review-grid">${cards.join('')}</div>`;
 }
 
-function renderBuilds(builds) {
-  return `<div class="section-title"><h3>Description 直出记录</h3><span>DESCRIPTION-ONLY SKILL BUILD</span></div><div class="build-list">${builds.map(build=>`<article class="build-card" data-skill-runtime="${escapeHtml(build.runtimeId || '')}"><div class="build-row"><b>${escapeHtml(build.runtime)}</b><span>${escapeHtml(build.model||'—')}</span><code>${escapeHtml(build.skill?.name||build.error||'构建失败')}</code><span class="${build.error?'':'ok'}">${build.error?'失败':`✓ ${build.mode.toUpperCase()}`}</span>${build.error || !build.skill ? '' : `<button class="skill-detail-toggle" type="button" data-skill-detail="${escapeHtml(build.runtimeId)}" aria-expanded="false"><i aria-hidden="true">⌁</i><span>查看 Skill</span></button>`}${retryButton('build', build.runtimeId, '重新直出并对测')}</div><div class="skill-inspector hidden" data-skill-inspector><div class="skill-inspector-loading"><i></i><span>正在装载目录快照…</span></div></div></article>`).join('')}</div>`;
+function renderBuilds(builds, item) {
+  const activity = activityOfType(item, 'build');
+  const cards = builds.map((build) => {
+    const working = activityMatches(activity, build.runtimeId);
+    return `<article class="build-card${working ? ' work-active' : ''}" data-skill-runtime="${escapeHtml(build.runtimeId || '')}"><div class="build-row"><b>${escapeHtml(build.runtime)}</b><span>${escapeHtml(build.model||'—')}</span><code>${escapeHtml(build.skill?.name||build.error||'构建失败')}</code><span class="${build.error?'':'ok'}">${build.error?'失败':`✓ ${build.mode.toUpperCase()}`}</span>${build.error || !build.skill ? '' : `<button class="skill-detail-toggle" type="button" data-skill-detail="${escapeHtml(build.runtimeId)}" aria-expanded="false"><i aria-hidden="true">⌁</i><span>查看 Skill</span></button>`}${retryButton('build', build.runtimeId, '重新直出并对测')}${working ? renderWorkLoader(activity, 'row') : ''}</div><div class="skill-inspector hidden" data-skill-inspector><div class="skill-inspector-loading"><i></i><span>正在装载目录快照…</span></div></div></article>`;
+  });
+  if (activity && !builds.some((build) => activityMatches(activity, build.runtimeId))) {
+    cards.push(`<article class="build-card build-card-loading work-active" data-skill-runtime="${escapeHtml(activity.key || '')}"><div class="build-row"><b>${escapeHtml(activity.target || 'Runtime')}</b><span>${activityPosition(activity)}</span><code>description-only 输入已封舱</code><span class="work-status">生成中</span>${renderWorkLoader(activity, 'row')}</div></article>`);
+  }
+  return `<div class="section-title"><h3>Description 直出记录</h3><span>DESCRIPTION-ONLY SKILL BUILD</span></div><div class="build-list">${cards.join('')}</div>`;
 }
 
 async function toggleSkillDetail(button) {
@@ -471,8 +487,48 @@ function skillCacheKey(evaluationId, runtimeId) {
   return `${evaluationId}:${runtimeId}:${(hash >>> 0).toString(36)}`;
 }
 
-function renderBattle(rounds) {
-  return `<div class="section-title"><h3>同 Prompt 对打</h3><span>SAME INPUT · VISIBLE OUTPUT ONLY</span></div>${rounds.map((round,index)=>{ const max=Math.max(...round.entries.map(e=>e.score)); return `<article class="battle-round"><div class="battle-prompt"><span>CASE ${String(index+1).padStart(2,'0')}<br>${escapeHtml(round.case.name)}</span><p>${escapeHtml(round.case.prompt)}</p></div><div class="battle-grid">${round.entries.map(entry=>`<div class="battle-entry"><header><h4>${escapeHtml(entry.name)}</h4><strong class="${entry.score===max?'winner':''}">${entry.score}</strong></header><div class="battle-actions"><span class="mode">${entry.mode.toUpperCase()}</span>${retryButton('benchmark', entry.id, '重跑这一局', index)}</div><details><summary>查看完整输出</summary><pre>${escapeHtml(entry.output)}</pre></details></div>`).join('')}</div></article>`; }).join('')}`;
+function renderBattle(rounds, item) {
+  const activity = activityOfType(item, 'benchmark');
+  return `<div class="section-title"><h3>同 Prompt 对打</h3><span>SAME INPUT · VISIBLE OUTPUT ONLY</span></div>${rounds.map((round,index)=>{
+    const entries = round.entries || [];
+    const max = entries.length ? Math.max(...entries.map((entry) => entry.score)) : null;
+    const cards = entries.map((entry) => {
+      const working = activity?.caseIndex === index && activityMatches(activity, entry.id);
+      return `<div class="battle-entry${working ? ' work-active' : ''}"><header><h4>${escapeHtml(entry.name)}</h4><strong class="${entry.score===max?'winner':''}">${entry.score}</strong></header><div class="battle-actions"><span class="mode">${entry.mode.toUpperCase()}</span>${retryButton('benchmark', entry.id, '重跑这一局', index)}</div><details><summary>查看完整输出</summary><pre>${escapeHtml(entry.output)}</pre></details>${working ? renderWorkLoader(activity, 'card') : ''}</div>`;
+    });
+    if (activity?.caseIndex === index && !entries.some((entry) => activityMatches(activity, entry.id))) {
+      cards.push(`<div class="battle-entry battle-entry-loading work-active"><header><h4>${escapeHtml(activity.target || '对测选手')}</h4><strong>···</strong></header>${renderWorkLoader(activity, 'card')}</div>`);
+    }
+    return `<article class="battle-round"><div class="battle-prompt"><span>CASE ${String(index+1).padStart(2,'0')}<br>${escapeHtml(round.case.name)}</span><p>${escapeHtml(round.case.prompt)}</p></div><div class="battle-grid">${cards.join('')}</div></article>`;
+  }).join('')}`;
+}
+
+function activeActivity(item) {
+  if (item?.activeWork) return item.activeWork;
+  if (item?.retrying) return { ...item.retrying, target: item.retrying.shortLabel, detail: '旧结果保留至新结果返回', retry: true, index: 1, total: 1 };
+  return { type:'system', key:'pipeline', label:item?.stage || '正在启动评测', target:'评测舱', detail:'首个阶段产物完成后会立即显示', retry:false, index:1, total:1 };
+}
+
+function activityOfType(item, type) {
+  const activity = activeActivity(item);
+  return activity?.type === type ? activity : null;
+}
+
+function activityMatches(activity, key) {
+  return Boolean(activity && key && String(activity.key) === String(key));
+}
+
+function activityPosition(activity) {
+  const index = Number.isInteger(activity?.index) ? activity.index : 1;
+  const total = Number.isInteger(activity?.total) ? activity.total : 1;
+  return `${index}/${total}`;
+}
+
+function renderWorkLoader(activity, variant = 'card', announce = false) {
+  const safeVariant = ['console','card','row'].includes(variant) ? variant : 'card';
+  const statusAttributes = announce ? ' role="status" aria-live="polite"' : '';
+  const mode = activity?.retry ? 'RETRY / 重新计算' : 'LIVE / 正在处理';
+  return `<div class="work-loader work-loader-${safeVariant}${activity?.retry ? ' is-retry' : ''}"${statusAttributes}><div class="work-signal" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="work-copy"><small>${mode}</small><b>${escapeHtml(activity?.label || '正在生成阶段产物')}</b><span>${escapeHtml(activity?.detail || '完成后会自动更新当前区域')}</span></div><strong class="work-position">${activityPosition(activity)}</strong></div>`;
 }
 
 function retryButton(type, key, label, caseIndex) {

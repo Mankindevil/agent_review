@@ -24,7 +24,7 @@ export class EvaluationPipeline {
     const temperature = normalizeTemperature(process.env.MODEL_TEMPERATURE, 0);
     const evaluation = {
       id: id(), createdAt: now(), updatedAt: now(), status: 'queued', mode: input.mode === 'live' ? 'live' : 'demo',
-      agentCard: input.agentCard, cases: input.cases.slice(0, 5), validation, seed, temperature, progress: 0, stage: '等待评测舱', logs: []
+      agentCard: input.agentCard, cases: input.cases.slice(0, 5), validation, seed, temperature, progress: 0, stage: '等待评测舱', activeWork: null, logs: []
     };
     await this.store.set(evaluation);
     const controller = new AbortController();
@@ -42,7 +42,7 @@ export class EvaluationPipeline {
     const reason = new Error('用户停止了本次评测');
     reason.name = 'AbortError';
     this.activeRuns.get(evaluationId)?.abort(reason);
-    await this.update(item, { status: 'cancelled', stage: '评测已停止', stoppedAt: now(), retrying: null }, {
+    await this.update(item, { status: 'cancelled', stage: '评测已停止', stoppedAt: now(), retrying: null, activeWork: null }, {
       level: 'error', source: 'SYSTEM', phase: 'cancelled', text: '用户停止了本次评测', detail: '已保留停止前完成的所有阶段产物', mode: item.mode
     });
     return item;
@@ -57,7 +57,7 @@ export class EvaluationPipeline {
     const previousStatus = item.status;
     const controller = new AbortController();
     this.activeRuns.set(evaluationId, controller);
-    await this.update(item, { status: 'retrying', stage: step.label, retrying: step }, {
+    await this.update(item, { status: 'retrying', stage: step.label, retrying: step, activeWork: retryActivity(step) }, {
       level: 'info', source: 'RETRY', phase: step.type, text: step.label, detail: '旧结果保留至新结果返回，完成后自动重算总评', mode: item.mode
     });
     queueMicrotask(() => this.runRetry(item, step, previous, previousStatus, controller.signal)
@@ -68,7 +68,7 @@ export class EvaluationPipeline {
 
   async recoverInterrupted() {
     for (const item of this.store.list().filter((value) => ['queued', 'running', 'retrying'].includes(value.status))) {
-      await this.update(item, { status: 'interrupted', stage: '服务重启，评测已中断', stoppedAt: now(), error: '执行进程在评测期间重启；已保留重启前完成的阶段产物。' }, {
+      await this.update(item, { status: 'interrupted', stage: '服务重启，评测已中断', stoppedAt: now(), error: '执行进程在评测期间重启；已保留重启前完成的阶段产物。', activeWork: null }, {
         level: 'error', source: 'SYSTEM', phase: 'interrupted', text: '检测到未完成的遗留评测', detail: '执行进程已重启，旧任务不再实际运行', mode: item.mode
       });
     }
@@ -90,6 +90,7 @@ export class EvaluationPipeline {
       status: completed ? 'completed' : previousStatus,
       stage: completed ? '单步复核完成，锐评已重算' : '单步复核完成',
       retrying: null,
+      activeWork: null,
       ...(completed ? { completedAt: now() } : {})
     }, {
       level: result.error ? 'error' : 'success', source: 'RETRY', phase: step.type,
@@ -126,13 +127,17 @@ export class EvaluationPipeline {
     }
     if (index === -1) builds.push(next); else builds[index] = next;
     item.builds = builds;
-    await this.update(item, { builds, stage: `${step.shortLabel} 已重建，正在重新执行同 Prompt 对测` }, {
+    await this.update(item, { builds, stage: `${step.shortLabel} 已重新直出，正在执行同 Prompt 对测`, activeWork: null }, {
       level: next.error ? 'error' : 'success', source: 'RETRY', phase: 'build',
       text: next.error ? `${step.shortLabel} 重建仍失败` : `${step.shortLabel} Skill 重建完成`,
       detail: next.error || next.skill?.name, mode: next.error ? 'failed' : next.mode
     });
     for (let caseIndex = 0; caseIndex < (item.benchmark || []).length; caseIndex += 1) {
       signal.throwIfAborted();
+      await this.update(item, {
+        activeWork: benchmarkActivity(step.key, step.shortLabel, item.benchmark[caseIndex].case, caseIndex, item.benchmark.length, true),
+        stage: `${step.shortLabel} 对测 ${caseIndex + 1}/${item.benchmark.length}`
+      });
       await this.replaceBenchmarkEntry(item, caseIndex, step.key, signal);
       const entry = item.benchmark[caseIndex].entries.find((candidate) => candidate.id === step.key);
       await this.update(item, { benchmark: item.benchmark, stage: `${step.shortLabel} 对测 ${caseIndex + 1}/${item.benchmark.length}` }, {
@@ -177,7 +182,7 @@ export class EvaluationPipeline {
   async failRetry(item, step, previous, previousStatus, error) {
     if (item.status === 'cancelled') return;
     appendRetryHistory(item, step, previous, { error: error.message }, 0);
-    await this.update(item, { status: previousStatus, stage: '单步复核异常', retrying: null }, {
+    await this.update(item, { status: previousStatus, stage: '单步复核异常', retrying: null, activeWork: null }, {
       level: 'error', source: 'RETRY', phase: step.type, text: `${step.shortLabel} 重试异常`, detail: error.message, mode: item.mode
     });
   }
@@ -186,7 +191,7 @@ export class EvaluationPipeline {
     const item = this.store.get(evaluationId);
     signal?.throwIfAborted();
     const target = item.validation.interfaces[0];
-    await this.update(item, { status: 'running', progress: 6, stage: 'A2A 协议体检' }, {
+    await this.update(item, { status: 'running', progress: 6, stage: 'A2A 协议体检', activeWork: { type: 'protocol', key: 'a2a', label: '正在校验 A2A 协议与接口声明', target: item.agentCard.name, detail: '确认 Card 结构、协议版本与调用入口', index: 1, total: 1, retry: false } }, {
       level: 'success', source: 'A2A', phase: 'protocol', text: 'Agent Card 结构与接口声明通过',
       detail: `${target.binding} · v${target.version} · seed=${item.seed} · temperature=${item.temperature} · ${redactUrl(target.url)}`, mode: item.mode
     });
@@ -202,7 +207,11 @@ export class EvaluationPipeline {
     for (const reviewer of reviewers) {
       signal?.throwIfAborted();
       const startedAt = Date.now();
-      await this.update(item, { progress: 28 + professionalReviews.length * 8, stage: `${reviewer.name} 正在盲审` }, {
+      await this.update(item, {
+        progress: 28 + professionalReviews.length * 8,
+        stage: `${reviewer.name} 正在盲审`,
+        activeWork: { type: 'review', key: reviewer.id, label: `${reviewer.name} 正在盲审`, target: reviewer.model, detail: '五维评分、评语与首要风险生成中', index: professionalReviews.length + 1, total: reviewers.length, retry: false }
+      }, {
         level: 'info', source: 'MODEL', phase: 'review', text: `${reviewer.model} 接过了答卷`, mode: item.mode
       });
       try {
@@ -218,13 +227,15 @@ export class EvaluationPipeline {
     const validProfessional = professionalReviews.filter((review) => review.score > 0);
     const professional = professionalSnapshot(professionalReviews);
     const professionalMode = professional.mode;
-    await this.update(item, { professional, progress: 52, stage: 'Runtime description-only 直出' }, { level: 'success', source: 'MODEL', phase: 'review', text: `${reviewers.length} 位模型评审已交卷`, detail: `有效评审 ${validProfessional.length} · 均分 ${professional.score}`, mode: professionalMode });
+    await this.update(item, { professional, progress: 52, stage: 'Runtime description-only 直出', activeWork: null }, { level: 'success', source: 'MODEL', phase: 'review', text: `${reviewers.length} 位模型评审已交卷`, detail: `有效评审 ${validProfessional.length} · 均分 ${professional.score}`, mode: professionalMode });
 
     const builds = [];
     for (const runtime of RUNTIMES) {
       signal?.throwIfAborted();
       const startedAt = Date.now();
-      await this.update(item, {}, { level: 'info', source: 'RUNTIME', phase: 'build', text: `${runtime.name} 开始仅凭 description 直出 Skill`, mode: item.mode });
+      await this.update(item, {
+        activeWork: { type: 'build', key: runtime.id, label: `${runtime.name} 正在直出 Skill`, target: runtime.name, detail: '唯一输入：Agent 顶层 description 原文', index: builds.length + 1, total: RUNTIMES.length, retry: false }
+      }, { level: 'info', source: 'RUNTIME', phase: 'build', text: `${runtime.name} 开始仅凭 description 直出 Skill`, mode: item.mode });
       try {
         const build = await buildSkill(runtime, item.agentCard.description, item.mode, { signal, ...phaseSampling(item, `build:${runtime.id}`) });
         builds.push(build);
@@ -236,7 +247,7 @@ export class EvaluationPipeline {
       }
     }
     const runtimeMode = summarizeModes(builds.map((build) => build.error ? 'failed' : build.mode));
-    await this.update(item, { builds, progress: 66, stage: '同题竞技场' }, { level: 'success', source: 'RUNTIME', phase: 'build', text: 'Runtime 复刻阶段结束', detail: builds.map((build) => `${build.runtime}:${build.mode}${build.error ? ':failed' : ''}`).join(' · '), mode: runtimeMode });
+    await this.update(item, { builds, progress: 66, stage: '同题竞技场', activeWork: null }, { level: 'success', source: 'RUNTIME', phase: 'build', text: 'Runtime 直出阶段结束', detail: builds.map((build) => `${build.runtime}:${build.mode}${build.error ? ':failed' : ''}`).join(' · '), mode: runtimeMode });
 
     const benchmark = [];
     for (let index = 0; index < item.cases.length; index += 1) {
@@ -247,6 +258,11 @@ export class EvaluationPipeline {
       let submittedOutput;
       let submittedMode = item.mode;
       let startedAt = Date.now();
+      await this.update(item, {
+        benchmark,
+        stage: `对测 ${index + 1}/${item.cases.length} · 0/${builds.length + 1}`,
+        activeWork: benchmarkActivity('submitted', item.agentCard.name, testCase, index, item.cases.length, false)
+      }, { level: 'info', source: 'A2A', phase: 'benchmark', text: `${item.agentCard.name} 开始执行「${testCase.name}」`, mode: item.mode });
       try {
         submittedOutput = item.mode === 'live'
           ? (await callA2AAgent(item.agentCard, testCase.prompt, 45_000, signal)).text
@@ -262,6 +278,11 @@ export class EvaluationPipeline {
       });
       for (const build of builds) {
         signal?.throwIfAborted();
+        await this.update(item, {
+          benchmark,
+          activeWork: benchmarkActivity(build.runtimeId, build.runtime, testCase, index, item.cases.length, false),
+          stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}`
+        }, { level: 'info', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 开始执行「${testCase.name}」`, mode: build.error ? 'failed' : build.mode });
         if (build.error) {
           entries.push(makeEntry(build.runtimeId, build.runtime, `执行失败：${build.error}`, testCase, 'failed', deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`)));
           await this.update(item, { benchmark, stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, { level: 'error', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 无法进入「${testCase.name}」`, detail: build.error, mode: 'failed' });
@@ -277,7 +298,7 @@ export class EvaluationPipeline {
         }
         await this.update(item, { benchmark, stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, { level: entries.at(-1).mode === 'failed' ? 'error' : 'success', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 完成「${testCase.name}」`, detail: `score=${entries.at(-1).score}`, mode: entries.at(-1).mode, durationMs: Date.now() - startedAt });
       }
-      await this.update(item, { benchmark, progress: 70 + Math.round(((index + 1) / item.cases.length) * 22), stage: `对测 ${index + 1}/${item.cases.length} 完成` }, { level: 'success', source: 'ARENA', phase: 'benchmark', text: `「${testCase.name || `案例 ${index + 1}`}」完成同 prompt 对打`, detail: entries.map((entry) => `${entry.name}=${entry.score}`).join(' · '), mode: summarizeModes(entries.map((entry) => entry.mode)) });
+      await this.update(item, { benchmark, progress: 70 + Math.round(((index + 1) / item.cases.length) * 22), stage: `对测 ${index + 1}/${item.cases.length} 完成`, activeWork: null }, { level: 'success', source: 'ARENA', phase: 'benchmark', text: `「${testCase.name || `案例 ${index + 1}`}」完成同 prompt 对打`, detail: entries.map((entry) => `${entry.name}=${entry.score}`).join(' · '), mode: summarizeModes(entries.map((entry) => entry.mode)) });
     }
 
     const averages = Object.fromEntries(['submitted', 'claude-code', 'cursor', 'doubao'].map((competitor) => {
@@ -287,7 +308,7 @@ export class EvaluationPipeline {
     const roast = buildRoast(averages.submitted, averages['claude-code'], averages.doubao, professional.score, complexity);
     const coverage = coverageSnapshot(item, professionalMode, runtimeMode, benchmark);
     const overallMode = summarizeModes(Object.values(coverage));
-    await this.update(item, { averages, roast, coverage, overallMode, status: 'completed', progress: 100, stage: '锐评出炉', completedAt: now() }, { level: 'success', source: 'VERDICT', phase: 'complete', text: roast.headline, detail: `tier=${roast.tier.label} · submitted=${averages.submitted} · claude=${averages['claude-code']} · doubao=${averages.doubao}`, mode: overallMode });
+    await this.update(item, { averages, roast, coverage, overallMode, status: 'completed', progress: 100, stage: '锐评出炉', completedAt: now(), activeWork: null }, { level: 'success', source: 'VERDICT', phase: 'complete', text: roast.headline, detail: `tier=${roast.tier.label} · submitted=${averages.submitted} · claude=${averages['claude-code']} · doubao=${averages.doubao}`, mode: overallMode });
   }
 
   async update(item, patch, log) {
@@ -301,7 +322,7 @@ export class EvaluationPipeline {
   async fail(evaluationId, error) {
     const item = this.store.get(evaluationId);
     if (!item || ['cancelled', 'interrupted'].includes(item.status)) return;
-    await this.update(item, { status: 'failed', stage: '评测中断', error: error.message }, { level: 'error', source: 'SYSTEM', phase: 'failed', text: '评测中断', detail: error.message, mode: item.mode });
+    await this.update(item, { status: 'failed', stage: '评测中断', error: error.message, activeWork: null }, { level: 'error', source: 'SYSTEM', phase: 'failed', text: '评测中断', detail: error.message, mode: item.mode });
   }
 }
 
@@ -322,7 +343,7 @@ function resolveRetryStep(item, input = {}) {
   if (type === 'build') {
     const runtime = RUNTIMES.find((candidate) => candidate.id === key);
     if (!runtime) throw badRetryRequest('Runtime 构建步骤不存在');
-    return { type, key: runtime.id, label: `重新复刻 · ${runtime.name}`, shortLabel: runtime.name };
+    return { type, key: runtime.id, label: `重新直出 · ${runtime.name}`, shortLabel: runtime.name };
   }
   if (type === 'benchmark') {
     const caseIndex = Number(input.caseIndex);
@@ -336,6 +357,39 @@ function resolveRetryStep(item, input = {}) {
     return { type, key, caseIndex, label: `重新对测 · ${roundItem.case.name} / ${name}`, shortLabel: `${roundItem.case.name} / ${name}` };
   }
   throw badRetryRequest('不支持的重试类型；可选 review、build、benchmark');
+}
+
+function retryActivity(step) {
+  const detail = step.type === 'review'
+    ? '旧评语保持可见，新评语返回后替换并重算'
+    : step.type === 'build'
+      ? '重新直出 Skill，随后自动执行全部同 Prompt 对测'
+      : '旧输出保持可见，新输出返回后替换并重算';
+  return {
+    type: step.type,
+    key: step.key,
+    ...(Number.isInteger(step.caseIndex) ? { caseIndex: step.caseIndex } : {}),
+    label: step.label,
+    target: step.shortLabel,
+    detail,
+    index: 1,
+    total: 1,
+    retry: true
+  };
+}
+
+function benchmarkActivity(key, target, testCase, caseIndex, totalCases, retry) {
+  return {
+    type: 'benchmark',
+    key,
+    caseIndex,
+    label: `${target} 正在执行同 Prompt 对测`,
+    target,
+    detail: `用例：${testCase?.name || `案例 ${caseIndex + 1}`}`,
+    index: caseIndex + 1,
+    total: totalCases,
+    retry
+  };
 }
 
 function badRetryRequest(message) { return Object.assign(new Error(message), { statusCode: 400 }); }
