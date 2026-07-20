@@ -57,6 +57,12 @@ test('serves localized loading effects with reduced-motion support', async () =>
   assert.match(css, /\.scan-beam,\.intake-card::after,\.work-loader::after/);
   assert.match(app, /function renderWorkLoader/);
   assert.match(app, /activityOfType\(item, 'build'\)/);
+  assert.match(app, /function reviewPlanFor/);
+  assert.match(app, /review-card-queued/);
+  const indexResponse = await fetch(`${origin}/`);
+  const index = await indexResponse.text();
+  assert.match(index, /app\.js\?v=20260720-loading2/);
+  assert.match(index, /styles\.css\?v=20260720-loading2/);
 });
 
 test('lets the final verdict use the available desktop width', async () => {

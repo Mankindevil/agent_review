@@ -36,7 +36,7 @@ A2A Agent endpoint   Model / Runtime endpoints
 
 当前版本刻意使用 Node.js 内置模块，不需要安装第三方依赖，降低首次运行成本。持久化默认使用 JSON 文件，写入采用同目录临时文件与原子 rename，适合单进程 MVP；生产环境应替换为 PostgreSQL，并把执行流水线放入任务队列。
 
-运行中的评测对象使用 `activeWork` 暴露当前实际工作项，而不是让前端猜测日志：`type` 区分 protocol / review / build / benchmark，`key` 定位模型、Runtime 或选手，`caseIndex` 定位用例，`label` / `detail` / `index` / `total` 驱动局部加载状态。首次流水线和单步重试共用这套契约；成功、失败、停止或服务恢复时都会清空 `activeWork`。前端因此能在对应评审卡、Description 直出行或对测卡中显示加载扫描带，同时保留已经完成的旧结果。
+运行中的评测对象使用 `activeWork` 暴露当前实际工作项，而不是让前端猜测日志：`type` 区分 protocol / review / build / benchmark，`key` 定位模型、Runtime 或选手，`caseIndex` 定位用例，`label` / `detail` / `index` / `total` 驱动局部加载状态。`reviewPlan` 与 `runtimePlan` 同时公布安全的执行席位（只有 ID、显示名和模型名，不含 Key 或 adapter 配置），因此未开始的席位也会显示“排队中”，不会留下无法解释的空白网格。首次流水线和单步重试共用这套契约；成功、失败、停止或服务恢复时都会清空 `activeWork`。前端还会为信息防火墙上线前的旧评测按阶段和已完成数量推导兼容加载卡，在对应评审卡、Description 直出行或对测卡中显示扫描带，同时保留已经完成的旧结果。
 
 ### 2.1 配置加载
 

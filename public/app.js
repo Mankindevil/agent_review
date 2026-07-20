@@ -1,6 +1,17 @@
 const state = { mode: 'demo', sourceType: 'direct', current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), skillRequestToken: 0 };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const DEFAULT_REVIEW_PLAN = [
+  { id:'gpt', name:'OpenAI 评审', model:'GPT-5' },
+  { id:'claude', name:'Anthropic 评审', model:'Claude Sonnet' },
+  { id:'doubao', name:'豆包评审', model:'Doubao Seed' },
+  { id:'deepseek', name:'DeepSeek 评审', model:'DeepSeek' }
+];
+const DEFAULT_RUNTIME_PLAN = [
+  { id:'claude-code', name:'Claude Code', model:'Claude Sonnet' },
+  { id:'cursor', name:'Cursor Agent', model:'Auto' },
+  { id:'doubao', name:'Doubao Agent', model:'Seed' }
+];
 
 const sampleCard = {
   name: '合同风险猎手',
@@ -375,17 +386,24 @@ function renderComplexity(value) {
 function renderReviews(reviews, item) {
   const labels = { domainDepth:'领域深度', workflowQuality:'流程设计', failureHandling:'异常处理', outputContract:'输出契约', evaluability:'可评测性' };
   const activity = activityOfType(item, 'review');
+  const plan = activity ? reviewPlanFor(item, reviews) : [];
   const cards = reviews.map((review) => {
     const key = review.reviewerId || review.model;
     const working = activityMatches(activity, key);
     return `<article class="review-card${working ? ' work-active' : ''}"><div class="reviewer"><b>${escapeHtml(review.reviewer)}</b><span>${escapeHtml(review.model)} · ${review.mode?.toUpperCase()}</span></div><div class="review-score">${review.score}<small> / 100</small></div>${review.error?`<div class="risk"><b>执行失败</b>${renderStructuredText(review.error)}</div>`:`<div class="mini-bars">${Object.entries(review.dimensions||{}).map(([dimension,score])=>`<div><span>${labels[dimension]||dimension}</span><i style="--value:${score}%"></i><b>${score}</b></div>`).join('')}</div>${renderStructuredText(review.comment, 'review-comment')}<div class="risk"><b>⚠ 首要风险</b>${renderStructuredText(review.risk)}</div>`}<div class="review-actions">${retryButton('review', key, '重跑该模型')}</div>${working ? renderWorkLoader(activity, 'card') : ''}</article>`;
   });
   if (activity && !reviews.some((review) => activityMatches(activity, review.reviewerId || review.model))) cards.push(`<article class="review-card review-card-loading work-active">${renderWorkLoader(activity, 'card')}</article>`);
+  plan.forEach((reviewer, index) => {
+    const completed = reviews.some((review) => reviewMatchesPlan(review, reviewer));
+    const active = activityMatches(activity, reviewer.id);
+    if (!completed && !active) cards.push(`<article class="review-card review-card-queued">${renderQueuedWork(reviewer.name, reviewer.model, index + 1, plan.length)}</article>`);
+  });
   return `<div class="section-title"><h3>四方会审</h3><span>MULTI-MODEL BLIND REVIEW</span></div><div class="review-grid model-review-grid">${cards.join('')}</div>`;
 }
 
 function renderBuilds(builds, item) {
   const activity = activityOfType(item, 'build');
+  const plan = activity ? runtimePlanFor(item) : [];
   const cards = builds.map((build) => {
     const working = activityMatches(activity, build.runtimeId);
     return `<article class="build-card${working ? ' work-active' : ''}" data-skill-runtime="${escapeHtml(build.runtimeId || '')}"><div class="build-row"><b>${escapeHtml(build.runtime)}</b><span>${escapeHtml(build.model||'—')}</span><code>${escapeHtml(build.skill?.name||build.error||'构建失败')}</code><span class="${build.error?'':'ok'}">${build.error?'失败':`✓ ${build.mode.toUpperCase()}`}</span>${build.error || !build.skill ? '' : `<button class="skill-detail-toggle" type="button" data-skill-detail="${escapeHtml(build.runtimeId)}" aria-expanded="false"><i aria-hidden="true">⌁</i><span>查看 Skill</span></button>`}${retryButton('build', build.runtimeId, '重新直出并对测')}${working ? renderWorkLoader(activity, 'row') : ''}</div><div class="skill-inspector hidden" data-skill-inspector><div class="skill-inspector-loading"><i></i><span>正在装载目录快照…</span></div></div></article>`;
@@ -393,6 +411,11 @@ function renderBuilds(builds, item) {
   if (activity && !builds.some((build) => activityMatches(activity, build.runtimeId))) {
     cards.push(`<article class="build-card build-card-loading work-active" data-skill-runtime="${escapeHtml(activity.key || '')}"><div class="build-row"><b>${escapeHtml(activity.target || 'Runtime')}</b><span>${activityPosition(activity)}</span><code>description-only 输入已封舱</code><span class="work-status">生成中</span>${renderWorkLoader(activity, 'row')}</div></article>`);
   }
+  plan.forEach((runtime, index) => {
+    if (!builds.some((build) => build.runtimeId === runtime.id) && !activityMatches(activity, runtime.id)) {
+      cards.push(`<article class="build-card build-card-queued"><div class="build-row"><b>${escapeHtml(runtime.name)}</b><span>${escapeHtml(runtime.model || '—')}</span><code>等待前序 Runtime 完成</code><span class="queued-status">排队中 · ${index + 1}/${plan.length}</span></div></article>`);
+    }
+  });
   return `<div class="section-title"><h3>Description 直出记录</h3><span>DESCRIPTION-ONLY SKILL BUILD</span></div><div class="build-list">${cards.join('')}</div>`;
 }
 
@@ -489,6 +512,7 @@ function skillCacheKey(evaluationId, runtimeId) {
 
 function renderBattle(rounds, item) {
   const activity = activityOfType(item, 'benchmark');
+  const competitorPlan = activity ? competitorPlanFor(item) : [];
   return `<div class="section-title"><h3>同 Prompt 对打</h3><span>SAME INPUT · VISIBLE OUTPUT ONLY</span></div>${rounds.map((round,index)=>{
     const entries = round.entries || [];
     const max = entries.length ? Math.max(...entries.map((entry) => entry.score)) : null;
@@ -499,6 +523,11 @@ function renderBattle(rounds, item) {
     if (activity?.caseIndex === index && !entries.some((entry) => activityMatches(activity, entry.id))) {
       cards.push(`<div class="battle-entry battle-entry-loading work-active"><header><h4>${escapeHtml(activity.target || '对测选手')}</h4><strong>···</strong></header>${renderWorkLoader(activity, 'card')}</div>`);
     }
+    if (activity?.caseIndex === index) competitorPlan.forEach((competitor, competitorIndex) => {
+      if (!entries.some((entry) => entry.id === competitor.id) && !activityMatches(activity, competitor.id)) {
+        cards.push(`<div class="battle-entry battle-entry-queued">${renderQueuedWork(competitor.name, '等待同 Prompt 执行', competitorIndex + 1, competitorPlan.length)}</div>`);
+      }
+    });
     return `<article class="battle-round"><div class="battle-prompt"><span>CASE ${String(index+1).padStart(2,'0')}<br>${escapeHtml(round.case.name)}</span><p>${escapeHtml(round.case.prompt)}</p></div><div class="battle-grid">${cards.join('')}</div></article>`;
   }).join('')}`;
 }
@@ -506,7 +535,49 @@ function renderBattle(rounds, item) {
 function activeActivity(item) {
   if (item?.activeWork) return item.activeWork;
   if (item?.retrying) return { ...item.retrying, target: item.retrying.shortLabel, detail: '旧结果保留至新结果返回', retry: true, index: 1, total: 1 };
+  if (item && !isTerminal(item.status)) {
+    const reviews = item.professional?.reviews || [];
+    const reviewPlan = reviewPlanFor(item, reviews);
+    const nextReviewer = reviewPlan.find((reviewer) => !reviews.some((review) => reviewMatchesPlan(review, reviewer)));
+    if (nextReviewer && (/盲审/.test(item.stage || '') || (item.progress >= 22 && item.progress <= 52 && !(item.builds?.length)))) {
+      return { type:'review', key:nextReviewer.id, label:`${nextReviewer.name} 正在盲审`, target:nextReviewer.model, detail:'正在等待该模型返回五维评分与评语', retry:false, index:reviews.length + 1, total:reviewPlan.length };
+    }
+    const builds = item.builds || [];
+    const runtimePlan = runtimePlanFor(item);
+    const nextRuntime = runtimePlan.find((runtime) => !builds.some((build) => build.runtimeId === runtime.id));
+    if (nextRuntime && (/直出|复刻/.test(item.stage || '') || (item.progress >= 52 && item.progress <= 66))) {
+      return { type:'build', key:nextRuntime.id, label:`${nextRuntime.name} 正在直出 Skill`, target:nextRuntime.name, detail:'唯一输入：Agent 顶层 description 原文', retry:false, index:builds.length + 1, total:runtimePlan.length };
+    }
+    if (/对测|竞技场/.test(item.stage || '') || item.progress >= 66) {
+      const competitorPlan = competitorPlanFor(item);
+      const rounds = item.benchmark || [];
+      const caseIndex = Math.max(0, rounds.findIndex((round) => (round.entries?.length || 0) < competitorPlan.length));
+      const round = rounds[caseIndex] || { case:item.cases?.[caseIndex], entries:[] };
+      const nextCompetitor = competitorPlan.find((competitor) => !(round.entries || []).some((entry) => entry.id === competitor.id));
+      if (nextCompetitor) return { type:'benchmark', key:nextCompetitor.id, caseIndex, label:`${nextCompetitor.name} 正在执行同 Prompt 对测`, target:nextCompetitor.name, detail:`用例：${round.case?.name || `案例 ${caseIndex + 1}`}`, retry:false, index:caseIndex + 1, total:item.cases?.length || 1 };
+    }
+  }
   return { type:'system', key:'pipeline', label:item?.stage || '正在启动评测', target:'评测舱', detail:'首个阶段产物完成后会立即显示', retry:false, index:1, total:1 };
+}
+
+function reviewPlanFor(item, reviews = item?.professional?.reviews || []) {
+  if (Array.isArray(item?.reviewPlan) && item.reviewPlan.length) return item.reviewPlan;
+  return DEFAULT_REVIEW_PLAN.map((reviewer, index) => {
+    const existing = reviews.find((review) => review.reviewerId === reviewer.id) || reviews[index];
+    return existing ? { id:existing.reviewerId || reviewer.id, name:existing.reviewer || reviewer.name, model:existing.model || reviewer.model } : reviewer;
+  });
+}
+
+function runtimePlanFor(item) {
+  return Array.isArray(item?.runtimePlan) && item.runtimePlan.length ? item.runtimePlan : DEFAULT_RUNTIME_PLAN;
+}
+
+function competitorPlanFor(item) {
+  return [{ id:'submitted', name:item?.agentCard?.name || '提交 Agent' }, ...runtimePlanFor(item).map((runtime) => ({ id:runtime.id, name:runtime.name }))];
+}
+
+function reviewMatchesPlan(review, reviewer) {
+  return [review.reviewerId, review.reviewer, review.model].filter(Boolean).some((value) => [reviewer.id, reviewer.name, reviewer.model].includes(value));
 }
 
 function activityOfType(item, type) {
@@ -529,6 +600,10 @@ function renderWorkLoader(activity, variant = 'card', announce = false) {
   const statusAttributes = announce ? ' role="status" aria-live="polite"' : '';
   const mode = activity?.retry ? 'RETRY / 重新计算' : 'LIVE / 正在处理';
   return `<div class="work-loader work-loader-${safeVariant}${activity?.retry ? ' is-retry' : ''}"${statusAttributes}><div class="work-signal" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="work-copy"><small>${mode}</small><b>${escapeHtml(activity?.label || '正在生成阶段产物')}</b><span>${escapeHtml(activity?.detail || '完成后会自动更新当前区域')}</span></div><strong class="work-position">${activityPosition(activity)}</strong></div>`;
+}
+
+function renderQueuedWork(name, detail, index, total) {
+  return `<div class="queued-work"><small>QUEUED / 等待中</small><b>${escapeHtml(name)}</b><span>${escapeHtml(detail)}</span><strong>${index}/${total}</strong><i aria-hidden="true"></i></div>`;
 }
 
 function retryButton(type, key, label, caseIndex) {

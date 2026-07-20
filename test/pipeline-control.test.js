@@ -71,6 +71,9 @@ test('persists each completed reviewer, runtime and benchmark entry incrementall
   assert.equal(store.get(created.id).activeWork, null);
   assert.equal(store.get(created.id).seed, 424242);
   assert.equal(store.get(created.id).temperature, 0);
+  assert.equal(store.get(created.id).reviewPlan.length, 4);
+  assert.equal(store.get(created.id).runtimePlan.length, 3);
+  assert.deepEqual(Object.keys(store.get(created.id).reviewPlan[0]).sort(), ['id', 'model', 'name']);
   assert.equal(store.get(created.id).professional.reviews.every((review) => Number.isInteger(review.seed)), true);
   assert.equal(store.get(created.id).builds.every((build) => Number.isInteger(build.seed)), true);
 });

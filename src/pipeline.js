@@ -22,9 +22,11 @@ export class EvaluationPipeline {
     }
     const seed = normalizeSeed(input.seed ?? process.env.EVALUATION_SEED);
     const temperature = normalizeTemperature(process.env.MODEL_TEMPERATURE, 0);
+    const reviewPlan = publicReviewPlan(configuredReviewers());
+    const runtimePlan = publicRuntimePlan();
     const evaluation = {
       id: id(), createdAt: now(), updatedAt: now(), status: 'queued', mode: input.mode === 'live' ? 'live' : 'demo',
-      agentCard: input.agentCard, cases: input.cases.slice(0, 5), validation, seed, temperature, progress: 0, stage: '等待评测舱', activeWork: null, logs: []
+      agentCard: input.agentCard, cases: input.cases.slice(0, 5), validation, seed, temperature, reviewPlan, runtimePlan, progress: 0, stage: '等待评测舱', activeWork: null, logs: []
     };
     await this.store.set(evaluation);
     const controller = new AbortController();
@@ -203,6 +205,8 @@ export class EvaluationPipeline {
     });
 
     const reviewers = configuredReviewers();
+    item.reviewPlan = publicReviewPlan(reviewers);
+    item.runtimePlan = publicRuntimePlan();
     const professionalReviews = [];
     for (const reviewer of reviewers) {
       signal?.throwIfAborted();
@@ -329,6 +333,14 @@ export class EvaluationPipeline {
 function professionalSnapshot(reviews) {
   const valid = reviews.filter((review) => review.score > 0);
   return { score: round(average(valid.map((review) => review.score)), 1), mode: summarizeModes(reviews.map((review) => review.error ? 'failed' : review.mode), 'failed'), reviews: [...reviews] };
+}
+
+function publicReviewPlan(reviewers) {
+  return reviewers.map((reviewer) => ({ id: reviewer.id || reviewer.model || reviewer.name, name: reviewer.name, model: reviewer.model }));
+}
+
+function publicRuntimePlan() {
+  return RUNTIMES.map((runtime) => ({ id: runtime.id, name: runtime.name, model: runtime.model }));
 }
 
 function resolveRetryStep(item, input = {}) {
