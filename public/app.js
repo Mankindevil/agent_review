@@ -1,4 +1,4 @@
-const state = { mode: 'demo', sourceType: 'direct', current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0 };
+const state = { mode: 'demo', sourceType: 'direct', current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0 };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -174,22 +174,34 @@ async function submitEvaluation() {
 }
 
 async function openEvaluation(id) {
-  if (state.eventSource) state.eventSource.close();
+  const token = ++state.openEvaluationToken;
+  if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
   try {
     const response = await fetch(`/api/evaluations/${id}`);
     if (!response.ok) throw new Error('评测不存在');
     const item = await response.json();
+    if (token !== state.openEvaluationToken) return;
     showEvaluation(item);
     if (!isTerminal(item.status)) subscribe(id);
-  } catch (error) { showError(error.message); showLanding(); }
+  } catch (error) {
+    if (token !== state.openEvaluationToken) return;
+    showError(error.message);
+    showLanding();
+  }
 }
 
 function subscribe(id) {
-  state.eventSource = new EventSource(`/api/evaluations/${id}/events`);
-  state.eventSource.onmessage = (event) => {
+  const source = new EventSource(`/api/evaluations/${id}/events`);
+  state.eventSource = source;
+  source.onmessage = (event) => {
+    if (state.current?.id !== id) return;
     const item = JSON.parse(event.data);
     showEvaluation(item);
-    if (isTerminal(item.status)) { state.eventSource.close(); loadHistory(); }
+    if (isTerminal(item.status)) {
+      source.close();
+      if (state.eventSource === source) state.eventSource = null;
+      loadHistory();
+    }
   };
 }
 
@@ -500,13 +512,15 @@ function renderStructuredText(value = '', className = 'review-prose') {
 }
 
 async function loadHistory() {
+  const token = ++state.historyLoadToken;
   try {
     const response = await fetch('/api/evaluations');
     const items = await response.json();
     if (!response.ok) throw new Error(items.error || '历史记录读取失败');
+    if (token !== state.historyLoadToken) return;
     $('#history-count').textContent = items.length;
     $('#history-list').innerHTML = items.length ? items.map(item=>{ const tier = item.tier ? normalizeTier(item.tier) : null; const canDelete = isTerminal(item.status); return `<article class="history-item"><button class="history-open" type="button" data-evaluation-id="${item.id}"><header><span>${formatTime(item.createdAt)}</span><span>${item.progress}%</span></header><h3>${escapeHtml(item.name)}</h3><p>${tier?`最终锐评：<span class="history-tier">${escapeHtml(tier.label)}</span> · 实战 ${item.score} 分`:escapeHtml(item.status)}</p></button><button class="history-delete" type="button" data-delete-evaluation="${item.id}" aria-label="${canDelete ? '删除' : '运行中，暂不可删除'} ${escapeHtml(item.name)} 的评测记录" title="${canDelete ? '删除这条战绩' : '请先停止本次评测'}"${canDelete ? '' : ' disabled'}><i aria-hidden="true">×</i><span>删除</span></button></article>`; }).join('') : '<p class="history-empty">还没有战绩。第一个被公开处刑的 Agent 会是谁？</p>';
-  } catch { $('#history-list').innerHTML = '<p>历史记录暂时读取失败。</p>'; }
+  } catch { if (token === state.historyLoadToken) $('#history-list').innerHTML = '<p>历史记录暂时读取失败。</p>'; }
 }
 
 async function deleteEvaluation(button) {
@@ -546,7 +560,7 @@ async function deleteEvaluation(button) {
   }
 }
 
-function showLanding() { if(state.eventSource)state.eventSource.close(); state.current=null; state.completedRendered=null; state.verdictRevealToken+=1; history.replaceState(null,'',location.pathname); $('#evaluation-view').classList.add('hidden'); $('#landing-view').classList.remove('hidden'); scrollTo({top:0,behavior:'smooth'}); }
+function showLanding() { if(state.eventSource)state.eventSource.close(); state.eventSource=null; state.openEvaluationToken+=1; state.current=null; state.lastStage=null; state.completedRendered=null; state.verdictRevealToken+=1; history.replaceState(null,'',location.pathname); $('#evaluation-view').classList.add('hidden'); $('#landing-view').classList.remove('hidden'); scrollTo({top:0,behavior:'smooth'}); }
 function openHistory() { $('#history-drawer').classList.add('open'); $('#drawer-backdrop').classList.add('open'); $('#history-drawer').setAttribute('aria-hidden','false'); loadHistory(); }
 function closeHistory() { $('#history-drawer').classList.remove('open'); $('#drawer-backdrop').classList.remove('open'); $('#history-drawer').setAttribute('aria-hidden','true'); }
 function showError(text) { $('#form-error').textContent = text; }

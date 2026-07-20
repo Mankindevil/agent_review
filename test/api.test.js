@@ -32,6 +32,20 @@ test('serves the scoring methodology document in the web UI', async () => {
   assert.match(html, /最新结果替换旧结果/);
 });
 
+test('keeps the history count inline in the top navigation', async () => {
+  const response = await fetch(`${origin}/styles.css`);
+  const css = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(css, /\.nav-button\s*\{[^}]*display:flex;[^}]*white-space:nowrap;/);
+});
+
+test('returns JSON 404 for unknown API routes instead of the SPA shell', async () => {
+  const response = await fetch(`${origin}/api/not-a-real-route`);
+  assert.equal(response.status, 404);
+  assert.match(response.headers.get('content-type'), /application\/json/);
+  assert.deepEqual(await response.json(), { error: '接口不存在' });
+});
+
 test('reports honest local runtime availability', async () => {
   const response = await fetch(`${origin}/api/runtimes`);
   const runtimes = await response.json();
@@ -107,6 +121,19 @@ test('returns 404 when deleting an unknown evaluation', async () => {
 test('rejects malformed agent cards', async () => {
   const response = await fetch(`${origin}/api/evaluations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agentCard: { name: 'Nope' }, cases: [{ prompt: 'x' }] }) });
   assert.equal(response.status, 400);
+});
+
+test('rejects non-string case prompts as a client error', async () => {
+  const card = {
+    name: 'Typed Agent', description: 'Valid card used to verify input typing.',
+    supportedInterfaces: [{ url: 'https://example.com/a2a', protocolBinding: 'HTTP+JSON', protocolVersion: '1.0' }],
+    skills: [{ id: 'typed', name: 'Typed', description: 'Validate prompt fields.' }]
+  };
+  const response = await fetch(`${origin}/api/evaluations`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agentCard: card, cases: [{ prompt: 42 }] })
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /prompt/);
 });
 
 test('rejects an out-of-range evaluation seed', async () => {

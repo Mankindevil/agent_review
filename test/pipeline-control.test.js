@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { createServer } from 'node:http';
 import { EvaluationPipeline } from '../src/pipeline.js';
 import { EvaluationStore } from '../src/store.js';
 
@@ -126,6 +127,37 @@ test('produces identical demo scores for the same explicit seed', async () => {
   assert.deepEqual(secondResult.professional.reviews.map((review) => review.score), firstResult.professional.reviews.map((review) => review.score));
   assert.deepEqual(secondResult.averages, firstResult.averages);
   assert.deepEqual(secondResult.roast, firstResult.roast);
+});
+
+test('marks a failed live Agent call as failed coverage', async () => {
+  const envNames = ['ALLOW_PRIVATE_AGENT_URLS', 'MODEL_REVIEWERS_JSON', 'RUNTIME_ADAPTERS_JSON', 'ENABLE_LOCAL_CLAUDE_CODE', 'ENABLE_LOCAL_CURSOR_AGENT', 'ARK_BASE_URL', 'ARK_API_KEY'];
+  const originalEnv = Object.fromEntries(envNames.map((name) => [name, process.env[name]]));
+  const failingAgent = createServer((_request, response) => { response.writeHead(503); response.end('offline'); });
+  await new Promise((resolve) => failingAgent.listen(0, '127.0.0.1', resolve));
+  try {
+    process.env.ALLOW_PRIVATE_AGENT_URLS = 'true';
+    process.env.MODEL_REVIEWERS_JSON = JSON.stringify([{ id: 'mock', name: 'Mock', model: 'Mock', kind: 'mock' }]);
+    process.env.RUNTIME_ADAPTERS_JSON = '{}';
+    process.env.ENABLE_LOCAL_CLAUDE_CODE = 'false';
+    process.env.ENABLE_LOCAL_CURSOR_AGENT = 'false';
+    delete process.env.ARK_BASE_URL;
+    delete process.env.ARK_API_KEY;
+    const store = new EvaluationStore(`/tmp/agent-roast-coverage-${process.pid}.json`);
+    const pipeline = new EvaluationPipeline(store, new EventEmitter());
+    const card = evaluation('template').agentCard;
+    card.supportedInterfaces[0].url = `http://127.0.0.1:${failingAgent.address().port}/a2a`;
+    const created = await pipeline.create({ mode: 'live', agentCard: card, cases: [{ name: 'failure', prompt: 'test prompt' }] });
+    const result = await waitFor(store, created.id, (value) => value.status === 'completed');
+    assert.equal(result.coverage.agent, 'failed');
+    assert.equal(result.benchmark[0].entries.find((entry) => entry.id === 'submitted').mode, 'failed');
+    assert.equal(result.overallMode, 'mixed');
+  } finally {
+    await new Promise((resolve) => failingAgent.close(resolve));
+    for (const name of envNames) {
+      if (originalEnv[name] === undefined) delete process.env[name];
+      else process.env[name] = originalEnv[name];
+    }
+  }
 });
 
 test('rejects an unknown retry step and a retry while work is active', async () => {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { configuredReviewers, DEFAULT_REVIEWERS, reviewAgent } from '../src/providers.js';
+import { configuredReviewers, DEFAULT_REVIEWERS, normalizeProfessionalReview, reviewAgent } from '../src/providers.js';
 
 const names = ['MODEL_REVIEWERS_JSON', 'OPENAI_BASE_URL', 'OPENAI_API_KEY', 'ARK_BASE_URL', 'ARK_API_KEY', 'REVIEW_MODEL_OPENAI', 'REVIEW_MODEL_ANTHROPIC', 'REVIEW_MODEL_DOUBAO', 'REVIEW_MODEL_DEEPSEEK', 'MODEL_REVIEW_TIMEOUT_MS', 'MODEL_REVIEW_MAX_TOKENS'];
 const original = Object.fromEntries(names.map((name) => [name, process.env[name]]));
@@ -67,4 +67,12 @@ test('disables deep thinking and caps output for the Doubao short-form review', 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('rejects reviewer payloads that violate the scoring contract', () => {
+  const valid = { score: 80, dimensions: { domainDepth: 80, workflowQuality: 80, failureHandling: 80, outputContract: 80, evaluability: 80 }, comment: 'clear', risk: 'known' };
+  assert.equal(normalizeProfessionalReview(valid).score, 80);
+  assert.throws(() => normalizeProfessionalReview({ ...valid, score: 130 }), /0–100/);
+  assert.throws(() => normalizeProfessionalReview({ ...valid, dimensions: { ...valid.dimensions, evaluability: '80' } }), /0–100/);
+  assert.throws(() => normalizeProfessionalReview({ ...valid, comment: '' }), /comment/);
 });

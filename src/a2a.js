@@ -6,14 +6,21 @@ const LEGACY_BINDINGS = { JSONRPC: 'JSONRPC', 'JSON-RPC': 'JSONRPC', HTTP_JSON: 
 export function validateAgentCard(card) {
   const errors = [];
   if (!card || typeof card !== 'object' || Array.isArray(card)) errors.push('Agent Card 必须是 JSON 对象');
-  if (!card?.name?.trim()) errors.push('缺少 name');
-  if (!card?.description?.trim()) errors.push('缺少 description');
-  if (!Array.isArray(card?.skills) || card.skills.length === 0) errors.push('至少声明一个 skill');
-  card?.skills?.forEach((skill, index) => {
-    if (!skill.id) errors.push(`skills[${index}] 缺少 id`);
-    if (!skill.name) errors.push(`skills[${index}] 缺少 name`);
-    if (!skill.description) errors.push(`skills[${index}] 缺少 description`);
-  });
+  if (!isNonEmptyString(card?.name)) errors.push('name 必须是非空字符串');
+  if (!isNonEmptyString(card?.description)) errors.push('description 必须是非空字符串');
+  if (!Array.isArray(card?.skills) || card.skills.length === 0) {
+    errors.push('至少声明一个 skill');
+  } else {
+    card.skills.forEach((skill, index) => {
+      if (!skill || typeof skill !== 'object' || Array.isArray(skill)) {
+        errors.push(`skills[${index}] 必须是对象`);
+        return;
+      }
+      if (!isNonEmptyString(skill.id)) errors.push(`skills[${index}].id 必须是非空字符串`);
+      if (!isNonEmptyString(skill.name)) errors.push(`skills[${index}].name 必须是非空字符串`);
+      if (!isNonEmptyString(skill.description)) errors.push(`skills[${index}].description 必须是非空字符串`);
+    });
+  }
   if (!getInterfaces(card).length) errors.push('缺少 supportedInterfaces 或旧版 url');
   return { valid: errors.length === 0, errors, version: inferVersion(card), interfaces: getInterfaces(card) };
 }
@@ -25,26 +32,31 @@ export function inferVersion(card) {
 export function getInterfaces(card) {
   if (Array.isArray(card?.supportedInterfaces)) {
     return card.supportedInterfaces
-      .filter((item) => item?.url)
+      .filter((item) => isNonEmptyString(item?.url))
       .map((item) => ({
         url: item.url,
         binding: LEGACY_BINDINGS[item.protocolBinding] || item.protocolBinding || 'HTTP+JSON',
         version: item.protocolVersion || card.protocolVersion || '1.0'
       }));
   }
-  if (card?.url) {
+  if (isNonEmptyString(card?.url)) {
     return [{ url: card.url, binding: LEGACY_BINDINGS[card.preferredTransport] || 'JSONRPC', version: card.protocolVersion || '0.3' }];
   }
   return [];
 }
 
+function isNonEmptyString(value) { return typeof value === 'string' && value.trim().length > 0; }
+
 export function assertSafeAgentUrl(rawUrl) {
   let url;
   try { url = new URL(rawUrl); } catch { throw new Error('Agent 接口 URL 不合法'); }
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Agent 接口仅支持 HTTP(S)');
-  const hostname = url.hostname.toLowerCase();
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   const privateName = hostname === 'localhost' || hostname.endsWith('.local');
-  const privateIp = isIP(hostname) && (/^127\./.test(hostname) || /^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname) || /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) || hostname === '::1');
+  const ipVersion = isIP(hostname);
+  const privateIpv4 = ipVersion === 4 && (/^127\./.test(hostname) || /^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname) || /^172\.(1[6-9]|2\d|3[01])\./.test(hostname));
+  const privateIpv6 = ipVersion === 6 && (hostname === '::' || hostname === '::1' || /^f[cd]/i.test(hostname) || /^fe[89ab]/i.test(hostname) || /^::ffff:/i.test(hostname));
+  const privateIp = privateIpv4 || privateIpv6;
   if ((privateName || privateIp) && process.env.ALLOW_PRIVATE_AGENT_URLS !== 'true') {
     throw new Error('为防止 SSRF，默认禁止内网 Agent URL；本地开发可设置 ALLOW_PRIVATE_AGENT_URLS=true');
   }

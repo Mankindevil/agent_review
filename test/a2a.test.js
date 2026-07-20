@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractAgentText, getInterfaces, validateAgentCard } from '../src/a2a.js';
+import { assertSafeAgentUrl, extractAgentText, getInterfaces, validateAgentCard } from '../src/a2a.js';
 import { buildRoast, scoreComplexity } from '../src/scoring.js';
 
 const card = {
@@ -17,9 +17,34 @@ test('accepts an A2A 1.0 agent card', () => {
   assert.equal(result.interfaces[0].binding, 'HTTP+JSON');
 });
 
+test('rejects malformed field types without throwing', () => {
+  const result = validateAgentCard({
+    name: 42,
+    description: 'valid description',
+    supportedInterfaces: [{ url: 99 }],
+    skills: { id: 'not-an-array' }
+  });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('；'), /name 必须是非空字符串/);
+  assert.match(result.errors.join('；'), /至少声明一个 skill/);
+  assert.match(result.errors.join('；'), /supportedInterfaces/);
+});
+
 test('supports legacy A2A cards with a top-level url', () => {
   const result = getInterfaces({ url: 'https://example.com/a2a', preferredTransport: 'JSONRPC', protocolVersion: '0.3' });
   assert.deepEqual(result[0], { url: 'https://example.com/a2a', binding: 'JSONRPC', version: '0.3' });
+});
+
+test('blocks loopback and private IPv6 Agent URLs by default', () => {
+  const previous = process.env.ALLOW_PRIVATE_AGENT_URLS;
+  delete process.env.ALLOW_PRIVATE_AGENT_URLS;
+  try {
+    assert.throws(() => assertSafeAgentUrl('http://[::1]/a2a'), /SSRF/);
+    assert.throws(() => assertSafeAgentUrl('http://[fc00::1]/a2a'), /SSRF/);
+    assert.throws(() => assertSafeAgentUrl('http://[fe80::1]/a2a'), /SSRF/);
+  } finally {
+    if (previous === undefined) delete process.env.ALLOW_PRIVATE_AGENT_URLS; else process.env.ALLOW_PRIVATE_AGENT_URLS = previous;
+  }
 });
 
 test('extracts text from A2A artifacts', () => {

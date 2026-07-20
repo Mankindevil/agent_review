@@ -68,6 +68,7 @@ export const server = createServer(async (request, response) => {
     }
     const eventMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/events$/);
     if (request.method === 'GET' && eventMatch) return streamEvents(request, response, eventMatch[1]);
+    if (url.pathname.startsWith('/api/')) return json(response, 404, { error: '接口不存在' });
     if (request.method === 'GET') return staticFile(url.pathname, response);
     return json(response, 404, { error: '接口不存在' });
   } catch (error) {
@@ -90,8 +91,8 @@ function streamEvents(request, response, evaluationId) {
 
 async function staticFile(pathname, response) {
   const requested = pathname === '/' ? '/index.html' : pathname;
-  const target = path.normalize(path.join(publicRoot, requested));
-  if (!target.startsWith(publicRoot)) return json(response, 403, { error: '禁止访问' });
+  const target = path.resolve(publicRoot, `.${requested}`);
+  if (target !== publicRoot && !target.startsWith(`${publicRoot}${path.sep}`)) return json(response, 403, { error: '禁止访问' });
   try {
     const info = await stat(target);
     if (!info.isFile()) throw new Error('not file');

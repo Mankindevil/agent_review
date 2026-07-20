@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 export class EvaluationStore {
@@ -22,22 +22,25 @@ export class EvaluationStore {
 
   async set(item) {
     this.items.set(item.id, item);
-    this.writeQueue = this.writeQueue.then(async () => {
-      await mkdir(path.dirname(this.file), { recursive: true });
-      await writeFile(this.file, JSON.stringify(this.list(), null, 2));
-    });
-    await this.writeQueue;
+    await this.persist();
     return item;
   }
 
   async delete(id) {
     const deleted = this.items.delete(id);
     if (!deleted) return false;
-    this.writeQueue = this.writeQueue.then(async () => {
+    await this.persist();
+    return true;
+  }
+
+  async persist() {
+    const snapshot = JSON.stringify(this.list(), null, 2);
+    this.writeQueue = this.writeQueue.catch(() => undefined).then(async () => {
       await mkdir(path.dirname(this.file), { recursive: true });
-      await writeFile(this.file, JSON.stringify(this.list(), null, 2));
+      const temporary = `${this.file}.tmp`;
+      await writeFile(temporary, snapshot);
+      await rename(temporary, this.file);
     });
     await this.writeQueue;
-    return true;
   }
 }

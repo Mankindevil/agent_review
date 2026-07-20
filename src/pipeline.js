@@ -14,7 +14,7 @@ export class EvaluationPipeline {
   async create(input) {
     const validation = validateAgentCard(input.agentCard);
     if (!validation.valid) throw Object.assign(new Error(`Agent Card 校验失败：${validation.errors.join('；')}`), { statusCode: 400 });
-    if (!Array.isArray(input.cases) || !input.cases.length || input.cases.some((item) => !item?.prompt?.trim())) {
+    if (!Array.isArray(input.cases) || !input.cases.length || input.cases.some((item) => typeof item?.prompt !== 'string' || !item.prompt.trim())) {
       throw Object.assign(new Error('至少提供一个包含 prompt 的使用实例'), { statusCode: 400 });
     }
     if (input.seed !== undefined && (!Number.isSafeInteger(Number(input.seed)) || Number(input.seed) < 0 || Number(input.seed) > 2_147_483_646)) {
@@ -107,7 +107,7 @@ export class EvaluationPipeline {
       next = { ...(await reviewAgent(reviewer, item.agentCard, item.complexity, item.mode, signal, phaseSampling(item, `review:${reviewer.id}`))), reviewerId: reviewer.id };
     } catch (error) {
       if (signal.aborted) throw signal.reason || error;
-      next = { reviewerId: reviewer.id, reviewer: reviewer.name, model: reviewer.model, score: 0, error: error.message, mode: item.mode };
+      next = { reviewerId: reviewer.id, reviewer: reviewer.name, model: reviewer.model, score: 0, error: error.message, mode: 'failed' };
     }
     if (index === -1) reviews.push(next); else reviews[index] = next;
     item.professional = professionalSnapshot(reviews);
@@ -211,8 +211,8 @@ export class EvaluationPipeline {
         await this.update(item, { professional: professionalSnapshot(professionalReviews) }, { level: 'success', source: 'MODEL', phase: 'review', text: `${reviewer.model} 完成盲审 · ${review.score}/100`, mode: review.mode, durationMs: Date.now() - startedAt });
       } catch (error) {
         if (signal?.aborted) throw signal.reason || error;
-        professionalReviews.push({ reviewerId: reviewer.id, reviewer: reviewer.name, model: reviewer.model, score: 0, error: error.message, mode: item.mode });
-        await this.update(item, { professional: professionalSnapshot(professionalReviews) }, { level: 'error', source: 'MODEL', phase: 'review', text: `${reviewer.model} 调用失败`, detail: error.message, mode: item.mode, durationMs: Date.now() - startedAt });
+        professionalReviews.push({ reviewerId: reviewer.id, reviewer: reviewer.name, model: reviewer.model, score: 0, error: error.message, mode: 'failed' });
+        await this.update(item, { professional: professionalSnapshot(professionalReviews) }, { level: 'error', source: 'MODEL', phase: 'review', text: `${reviewer.model} 调用失败`, detail: error.message, mode: 'failed', durationMs: Date.now() - startedAt });
       }
     }
     const validProfessional = professionalReviews.filter((review) => review.score > 0);
@@ -285,7 +285,7 @@ export class EvaluationPipeline {
       return [competitor, round(average(scores), 1)];
     }));
     const roast = buildRoast(averages.submitted, averages['claude-code'], averages.doubao, professional.score, complexity);
-    const coverage = { agent: item.mode === 'live' ? 'live' : 'demo', models: professionalMode, runtimes: runtimeMode };
+    const coverage = coverageSnapshot(item, professionalMode, runtimeMode, benchmark);
     const overallMode = summarizeModes(Object.values(coverage));
     await this.update(item, { averages, roast, coverage, overallMode, status: 'completed', progress: 100, stage: '锐评出炉', completedAt: now() }, { level: 'success', source: 'VERDICT', phase: 'complete', text: roast.headline, detail: `tier=${roast.tier.label} · submitted=${averages.submitted} · claude=${averages['claude-code']} · doubao=${averages.doubao}`, mode: overallMode });
   }
@@ -307,7 +307,7 @@ export class EvaluationPipeline {
 
 function professionalSnapshot(reviews) {
   const valid = reviews.filter((review) => review.score > 0);
-  return { score: round(average(valid.map((review) => review.score)), 1), mode: summarizeModes(reviews.map((review) => review.mode)), reviews: [...reviews] };
+  return { score: round(average(valid.map((review) => review.score)), 1), mode: summarizeModes(reviews.map((review) => review.error ? 'failed' : review.mode), 'failed'), reviews: [...reviews] };
 }
 
 function resolveRetryStep(item, input = {}) {
@@ -382,8 +382,8 @@ function hasCompleteBenchmark(item) {
 
 function recalculateDerived(item) {
   const professional = professionalSnapshot(item.professional?.reviews || []);
-  const runtimeMode = summarizeModes((item.builds || []).map((build) => build.error ? 'failed' : build.mode));
-  const coverage = { agent: item.mode === 'live' ? 'live' : 'demo', models: professional.mode, runtimes: runtimeMode };
+  const runtimeMode = summarizeModes((item.builds || []).map((build) => build.error ? 'failed' : build.mode), 'failed');
+  const coverage = coverageSnapshot(item, professional.mode, runtimeMode, item.benchmark || []);
   const derived = { professional, coverage, overallMode: summarizeModes(Object.values(coverage)) };
   if (!hasCompleteBenchmark(item)) return derived;
   const competitorIds = ['submitted', ...RUNTIMES.map((runtime) => runtime.id)];
@@ -404,10 +404,22 @@ function redactUrl(rawUrl) {
   try { const url = new URL(rawUrl); return `${url.protocol}//${url.host}${url.pathname}`; } catch { return 'invalid-url'; }
 }
 
-function summarizeModes(modes) {
+function summarizeModes(modes, fallback = 'mixed') {
   const unique = new Set(modes.filter(Boolean));
+  if (!unique.size) return fallback;
   if (unique.size === 1) return [...unique][0];
   return 'mixed';
+}
+
+function coverageSnapshot(item, professionalMode, runtimeFallback, benchmark) {
+  const submittedModes = benchmark.flatMap((roundItem) => (roundItem.entries || []).filter((entry) => entry.id === 'submitted').map((entry) => entry.mode));
+  const runtimeIds = new Set(RUNTIMES.map((runtime) => runtime.id));
+  const runtimeModes = benchmark.flatMap((roundItem) => (roundItem.entries || []).filter((entry) => runtimeIds.has(entry.id)).map((entry) => entry.mode));
+  return {
+    agent: summarizeModes(submittedModes, item.mode === 'live' ? 'live' : 'demo'),
+    models: professionalMode,
+    runtimes: summarizeModes(runtimeModes, runtimeFallback)
+  };
 }
 
 function phaseSampling(item, scope) {

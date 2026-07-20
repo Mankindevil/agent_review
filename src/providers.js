@@ -37,8 +37,26 @@ export async function reviewAgent(reviewer, card, complexity, mode, signal, samp
   const responseText = reviewer.kind === 'anthropic'
     ? await callAnthropic(reviewer, system, prompt, signal, sampling)
     : await callOpenAICompatible(reviewer, system, prompt, signal, sampling);
-  const parsed = safeJson(responseText);
+  const parsed = normalizeProfessionalReview(safeJson(responseText));
   return { reviewer: reviewer.name, model: reviewer.model, ...parsed, mode: 'live', seed: sampling.seed };
+}
+
+export function normalizeProfessionalReview(value) {
+  const dimensionKeys = ['domainDepth', 'workflowQuality', 'failureHandling', 'outputContract', 'evaluability'];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('专业度评审必须返回 JSON 对象');
+  assertScore(value.score, 'score');
+  if (!value.dimensions || typeof value.dimensions !== 'object' || Array.isArray(value.dimensions)) throw new TypeError('专业度评审缺少 dimensions 对象');
+  const dimensions = Object.fromEntries(dimensionKeys.map((key) => {
+    assertScore(value.dimensions[key], `dimensions.${key}`);
+    return [key, Math.round(value.dimensions[key])];
+  }));
+  if (typeof value.comment !== 'string' || !value.comment.trim()) throw new TypeError('专业度评审缺少 comment');
+  if (typeof value.risk !== 'string' || !value.risk.trim()) throw new TypeError('专业度评审缺少 risk');
+  return { score: Math.round(value.score), dimensions, comment: value.comment.trim(), risk: value.risk.trim() };
+}
+
+function assertScore(value, field) {
+  if (!Number.isFinite(value) || value < 0 || value > 100) throw new RangeError(`${field} 必须是 0–100 的数字`);
 }
 
 async function callOpenAICompatible(config, system, prompt, signal, sampling) {

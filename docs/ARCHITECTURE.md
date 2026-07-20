@@ -34,7 +34,7 @@ Node HTTP API
 A2A Agent endpoint   Model / Runtime endpoints
 ```
 
-当前版本刻意使用 Node.js 内置模块，不需要安装第三方依赖，降低首次运行成本。持久化默认使用 JSON 文件，适合单机 MVP；生产环境应替换为 PostgreSQL，并把执行流水线放入任务队列。
+当前版本刻意使用 Node.js 内置模块，不需要安装第三方依赖，降低首次运行成本。持久化默认使用 JSON 文件，写入采用同目录临时文件与原子 rename，适合单进程 MVP；生产环境应替换为 PostgreSQL，并把执行流水线放入任务队列。
 
 ### 2.1 配置加载
 
@@ -264,11 +264,15 @@ SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日
 │   ├── agents/server.js    三个可真实调用的本地 A2A 服务
 │   ├── submissions/        三种协议/复杂度样本 Card
 │   └── use-cases.json      Prompt 与结构化验收点
-├── scripts/real-demo.js    同时启动平台与本地 Agent
+├── scripts/
+│   ├── real-demo.js        同时启动平台与本地 Agent
+│   ├── deepseek-demo.js    使用 DeepSeek/Ark 配置启动真实 Runtime 演示
+│   └── check-syntax.js     自动检查仓库内全部 JavaScript 文件语法
 ├── test/                   Node 原生单元与 API 测试
 └── docs/
     ├── ARCHITECTURE.md     架构与实现文档
-    └── SCORING.md          打分公式、阈值、失败处理与分档顺序
+    ├── SCORING.md          打分公式、阈值、失败处理与分档顺序
+    └── CODE_REVIEW.md      全仓审查结果、剩余风险与实施优先级
 ```
 
 ## 7. 生产化路线

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateValidatedSkill } from '../src/runtimes.js';
+import { buildSkill, generateValidatedSkill, runSkill } from '../src/runtimes.js';
 
 test('retries once when a runtime returns truncated or invalid Skill JSON', async () => {
   const prompts = [];
@@ -28,4 +28,35 @@ test('does not retry a valid Skill response', async () => {
 
   assert.equal(result.skill.name, 'ok');
   assert.equal(calls, 1);
+});
+
+test('normalizes remote runtime adapter responses to the platform contract', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalAdapters = process.env.RUNTIME_ADAPTERS_JSON;
+  const originalKey = process.env.RUNTIME_TEST_KEY;
+  const requests = [];
+  process.env.RUNTIME_ADAPTERS_JSON = JSON.stringify({ cursor: { url: 'https://runtime.example/cursor', apiKeyEnv: 'RUNTIME_TEST_KEY' } });
+  process.env.RUNTIME_TEST_KEY = 'test-only';
+  globalThis.fetch = async (_url, options) => {
+    requests.push({ headers: options.headers, body: JSON.parse(options.body) });
+    if (requests.at(-1).body.action === 'build_skill') {
+      return new Response(JSON.stringify({ runtime: 'spoofed', mode: 'demo', model: 'Remote Model', skill: { name: 'remote', description: 'remote skill', instructions: ['run'], tools: [] } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ output: 'visible result' }), { status: 200 });
+  };
+  try {
+    const runtime = { id: 'cursor', name: 'Cursor Agent', model: 'Auto' };
+    const build = await buildSkill(runtime, { name: 'Agent', description: 'Description', skills: [] }, 'live', { seed: 17, temperature: 0 });
+    assert.equal(build.runtime, 'Cursor Agent');
+    assert.equal(build.runtimeId, 'cursor');
+    assert.equal(build.mode, 'live');
+    assert.equal(build.adapterKind, 'remote-http');
+    assert.equal(build.skill.name, 'remote');
+    assert.equal(await runSkill(build, { prompt: 'same prompt' }, 'live', { seed: 18 }), 'visible result');
+    assert.equal(requests[0].headers.authorization, 'Bearer test-only');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalAdapters === undefined) delete process.env.RUNTIME_ADAPTERS_JSON; else process.env.RUNTIME_ADAPTERS_JSON = originalAdapters;
+    if (originalKey === undefined) delete process.env.RUNTIME_TEST_KEY; else process.env.RUNTIME_TEST_KEY = originalKey;
+  }
 });

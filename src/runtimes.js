@@ -36,12 +36,22 @@ export async function buildSkill(runtime, card, mode, { signal, seed, temperatur
   if (mode === 'live' && config?.url) {
     const response = await fetch(config.url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(config.apiKeyEnv ? { authorization: `Bearer ${process.env[config.apiKeyEnv]}` } : {}) },
+      headers: runtimeAdapterHeaders(config),
       body: JSON.stringify({ action: 'build_skill', agentCard: card, seed, temperature }),
       signal: withTimeout(signal, 120_000)
     });
     if (!response.ok) throw new Error(`${runtime.name} runtime 返回 HTTP ${response.status}`);
-    return { runtime: runtime.name, mode: 'live', ...(await response.json()) };
+    const payload = await response.json();
+    return {
+      runtime: runtime.name,
+      runtimeId: runtime.id,
+      model: typeof payload.model === 'string' ? payload.model : runtime.model,
+      mode: 'live',
+      adapterKind: 'remote-http',
+      skill: validateGeneratedSkill(payload.skill),
+      trace: payload.trace,
+      seed
+    };
   }
   const tools = inferTools(card);
   return {
@@ -91,12 +101,14 @@ export async function runSkill(build, testCase, mode, { signal, seed, temperatur
   if (mode === 'live' && config?.url) {
     const response = await fetch(config.url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(config.apiKeyEnv ? { authorization: `Bearer ${process.env[config.apiKeyEnv]}` } : {}) },
+      headers: runtimeAdapterHeaders(config),
       body: JSON.stringify({ action: 'run_skill', skill: build.skill, prompt: testCase.prompt, seed, temperature }),
       signal: withTimeout(signal, 120_000)
     });
     if (!response.ok) throw new Error(`${build.runtime} 执行返回 HTTP ${response.status}`);
-    return (await response.json()).output;
+    const output = (await response.json()).output;
+    if (typeof output !== 'string' || !output.trim()) throw new Error(`${build.runtime} adapter 没有返回非空 output`);
+    return output;
   }
   const lead = build.runtimeId === 'claude-code' ? '我先检查约束并给出可复核结果。' : build.runtimeId === 'cursor' ? '已按任务流程执行并整理产物。' : '任务已完成，下面是处理结果。';
   return `${lead}\n\n1. 任务理解：${testCase.prompt}\n2. 执行依据：使用 ${build.skill.tools.join('、') || '文本推理'}，按技能边界逐项处理。\n3. 结果：已形成结构化交付，并标出需要人工确认的假设。\n4. 风险：真实文件或外部系统未提供时，不声称已经修改。`;
@@ -113,6 +125,13 @@ function runtimeConfig(runtimeId) {
     return { kind: 'model-api', baseUrl: process.env.ARK_BASE_URL, apiKeyEnv: 'ARK_API_KEY', model: process.env.REVIEW_MODEL_DOUBAO || 'ep-20260720110725-5rbml', thinking: { type: 'disabled' } };
   }
   return null;
+}
+
+function runtimeAdapterHeaders(config) {
+  if (!config.apiKeyEnv) return { 'content-type': 'application/json' };
+  const apiKey = process.env[config.apiKeyEnv];
+  if (!apiKey) throw new Error(`Runtime adapter 缺少环境变量 ${config.apiKeyEnv}`);
+  return { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` };
 }
 
 function localRuntimeModel(runtime) {
