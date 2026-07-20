@@ -14,16 +14,41 @@
 
 ## 1. Agent 必要性
 
-从 Card 描述、skill 名称/描述/标签/示例和用户测试 prompt 中识别信号。定义：
+程序先把以下字段以空格拼成一段文本：Card 的 `description`；每个 skill 的 `name`、`description`、`tags[]`、`examples[]`；全部测试用例的 `prompt`。URL、Runtime 输出和源码不参与必要性信号匹配。
 
-- `C`：命中的复杂信号组数量，最多 8 组；
-- `S`：是否命中简单变换信号，当前为 0 或 1；
-- `K`：skill 数量；
-- `N`：测试用例数量；
-- `U`：是否有测试用例，正常提交为 1；
-- `B`：能力加分，streaming +5、push notifications +6、extensions +4。
+变量定义：
 
-复杂信号组为：多步编排、人机确认、外部系统、文件文档、跨文档核对、证据/合规、状态/异步、规划/重试。简单信号包括整理文件、重命名、摘要、翻译、改写、分类和 format。
+- `C`（Complex signal groups）：命中的复杂信号组数量，取值 0–8；
+- `S`（Simple-transform signal）：是否命中简单变换组，取值 0 或 1；
+- `K`（Skill count）：Card 的 skill 数量；字母 S 已用于简单信号，因此取 skill 中的 K；
+- `N`（Number of use cases）：测试用例数量，正常范围 1–5；
+- `U`（Use-case indicator）：有测试用例为 1，否则为 0；正常提交恒为 1；
+- `B`（Capability bonus）：`streaming=true` 加 5，`pushNotifications=true` 加 6，`extensions` 非空加 4，可叠加，范围 0–15。
+
+这些变量只在“必要性”阶段内有效。最终分档章节会重新定义局部变量，其中 `C` 表示 Claude Code 均分；它与本节表示 Complex signals 的 `C` 不会进入同一个公式。
+
+复杂信号分为 8 个正则组。每个组扫描一次完整拼接文本，不区分英文大小写；组内任意词出现即命中该组。同组重复出现只计 1，不同组可以由同一段文字同时命中。
+
+| 组 | 含义 | 当前匹配词 | 命中效果 |
+|---|---|---|---|
+| G1 | 多步编排 | 多步、multi-step / multi step、workflow、编排、`orchestrat*` | `C + 1` |
+| G2 | 人机节点 | 审批、human-in-the-loop、确认、澄清、`clarif*` | `C + 1` |
+| G3 | 外部系统 | 外部系统、API、database、数据库、检索、browser、工具 | `C + 1` |
+| G4 | 文件文档 | 文件、document、PDF、合同、附件、artifact | `C + 1` |
+| G5 | 跨文档核对 | 制度、跨文档、multiple documents、交叉核对、cross-check / cross check | `C + 1` |
+| G6 | 证据与合规 | 证据、风险、冲突、审查、verify、validation、合规 | `C + 1` |
+| G7 | 状态与异步 | 状态、记忆、memory、异步、async、long-running | `C + 1` |
+| G8 | 规划与恢复 | 规划、plan、分支、重试、retry、监控、monitor | `C + 1` |
+
+简单变换组匹配：整理文件、重命名、摘要、翻译、改写、分类、format、summarize / summarise、translate、rename。无论命中多少个词都只令 `S=1`。复杂组与简单组可同时命中，例如“整理文件”会命中 G4，同时令 `S=1`。
+
+`clamp` 的默认上下限是 0 和 100，准确实现为：
+
+```text
+clamp(x) = min(100, max(0, x))
+```
+
+因此 `x < 0` 返回 0，`0 ≤ x ≤ 100` 返回 x，`x > 100` 返回 100。
 
 五维公式均限制在 0–100：
 
@@ -35,6 +60,10 @@
 复用价值   = clamp(26 + 7K + 4N + 4C)
 必要性总分 = round(五维算术平均)
 ```
+
+手算示例：若 `C=5、S=0、K=1、N=2、U=1、B=5`，五维依次为 68、60、55、55、61；总分为 `round((68+60+55+55+61)/5) = round(59.8) = 60`。
+
+当前命中属于可审计的关键词/正则启发式，不是语义理解，可能存在漏判或字符串误命中。算法保持透明是为了便于复算，不代表必要性分是客观真理。
 
 阈值：
 

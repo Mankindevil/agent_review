@@ -83,14 +83,43 @@
         <section class="rule-section" id="necessity">
           <header><span>STAGE 01 / RULE ENGINE</span><h2>Agent 必要性：五维等权</h2><p>判断固定 Agent 流程是否真的比一次模型调用更有价值。满分 100，五个维度各占 20%。</p></header>
           <div class="notation">
-            <div><b>C</b><span>命中的复杂信号组数量，最多 8 组</span></div>
-            <div><b>S</b><span>是否出现简单变换信号，当前为 0 或 1</span></div>
-            <div><b>K</b><span>Card 中声明的 skill 数量</span></div>
-            <div><b>N</b><span>测试用例数量，范围 1–5</span></div>
-            <div><b>U</b><span>是否提供测试用例；正常提交恒为 1</span></div>
-            <div><b>B</b><span>能力加分：流式 +5、推送 +6、扩展 +4</span></div>
+            <div><b>C</b><span><strong>Complex signal groups</strong>命中的复杂信号组数，取值 0–8</span></div>
+            <div><b>S</b><span><strong>Simple-transform signal</strong>是否命中简单变换组，取值 0 或 1</span></div>
+            <div><b>K</b><span><strong>Skill count (K)</strong>Card 中声明的 skill 数；取 skill 中的 K，避免与 S 冲突</span></div>
+            <div><b>N</b><span><strong>Number of use cases</strong>测试用例数量，正常范围 1–5</span></div>
+            <div><b>U</b><span><strong>Use-case indicator</strong>有测试用例为 1，否则为 0；正常提交恒为 1</span></div>
+            <div><b>B</b><span><strong>Capability bonus</strong>streaming +5、pushNotifications +6、extensions +4</span></div>
           </div>
-          <p class="signal-note"><b>复杂信号组：</b>多步编排、人机确认、外部系统、文件文档、跨文档核对、证据/合规、状态/异步、规划/重试。每组无论命中几次只计一次。<br><b>简单信号：</b>整理文件、重命名、摘要、翻译、改写、分类、format 等。</p>
+          <p class="variable-scope"><b>变量作用域：</b>本节的 <code>C</code> 只表示 Complex signals。最终分档章节会重新定义局部变量，其中 <code>C</code> 表示 Claude Code 均分；两套公式不会混用。</p>
+          <div class="necessity-explainers">
+            <article class="clamp-card">
+              <span>BOUND FUNCTION / 截断函数</span>
+              <h3><code>clamp(x) = min(100, max(0, x))</code></h3>
+              <div><b>x &lt; 0</b><i>→</i><strong>0</strong><b>0 ≤ x ≤ 100</b><i>→</i><strong>x</strong><b>x &gt; 100</b><i>→</i><strong>100</strong></div>
+              <p>这里的 <code>clamp</code> 只接收一个参数时，默认下限是 0、上限是 100。例如 <code>clamp(-7)=0</code>，<code>clamp(63)=63</code>，<code>clamp(118)=100</code>。</p>
+            </article>
+            <article class="hit-card">
+              <span>MATCH PIPELINE / 命中流程</span>
+              <ol>
+                <li>拼接 Card 描述、每个 skill 的名称/描述/tags/examples，以及全部测试 prompt；</li>
+                <li>8 个复杂信号正则分别扫描一次完整文本，不区分中英文大小写；</li>
+                <li>某组匹配至少一次，该组记 1；同组重复出现不累计；</li>
+                <li>同一段文字可以同时命中不同组，例如“跨文档合同审查”会命中 3 组。</li>
+              </ol>
+            </article>
+          </div>
+          <div class="signal-matrix" aria-label="复杂信号命中表">
+            <header><span>组</span><span>含义</span><span>当前匹配词；任一出现即命中</span><span>计数</span></header>
+            <article><i>G1</i><b>多步编排</b><code>多步 / multi-step / multi step / workflow / 编排 / orchestrat*</code><strong>C +1</strong></article>
+            <article><i>G2</i><b>人机节点</b><code>审批 / human-in-the-loop / 确认 / 澄清 / clarif*</code><strong>C +1</strong></article>
+            <article><i>G3</i><b>外部系统</b><code>外部系统 / API / database / 数据库 / 检索 / browser / 工具</code><strong>C +1</strong></article>
+            <article><i>G4</i><b>文件文档</b><code>文件 / document / PDF / 合同 / 附件 / artifact</code><strong>C +1</strong></article>
+            <article><i>G5</i><b>跨文档核对</b><code>制度 / 跨文档 / multiple documents / 交叉核对 / cross-check</code><strong>C +1</strong></article>
+            <article><i>G6</i><b>证据与合规</b><code>证据 / 风险 / 冲突 / 审查 / verify / validation / 合规</code><strong>C +1</strong></article>
+            <article><i>G7</i><b>状态与异步</b><code>状态 / 记忆 / memory / 异步 / async / long-running</code><strong>C +1</strong></article>
+            <article><i>G8</i><b>规划与恢复</b><code>规划 / plan / 分支 / 重试 / retry / 监控 / monitor</code><strong>C +1</strong></article>
+          </div>
+          <div class="simple-signal"><b>S / 简单变换组</b><p><code>整理文件 / 重命名 / 摘要 / 翻译 / 改写 / 分类 / format / summarize / translate / rename</code></p><span>命中任意个都只令 S=1。复杂组与简单组可同时命中：例如“整理文件”会令 G4 命中、同时令 S=1。</span></div>
           <div class="formula-list">
             <article><span>步骤深度</span><code>clamp(18 + 10C − 5S)</code><small>复杂步骤加分；简单变换扣分。</small></article>
             <article><span>工具依赖</span><code>clamp(12 + 9C + 3K)</code><small>复杂信号与 skill 数共同反映工具编排需求。</small></article>
@@ -99,6 +128,19 @@
             <article><span>复用价值</span><code>clamp(26 + 7K + 4N + 4C)</code><small>skill 与测试场景越多，固定流程复用价值越高。</small></article>
           </div>
           <div class="equation"><span>必要性总分</span><strong>round((五维分数之和) ÷ 5)</strong><small>所有维度先限制到 0–100。</small></div>
+          <article class="worked-example">
+            <header><div><span>WORKED EXAMPLE / 手算示例</span><h3>5 组复杂信号、1 个 Skill、2 个用例、仅开启流式能力</h3></div><strong>60</strong></header>
+            <div class="example-inputs"><code>C=5</code><code>S=0</code><code>K=1</code><code>N=2</code><code>U=1</code><code>B=5</code></div>
+            <div class="example-math">
+              <p><b>步骤深度</b><span>clamp(18 + 10×5 − 5×0)</span><strong>68</strong></p>
+              <p><b>工具依赖</b><span>clamp(12 + 9×5 + 3×1)</span><strong>60</strong></p>
+              <p><b>状态与分支</b><span>clamp(10 + 8×5 + 5)</span><strong>55</strong></p>
+              <p><b>不确定性</b><span>clamp(22 + 8×1 + 5×5)</span><strong>55</strong></p>
+              <p><b>复用价值</b><span>clamp(26 + 7×1 + 4×2 + 4×5)</span><strong>61</strong></p>
+            </div>
+            <footer><code>round((68 + 60 + 55 + 55 + 61) ÷ 5) = round(59.8) = 60</code><span>落入“值得 Agent 化”区间。</span></footer>
+          </article>
+          <p class="heuristic-note"><b>命中不是语义理解。</b>当前实现是透明的关键词/正则启发式，不读取源码，也不让模型判断 C 和 S。它可能出现漏判或字符串误命中，因此必要性分适合做可审计初筛，不应视为客观真理。</p>
           <div class="thresholds">
             <div class="bad"><b>0–35</b><span>模型直出更划算</span><small>最终评级强制为“拉”</small></div>
             <div class="mid"><b>36–59</b><span>Agent 价值存疑</span><small>允许继续实战对比</small></div>

@@ -28,6 +28,11 @@ test('serves the scoring methodology document in the web UI', async () => {
   assert.match(response.headers.get('content-type'), /text\/html/);
   assert.match(html, /每一分/);
   assert.match(html, /clamp\(18 \+ 10C/);
+  assert.match(html, /clamp\(x\) = min\(100, max\(0, x\)\)/);
+  assert.match(html, /Complex signal groups/);
+  assert.match(html, /变量作用域/);
+  assert.match(html, /同组重复出现不累计/);
+  assert.match(html, /round\(59\.8\) = 60/);
   assert.match(html, /夯 \/ 人上人 \/ NPC \/ 拉/);
   assert.match(html, /最新结果替换旧结果/);
 });
