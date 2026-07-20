@@ -30,18 +30,18 @@ export function configuredReviewers() {
   });
 }
 
-export async function reviewAgent(reviewer, card, complexity, mode, signal) {
-  if (mode !== 'live' || reviewer.kind === 'mock') return mockProfessionalReview(reviewer, card, complexity);
+export async function reviewAgent(reviewer, card, complexity, mode, signal, sampling = {}) {
+  if (mode !== 'live' || reviewer.kind === 'mock') return mockProfessionalReview(reviewer, card, complexity, sampling.seed);
   const system = PROFESSIONAL_REVIEW_SYSTEM_PROMPT;
   const prompt = professionalReviewPrompt(card, complexity);
   const responseText = reviewer.kind === 'anthropic'
-    ? await callAnthropic(reviewer, system, prompt, signal)
-    : await callOpenAICompatible(reviewer, system, prompt, signal);
+    ? await callAnthropic(reviewer, system, prompt, signal, sampling)
+    : await callOpenAICompatible(reviewer, system, prompt, signal, sampling);
   const parsed = safeJson(responseText);
-  return { reviewer: reviewer.name, model: reviewer.model, ...parsed, mode: 'live' };
+  return { reviewer: reviewer.name, model: reviewer.model, ...parsed, mode: 'live', seed: sampling.seed };
 }
 
-async function callOpenAICompatible(config, system, prompt, signal) {
+async function callOpenAICompatible(config, system, prompt, signal, sampling) {
   const timeoutMs = Number(process.env.MODEL_REVIEW_TIMEOUT_MS || 120_000);
   let response;
   try {
@@ -50,7 +50,8 @@ async function callOpenAICompatible(config, system, prompt, signal) {
       headers: { 'content-type': 'application/json', authorization: `Bearer ${resolveSecret(config.apiKeyEnv)}` },
       body: JSON.stringify({
         model: config.model,
-        temperature: 0.2,
+        temperature: sampling.temperature ?? 0,
+        ...(Number.isInteger(sampling.seed) ? { seed: sampling.seed } : {}),
         max_tokens: Number(process.env.MODEL_REVIEW_MAX_TOKENS || 1200),
         ...(config.id === 'doubao' ? { thinking: { type: 'disabled' } } : {}),
         messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }]
@@ -69,14 +70,14 @@ async function callOpenAICompatible(config, system, prompt, signal) {
   return content || '';
 }
 
-async function callAnthropic(config, system, prompt, signal) {
+async function callAnthropic(config, system, prompt, signal, sampling) {
   const timeoutMs = Number(process.env.MODEL_REVIEW_TIMEOUT_MS || 120_000);
   let response;
   try {
     response = await fetch(config.baseUrl || 'https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': resolveSecret(config.apiKeyEnv), 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: config.model, max_tokens: Number(process.env.MODEL_REVIEW_MAX_TOKENS || 1200), temperature: 0.2, system, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: config.model, max_tokens: Number(process.env.MODEL_REVIEW_MAX_TOKENS || 1200), temperature: sampling.temperature ?? 0, system, messages: [{ role: 'user', content: prompt }] }),
       signal: withTimeout(signal, timeoutMs)
     });
   } catch (error) {

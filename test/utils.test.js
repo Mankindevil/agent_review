@@ -1,6 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { safeJson } from '../src/utils.js';
+import { deriveSeed, normalizeSeed, normalizeTemperature, safeJson } from '../src/utils.js';
+
+test('normalizes and derives deterministic evaluation seeds', () => {
+  assert.equal(normalizeSeed('20260720'), 20260720);
+  assert.equal(normalizeSeed(''), 20260720);
+  assert.equal(normalizeSeed('named-seed'), normalizeSeed('named-seed'));
+  assert.equal(deriveSeed(42, 'review:gpt'), deriveSeed(42, 'review:gpt'));
+  assert.notEqual(deriveSeed(42, 'review:gpt'), deriveSeed(42, 'review:claude'));
+  assert.equal(normalizeTemperature('0'), 0);
+  assert.equal(normalizeTemperature('9'), 2);
+});
 
 test('parses plain and fenced JSON model output', () => {
   assert.deepEqual(safeJson('{"name":"plain"}'), { name: 'plain' });

@@ -2,7 +2,7 @@ import { callA2AAgent, validateAgentCard } from './a2a.js';
 import { configuredReviewers, reviewAgent } from './providers.js';
 import { buildRoast, judgeOutput, scoreComplexity } from './scoring.js';
 import { buildSkill, RUNTIMES, runSkill } from './runtimes.js';
-import { average, id, now, round, stableNumber } from './utils.js';
+import { average, deriveSeed, id, normalizeSeed, normalizeTemperature, now, round, stableNumber } from './utils.js';
 
 export class EvaluationPipeline {
   constructor(store, events) {
@@ -17,9 +17,14 @@ export class EvaluationPipeline {
     if (!Array.isArray(input.cases) || !input.cases.length || input.cases.some((item) => !item?.prompt?.trim())) {
       throw Object.assign(new Error('至少提供一个包含 prompt 的使用实例'), { statusCode: 400 });
     }
+    if (input.seed !== undefined && (!Number.isSafeInteger(Number(input.seed)) || Number(input.seed) < 0 || Number(input.seed) > 2_147_483_646)) {
+      throw Object.assign(new Error('Seed 必须是 0–2147483646 的整数'), { statusCode: 400 });
+    }
+    const seed = normalizeSeed(input.seed ?? process.env.EVALUATION_SEED);
+    const temperature = normalizeTemperature(process.env.MODEL_TEMPERATURE, 0);
     const evaluation = {
       id: id(), createdAt: now(), updatedAt: now(), status: 'queued', mode: input.mode === 'live' ? 'live' : 'demo',
-      agentCard: input.agentCard, cases: input.cases.slice(0, 5), validation, progress: 0, stage: '等待评测舱', logs: []
+      agentCard: input.agentCard, cases: input.cases.slice(0, 5), validation, seed, temperature, progress: 0, stage: '等待评测舱', logs: []
     };
     await this.store.set(evaluation);
     const controller = new AbortController();
@@ -99,7 +104,7 @@ export class EvaluationPipeline {
     const index = reviews.findIndex((review) => retryReviewResultKey(review) === step.key || review.model === step.key || review.reviewer === step.key || review.reviewer === step.reviewerName);
     let next;
     try {
-      next = { ...(await reviewAgent(reviewer, item.agentCard, item.complexity, item.mode, signal)), reviewerId: reviewer.id };
+      next = { ...(await reviewAgent(reviewer, item.agentCard, item.complexity, item.mode, signal, phaseSampling(item, `review:${reviewer.id}`))), reviewerId: reviewer.id };
     } catch (error) {
       if (signal.aborted) throw signal.reason || error;
       next = { reviewerId: reviewer.id, reviewer: reviewer.name, model: reviewer.model, score: 0, error: error.message, mode: item.mode };
@@ -114,7 +119,7 @@ export class EvaluationPipeline {
     const index = builds.findIndex((build) => build.runtimeId === step.key);
     let next;
     try {
-      next = await buildSkill(runtime, item.agentCard, item.mode, { signal });
+      next = await buildSkill(runtime, item.agentCard, item.mode, { signal, ...phaseSampling(item, `build:${runtime.id}`) });
     } catch (error) {
       if (signal.aborted) throw signal.reason || error;
       next = { runtime: runtime.name, runtimeId: runtime.id, mode: item.mode, error: error.message };
@@ -156,7 +161,7 @@ export class EvaluationPipeline {
         if (!build || build.error) throw new Error(build?.error || '对应 Runtime Skill 尚未生成');
         name = build.runtime;
         mode = build.mode;
-        output = await runSkill(build, testCase, item.mode, { signal });
+        output = await runSkill(build, testCase, item.mode, { signal, ...phaseSampling(item, `run:${caseIndex}:${competitorId}`) });
       }
     } catch (error) {
       if (signal.aborted) throw signal.reason || error;
@@ -164,7 +169,7 @@ export class EvaluationPipeline {
       mode = 'failed';
       if (competitorId !== 'submitted') name = item.builds?.find((candidate) => candidate.runtimeId === competitorId)?.runtime || competitorId;
     }
-    const next = makeEntry(competitorId, name, output, testCase, mode);
+    const next = makeEntry(competitorId, name, output, testCase, mode, deriveSeed(item.seed, `judge:${caseIndex}:${competitorId}`));
     const entryIndex = roundItem.entries.findIndex((entry) => entry.id === competitorId);
     if (entryIndex === -1) roundItem.entries.push(next); else roundItem.entries[entryIndex] = next;
   }
@@ -183,7 +188,7 @@ export class EvaluationPipeline {
     const target = item.validation.interfaces[0];
     await this.update(item, { status: 'running', progress: 6, stage: 'A2A 协议体检' }, {
       level: 'success', source: 'A2A', phase: 'protocol', text: 'Agent Card 结构与接口声明通过',
-      detail: `${target.binding} · v${target.version} · ${redactUrl(target.url)}`, mode: item.mode
+      detail: `${target.binding} · v${target.version} · seed=${item.seed} · temperature=${item.temperature} · ${redactUrl(target.url)}`, mode: item.mode
     });
 
     const complexity = scoreComplexity(item.agentCard, item.cases);
@@ -201,7 +206,7 @@ export class EvaluationPipeline {
         level: 'info', source: 'MODEL', phase: 'review', text: `${reviewer.model} 接过了答卷`, mode: item.mode
       });
       try {
-        const review = { ...(await reviewAgent(reviewer, item.agentCard, complexity, item.mode, signal)), reviewerId: reviewer.id };
+        const review = { ...(await reviewAgent(reviewer, item.agentCard, complexity, item.mode, signal, phaseSampling(item, `review:${reviewer.id}`))), reviewerId: reviewer.id };
         professionalReviews.push(review);
         await this.update(item, { professional: professionalSnapshot(professionalReviews) }, { level: 'success', source: 'MODEL', phase: 'review', text: `${reviewer.model} 完成盲审 · ${review.score}/100`, mode: review.mode, durationMs: Date.now() - startedAt });
       } catch (error) {
@@ -221,7 +226,7 @@ export class EvaluationPipeline {
       const startedAt = Date.now();
       await this.update(item, {}, { level: 'info', source: 'RUNTIME', phase: 'build', text: `${runtime.name} 开始复刻 skill`, mode: item.mode });
       try {
-        const build = await buildSkill(runtime, item.agentCard, item.mode, { signal });
+        const build = await buildSkill(runtime, item.agentCard, item.mode, { signal, ...phaseSampling(item, `build:${runtime.id}`) });
         builds.push(build);
         await this.update(item, { builds: [...builds] }, { level: 'success', source: 'RUNTIME', phase: 'build', text: `${runtime.name} 复刻完成`, detail: build.skill?.name, mode: build.mode, durationMs: Date.now() - startedAt });
       } catch (error) {
@@ -251,24 +256,24 @@ export class EvaluationPipeline {
         submittedOutput = `执行失败：${error.message}`;
         submittedMode = 'failed';
       }
-      entries.push(makeEntry('submitted', item.agentCard.name, submittedOutput, testCase, submittedMode));
+      entries.push(makeEntry('submitted', item.agentCard.name, submittedOutput, testCase, submittedMode, deriveSeed(item.seed, `judge:${index}:submitted`)));
       await this.update(item, { benchmark, progress: 70 + Math.round((index / item.cases.length) * 22), stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, {
         level: submittedMode === 'failed' ? 'error' : 'success', source: 'A2A', phase: 'benchmark', text: `${item.agentCard.name} 完成「${testCase.name}」`, detail: `score=${entries.at(-1).score}`, mode: submittedMode, durationMs: Date.now() - startedAt
       });
       for (const build of builds) {
         signal?.throwIfAborted();
         if (build.error) {
-          entries.push(makeEntry(build.runtimeId, build.runtime, `执行失败：${build.error}`, testCase, 'failed'));
+          entries.push(makeEntry(build.runtimeId, build.runtime, `执行失败：${build.error}`, testCase, 'failed', deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`)));
           await this.update(item, { benchmark, stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, { level: 'error', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 无法进入「${testCase.name}」`, detail: build.error, mode: 'failed' });
           continue;
         }
         startedAt = Date.now();
         try {
-          const output = await runSkill(build, testCase, item.mode, { signal });
-          entries.push(makeEntry(build.runtimeId, build.runtime, output, testCase, build.mode));
+          const output = await runSkill(build, testCase, item.mode, { signal, ...phaseSampling(item, `run:${index}:${build.runtimeId}`) });
+          entries.push(makeEntry(build.runtimeId, build.runtime, output, testCase, build.mode, deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`)));
         } catch (error) {
           if (signal?.aborted) throw signal.reason || error;
-          entries.push(makeEntry(build.runtimeId, build.runtime, `执行失败：${error.message}`, testCase, 'failed'));
+          entries.push(makeEntry(build.runtimeId, build.runtime, `执行失败：${error.message}`, testCase, 'failed', deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`)));
         }
         await this.update(item, { benchmark, stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, { level: entries.at(-1).mode === 'failed' ? 'error' : 'success', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 完成「${testCase.name}」`, detail: `score=${entries.at(-1).score}`, mode: entries.at(-1).mode, durationMs: Date.now() - startedAt });
       }
@@ -340,14 +345,14 @@ function retryReviewResultKey(review) { return review.reviewerId || review.model
 function retryTargetSummary(item, step) {
   if (step.type === 'review') {
     const review = item.professional?.reviews?.find((candidate) => retryReviewResultKey(candidate) === step.key || candidate.model === step.key || candidate.reviewer === step.key || candidate.reviewer === step.reviewerName);
-    return review ? { score: review.score, model: review.model, mode: review.mode, ...(review.error ? { error: review.error } : {}) } : { error: '暂无旧结果' };
+    return review ? { score: review.score, model: review.model, mode: review.mode, seed: review.seed, ...(review.error ? { error: review.error } : {}) } : { error: '暂无旧结果' };
   }
   if (step.type === 'build') {
     const build = item.builds?.find((candidate) => candidate.runtimeId === step.key);
-    return build ? { model: build.model, mode: build.mode, skill: build.skill?.name, ...(build.error ? { error: build.error } : {}) } : { error: '暂无旧结果' };
+    return build ? { model: build.model, mode: build.mode, seed: build.seed, skill: build.skill?.name, ...(build.error ? { error: build.error } : {}) } : { error: '暂无旧结果' };
   }
   const entry = item.benchmark?.[step.caseIndex]?.entries?.find((candidate) => candidate.id === step.key);
-  return entry ? { score: entry.score, name: entry.name, mode: entry.mode, ...(entry.mode === 'failed' ? { error: String(entry.output || '').slice(0, 300) } : {}) } : { error: '暂无旧结果' };
+  return entry ? { score: entry.score, name: entry.name, mode: entry.mode, judgeSeed: entry.judgeSeed, ...(entry.mode === 'failed' ? { error: String(entry.output || '').slice(0, 300) } : {}) } : { error: '暂无旧结果' };
 }
 
 function appendRetryHistory(item, step, previous, result, durationMs) {
@@ -405,10 +410,14 @@ function summarizeModes(modes) {
   return 'mixed';
 }
 
-function makeEntry(id, name, output, testCase, mode) {
-  const judged = judgeOutput(testCase.prompt, output, id);
+function phaseSampling(item, scope) {
+  return { seed: deriveSeed(item.seed, scope), temperature: normalizeTemperature(item.temperature, 0) };
+}
+
+function makeEntry(id, name, output, testCase, mode, seed) {
+  const judged = judgeOutput(testCase.prompt, output, `${id}:${seed}`);
   if (mode === 'failed') judged.score = 0;
-  return { id, name, output, mode, ...judged };
+  return { id, name, output, mode, judgeSeed: seed, ...judged };
 }
 
 function mockSubmittedOutput(card, testCase) {

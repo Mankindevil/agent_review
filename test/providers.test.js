@@ -57,10 +57,13 @@ test('disables deep thinking and caps output for the Doubao short-form review', 
     return new Response(JSON.stringify({ choices: [{ message: { content: '{"score":20,"dimensions":{"domainDepth":20,"workflowQuality":20,"failureHandling":20,"outputContract":20,"evaluability":20},"comment":"short","risk":"none"}' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   try {
-    const result = await reviewAgent({ id: 'doubao', name: '豆包评审', model: 'ep-test', kind: 'openai-compatible', baseUrl: 'https://ark.example/api/v3', apiKeyEnv: 'ARK_API_KEY' }, { name: 'A', description: 'B', skills: [] }, { score: 10 }, 'live');
+    const result = await reviewAgent({ id: 'doubao', name: '豆包评审', model: 'ep-test', kind: 'openai-compatible', baseUrl: 'https://ark.example/api/v3', apiKeyEnv: 'ARK_API_KEY' }, { name: 'A', description: 'B', skills: [] }, { score: 10 }, 'live', undefined, { seed: 73021, temperature: 0 });
     assert.equal(result.score, 20);
     assert.deepEqual(requestBody.thinking, { type: 'disabled' });
     assert.equal(requestBody.max_tokens, 777);
+    assert.equal(requestBody.seed, 73021);
+    assert.equal(requestBody.temperature, 0);
+    assert.equal(result.seed, 73021);
   } finally {
     globalThis.fetch = originalFetch;
   }

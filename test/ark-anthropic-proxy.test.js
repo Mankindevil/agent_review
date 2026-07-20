@@ -24,7 +24,7 @@ test('bridges Ark chat completions into Anthropic JSON and SSE responses', async
     response.end(JSON.stringify({ choices: [{ message: { content: 'Ark DeepSeek result' } }], usage: { prompt_tokens: 12, completion_tokens: 7 } }));
   });
   await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve));
-  const proxy = await startArkAnthropicProxy({ baseUrl: `http://127.0.0.1:${upstream.address().port}/api/v3`, apiKey: 'ark-test-key', model: 'ep-deepseek' });
+  const proxy = await startArkAnthropicProxy({ baseUrl: `http://127.0.0.1:${upstream.address().port}/api/v3`, apiKey: 'ark-test-key', model: 'ep-deepseek', seed: 8848, temperature: 0 });
   try {
     const basePayload = { model: 'claude-sonnet', max_tokens: 100, system: 'system', messages: [{ role: 'user', content: 'hello' }] };
     const jsonResponse = await fetch(`${proxy.baseUrl}/v1/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(basePayload) });
@@ -42,6 +42,8 @@ test('bridges Ark chat completions into Anthropic JSON and SSE responses', async
     assert.equal(observed[0].url, '/api/v3/chat/completions');
     assert.equal(observed[0].authorization, 'Bearer ark-test-key');
     assert.equal(observed[0].body.model, 'ep-deepseek');
+    assert.equal(observed[0].body.seed, 8848);
+    assert.equal(observed[0].body.temperature, 0);
   } finally {
     await proxy.close();
     await new Promise((resolve) => upstream.close(resolve));

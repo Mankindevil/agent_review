@@ -36,9 +36,16 @@
 
       <div class="intake-card" id="submission-panel">
         <div class="card-kicker"><span>INTAKE / 送检入口</span><strong>01</strong></div>
-        <div class="mode-switch" role="group" aria-label="评测模式">
-          <button class="selected" data-mode="demo"><span>演示评测</span><small>零配置，跑完整流程</small></button>
-          <button data-mode="live"><span>真实对测</span><small>调用 Agent 与已配置模型</small></button>
+        <div class="evaluation-controls">
+          <div class="mode-switch" role="group" aria-label="评测模式">
+            <button class="selected" data-mode="demo"><span>演示评测</span><small>零配置，跑完整流程</small></button>
+            <button data-mode="live"><span>真实对测</span><small>调用 Agent 与已配置模型</small></button>
+          </div>
+          <label class="seed-control" for="evaluation-seed">
+            <span>SEED</span>
+            <input id="evaluation-seed" type="number" min="0" max="2147483646" step="1" placeholder="读取中" inputmode="numeric">
+            <small>尽力复现 · 可覆盖</small>
+          </label>
         </div>
         <div class="runtime-health" id="runtime-health" aria-live="polite"><span>RUNTIME PROBE</span><i>正在检查本机执行器…</i></div>
 

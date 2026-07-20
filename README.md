@@ -14,6 +14,7 @@
 - SSE 实时进度：复杂度、每位模型评语、每个 Runtime Skill 和每位对测选手完成后立即展示；
 - 可真正中止模型请求与本地 CLI 的停止按钮，以及服务重启后的遗留任务识别；
 - 模型复审、Runtime 重建、单用例单选手重跑三种单步重试；新结果替换旧结果后自动重算均分、覆盖模式、等级与锐评，并保留复核审计历史；
+- 可在页面或 `.env` 固定评测 seed；平台为每个模型、Runtime 和用例派生稳定子 seed，并默认使用 temperature 0；
 - 结构化执行日志：协议、评分、模型、Runtime、对测、耗时与真实/演示模式；
 - 本机 Runtime 探测，区分“已安装”“已配置可执行”和“缺失”；
 - 扫描光束、阶段切换、分数计数与判词盖章动效，支持 reduced-motion；
@@ -116,6 +117,8 @@ npm test
 运行页不会等待最终锐评才出报告。后端在每位评审、每个 Runtime 和每个同题选手结束时持久化完整快照并通过 SSE 推送；前端按“跑完一项，解锁一项”持续追加阶段产物。运行中的评测可点击“停止本次评测”，后端会通过 `AbortController` 中止当前 HTTP 请求或 CLI 子进程，并保留已经完成的结果。若服务在任务期间重启，遗留的 `queued/running` 记录会被标记为 `interrupted`，不再显示假运行。
 
 评测结束后，每张模型评审卡可“重跑该模型”，每条 Runtime 构建记录可“重建并回放”，每个同题选手可“重跑这一局”。Runtime 重建会自动用新 Skill 回放全部已有测试用例，避免构建物与对战输出版本不一致。重试期间状态为 `retrying`，仍可停止；完成后新结果原位替换旧结果，平台重新计算专业度、四方实战均分、覆盖模式与最终“夯 / 人上人 / NPC / 拉”，并将前后摘要写入 `retryHistory`。
+
+提交页的 `SEED` 默认是 `20260720`。同一个 seed 会为每位评审、每个 Runtime 构建和每个“用例 × 选手”派生不同但稳定的整数 seed；单步重试继续使用原来的子 seed。OpenAI-compatible、方舟豆包以及 Claude Code 的方舟协议桥会实际发送 `seed`，同时默认把 `temperature` 设为 `0`。原生 Anthropic Messages、Cursor Agent CLI 与用户提交的外部 A2A Agent 不保证支持 seed，因此这是“尽力确定性”，不能承诺底层服务升级、并发调度或模型权重变化后逐字节一致。
 
 “本机已安装”不等于“平台已真实调用”。`GET /api/runtimes` 会分别检查 Claude/Cursor 的 CLI、鉴权与启用开关；豆包既可以来自 `doubao` CLI，也可以在 `ARK_BASE_URL`、`ARK_API_KEY` 和豆包 endpoint 同时存在时直接使用方舟 API。远程隔离 adapter 仍可通过 `RUNTIME_ADAPTERS_JSON` 覆盖。主服务不会把 Cursor Desktop 的 `cursor` 命令误认成 `cursor-agent`。
 
@@ -258,6 +261,8 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 | `REVIEW_MODEL_DEEPSEEK` | `ep-20260708162855-pcf9x` | DeepSeek 接入点 ID |
 | `MODEL_REVIEW_TIMEOUT_MS` | `180000` | 单次模型盲审超时；错误会显示模型 ID 与实际秒数 |
 | `MODEL_REVIEW_MAX_TOKENS` | `1200` | 单次模型盲审最大输出 token；豆包短评分同时关闭深度思考 |
+| `EVALUATION_SEED` | `20260720` | 页面未指定时使用的评测根 seed；每个阶段会派生稳定子 seed |
+| `MODEL_TEMPERATURE` | `0` | 支持显式采样参数的模型温度，限制在 0–2 |
 | `MODEL_REVIEWERS_JSON` | 内置四位 demo 评审 | 真实模型 adapter 高级配置 |
 | `RUNTIME_ADAPTERS_JSON` | 内置三种 demo runtime | 隔离 runtime adapter 配置 |
 | `ENABLE_LOCAL_CLAUDE_CODE` | `false` | 允许真实调用已登录的本机 Claude Code |

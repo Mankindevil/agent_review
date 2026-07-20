@@ -35,8 +35,8 @@ export function scoreComplexity(card, useCases = []) {
   return { score, verdict, reason, dimensions };
 }
 
-export function mockProfessionalReview(reviewer, card, complexity) {
-  const seed = `${reviewer.id}:${card.name}:${card.description}`;
+export function mockProfessionalReview(reviewer, card, complexity, evaluationSeed) {
+  const seed = `${evaluationSeed ?? 'default'}:${reviewer.id}:${card.name}:${card.description}`;
   const base = stableNumber(seed, 66, 88) + (complexity.score >= 60 ? 2 : -2);
   const dimensions = {
     domainDepth: clamp(base + stableNumber(`${seed}:depth`, -7, 6)),
@@ -55,7 +55,8 @@ export function mockProfessionalReview(reviewer, card, complexity) {
     dimensions,
     comment: `能力边界写得清楚，${labelDimension(strongest)}是亮点；${labelDimension(weakest)}仍缺少可验证的约束与异常样例。`,
     risk: 'Agent Card 描述无法单独证明真实执行质量，必须结合现场对测。',
-    mode: 'demo'
+    mode: 'demo',
+    seed: evaluationSeed
   };
 }
 

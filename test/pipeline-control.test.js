@@ -57,13 +57,17 @@ test('persists each completed reviewer, runtime and benchmark entry incrementall
     return originalSet(item);
   };
   const pipeline = new EvaluationPipeline(store, new EventEmitter());
-  const created = await pipeline.create({ mode: 'demo', agentCard: evaluation('template').agentCard, cases: [{ name: 'case', prompt: 'test prompt' }] });
+  const created = await pipeline.create({ mode: 'demo', seed: 424242, agentCard: evaluation('template').agentCard, cases: [{ name: 'case', prompt: 'test prompt' }] });
   for (let attempt = 0; attempt < 80 && store.get(created.id).status !== 'completed'; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
 
   assert.ok(snapshots.some((item) => item.professional?.reviews?.length === 1));
   assert.ok(snapshots.some((item) => item.builds?.length === 1));
   assert.ok(snapshots.some((item) => item.benchmark?.[0]?.entries?.length === 1));
   assert.equal(store.get(created.id).status, 'completed');
+  assert.equal(store.get(created.id).seed, 424242);
+  assert.equal(store.get(created.id).temperature, 0);
+  assert.equal(store.get(created.id).professional.reviews.every((review) => Number.isInteger(review.seed)), true);
+  assert.equal(store.get(created.id).builds.every((build) => Number.isInteger(build.seed)), true);
 });
 
 test('retries an individual stage and recalculates the derived verdict', async () => {
@@ -109,6 +113,19 @@ test('retries an individual stage and recalculates the derived verdict', async (
     if (oldBaseUrl === undefined) delete process.env.OPENAI_BASE_URL; else process.env.OPENAI_BASE_URL = oldBaseUrl;
     if (oldApiKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = oldApiKey;
   }
+});
+
+test('produces identical demo scores for the same explicit seed', async () => {
+  const store = new EvaluationStore(`/tmp/agent-roast-seed-${process.pid}.json`);
+  const pipeline = new EvaluationPipeline(store, new EventEmitter());
+  const input = { mode: 'demo', seed: 731, agentCard: evaluation('template').agentCard, cases: [{ name: 'case', prompt: 'same prompt' }] };
+  const first = await pipeline.create(input);
+  const firstResult = await waitFor(store, first.id, (value) => value.status === 'completed');
+  const second = await pipeline.create(input);
+  const secondResult = await waitFor(store, second.id, (value) => value.status === 'completed');
+  assert.deepEqual(secondResult.professional.reviews.map((review) => review.score), firstResult.professional.reviews.map((review) => review.score));
+  assert.deepEqual(secondResult.averages, firstResult.averages);
+  assert.deepEqual(secondResult.roast, firstResult.roast);
 });
 
 test('rejects an unknown retry step and a retry while work is active', async () => {

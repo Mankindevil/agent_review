@@ -5,6 +5,22 @@ export const round = (value, digits = 0) => Number(value.toFixed(digits));
 export const now = () => new Date().toISOString();
 export const id = (prefix = 'eval') => `${prefix}_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
 
+export function normalizeSeed(value, fallback = 20_260_720) {
+  if (value === undefined || value === null || String(value).trim() === '') return fallback;
+  const numeric = Number(value);
+  if (Number.isSafeInteger(numeric)) return Math.abs(numeric) % 2_147_483_647;
+  return stableNumber(String(value), 1, 2_147_483_646);
+}
+
+export function deriveSeed(seed, scope) {
+  return stableNumber(`${normalizeSeed(seed)}:${scope}`, 1, 2_147_483_646);
+}
+
+export function normalizeTemperature(value, fallback = 0) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.min(2, Math.max(0, numeric)) : fallback;
+}
+
 export function stableNumber(input, min, max) {
   const hex = createHash('sha256').update(String(input)).digest('hex').slice(0, 8);
   return min + (Number.parseInt(hex, 16) % (max - min + 1));

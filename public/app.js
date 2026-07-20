@@ -42,6 +42,7 @@ async function init() {
   requestAnimationFrame(() => document.body.classList.add('ready'));
   addCase('高风险条款审查', '请审查这份 SaaS 采购合同，重点看数据出境、赔偿上限和自动续费；按高、中、低风险列出原文、依据和修改建议。');
   bindEvents();
+  loadEvaluationDefaults();
   loadRuntimeHealth();
   await loadHistory();
   const route = location.hash.match(/^#\/evaluation\/(.+)$/);
@@ -63,6 +64,7 @@ function bindEvents() {
   });
   $('#start-evaluation').addEventListener('click', submitEvaluation);
   $('#stop-evaluation').addEventListener('click', stopEvaluation);
+  $('#evaluation-seed').addEventListener('input', (event) => { event.currentTarget.dataset.edited = 'true'; });
   $('#agent-file').addEventListener('change', (event) => readFile(event.target.files[0]));
   const drop = $('#drop-zone');
   ['dragenter','dragover'].forEach((name) => drop.addEventListener(name, (event) => { event.preventDefault(); drop.classList.add('dragging'); }));
@@ -154,10 +156,13 @@ async function submitEvaluation() {
   }
   const cases = $$('.case-row').map((row, index) => ({ name: $('.case-name', row).value.trim() || `案例 ${index + 1}`, prompt: $('.case-prompt', row).value.trim() })).filter((item) => item.prompt);
   if (!cases.length) return showError('至少填写一个测试 prompt。');
+  const seedValue = $('#evaluation-seed').value.trim();
+  const seed = seedValue === '' ? undefined : Number(seedValue);
+  if (seed !== undefined && (!Number.isSafeInteger(seed) || seed < 0 || seed > 2_147_483_646)) return showError('Seed 必须是 0–2147483646 的整数。');
   const button = $('#start-evaluation');
   button.disabled = true; $('span', button).textContent = '正在封舱';
   try {
-    const response = await fetch('/api/evaluations', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agentCard, cases, mode: state.mode }) });
+    const response = await fetch('/api/evaluations', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agentCard, cases, mode: state.mode, seed }) });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || '创建评测失败');
     await loadHistory();
@@ -245,7 +250,8 @@ function showEvaluation(item) {
   $('#run-id').textContent = `RUN / ${item.id.toUpperCase()}`;
   $('#agent-name').textContent = item.agentCard.name;
   $('#agent-description').textContent = item.agentCard.description;
-  $('#run-mode').textContent = item.overallMode === 'live' ? 'LIVE / 全链路真实' : item.mode === 'live' ? 'MIXED / Agent 实调' : 'DEMO / 演示模拟';
+  const modeLabel = item.overallMode === 'live' ? 'LIVE / 全链路真实' : item.mode === 'live' ? 'MIXED / Agent 实调' : 'DEMO / 演示模拟';
+  $('#run-mode').textContent = `${modeLabel} · SEED ${item.seed ?? 'LEGACY'}`;
   $('#current-stage').textContent = item.stage;
   $('#latest-log').textContent = item.logs?.at(-1)?.text || '等待评测信号';
   $('#progress-number').textContent = item.progress;
@@ -389,6 +395,16 @@ async function loadRuntimeHealth() {
   } catch {
     root.innerHTML = '<span>RUNTIME PROBE</span><i>探测失败</i>';
   }
+}
+
+async function loadEvaluationDefaults() {
+  try {
+    const response = await fetch('/api/health');
+    const payload = await response.json();
+    const input = $('#evaluation-seed');
+    if (!input.dataset.edited && Number.isInteger(payload.evaluationSeed)) input.value = payload.evaluationSeed;
+    input.title = `服务默认 seed：${payload.evaluationSeed} · temperature：${payload.modelTemperature}`;
+  } catch { $('#evaluation-seed').placeholder = '20260720'; }
 }
 
 function animateCounters(root) {

@@ -140,6 +140,17 @@ Doubao Runtime 不要求本机存在 `doubao` CLI。当 `ARK_BASE_URL`、`ARK_AP
 
 每次尝试写入 `retryHistory`，记录步骤类型、目标 key、用例索引、开始时间、耗时以及前后结果摘要，最多保留最近 100 条。意外异常会恢复重试前状态；用户停止则进入 `cancelled` 并保留已落盘产物。服务启动时也会把遗留 `retrying` 状态恢复为 `interrupted`。
 
+### 3.7 可复现 seed
+
+创建评测时可传入 `seed`；未传时使用 `EVALUATION_SEED`，再回退到 `20260720`。评测对象会持久化根 seed 和 temperature，避免运行期间环境变量变化导致同一任务前后采样配置不一致。平台不会把同一个整数机械地发给所有调用，而是按照以下 scope 派生稳定子 seed：
+
+- `review:<reviewerId>`：单模型专业度评审；
+- `build:<runtimeId>`：Runtime Skill 构建；
+- `run:<caseIndex>:<runtimeId>`：指定 Skill 的指定用例执行；
+- `judge:<caseIndex>:<competitorId>`：平台输出评分中的稳定扰动。
+
+OpenAI-compatible 模型、方舟模型 API 和 Claude Code 的 Ark 协议桥会发送标准 `seed` 字段；远程 Runtime adapter 请求也携带 `seed` 与 `temperature`。原生 Anthropic Messages、Cursor Agent CLI、DeepSeek Anthropic-compatible CLI 链路以及用户提供的 A2A Agent 可能没有 seed 能力，因此系统将该能力标为 best-effort。固定 seed 只降低采样抖动，不能抵消模型版本、服务端实现或外部数据变化。
+
 ## 4. 数据与接口
 
 ### `POST /api/evaluations`
@@ -147,6 +158,7 @@ Doubao Runtime 不要求本机存在 `doubao` CLI。当 `ARK_BASE_URL`、`ARK_AP
 ```json
 {
   "mode": "demo",
+  "seed": 20260720,
   "agentCard": {},
   "cases": [
     { "name": "案例名称", "prompt": "完全原始的用户 prompt" }

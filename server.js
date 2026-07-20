@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { EvaluationPipeline } from './src/pipeline.js';
 import { EvaluationStore } from './src/store.js';
-import { readJsonBody } from './src/utils.js';
+import { normalizeSeed, normalizeTemperature, readJsonBody } from './src/utils.js';
 import { resolveAgentCard } from './src/a2a.js';
 import { getRuntimeStatus } from './src/runtime-status.js';
 
@@ -23,7 +23,10 @@ await pipeline.recoverInterrupted();
 export const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
-    if (request.method === 'GET' && url.pathname === '/api/health') return json(response, 200, { ok: true, mode: 'full-stack', time: new Date().toISOString() });
+    if (request.method === 'GET' && url.pathname === '/api/health') return json(response, 200, {
+      ok: true, mode: 'full-stack', time: new Date().toISOString(),
+      evaluationSeed: normalizeSeed(process.env.EVALUATION_SEED), modelTemperature: normalizeTemperature(process.env.MODEL_TEMPERATURE, 0)
+    });
     if (request.method === 'GET' && url.pathname === '/api/runtimes') return json(response, 200, await getRuntimeStatus());
     if (request.method === 'POST' && url.pathname === '/api/agent-cards/resolve') {
       const input = await readJsonBody(request);

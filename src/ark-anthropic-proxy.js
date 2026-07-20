@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { withTimeout } from './utils.js';
 
-export async function startArkAnthropicProxy({ baseUrl, apiKey, model, fetchImpl = fetch, signal }) {
+export async function startArkAnthropicProxy({ baseUrl, apiKey, model, fetchImpl = fetch, signal, seed, temperature }) {
   if (!baseUrl || !apiKey || !model) throw new Error('启动 Ark Claude 协议桥需要 baseUrl、apiKey 和 model');
   const endpoint = chatCompletionsUrl(baseUrl);
   const server = createServer(async (request, response) => {
@@ -23,7 +23,8 @@ export async function startArkAnthropicProxy({ baseUrl, apiKey, model, fetchImpl
         body: JSON.stringify({
           model,
           max_tokens: Math.min(Number(payload.max_tokens) || 4096, 16_384),
-          ...(Number.isFinite(payload.temperature) ? { temperature: payload.temperature } : {}),
+          temperature: Number.isFinite(temperature) ? temperature : Number.isFinite(payload.temperature) ? payload.temperature : 0,
+          ...(Number.isInteger(seed) ? { seed } : {}),
           messages: anthropicToOpenAIMessages(payload)
         }),
         signal: withTimeout(signal, 120_000)

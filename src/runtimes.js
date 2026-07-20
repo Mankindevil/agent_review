@@ -17,27 +17,27 @@ export const RUNTIMES = [
   { id: 'doubao', name: 'Doubao Agent', model: 'Seed', badge: 'DB' }
 ];
 
-export async function buildSkill(runtime, card, mode, { signal } = {}) {
+export async function buildSkill(runtime, card, mode, { signal, seed, temperature = 0 } = {}) {
   const config = runtimeConfig(runtime.id);
   if (mode === 'live' && config?.kind === 'local-cli') {
     const { skill, result } = await generateValidatedSkill(
-      (prompt) => callLocalCli(runtime.id, prompt, signal),
+      (prompt) => callLocalCli(runtime.id, prompt, signal, { seed, temperature }),
       runtimeBuildSkillPrompt(card)
     );
-    return { runtime: runtime.name, runtimeId: runtime.id, model: localRuntimeModel(runtime), mode: 'live', adapterKind: 'local-cli', skill, trace: result.trace };
+    return { runtime: runtime.name, runtimeId: runtime.id, model: localRuntimeModel(runtime), mode: 'live', adapterKind: 'local-cli', skill, trace: result.trace, seed };
   }
   if (mode === 'live' && config?.kind === 'model-api') {
     const { skill } = await generateValidatedSkill(
-      async (prompt) => ({ text: await callRuntimeModel(config, prompt, signal) }),
+      async (prompt) => ({ text: await callRuntimeModel(config, prompt, signal, { seed, temperature }) }),
       runtimeBuildSkillPrompt(card)
     );
-    return { runtime: runtime.name, runtimeId: runtime.id, model: config.model, mode: 'live', adapterKind: 'model-api', skill };
+    return { runtime: runtime.name, runtimeId: runtime.id, model: config.model, mode: 'live', adapterKind: 'model-api', skill, seed };
   }
   if (mode === 'live' && config?.url) {
     const response = await fetch(config.url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(config.apiKeyEnv ? { authorization: `Bearer ${process.env[config.apiKeyEnv]}` } : {}) },
-      body: JSON.stringify({ action: 'build_skill', agentCard: card }),
+      body: JSON.stringify({ action: 'build_skill', agentCard: card, seed, temperature }),
       signal: withTimeout(signal, 120_000)
     });
     if (!response.ok) throw new Error(`${runtime.name} runtime 返回 HTTP ${response.status}`);
@@ -49,6 +49,7 @@ export async function buildSkill(runtime, card, mode, { signal } = {}) {
     runtimeId: runtime.id,
     model: runtime.model,
     mode: 'demo',
+    seed,
     skill: {
       name: slug(card.name),
       description: card.description,
@@ -79,19 +80,19 @@ export async function generateValidatedSkill(generate, prompt, attempts = 2) {
   throw new Error(`Runtime 连续 ${attempts} 次未返回有效 Skill：${lastError?.message || '未知格式错误'}`);
 }
 
-export async function runSkill(build, testCase, mode, { signal } = {}) {
+export async function runSkill(build, testCase, mode, { signal, seed, temperature = 0 } = {}) {
   const config = runtimeConfig(build.runtimeId);
   if (mode === 'live' && config?.kind === 'local-cli') {
-    return (await callLocalCli(build.runtimeId, runtimeRunSkillPrompt(build.skill, testCase.prompt), signal)).text;
+    return (await callLocalCli(build.runtimeId, runtimeRunSkillPrompt(build.skill, testCase.prompt), signal, { seed, temperature })).text;
   }
   if (mode === 'live' && config?.kind === 'model-api') {
-    return callRuntimeModel(config, runtimeRunSkillPrompt(build.skill, testCase.prompt), signal);
+    return callRuntimeModel(config, runtimeRunSkillPrompt(build.skill, testCase.prompt), signal, { seed, temperature });
   }
   if (mode === 'live' && config?.url) {
     const response = await fetch(config.url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(config.apiKeyEnv ? { authorization: `Bearer ${process.env[config.apiKeyEnv]}` } : {}) },
-      body: JSON.stringify({ action: 'run_skill', skill: build.skill, prompt: testCase.prompt }),
+      body: JSON.stringify({ action: 'run_skill', skill: build.skill, prompt: testCase.prompt, seed, temperature }),
       signal: withTimeout(signal, 120_000)
     });
     if (!response.ok) throw new Error(`${build.runtime} 执行返回 HTTP ${response.status}`);
@@ -121,7 +122,7 @@ function localRuntimeModel(runtime) {
   return runtime.model;
 }
 
-async function callLocalCli(runtimeId, prompt, signal) {
+async function callLocalCli(runtimeId, prompt, signal, sampling = {}) {
   const workspace = await mkdtemp(path.join(tmpdir(), `agent-roast-${runtimeId}-`));
   let arkProxy;
   const startedAt = Date.now();
@@ -134,13 +135,13 @@ async function callLocalCli(runtimeId, prompt, signal) {
   try {
     const commandEnv = { ...process.env, NO_COLOR: '1' };
     if (runtimeId === 'claude-code' && shouldUseArkClaude(commandEnv)) {
-      arkProxy = await startArkAnthropicProxy({ baseUrl: commandEnv.ARK_BASE_URL, apiKey: commandEnv.ARK_API_KEY, model: commandEnv.CLAUDE_ARK_MODEL || commandEnv.REVIEW_MODEL_DEEPSEEK, signal });
+      arkProxy = await startArkAnthropicProxy({ baseUrl: commandEnv.ARK_BASE_URL, apiKey: commandEnv.ARK_API_KEY, model: commandEnv.CLAUDE_ARK_MODEL || commandEnv.REVIEW_MODEL_DEEPSEEK, signal, ...sampling });
       applyArkClaudeEnv(commandEnv, arkProxy.baseUrl);
     } else if (runtimeId === 'claude-code') applyDeepSeekClaudeEnv(commandEnv);
     const { stdout, stderr } = await execFileAsync(command, args, { cwd: workspace, timeout, maxBuffer: 5_000_000, env: commandEnv, signal });
     const text = extractCliText(stdout);
     if (!text.trim()) throw new Error(`${command} 没有返回可见结果`);
-    return { text, trace: { command, durationMs: Date.now() - startedAt, stdoutBytes: Buffer.byteLength(stdout), stderr: String(stderr || '').trim().slice(0, 500) } };
+    return { text, trace: { command, durationMs: Date.now() - startedAt, stdoutBytes: Buffer.byteLength(stdout), stderr: String(stderr || '').trim().slice(0, 500), seed: sampling.seed } };
   } catch (error) {
     if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('评测已停止');
     const detail = [error.stderr, error.stdout, error.message].filter(Boolean).join('\n');
@@ -153,13 +154,13 @@ async function callLocalCli(runtimeId, prompt, signal) {
   }
 }
 
-async function callRuntimeModel(config, prompt, signal) {
+async function callRuntimeModel(config, prompt, signal, sampling = {}) {
   const baseUrl = config.baseUrl.replace(/\/$/, '');
   const endpoint = baseUrl.endsWith('/chat/completions') ? baseUrl : baseUrl + '/chat/completions';
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env[config.apiKeyEnv]}` },
-    body: JSON.stringify({ model: config.model, temperature: 0.2, max_tokens: 2400, ...(config.thinking ? { thinking: config.thinking } : {}), messages: [{ role: 'user', content: prompt }] }),
+    body: JSON.stringify({ model: config.model, temperature: sampling.temperature ?? 0, ...(Number.isInteger(sampling.seed) ? { seed: sampling.seed } : {}), max_tokens: 2400, ...(config.thinking ? { thinking: config.thinking } : {}), messages: [{ role: 'user', content: prompt }] }),
     signal: withTimeout(signal, Number(process.env.LOCAL_RUNTIME_TIMEOUT_MS || 180_000))
   });
   if (!response.ok) throw new Error(`Doubao runtime 返回 HTTP ${response.status}`);

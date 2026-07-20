@@ -15,7 +15,10 @@ test.after(async () => new Promise((resolve) => server.close(resolve)));
 test('health endpoint responds', async () => {
   const response = await fetch(`${origin}/api/health`);
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).ok, true);
+  const health = await response.json();
+  assert.equal(health.ok, true);
+  assert.equal(Number.isInteger(health.evaluationSeed), true);
+  assert.equal(health.modelTemperature, 0);
 });
 
 test('reports honest local runtime availability', async () => {
@@ -32,7 +35,7 @@ test('creates and completes a demo evaluation', async () => {
     supportedInterfaces: [{ url: 'https://example.com/a2a', protocolBinding: 'HTTP+JSON', protocolVersion: '1.0' }],
     skills: [{ id: 'flow', name: 'Workflow', description: 'Plan and execute an API workflow.' }]
   };
-  const createdResponse = await fetch(`${origin}/api/evaluations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agentCard: card, mode: 'demo', cases: [{ name: 'test', prompt: 'Plan and execute this workflow with evidence.' }] }) });
+  const createdResponse = await fetch(`${origin}/api/evaluations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agentCard: card, mode: 'demo', seed: 9981, cases: [{ name: 'test', prompt: 'Plan and execute this workflow with evidence.' }] }) });
   assert.equal(createdResponse.status, 202);
   const created = await createdResponse.json();
   let result;
@@ -42,6 +45,8 @@ test('creates and completes a demo evaluation', async () => {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   assert.equal(result.status, 'completed');
+  assert.equal(result.seed, 9981);
+  assert.equal(result.temperature, 0);
   assert.equal(result.benchmark[0].entries.length, 4);
   assert.ok(result.roast.tier.label);
   assert.ok(result.logs.length > 10);
@@ -81,4 +86,18 @@ test('returns 404 when retrying an unknown evaluation', async () => {
 test('rejects malformed agent cards', async () => {
   const response = await fetch(`${origin}/api/evaluations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agentCard: { name: 'Nope' }, cases: [{ prompt: 'x' }] }) });
   assert.equal(response.status, 400);
+});
+
+test('rejects an out-of-range evaluation seed', async () => {
+  const card = {
+    name: 'Seed Agent', description: 'Valid card with invalid seed.',
+    supportedInterfaces: [{ url: 'https://example.com/a2a', protocolBinding: 'HTTP+JSON', protocolVersion: '1.0' }],
+    skills: [{ id: 'seed', name: 'Seed', description: 'Test seed validation.' }]
+  };
+  const response = await fetch(`${origin}/api/evaluations`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ agentCard: card, mode: 'demo', seed: 2_147_483_647, cases: [{ prompt: 'test' }] })
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /Seed/);
 });
