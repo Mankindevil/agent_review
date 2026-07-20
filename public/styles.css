@@ -207,6 +207,7 @@ h1 em::after { content: ""; position: absolute; left: 0; bottom: -5px; width: 10
 .section-title { display: flex; align-items: end; justify-content: space-between; border-bottom: 2px solid var(--ink); padding-bottom: 10px; margin: 44px 0 16px; }
 .section-title h3 { margin: 0; font: 900 30px var(--display); }.section-title span { font: 9px var(--mono); color: var(--muted); }
 .review-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; }
+.model-review-grid { grid-template-columns:repeat(4,minmax(0,1fr)); }
 .review-card { border: 1px solid var(--line); background: var(--panel); padding: 20px; position: relative; }
 .review-card .reviewer { display: flex; justify-content: space-between; }.review-card .reviewer b { font-size: 13px; }.review-card .reviewer span { font: 9px var(--mono); color: var(--muted); }
 .review-score { font: 900 48px var(--display); margin: 18px 0 10px; }.review-score small { font: 10px var(--mono); color: var(--muted); }
@@ -229,7 +230,7 @@ h1 em::after { content: ""; position: absolute; left: 0; bottom: -5px; width: 10
 @media (max-width: 1000px) {
   .hero { grid-template-columns: 1fr; padding-top: 60px; }.hero::before { left: 58%; }.intake-card { max-height: none; max-width: 720px; width: 100%; }.hero-copy { max-width: 760px; }
   .method-strip { grid-template-columns: repeat(3,1fr); }.method-callout { grid-column:1/-1; min-height:100px; }
-  .battle-grid { grid-template-columns: repeat(2,1fr); }.battle-entry:nth-child(2) { border-right:0; }.battle-entry { border-bottom:1px solid var(--line); }
+  .model-review-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.battle-grid { grid-template-columns: repeat(2,1fr); }.battle-entry:nth-child(2) { border-right:0; }.battle-entry { border-bottom:1px solid var(--line); }
 }
 @media (max-width: 700px) {
   .site-header { padding:0 18px; }.site-header nav .nav-button:first-child, .system-state span { display:none; }.nav-button { padding:0 8px; }

@@ -5,7 +5,8 @@ import { safeJson } from './utils.js';
 export const DEFAULT_REVIEWERS = [
   { id: 'gpt', name: 'OpenAI 评审', model: 'GPT-5', kind: 'mock' },
   { id: 'claude', name: 'Anthropic 评审', model: 'Claude Sonnet', kind: 'mock' },
-  { id: 'doubao', name: '字节评审', model: 'Doubao Seed', kind: 'mock' }
+  { id: 'doubao', name: '豆包评审', model: 'Doubao Seed', kind: 'mock' },
+  { id: 'deepseek', name: 'DeepSeek 评审', model: 'DeepSeek', kind: 'mock' }
 ];
 
 export function configuredReviewers() {
@@ -15,13 +16,18 @@ export function configuredReviewers() {
       if (Array.isArray(parsed) && parsed.length) return parsed;
     } catch { /* Fall through to gateway or demo reviewers. */ }
   }
-  if (!process.env.OPENAI_BASE_URL || !process.env.OPENAI_API_KEY) return DEFAULT_REVIEWERS;
-  const common = { kind: 'openai-compatible', baseUrl: process.env.OPENAI_BASE_URL, apiKeyEnv: 'OPENAI_API_KEY' };
-  return [
-    { ...common, id: 'gpt', name: 'OpenAI 评审', model: process.env.REVIEW_MODEL_OPENAI || 'g5.4' },
-    { ...common, id: 'claude', name: 'Anthropic 评审', model: process.env.REVIEW_MODEL_ANTHROPIC || 'cs4.6' },
-    { ...common, id: 'deepseek', name: 'DeepSeek 评审', model: process.env.REVIEW_MODEL_DEEPSEEK || 'dkc' }
-  ];
+  const llmxReady = Boolean(process.env.OPENAI_BASE_URL && process.env.OPENAI_API_KEY);
+  const arkReady = Boolean(process.env.ARK_BASE_URL && process.env.ARK_API_KEY);
+  if (!llmxReady && !arkReady) return DEFAULT_REVIEWERS;
+  const llmx = { kind: 'openai-compatible', baseUrl: process.env.OPENAI_BASE_URL, apiKeyEnv: 'OPENAI_API_KEY' };
+  const ark = { kind: 'openai-compatible', baseUrl: process.env.ARK_BASE_URL, apiKeyEnv: 'ARK_API_KEY' };
+  return DEFAULT_REVIEWERS.map((reviewer) => {
+    if (reviewer.id === 'gpt' && llmxReady) return { ...llmx, id: reviewer.id, name: reviewer.name, model: process.env.REVIEW_MODEL_OPENAI || 'g5.4' };
+    if (reviewer.id === 'claude' && llmxReady) return { ...llmx, id: reviewer.id, name: reviewer.name, model: process.env.REVIEW_MODEL_ANTHROPIC || 'cs4.6' };
+    if (reviewer.id === 'doubao' && arkReady) return { ...ark, id: reviewer.id, name: reviewer.name, model: process.env.REVIEW_MODEL_DOUBAO || 'ep-20260720110725-5rbml' };
+    if (reviewer.id === 'deepseek' && arkReady) return { ...ark, id: reviewer.id, name: reviewer.name, model: process.env.REVIEW_MODEL_DEEPSEEK || 'ep-20260708162855-pcf9x' };
+    return reviewer;
+  });
 }
 
 export async function reviewAgent(reviewer, card, complexity, mode) {

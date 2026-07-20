@@ -93,7 +93,7 @@ A2A 1.0 JSON-RPC 使用 `SendMessage`，0.3 兼容调用使用 `message/send`。
 - 输出契约；
 - 可评测性。
 
-模型调用失败不会中止整场评测，失败评审会保留错误且不进入专业度平均分。默认可通过 `OPENAI_BASE_URL`、`OPENAI_API_KEY` 和三项 `REVIEW_MODEL_*` 快捷配置 OpenAI-compatible 网关；`MODEL_REVIEWERS_JSON` 可覆盖为任意数量的 OpenAI-compatible 或 Anthropic Messages API。
+模型调用失败不会中止整场评测，失败评审会保留错误且不进入专业度平均分。OpenAI 与 Anthropic 默认通过 `OPENAI_BASE_URL` / `OPENAI_API_KEY` 接入 LLMX；豆包与 DeepSeek 通过 `ARK_BASE_URL` / `ARK_API_KEY` 接入火山方舟在线推理，分别使用独立 endpoint ID。任一网关未配置 Key 时，只把对应模型降级为演示评审，其余已配置模型仍可真实运行。`MODEL_REVIEWERS_JSON` 可覆盖为任意数量的 OpenAI-compatible 或 Anthropic Messages API。
 
 模型评审、Runtime 构建 Skill 和 Runtime 执行 Skill 的 prompt 集中在 `src/prompts.js`。Runtime 构建要求单个 JSON 对象，但平台不会假设 CLI 永远严格服从格式：`safeJson()` 会从代码围栏或前后说明文字中提取第一个完整、可解析的平衡 JSON 值，随后再校验 Skill 的 `name`、`description`、`instructions` 和 `tools` 契约。这避免 Claude Code 或 Cursor Agent 输出简短前言时被误判为 0 分。
 

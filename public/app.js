@@ -257,7 +257,7 @@ function renderComplexity(value) {
 
 function renderReviews(reviews) {
   const labels = { domainDepth:'领域深度', workflowQuality:'流程设计', failureHandling:'异常处理', outputContract:'输出契约', evaluability:'可评测性' };
-  return `<div class="section-title"><h3>三堂会审</h3><span>MULTI-MODEL BLIND REVIEW</span></div><div class="review-grid">${reviews.map(review=>`<article class="review-card"><div class="reviewer"><b>${escapeHtml(review.reviewer)}</b><span>${escapeHtml(review.model)} · ${review.mode?.toUpperCase()}</span></div><div class="review-score">${review.score}<small> / 100</small></div>${review.error?`<p class="risk">${escapeHtml(review.error)}</p>`:`<div class="mini-bars">${Object.entries(review.dimensions||{}).map(([key,score])=>`<div><span>${labels[key]||key}</span><i style="--value:${score}%"></i><b>${score}</b></div>`).join('')}</div><p>${escapeHtml(review.comment)}</p><div class="risk">⚠ ${escapeHtml(review.risk)}</div>`}</article>`).join('')}</div>`;
+  return `<div class="section-title"><h3>四方会审</h3><span>MULTI-MODEL BLIND REVIEW</span></div><div class="review-grid model-review-grid">${reviews.map(review=>`<article class="review-card"><div class="reviewer"><b>${escapeHtml(review.reviewer)}</b><span>${escapeHtml(review.model)} · ${review.mode?.toUpperCase()}</span></div><div class="review-score">${review.score}<small> / 100</small></div>${review.error?`<p class="risk">${escapeHtml(review.error)}</p>`:`<div class="mini-bars">${Object.entries(review.dimensions||{}).map(([key,score])=>`<div><span>${labels[key]||key}</span><i style="--value:${score}%"></i><b>${score}</b></div>`).join('')}</div><p>${escapeHtml(review.comment)}</p><div class="risk">⚠ ${escapeHtml(review.risk)}</div>`}</article>`).join('')}</div>`;
 }
 
 function renderBuilds(builds) {

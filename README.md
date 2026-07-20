@@ -8,7 +8,7 @@
 - 文件拖拽、文件选择、JSON 粘贴、Agent Card URL 与服务根地址自动发现；
 - 1–5 个同 prompt 测试用例；
 - Agent 必要性五维评分与明确判断；
-- GPT、Claude、豆包三个模型视角的独立评分、评语和风险；
+- OpenAI、Anthropic、豆包、DeepSeek 四个模型视角的独立评分、评语和风险；
 - Claude Code、Cursor、Doubao 三种 runtime 的 skill 现场复刻抽象；
 - 提交 Agent 与三个复刻 skill 的逐用例输出和分数对比；
 - SSE 实时进度、可恢复的评测详情和本地历史记录；
@@ -127,17 +127,21 @@ npm test
 
 ## 模型评审配置
 
-最简单的方式是在 `.env` 中填写统一的 OpenAI-compatible 网关。项目已经写入你提供的 Base URL，并为三位评审设置了可独立调整的默认模型：
+项目支持两组可独立启用的 OpenAI-compatible 网关：OpenAI 与 Anthropic 走 LLMX；豆包与 DeepSeek 走火山方舟在线推理。Base URL 和模型接入点已写入 `.env`：
 
 ```env
 OPENAI_BASE_URL=https://llmx.tqx.ai/v1
 OPENAI_API_KEY=你稍后填写的Key
 REVIEW_MODEL_OPENAI=g5.4
 REVIEW_MODEL_ANTHROPIC=cs4.6
-REVIEW_MODEL_DEEPSEEK=dkc
+
+ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+ARK_API_KEY=你稍后填写的方舟Key
+REVIEW_MODEL_DOUBAO=ep-20260720110725-5rbml
+REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 ```
 
-只有 Base URL 和 Key 都存在时，真实模式才启用这组三模型评审；Key 留空时继续使用演示评审，不会产生无意义的鉴权报错。网关按 OpenAI Chat Completions 契约调用 `${OPENAI_BASE_URL}/chat/completions`。
+每组只有在自己的 Base URL 和 Key 都存在时才启用真实评审；Key 留空的模型继续使用演示评审，不会产生无意义的鉴权报错。两个网关都按 OpenAI Chat Completions 契约调用 `${BASE_URL}/chat/completions`。方舟控制台给出的裸域名需要补全 `/api/v3`，模型值使用接入点 ID。
 
 需要完全自定义评审数量或不同 endpoint 时，可以使用下面的 `MODEL_REVIEWERS_JSON`。该配置非空时优先级最高。
 
@@ -236,8 +240,11 @@ REVIEW_MODEL_DEEPSEEK=dkc
 | `OPENAI_API_KEY` | 空 | 网关 Key，只填写在本机 `.env` 或部署密钥中 |
 | `REVIEW_MODEL_OPENAI` | `g5.4` | OpenAI 视角评审模型 |
 | `REVIEW_MODEL_ANTHROPIC` | `cs4.6` | Anthropic 视角评审模型 |
-| `REVIEW_MODEL_DEEPSEEK` | `dkc` | DeepSeek 视角评审模型 |
-| `MODEL_REVIEWERS_JSON` | 内置三位 demo 评审 | 真实模型 adapter 配置 |
+| `ARK_BASE_URL` | `https://ark.cn-beijing.volces.com/api/v3` | 火山方舟在线推理兼容网关 |
+| `ARK_API_KEY` | 空 | 豆包与 DeepSeek 共用的方舟 Key |
+| `REVIEW_MODEL_DOUBAO` | `ep-20260720110725-5rbml` | 豆包接入点 ID |
+| `REVIEW_MODEL_DEEPSEEK` | `ep-20260708162855-pcf9x` | DeepSeek 接入点 ID |
+| `MODEL_REVIEWERS_JSON` | 内置四位 demo 评审 | 真实模型 adapter 高级配置 |
 | `RUNTIME_ADAPTERS_JSON` | 内置三种 demo runtime | 隔离 runtime adapter 配置 |
 | `ENABLE_LOCAL_CLAUDE_CODE` | `false` | 允许真实调用已登录的本机 Claude Code |
 | `ENABLE_LOCAL_CURSOR_AGENT` | `false` | 允许真实调用已登录的本机 Cursor Agent CLI |
