@@ -294,7 +294,7 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 
 ## 常用环境变量
 
-所有项目配置集中在根目录 `.env`，可提交的字段模板见 [`.env.example`](./.env.example)。加载优先级为“已有进程环境变量 > `.env` > 代码默认值”；需要使用另一份文件时，在启动进程中设置绝对路径 `ENV_FILE=/path/to/custom.env`。
+所有项目配置集中在根目录 `.env`，可提交的字段模板见 [`.env.example`](./.env.example)。加载优先级为“已有进程环境变量 > 当前分支 `.env` > `ENV_FALLBACK_FILE` 共享配置 > 代码默认值”。`ENV_FILE` 可完全替换主配置文件；`ENV_FALLBACK_FILE` 适合让金融分支复用通用分支的模型与 Runtime 密钥，同时保留自己的 PandaAI 配置。
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
@@ -335,6 +335,7 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 | `DEEPSEEK_CLAUDE_MODEL` | `deepseek-v4-pro[1m]` | DeepSeek 官方直连回退模型 |
 | `ANTHROPIC_*` / `CLAUDE_CODE_*` | 见模板 | Anthropic-compatible endpoint 与 Claude Code 模型映射 |
 | `ENV_FILE` | 项目根目录 `.env` | 从进程环境指定另一份 env 文件 |
+| `ENV_FALLBACK_FILE` | 空 | 共享基础 env 文件；只补充当前分支未定义的变量 |
 
 ## Git 工作流
 

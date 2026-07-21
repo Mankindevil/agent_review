@@ -40,7 +40,7 @@ A2A Agent endpoint   Model / Runtime endpoints
 
 ### 2.1 配置加载
 
-`src/env.js` 在服务和 DeepSeek 启动器执行实际业务模块前加载项目根目录 `.env`，不依赖第三方 dotenv 包。解析器支持注释、`export`、单/双引号和空值，但环境 JSON 配置仍要求写在单行。加载时只补充尚不存在的变量，因此进程环境、CI Secret 或容器注入值始终优先于文件值。外部进程可通过 `ENV_FILE` 指定另一份配置文件。
+`src/env.js` 在服务和 DeepSeek 启动器执行实际业务模块前加载项目根目录 `.env`，不依赖第三方 dotenv 包。解析器支持注释、`export`、单/双引号和空值，但环境 JSON 配置仍要求写在单行。加载时只补充尚不存在的变量，因此优先级为进程环境、当前分支 `.env`、`ENV_FALLBACK_FILE` 共享配置、代码默认值。外部进程也可通过 `ENV_FILE` 完全指定另一份主配置文件。
 
 本机 `.env` 包含全部配置入口且被 Git 忽略；`.env.example` 只保留安全默认值和空的密钥占位，可进入版本控制。加载器不会输出变量值，API Key 也不得进入评测对象或日志。
 

@@ -38,6 +38,12 @@ export async function loadEnvFile(file = process.env.ENV_FILE || PROJECT_ENV_FIL
   }
 }
 
+export async function loadFallbackEnv(target = process.env) {
+  const file = target.ENV_FALLBACK_FILE?.trim();
+  if (!file) return { loaded: false, path: null, applied: [] };
+  return loadEnvFile(file, target);
+}
+
 function parseValue(raw) {
   const value = raw.trim();
   if (!value) return '';
@@ -64,3 +70,4 @@ function findClosingDoubleQuote(value) {
 }
 
 await loadEnvFile();
+if (process.env.NODE_ENV !== 'test') await loadFallbackEnv();
