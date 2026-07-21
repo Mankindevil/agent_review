@@ -3,12 +3,16 @@ import { configuredReviewers, reviewAgent } from './providers.js';
 import { buildRoast, judgeOutput, scoreComplexity } from './scoring.js';
 import { buildSkill, RUNTIMES, runSkill } from './runtimes.js';
 import { average, deriveSeed, id, normalizeSeed, normalizeTemperature, now, round, stableNumber } from './utils.js';
+import { buildDataPlan, collectDataEvidence, normalizeTestCases, verifyOutputAgainstEvidence } from './data-verifier.js';
+import { queryPandaData } from './panda-data.js';
 
 export class EvaluationPipeline {
-  constructor(store, events) {
+  constructor(store, events, options = {}) {
     this.store = store;
     this.events = events;
     this.activeRuns = new Map();
+    this.dataQuery = options.dataQuery || queryPandaData;
+    this.dataVerificationEnabled = options.dataVerificationEnabled ?? (process.env.NODE_ENV !== 'test' && process.env.PANDA_DATA_AUTO_VERIFY === 'true');
   }
 
   async create(input) {
@@ -20,13 +24,14 @@ export class EvaluationPipeline {
     if (input.seed !== undefined && (!Number.isSafeInteger(Number(input.seed)) || Number(input.seed) < 0 || Number(input.seed) > 2_147_483_646)) {
       throw Object.assign(new Error('Seed 必须是 0–2147483646 的整数'), { statusCode: 400 });
     }
+    const cases = normalizeTestCases(input.cases);
     const seed = normalizeSeed(input.seed ?? process.env.EVALUATION_SEED);
     const temperature = normalizeTemperature(process.env.MODEL_TEMPERATURE, 0);
     const reviewPlan = publicReviewPlan(configuredReviewers());
     const runtimePlan = publicRuntimePlan();
     const evaluation = {
       id: id(), createdAt: now(), updatedAt: now(), status: 'queued', mode: input.mode === 'live' ? 'live' : 'demo',
-      agentCard: input.agentCard, cases: input.cases.slice(0, 5), validation, seed, temperature, reviewPlan, runtimePlan, progress: 0, stage: '等待评测舱', activeWork: null, logs: []
+      agentCard: input.agentCard, cases, validation, seed, temperature, reviewPlan, runtimePlan, progress: 0, stage: '等待评测舱', activeWork: null, logs: []
     };
     await this.store.set(evaluation);
     const controller = new AbortController();
@@ -176,7 +181,7 @@ export class EvaluationPipeline {
       mode = 'failed';
       if (competitorId !== 'submitted') name = item.builds?.find((candidate) => candidate.runtimeId === competitorId)?.runtime || competitorId;
     }
-    const next = makeEntry(competitorId, name, output, testCase, mode, deriveSeed(item.seed, `judge:${caseIndex}:${competitorId}`));
+    const next = makeEntry(competitorId, name, output, testCase, mode, deriveSeed(item.seed, `judge:${caseIndex}:${competitorId}`), roundItem.dataEvidence);
     const entryIndex = roundItem.entries.findIndex((entry) => entry.id === competitorId);
     if (entryIndex === -1) roundItem.entries.push(next); else roundItem.entries[entryIndex] = next;
   }
@@ -258,7 +263,28 @@ export class EvaluationPipeline {
       signal?.throwIfAborted();
       const testCase = item.cases[index];
       const entries = [];
-      benchmark.push({ case: testCase, entries });
+      const dataPlan = buildDataPlan(testCase);
+      let dataEvidence = { status: 'not-configured', source: 'pandaai', fetchedAt: null, queries: [] };
+      if (dataPlan.length) {
+        await this.update(item, {
+          benchmark,
+          stage: `参考数据验真 ${index + 1}/${item.cases.length}`,
+          activeWork: { type: 'data', key: `case-${index}`, caseIndex: index, label: '正在获取 PandaAI 参考数据', target: testCase.name, detail: `${dataPlan.length} 个只读查询 · 不向参赛 Agent 泄露`, index: index + 1, total: item.cases.length, retry: false }
+        }, { level: 'info', source: 'DATA', phase: 'evidence', text: `开始为「${testCase.name}」建立参考数据快照`, detail: dataPlan.map((query) => query.method).join(' · '), mode: item.mode });
+        dataEvidence = await collectDataEvidence(testCase, {
+          enabled: item.mode === 'live' && this.dataVerificationEnabled,
+          query: (method, params, options) => this.dataQuery(method, params, options),
+          signal
+        });
+        const successful = dataEvidence.queries.filter((query) => query.status === 'ready').length;
+        await this.update(item, { benchmark, activeWork: null }, {
+          level: dataEvidence.status === 'failed' ? 'error' : 'success', source: 'DATA', phase: 'evidence',
+          text: dataEvidence.status === 'ready' ? `参考数据快照已锁定 · ${successful}/${dataEvidence.queries.length}` : `参考数据验真状态：${dataEvidence.status}`,
+          detail: dataEvidence.queries.map((query) => `${query.label}:${query.status}${query.rowCount === undefined ? '' : `:${query.rowCount}行`}`).join(' · '),
+          mode: dataEvidence.status === 'ready' ? 'live' : dataEvidence.status
+        });
+      }
+      benchmark.push({ case: testCase, dataEvidence, entries });
       let submittedOutput;
       let submittedMode = item.mode;
       let startedAt = Date.now();
@@ -276,7 +302,7 @@ export class EvaluationPipeline {
         submittedOutput = `执行失败：${error.message}`;
         submittedMode = 'failed';
       }
-      entries.push(makeEntry('submitted', item.agentCard.name, submittedOutput, testCase, submittedMode, deriveSeed(item.seed, `judge:${index}:submitted`)));
+      entries.push(makeEntry('submitted', item.agentCard.name, submittedOutput, testCase, submittedMode, deriveSeed(item.seed, `judge:${index}:submitted`), dataEvidence));
       await this.update(item, { benchmark, progress: 70 + Math.round((index / item.cases.length) * 22), stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, {
         level: submittedMode === 'failed' ? 'error' : 'success', source: 'A2A', phase: 'benchmark', text: `${item.agentCard.name} 完成「${testCase.name}」`, detail: `score=${entries.at(-1).score}`, mode: submittedMode, durationMs: Date.now() - startedAt
       });
@@ -288,17 +314,17 @@ export class EvaluationPipeline {
           stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}`
         }, { level: 'info', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 开始执行「${testCase.name}」`, mode: build.error ? 'failed' : build.mode });
         if (build.error) {
-          entries.push(makeEntry(build.runtimeId, build.runtime, `执行失败：${build.error}`, testCase, 'failed', deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`)));
+          entries.push(makeEntry(build.runtimeId, build.runtime, `执行失败：${build.error}`, testCase, 'failed', deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence));
           await this.update(item, { benchmark, stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, { level: 'error', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 无法进入「${testCase.name}」`, detail: build.error, mode: 'failed' });
           continue;
         }
         startedAt = Date.now();
         try {
           const output = await runSkill(build, testCase, item.mode, { signal, ...phaseSampling(item, `run:${index}:${build.runtimeId}`) });
-          entries.push(makeEntry(build.runtimeId, build.runtime, output, testCase, build.mode, deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`)));
+          entries.push(makeEntry(build.runtimeId, build.runtime, output, testCase, build.mode, deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence));
         } catch (error) {
           if (signal?.aborted) throw signal.reason || error;
-          entries.push(makeEntry(build.runtimeId, build.runtime, `执行失败：${error.message}`, testCase, 'failed', deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`)));
+          entries.push(makeEntry(build.runtimeId, build.runtime, `执行失败：${error.message}`, testCase, 'failed', deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence));
         }
         await this.update(item, { benchmark, stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, { level: entries.at(-1).mode === 'failed' ? 'error' : 'success', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 完成「${testCase.name}」`, detail: `score=${entries.at(-1).score}`, mode: entries.at(-1).mode, durationMs: Date.now() - startedAt });
       }
@@ -492,10 +518,11 @@ function phaseSampling(item, scope) {
   return { seed: deriveSeed(item.seed, scope), temperature: normalizeTemperature(item.temperature, 0) };
 }
 
-function makeEntry(id, name, output, testCase, mode, seed) {
-  const judged = judgeOutput(testCase.prompt, output, `${id}:${seed}`);
+function makeEntry(id, name, output, testCase, mode, seed, dataEvidence) {
+  const dataVerification = verifyOutputAgainstEvidence(output, dataEvidence);
+  const judged = judgeOutput(testCase.prompt, output, `${id}:${seed}`, dataVerification);
   if (mode === 'failed') judged.score = 0;
-  return { id, name, output, mode, judgeSeed: seed, ...judged };
+  return { id, name, output, mode, judgeSeed: seed, dataVerification, ...judged };
 }
 
 function mockSubmittedOutput(card, testCase) {

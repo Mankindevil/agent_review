@@ -69,7 +69,7 @@ Claude Code、Cursor Agent 与 Doubao Agent 只收到顶层 `description` 原文
 
 ```text
 任务完成 = 长度 > 80 ? 80 : 长度 > 25 ? 66 : 38
-数据证据 = 命中来源/截至/样本区间/频率/口径/复权/交易日 ? 86 : 48
+基础数据证据 = 命中来源/截至/样本区间/频率/口径/复权/交易日 ? 86 : 48
 方法严谨 = 命中 IC/分组回测/基准/年化/回撤/夏普/换手/成本/暴露/置信区间 ? 86 : 50
 风险披露 = 命中风险提示/假设/局限/不构成投资建议/未来收益/压力测试 ? 88 : 44
 单局分   = round(clamp(四维平均 + 稳定扰动[-4, +4]))
@@ -77,7 +77,19 @@ Claude Code、Cursor Agent 与 Doubao Agent 只收到顶层 `description` 原文
 
 执行失败时覆盖为 0。每个选手的最终实战分是全部测试用例的算术平均，保留 1 位小数。
 
-这套启发式能检查“有没有交代研究纪律”，不能仅凭文本验证行情、财务数据或回测收益真假。接入主办方 Data / Research Skills 后，应增加 point-in-time 快照复算、回测结果哈希、结构化验收断言和人工抽检。
+真实模式开启 `PANDA_DATA_AUTO_VERIFY` 后，平台在同局开始前锁定一份 PandaAI 参考快照。自动行情锚点默认 `required=false`：选手没有声称该数值时不加不扣，声称后才校验。显式 `dataQueries[].facts[]` 默认 `required=true`，按 `field + where(first / last / 条件对象)` 从快照解析参考值，并使用 `aliases` 定位输出附近的数字。
+
+验真会覆盖“数据证据”维度：
+
+```text
+verified     = max(基础数据证据, 96)
+partial      = round(mean(基础数据证据, 验真命中率))
+contradicted = min(基础数据证据, round(20 + 0.3 × 验真命中率))
+missing      = min(基础数据证据, 35)
+not-claimed / unavailable = 基础数据证据
+```
+
+数值默认容差为 `max(|参考值| × 0.1%, 0.01)`，也可在事实中显式设置绝对 `tolerance`。该能力能验证声明的行情/财务锚点，但复杂回测收益仍需要进一步加入结构化回测配置、逐期净值复算与人工抽检。
 
 ## 5. 最终分档
 

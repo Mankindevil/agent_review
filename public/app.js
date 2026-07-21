@@ -32,7 +32,7 @@ const sampleCard = {
 const exampleCatalog = {
   factor: {
     card: { ...sampleCard, supportedInterfaces:[{url:'http://127.0.0.1:4181/a2a/v1',protocolBinding:'HTTP+JSON',protocolVersion:'1.0'}], version:'1.0.0' },
-    cases: [{name:'现金流因子检验',prompt:'在沪深 300 成分股内检验经营现金流收益率因子。样本期 2019-01-01 至 2024-12-31，月频调仓。请说明数据时点和清洗口径，输出 Rank IC、五分组回测、换手、最大回撤及风险提示。'}]
+    cases: [{name:'现金流因子检验',prompt:'在沪深 300 成分股内检验经营现金流收益率因子。样本期 2019-01-01 至 2024-12-31，月频调仓。请报告期末沪深 300 收盘点位作为数据锚点，说明数据时点和清洗口径，输出 Rank IC、五分组回测、换手、最大回撤及风险提示。',dataQueries:[{id:'csi300-close-anchor',label:'沪深 300 期末行情',method:'get_index_daily',params:{symbol:['000300.SH'],start_date:'20241220',end_date:'20241231',fields:[]},requiredFields:['date','symbol','close'],facts:[{label:'沪深 300 期末收盘',field:'close',where:'last',aliases:['沪深 300 收盘','沪深300收盘','基准收盘','期末收盘'],tolerance:0.01,required:true}]}]}]
   },
   backtest: {
     card: { name:'策略验钞机', description:'把自然语言策略转成可审计回测：锁定股票池、样本区间、信号与成交时点，调用行情和回测 Skills，计入手续费、滑点与不可交易约束，输出收益、回撤、换手和风险暴露。', version:'1.2.0', supportedInterfaces:[{url:'http://127.0.0.1:4182/a2a',protocolBinding:'JSONRPC',protocolVersion:'1.0'}], capabilities:{streaming:false,pushNotifications:false}, defaultInputModes:['text/plain'],defaultOutputModes:['text/markdown'],skills:[{id:'strategy-backtest',name:'策略回测',description:'解析自然语言策略并执行防未来函数的基准回测与敏感性检验。',tags:['backtest','transaction-cost','benchmark','risk'],examples:['回测沪深 300 月度动量策略，计入双边成本并和指数比较。']}] },
@@ -51,7 +51,8 @@ init();
 
 async function init() {
   requestAnimationFrame(() => document.body.classList.add('ready'));
-  addCase('现金流因子检验', '在沪深 300 成分股内检验经营现金流收益率因子。样本期 2019-01-01 至 2024-12-31，月频调仓。请说明数据时点和清洗口径，输出 Rank IC、五分组回测、换手、最大回撤及风险提示。');
+  const initialCase = exampleCatalog.factor.cases[0];
+  addCase(initialCase.name, initialCase.prompt, initialCase.dataQueries);
   bindEvents();
   loadEvaluationDefaults();
   loadDataSourceHealth();
@@ -106,11 +107,16 @@ function bindEvents() {
   });
 }
 
-function addCase(name, prompt) {
+function addCase(name, prompt, dataQueries) {
   if ($$('.case-row').length >= 5) return;
   const fragment = $('#case-template').content.cloneNode(true);
   $('.case-name', fragment).value = name;
   $('.case-prompt', fragment).value = prompt;
+  const row = $('.case-row', fragment);
+  if (dataQueries?.length) {
+    row.dataset.dataQueries = JSON.stringify(dataQueries);
+    $('.case-data-tag', fragment).classList.remove('hidden');
+  }
   $('.remove-case', fragment).addEventListener('click', (event) => { event.currentTarget.closest('.case-row').remove(); updateCaseNumbers(); });
   $('#case-list').append(fragment);
   updateCaseNumbers();
@@ -123,7 +129,7 @@ function loadSample(id = 'contract') {
   $('#agent-card').value = JSON.stringify(example.card, null, 2);
   $('#file-name').textContent = `已载入：${example.card.name}.a2a.json`;
   $('#case-list').innerHTML = '';
-  example.cases.forEach((testCase) => addCase(testCase.name, testCase.prompt));
+  example.cases.forEach((testCase) => addCase(testCase.name, testCase.prompt, testCase.dataQueries));
 }
 
 function setSourceType(sourceType) {
@@ -174,7 +180,11 @@ async function submitEvaluation() {
   } else {
     try { agentCard = state.resolvedCard || await resolveRemoteCard(); } catch { return; }
   }
-  const cases = $$('.case-row').map((row, index) => ({ name: $('.case-name', row).value.trim() || `案例 ${index + 1}`, prompt: $('.case-prompt', row).value.trim() })).filter((item) => item.prompt);
+  const cases = $$('.case-row').map((row, index) => ({
+    name: $('.case-name', row).value.trim() || `案例 ${index + 1}`,
+    prompt: $('.case-prompt', row).value.trim(),
+    ...(row.dataset.dataQueries ? { dataQueries: JSON.parse(row.dataset.dataQueries) } : {})
+  })).filter((item) => item.prompt);
   if (!cases.length) return showError('至少填写一个测试 prompt。');
   const seedValue = $('#evaluation-seed').value.trim();
   const seed = seedValue === '' ? undefined : Number(seedValue);
@@ -519,7 +529,7 @@ function renderBattle(rounds, item) {
     const max = entries.length ? Math.max(...entries.map((entry) => entry.score)) : null;
     const cards = entries.map((entry) => {
       const working = activity?.caseIndex === index && activityMatches(activity, entry.id);
-      return `<div class="battle-entry${working ? ' work-active' : ''}"><header><h4>${escapeHtml(entry.name)}</h4><strong class="${entry.score===max?'winner':''}">${entry.score}</strong></header><div class="battle-actions"><span class="mode">${entry.mode.toUpperCase()}</span>${retryButton('benchmark', entry.id, '重跑这一局', index)}</div><details><summary>查看完整输出</summary><pre>${escapeHtml(entry.output)}</pre></details>${working ? renderWorkLoader(activity, 'card') : ''}</div>`;
+      return `<div class="battle-entry${working ? ' work-active' : ''}"><header><h4>${escapeHtml(entry.name)}</h4><strong class="${entry.score===max?'winner':''}">${entry.score}</strong></header><div class="battle-actions"><span class="mode">${entry.mode.toUpperCase()}</span>${renderDataVerificationBadge(entry.dataVerification)}${retryButton('benchmark', entry.id, '重跑这一局', index)}</div><details><summary>查看完整输出</summary><pre>${escapeHtml(entry.output)}</pre></details>${renderDataChecks(entry.dataVerification)}${working ? renderWorkLoader(activity, 'card') : ''}</div>`;
     });
     if (activity?.caseIndex === index && !entries.some((entry) => activityMatches(activity, entry.id))) {
       cards.push(`<div class="battle-entry battle-entry-loading work-active"><header><h4>${escapeHtml(activity.target || '对测选手')}</h4><strong>···</strong></header>${renderWorkLoader(activity, 'card')}</div>`);
@@ -529,8 +539,34 @@ function renderBattle(rounds, item) {
         cards.push(`<div class="battle-entry battle-entry-queued">${renderQueuedWork(competitor.name, '等待同 Prompt 执行', competitorIndex + 1, competitorPlan.length)}</div>`);
       }
     });
-    return `<article class="battle-round"><div class="battle-prompt"><span>CASE ${String(index+1).padStart(2,'0')}<br>${escapeHtml(round.case.name)}</span><p>${escapeHtml(round.case.prompt)}</p></div><div class="battle-grid">${cards.join('')}</div></article>`;
+    return `<article class="battle-round"><div class="battle-prompt"><span>CASE ${String(index+1).padStart(2,'0')}<br>${escapeHtml(round.case.name)}</span><p>${escapeHtml(round.case.prompt)}</p></div>${renderDataEvidence(round.dataEvidence)}<div class="battle-grid">${cards.join('')}</div></article>`;
   }).join('')}`;
+}
+
+function renderDataEvidence(evidence) {
+  if (!evidence || evidence.status === 'not-configured') return '';
+  const labels = { ready:'已锁定', partial:'部分可用', failed:'查询失败', disabled:'未启用' };
+  const queries = (evidence.queries || []).map((query) => {
+    const facts = (query.facts || []).filter((fact) => fact.status === 'available').map((fact) => `<span>${escapeHtml(fact.label)} = <b>${escapeHtml(formatEvidenceValue(fact.value, fact.unit))}</b>${fact.sourceDate ? ` · ${escapeHtml(String(fact.sourceDate))}` : ''}</span>`).join('');
+    return `<div class="data-evidence-query"><div><b>${escapeHtml(query.label || query.method)}</b><code>${escapeHtml(query.method || '')}</code><i class="data-state ${escapeHtml(query.status || '')}">${escapeHtml(query.status || 'unknown')}</i></div><p>${query.rowCount === undefined ? escapeHtml(query.error || '未执行') : `${query.rowCount} 行 · ${escapeHtml((query.fields || []).join(', '))}`}${query.fingerprint ? ` · SHA256 ${escapeHtml(query.fingerprint.slice(0, 12))}` : ''}</p>${facts ? `<div class="data-facts">${facts}</div>` : ''}</div>`;
+  }).join('');
+  return `<details class="data-evidence" ${evidence.status === 'failed' ? 'open' : ''}><summary><span>PANDAAI REFERENCE</span><b>${escapeHtml(labels[evidence.status] || evidence.status)}</b><i>${evidence.queries?.length || 0} 个查询 · 同局共用快照</i></summary><div>${queries}</div></details>`;
+}
+
+function renderDataVerificationBadge(verification) {
+  if (!verification || verification.status === 'unavailable') return '<span class="verify-badge unavailable">未验真</span>';
+  const labels = { verified:'数据吻合', partial:'部分吻合', contradicted:'数据冲突', missing:'缺少必填事实', 'not-claimed':'未声明锚点' };
+  return `<span class="verify-badge ${escapeHtml(verification.status)}">${escapeHtml(labels[verification.status] || verification.status)}</span>`;
+}
+
+function renderDataChecks(verification) {
+  if (!verification?.checks?.length) return '';
+  return `<details class="verification-checks"><summary>数据验真 ${verification.matched}/${verification.total}</summary>${verification.checks.map((check) => `<div class="check-${escapeHtml(check.status)}"><b>${escapeHtml(check.label)}</b><span>${escapeHtml(check.status)} · 参考 ${escapeHtml(formatEvidenceValue(check.expected, check.unit))}${check.observed === undefined ? '' : ` · 输出 ${escapeHtml(formatEvidenceValue(check.observed, check.unit))}`}</span></div>`).join('')}</details>`;
+}
+
+function formatEvidenceValue(value, unit = '') {
+  const formatted = typeof value === 'number' ? Number(value.toFixed(6)).toLocaleString('zh-CN') : String(value ?? '—');
+  return `${formatted}${unit || ''}`;
 }
 
 function activeActivity(item) {
@@ -651,7 +687,7 @@ async function loadDataSourceHealth() {
     const source = await response.json();
     if (!response.ok) throw new Error(source.error || '数据源状态读取失败');
     const stateLabel = source.ready ? 'READY' : source.enabled && source.configured && source.installed === false ? 'SDK 缺失' : source.enabled ? '账号未配置' : '未启用';
-    root.innerHTML = `<span>DATA SOURCE</span><span class="runtime-chip ${source.configured ? 'installed' : ''} ${source.ready ? 'ready' : ''}" title="PandaAI Quant 官方 panda_data SDK">PandaAI Quant · ${stateLabel}</span><i>${source.ready ? `${source.allowedMethods.length} 个只读方法` : '在 .env 配置 PANDA_DATA_*'}</i>`;
+    root.innerHTML = `<span>DATA SOURCE</span><span class="runtime-chip ${source.configured ? 'installed' : ''} ${source.ready ? 'ready' : ''}" title="PandaAI Quant 官方 panda_data SDK">PandaAI Quant · ${stateLabel}</span><i>${source.ready ? `${source.allowedMethods.length} 个只读方法 · ${source.autoVerify ? '自动验真 ON' : '自动验真 OFF'}` : '在 .env 配置 PANDA_DATA_*'}</i>`;
   } catch {
     root.innerHTML = '<span>DATA SOURCE</span><i>PandaAI Quant 状态读取失败</i>';
   }

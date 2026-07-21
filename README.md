@@ -122,6 +122,7 @@ python3 -m venv .venv
 
 ```env
 PANDA_DATA_ENABLED=true
+PANDA_DATA_AUTO_VERIFY=true
 PANDA_DATA_USERNAME=你的11位手机号或86开头账号
 PANDA_DATA_PASSWORD=你的密码
 PANDA_DATA_BASE_URL=http://pandadata.pandaaiquant.com
@@ -151,6 +152,34 @@ Content-Type: application/json
 
 只有 `PANDA_DATA_ALLOWED_METHODS` 白名单中的 SDK 方法可以调用，结果会按 `PANDA_DATA_MAX_ROWS` 截断。`PANDA_DATA_ACCESS_KEY` 留空时查询网关强制关闭，避免公开部署后被匿名消耗数据额度。接口字段以 [PandaAI Quant 数据 API 文档](https://www.pandaaiquant.com/data-service/api-docs?api=data_fetch_doc) 和比赛提供的本地接口文档为准。
 
+### Benchmark 自动数据验真
+
+设置 `PANDA_DATA_AUTO_VERIFY=true` 后，真实模式会在每个同题用例执行前建立一次 PandaAI 参考快照。提交 Agent 与三个 Runtime 共用该快照；快照不进入 Prompt，只在输出完成后校验数值。常见的沪深 300、中证 500、上证指数、深证成指、创业板指和带交易所后缀的股票代码会根据 Prompt 截止日期自动生成小窗口行情锚点。
+
+需要强约束时，可在用例中声明最多 3 个 `dataQueries`，每个查询最多 10 个事实：
+
+```json
+{
+  "name": "指数数据锚点",
+  "prompt": "截至 2025-01-10，报告沪深 300 期末收盘。",
+  "dataQueries": [{
+    "method": "get_index_daily",
+    "params": { "symbol": ["000300.SH"], "start_date": "20250101", "end_date": "20250110", "fields": [] },
+    "requiredFields": ["date", "symbol", "close"],
+    "facts": [{
+      "label": "沪深 300 期末收盘",
+      "field": "close",
+      "where": "last",
+      "aliases": ["期末收盘", "基准收盘"],
+      "tolerance": 0.01,
+      "required": true
+    }]
+  }]
+}
+```
+
+结果中的 `benchmark[].dataEvidence` 保存行数、字段、尾部样本、SHA-256 指纹和解析出的参考事实；每位选手的 `dataVerification` 标明 `verified / partial / contradicted / missing / not-claimed / unavailable`。查询失败只会标记验真不可用，不会伪造参考值；显式必填事实缺失或冲突会降低“数据证据”维度。
+
 ## 演示模式与真实模式
 
 演示模式默认可用。它会完整执行协议校验、必要性打分、多模型评语、skill 构建、同题对测和最终分档，但模型与 runtime 输出是基于输入确定生成的模拟数据。界面和结果对象均标记 `DEMO`，不会伪装成真实线上调用。
@@ -160,6 +189,7 @@ Content-Type: application/json
 1. 调用 Agent Card 声明的 A2A endpoint；
 2. 调用 LLMX、火山方舟或 `MODEL_REVIEWERS_JSON` 配置的评审模型；
 3. 调用显式启用的本机 Claude/Cursor、方舟豆包或 `RUNTIME_ADAPTERS_JSON` 隔离服务，仅凭 description 直出 Skill。
+4. 在开启自动验真时，通过 PandaAI 建立同局共享的参考数据快照并复核可见输出。
 
 如果未配置真实 adapter，相关项会保留为 demo；调用失败会记录错误并继续执行其余选手。
 
@@ -303,6 +333,7 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 | `DATA_FILE` | `data/evaluations.json` | 评测持久化文件 |
 | `ALLOW_PRIVATE_AGENT_URLS` | `false` | 是否允许 localhost/私网 Agent URL，仅建议本地开发开启 |
 | `PANDA_DATA_ENABLED` | `false` | 是否启用 PandaAI Quant 数据源 |
+| `PANDA_DATA_AUTO_VERIFY` | `false` | 真实 benchmark 前建立参考数据快照并验真输出 |
 | `PANDA_DATA_USERNAME` | 空 | 11 位手机号或 86 开头的数据服务账号，仅写入本机 `.env` |
 | `PANDA_DATA_PASSWORD` | 空 | 数据服务密码，仅写入本机 `.env` |
 | `PANDA_DATA_BASE_URL` | `http://pandadata.pandaaiquant.com` | Panda Data SDK 服务地址，通常无需修改 |

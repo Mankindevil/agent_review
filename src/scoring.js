@@ -60,14 +60,24 @@ export function mockProfessionalReview(reviewer, card, complexity, evaluationSee
   };
 }
 
-export function judgeOutput(prompt, output, identity) {
+export function judgeOutput(prompt, output, identity, dataVerification) {
   const content = String(output || '');
   const taskCompletion = content.length > 80 ? 80 : content.length > 25 ? 66 : 38;
-  const dataEvidence = /数据来源|来源[:：]|截至|as.?of|样本(?:期|区间)|起止日期|频率|口径|复权|交易日/i.test(content) ? 86 : 48;
+  const baseDataEvidence = /数据来源|来源[:：]|截至|as.?of|样本(?:期|区间)|起止日期|频率|口径|复权|交易日/i.test(content) ? 86 : 48;
+  const dataEvidence = verifiedDataScore(baseDataEvidence, dataVerification);
   const methodRigor = /\bIC\b|Rank.?IC|分组回测|基准|年化|最大回撤|夏普|换手|手续费|滑点|因子暴露|风险归因|置信区间/i.test(content) ? 86 : 50;
   const riskDisclosure = /风险提示|假设|局限|不构成.{0,8}投资建议|未来收益|回撤|压力测试|授权数据/i.test(content) ? 88 : 44;
   const score = round(clamp(average([taskCompletion, dataEvidence, methodRigor, riskDisclosure]) + stableNumber(`${identity}:${prompt}`, -4, 4)));
   return { score, dimensions: { taskCompletion, dataEvidence, methodRigor, riskDisclosure } };
+}
+
+function verifiedDataScore(baseScore, verification) {
+  if (!verification || !Number.isFinite(verification.score)) return baseScore;
+  if (verification.status === 'verified') return Math.max(baseScore, 96);
+  if (verification.status === 'partial') return round(average([baseScore, verification.score]));
+  if (verification.status === 'contradicted') return Math.min(baseScore, round(20 + verification.score * 0.3));
+  if (verification.status === 'missing') return Math.min(baseScore, 35);
+  return baseScore;
 }
 
 export function buildRoast(submittedAverage, claudeAverage, doubaoAverage, professionalAverage, complexity) {

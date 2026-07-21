@@ -36,6 +36,7 @@ export function pandaDataConfig(env = process.env) {
   return {
     provider: 'pandaai',
     enabled,
+    autoVerify: env.PANDA_DATA_AUTO_VERIFY === 'true',
     configured,
     ready: enabled && configured,
     accessProtected,
@@ -73,6 +74,7 @@ export async function getPandaDataStatus(options = {}) {
   return {
     provider: config.provider,
     enabled: config.enabled,
+    autoVerify: config.autoVerify,
     configured: config.configured,
     ready: config.ready && installed !== false,
     accessProtected: config.accessProtected,

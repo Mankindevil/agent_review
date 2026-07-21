@@ -2,7 +2,19 @@
   "factor-researcher": [
     {
       "name": "现金流因子检验",
-      "prompt": "在沪深 300 成分股内检验经营现金流收益率因子。样本期 2019-01-01 至 2024-12-31，月频调仓。请说明数据时点和清洗口径，输出 Rank IC、五分组回测、换手、最大回撤及风险提示。",
+      "prompt": "在沪深 300 成分股内检验经营现金流收益率因子。样本期 2019-01-01 至 2024-12-31，月频调仓。请报告期末沪深 300 收盘点位作为数据锚点，说明数据时点和清洗口径，输出 Rank IC、五分组回测、换手、最大回撤及风险提示。",
+      "dataQueries": [
+        {
+          "id": "csi300-close-anchor",
+          "label": "沪深 300 期末行情",
+          "method": "get_index_daily",
+          "params": { "symbol": ["000300.SH"], "start_date": "20241220", "end_date": "20241231", "fields": [] },
+          "requiredFields": ["date", "symbol", "close"],
+          "facts": [
+            { "label": "沪深 300 期末收盘", "field": "close", "where": "last", "aliases": ["沪深 300 收盘", "沪深300收盘", "基准收盘", "期末收盘"], "tolerance": 0.01, "required": true }
+          ]
+        }
+      ],
       "acceptance": ["使用历史成分与公告日时点", "说明极值、缺失和中性化口径", "报告 Rank IC 与分组单调性", "包含成本、回撤与不构成投资建议"]
     }
   ],

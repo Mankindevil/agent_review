@@ -4,6 +4,7 @@ import { getPandaDataStatus, pandaDataConfig, queryPandaData } from '../src/pand
 
 const configuredEnv = {
   PANDA_DATA_ENABLED: 'true',
+  PANDA_DATA_AUTO_VERIFY: 'true',
   PANDA_DATA_USERNAME: '8613800000000',
   PANDA_DATA_PASSWORD: 'test-password',
   PANDA_DATA_ACCESS_KEY: 'gateway-key',
@@ -16,6 +17,7 @@ const configuredEnv = {
 test('reports PandaAI readiness without exposing account credentials', () => {
   const config = pandaDataConfig(configuredEnv);
   assert.equal(config.ready, true);
+  assert.equal(config.autoVerify, true);
   assert.equal(config.maxRows, 25);
   assert.equal(config.baseUrl, 'https://data.example.test');
   assert.deepEqual(config.allowedMethods, ['get_trade_cal', 'get_stock_daily']);

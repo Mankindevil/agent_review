@@ -52,6 +52,8 @@ A2A Agent endpoint   Model / Runtime endpoints
 
 `GET /api/data-source` 返回非敏感配置状态，`POST /api/data-source/query` 需要独立的 `PANDA_DATA_ACCESS_KEY`。调用层同时限制方法白名单、请求体大小、执行超时、最大返回行数与最大输出字节数。该网关用于金融 Agent/Data Skill 的受控数据读取，不提供交易或写入能力。
 
+`src/data-verifier.js` 把数据源接入同题流水线。真实评测且 `PANDA_DATA_AUTO_VERIFY=true` 时，每个用例先构造自动或显式 `dataQueries`，只取数一次，再把紧凑快照保存在 `benchmark[].dataEvidence`。快照包含查询参数、行数、字段、最多 5 行尾部样本、SHA-256 指纹和事实值，不包含账号、密码或会话 token，也不会拼入参赛 Agent / Runtime 的 Prompt。四个选手输出完成后统一生成 `dataVerification`；单步重跑复用原快照，避免数据漂移改变比较基准。
+
 ### 3.1 A2A 协议体检
 
 `src/a2a.js` 校验：
@@ -275,6 +277,8 @@ SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日
 │   ├── ark-anthropic-proxy.js 方舟 OpenAI API 到 Anthropic Messages 的本地协议桥
 │   ├── claude-env.js       Claude Code 的 Ark / DeepSeek 环境映射
 │   ├── a2a.js              Agent Card 校验、binding 选择和 A2A client
+│   ├── panda-data.js       PandaAI SDK 进程桥、白名单与安全查询适配
+│   ├── data-verifier.js    自动/显式数据计划、参考快照与输出事实验真
 │   ├── pipeline.js         评测、单步复核、派生结果重算与容错状态机
 │   ├── prompts.js          模型评审、Skill 构建与同题执行 prompt
 │   ├── providers.js        多模型评审 adapter

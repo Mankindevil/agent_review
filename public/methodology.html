@@ -33,7 +33,7 @@
       <aside class="method-warning">
         <span>先说结论</span>
         <b>能审研究纪律，不凭空验证收益。</b>
-        <p>未接入主办方 Data / Research Skills 时，系统只检查数据时点、回测口径、风险披露与可复现性，绝不把模拟输出当成真实金融结论。</p>
+        <p>接入 PandaAI 后，真实模式会在同题执行前锁定共享参考快照，并在输出完成后校验声明的行情锚点；未取数或查询失败时仍只检查研究纪律，绝不伪造验真结果。</p>
       </aside>
     </section>
 
@@ -202,7 +202,7 @@
           <header><span>STAGE 04 / ARENA</span><h2>同题研究压测：只看可见最终输出</h2><p>每个用例分别运行提交 Agent 与三个复刻 Skill。评分器不读取隐藏思维链，也不因为收益数字更夸张而加分。</p></header>
           <div class="judge-grid">
             <article><span>任务完成</span><b>38–80</b><p>输出大于 80 字为 80；26–80 字为 66；否则 38。</p></article>
-            <article><span>数据证据</span><b>48 / 86</b><p>是否交代来源、截至时点、样本区间、频率、口径或复权。</p></article>
+            <article><span>数据证据</span><b>20–96</b><p>先检查来源与口径；存在参考快照时，再校验必填数据事实、数值容差与冲突。</p></article>
             <article><span>方法严谨</span><b>50 / 86</b><p>是否报告 IC、基准、收益风险、换手、成本、暴露或置信区间。</p></article>
             <article><span>风险披露</span><b>44 / 88</b><p>是否声明假设、局限、回撤、压力测试与不构成投资建议。</p></article>
           </div>
@@ -211,7 +211,7 @@
             <article class="rule-card"><h3>多用例汇总</h3><p>每个选手的实战均分 = 该选手所有测试用例分数的算术平均，保留 1 位小数。</p></article>
             <article class="rule-card"><h3>“同 Prompt”的含义</h3><p>提交 Agent 收到原始 prompt；Runtime 执行提示会带上刚生成的 Skill，但其中的用户原始 prompt 不改写。当前评分不使用用例中额外的结构化验收点。</p></article>
           </div>
-          <div class="mode-callout warning"><b>数据接入边界</b><span>当前规则能识别研究纪律信号，但不能凭文本验证行情、财务数据和回测数字真假。接入主办方 Data / Research Skills 后，应增加时点快照复算、回测结果哈希、结构化断言与人工抽检。</span></div>
+          <div class="mode-callout warning"><b>数据接入边界</b><span>PandaAI 参考快照可验证声明的行情与财务锚点；复杂回测收益仍需结构化回测配置、逐期净值复算、结果哈希与人工抽检。</span></div>
         </section>
 
         <section class="rule-section" id="verdict">
@@ -241,12 +241,12 @@
           <header><span>STAGE 07 / DISCLOSURE</span><h2>你应该如何解读结果</h2><p>报告同时标注 LIVE、DEMO、RULES、FAILED 或 MIXED，避免把模拟产物误认为真实调用。</p></header>
           <div class="boundary-list">
             <article><b>能说明</b><p>同一套公开规则下的相对表现、Agent Card 的工程完整度、可见输出质量、各适配器是否成功。</p></article>
-            <article><b>不能说明</b><p>没有真实 Data Skills 时，不能证明回测收益、因子有效性或组合风险数值正确，更不能作为投资建议。</p></article>
-            <article><b>数据接入后</b><p>增加 point-in-time 快照复算、历史成分校验、成本敏感性、样本外测试、结果哈希和独立 Judge。</p></article>
+            <article><b>不能说明</b><p>行情锚点验真不等于完整回测复算，仍不能单独证明因子有效性或未来收益，更不能作为投资建议。</p></article>
+            <article><b>数据接入后</b><p>已支持 PandaAI 快照、事实容差和结果指纹；后续继续增加历史成分校验、成本敏感性、样本外测试和逐期净值复算。</p></article>
           </div>
           <footer class="source-note">
             <div><span>SOURCE OF TRUTH</span><b>当前页面对应实际代码</b></div>
-            <p><code>src/scoring.js</code> 负责必要性、输出分和分档；<code>src/prompts.js</code> 定义专业评审与复刻约束；<code>src/pipeline.js</code> 负责失败、重试和汇总。</p>
+            <p><code>src/scoring.js</code> 负责必要性、输出分和分档；<code>src/data-verifier.js</code> 负责参考快照与事实验真；<code>src/pipeline.js</code> 负责执行、失败、重试和汇总。</p>
             <a href="/">带着规则去发起评测 <i>↗</i></a>
           </footer>
         </section>

@@ -21,6 +21,7 @@ test('health endpoint responds', async () => {
   assert.equal(health.modelTemperature, 0);
   assert.equal(health.dataSource.provider, 'pandaai');
   assert.equal(typeof health.dataSource.configured, 'boolean');
+  assert.equal(typeof health.dataSource.autoVerify, 'boolean');
 });
 
 test('reports PandaAI data source status without credentials', async () => {
@@ -104,8 +105,8 @@ test('serves localized loading effects with reduced-motion support', async () =>
   assert.match(app, /review-card-queued/);
   const indexResponse = await fetch(`${origin}/`);
   const index = await indexResponse.text();
-  assert.match(index, /app\.js\?v=20260720-finance1/);
-  assert.match(index, /styles\.css\?v=20260720-finance1/);
+  assert.match(index, /app\.js\?v=20260721-finance2/);
+  assert.match(index, /styles\.css\?v=20260721-finance2/);
 });
 
 test('lets the final verdict use the available desktop width', async () => {
@@ -224,6 +225,20 @@ test('rejects non-string case prompts as a client error', async () => {
   });
   assert.equal(response.status, 400);
   assert.match((await response.json()).error, /prompt/);
+});
+
+test('rejects malformed benchmark data query plans', async () => {
+  const card = {
+    name: 'Data Agent', description: 'Valid card used to verify data query typing.',
+    supportedInterfaces: [{ url: 'https://example.com/a2a', protocolBinding: 'HTTP+JSON', protocolVersion: '1.0' }],
+    skills: [{ id: 'data', name: 'Data', description: 'Validate data query fields.' }]
+  };
+  const response = await fetch(`${origin}/api/evaluations`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ agentCard: card, cases: [{ prompt: 'test', dataQueries: [{ method: 'get_index_daily', params: [] }] }] })
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /dataQueries.*params|params 必须/);
 });
 
 test('rejects an out-of-range evaluation seed', async () => {
