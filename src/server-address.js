@@ -4,7 +4,7 @@ export function resolveServerAddress(env = process.env) {
     throw new Error('PORT 必須是 1 到 65535 之間的整數');
   }
   return {
-    host: String(env.HOST || '').trim() || undefined,
+    host: String(env.HOST || '').trim() || '127.0.0.1',
     port
   };
 }

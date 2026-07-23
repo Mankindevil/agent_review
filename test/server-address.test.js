@@ -9,8 +9,8 @@ test('uses an explicit production host and numeric port', () => {
   );
 });
 
-test('preserves the current all-interface default when HOST is absent', () => {
-  assert.deepEqual(resolveServerAddress({}), { host: undefined, port: 4173 });
+test('defaults to loopback when HOST is absent', () => {
+  assert.deepEqual(resolveServerAddress({}), { host: '127.0.0.1', port: 4173 });
 });
 
 test('rejects invalid ports before starting the server', () => {
