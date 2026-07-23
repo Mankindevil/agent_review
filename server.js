@@ -15,6 +15,7 @@ import { createDiagnosticsGuard } from './src/diagnostics-guard.js';
 import { getRuntimeStatus } from './src/runtime-status.js';
 import { createSkillBundle } from './src/runtimes.js';
 import { getPandaDataStatus, pandaDataConfig, queryPandaData } from './src/panda-data.js';
+import { resolveServerAddress } from './src/server-address.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.join(root, 'public');
@@ -170,6 +171,9 @@ function json(response, status, payload) { response.writeHead(status, { 'content
 function summary(item) { return { id: item.id, name: item.agentCard.name, createdAt: item.createdAt, status: item.status, progress: item.progress, tier: item.roast?.tier, score: item.averages?.submitted }; }
 
 if (process.env.NODE_ENV !== 'test') {
-  const port = Number(process.env.PORT || 4173);
-  server.listen(port, () => console.log(`Agent 锐评系统已启动：http://localhost:${port}`));
+  const { host, port } = resolveServerAddress();
+  server.listen(port, host, () => {
+    const displayHost = host || 'localhost';
+    console.log(`Agent 锐评系统已启动：http://${displayHost}:${port}`);
+  });
 }
