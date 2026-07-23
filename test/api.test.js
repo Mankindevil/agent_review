@@ -130,7 +130,7 @@ test('returns JSON 404 for unknown API routes instead of the SPA shell', async (
   assert.deepEqual(await response.json(), { error: '接口不存在' });
 });
 
-test('serves a standalone diagnostics console with isolated credentials and explicit streaming consent', async () => {
+test('serves an Agent Card upload readiness console with isolated credentials and explicit streaming consent', async () => {
   const [pageResponse, scriptResponse, styleResponse] = await Promise.all([
     fetch(`${origin}/agent-check.html`),
     fetch(`${origin}/agent-check.js`),
@@ -145,16 +145,29 @@ test('serves a standalone diagnostics console with isolated credentials and expl
   assert.equal(scriptResponse.status, 200);
   assert.equal(styleResponse.status, 200);
   for (const id of [
-    'diagnostics-form', 'platform-key', 'agent-token', 'source-type', 'agent-url',
-    'diagnostic-prompt', 'allow-cross-origin', 'run-streaming', 'confirm-streaming',
-    'check-discovery', 'check-card-validation', 'check-call', 'check-stream'
+    'diagnostics-form', 'platform-key', 'agent-card-file', 'agent-card-json',
+    'card-drop-zone', 'card-summary', 'auth-method', 'agent-token',
+    'auth-target-origin', 'confirm-auth-target', 'diagnostic-prompt',
+    'timeout-ms', 'attestation-deepseek', 'attestation-authorized',
+    'run-streaming', 'confirm-streaming', 'technical-readiness',
+    'check-card-input', 'check-card-validation', 'check-call', 'check-stream'
   ]) {
     assert.match(html, new RegExp(`id="${id}"`), id);
   }
+  for (const timeout of ['60000', '300000', '600000', '1200000']) {
+    assert.match(html, new RegExp(`value="${timeout}"`), timeout);
+  }
+  assert.match(html, /一次只测试一张 Agent Card/);
+  assert.match(html, /内部多 Agent/);
+  assert.match(html, /最终报名表/);
   assert.match(html, /再次真实执行 Prompt/);
   assert.match(script, /\/api\/agent-diagnostics/);
+  assert.match(script, /agentCard/);
+  assert.match(script, /confirmAuthorizationTarget/);
+  assert.match(script, /MAX_CARD_BYTES/);
   assert.doesNotMatch(script, /localStorage|sessionStorage/);
   assert.match(script, /pageshow/);
+  assert.match(css, /\.card-drop-zone/);
   assert.match(css, /\.signal-rail/);
   assert.match(css, /prefers-reduced-motion/);
 });

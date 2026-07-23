@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="一次性检查 A2A Agent 的发现、Card、普通调用和流式调用。">
-  <title>Agent 协议检查台 · 锐评局</title>
-  <link rel="stylesheet" href="/agent-check.css?v=20260723">
+  <meta name="description" content="上传单个 A2A Agent Card JSON，执行一次性参评技术预检。">
+  <title>Agent Card 技术预检台 · 锐评局</title>
+  <link rel="stylesheet" href="/agent-check.css?v=20260724">
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/" aria-label="返回锐评局首页">
       <span class="brand-mark">锐</span>
-      <span><b>Agent 协议检查台</b><small>ONE-SHOT DIAGNOSTICS</small></span>
+      <span><b>Agent Card 技术预检台</b><small>A2A READINESS TRACE</small></span>
     </a>
     <a class="back-link" href="/">返回评测平台 <span aria-hidden="true">↗</span></a>
   </header>
@@ -19,22 +19,27 @@
   <main>
     <section class="hero" aria-labelledby="page-title">
       <div class="hero-copy">
-        <p class="kicker">A2A / LIVE PROTOCOL TRACE</p>
-        <h1 id="page-title">先验协议，<br>再进考场。</h1>
-        <p>读取公开 Agent Card，核对接口声明，并执行一次真实调用。结果只停留在当前页面，不创建评测，也不写入历史。</p>
+        <p class="kicker">ONE CARD / ONE TECHNICAL TRACE</p>
+        <h1 id="page-title">先交协议，<br>再进考场。</h1>
+        <p>上传一张 A2A Agent Card，核对公开能力并执行一次真实自然语言任务。结果只停留在当前页面，不创建正式投稿，也不写入评测历史。</p>
       </div>
       <aside class="truth-card">
-        <b>真实调用，不是模拟</b>
-        <p>普通诊断会执行一次 Prompt。流式检查会再次执行同一 Prompt，默认关闭。</p>
+        <b>一次只测试一张 Agent Card</b>
+        <p>内部多 Agent 可通过一个编排 Agent 整体参评；独立对外的 Agent 请分别上传、分别测试。</p>
         <span>NO HISTORY · NO SCORE · LIVE REQUEST</span>
       </aside>
     </section>
+
+    <div class="scope-strip" role="note">
+      <span>技术入口</span>
+      <p>这里验证 Card、A2A 调用和响应时限。团队、作品说明、示例问答、Skills 清单与仓库地址在最终报名表填写。</p>
+    </div>
 
     <div class="workspace">
       <section class="input-panel" aria-labelledby="input-title">
         <header class="section-head">
           <span>INPUT / 01</span>
-          <h2 id="input-title">连接信息</h2>
+          <h2 id="input-title">提交技术样本</h2>
         </header>
 
         <form id="diagnostics-form" autocomplete="off">
@@ -42,56 +47,80 @@
             <legend>平台门禁</legend>
             <label for="platform-key">平台访问密钥</label>
             <input id="platform-key" name="platformKey" type="password" required autocomplete="off" spellcheck="false" placeholder="AGENT_DIAGNOSTICS_ACCESS_KEY">
-            <small>只用于访问本平台诊断 API，不会发送给 Agent。</small>
+            <small>只用于访问本平台 API，绝不会发送给被测 Agent。</small>
           </fieldset>
 
           <fieldset>
-            <legend>发现目标</legend>
-            <div class="split-row">
+            <legend>Agent Card JSON</legend>
+            <div id="card-drop-zone" class="card-drop-zone" tabindex="0">
+              <input id="agent-card-file" name="agentCardFile" type="file" accept=".json,application/json">
+              <span class="drop-glyph" aria-hidden="true">{ }</span>
               <div>
-                <label for="source-type">地址类型</label>
-                <select id="source-type" name="sourceType">
-                  <option value="service-url">服务根地址</option>
-                  <option value="card-url">Agent Card URL</option>
-                </select>
+                <b>拖入 Card JSON</b>
+                <p>或选择不超过 1 MiB 的单个 `.json` 文件</p>
               </div>
-              <div class="grow">
-                <label for="agent-url">Agent 地址</label>
-                <input id="agent-url" name="url" type="url" required maxlength="2048" placeholder="https://agent.example.com">
-              </div>
+              <label class="file-button" for="agent-card-file">选择文件</label>
+            </div>
+
+            <label for="agent-card-json">也可以直接粘贴 JSON</label>
+            <textarea id="agent-card-json" name="agentCardJson" class="json-input" rows="10" spellcheck="false" required placeholder="{&#10;  &quot;name&quot;: &quot;Research Agent&quot;,&#10;  &quot;supportedInterfaces&quot;: [...]&#10;}"></textarea>
+
+            <div id="card-summary" class="card-summary" data-state="empty" aria-live="polite">
+              <span class="summary-mark">∅</span>
+              <p>等待一张 Agent Card。服务地址将从 Card 声明中读取，不能另行覆盖。</p>
             </div>
           </fieldset>
 
           <fieldset>
-            <legend>Agent 调用</legend>
-            <label for="agent-token">Agent Bearer Token <em>可选</em></label>
-            <input id="agent-token" name="agentToken" type="password" maxlength="8192" autocomplete="off" spellcheck="false" placeholder="只填 Token 值">
-            <label class="check-row" for="allow-cross-origin">
-              <input id="allow-cross-origin" name="allowCrossOrigin" type="checkbox">
-              <span><b>允许跨域转发 Agent Token</b><small>仅当 Card 声明的调用接口与发现地址不同源时启用。</small></span>
-            </label>
+            <legend>Agent 实测</legend>
+            <div class="split-row">
+              <div>
+                <label for="auth-method">Agent 鉴权方式</label>
+                <select id="auth-method" name="authMethod">
+                  <option value="none" selected>无鉴权</option>
+                  <option value="bearer">Bearer Token</option>
+                </select>
+              </div>
+              <div class="grow target-readout">
+                <span>Token 目标 origin</span>
+                <code id="auth-target-origin">等待有效 Card</code>
+              </div>
+            </div>
 
-            <label for="diagnostic-prompt">测试 Prompt</label>
-            <textarea id="diagnostic-prompt" name="prompt" maxlength="4000" rows="5">请返回一句简短的服务状态说明，不执行任何外部操作。</textarea>
+            <div id="auth-fields" class="auth-fields" data-active="false">
+              <label for="agent-token">Agent Bearer Token</label>
+              <input id="agent-token" name="agentToken" type="password" maxlength="8192" autocomplete="off" spellcheck="false" disabled placeholder="只填 Token 值">
+              <label class="check-row" for="confirm-auth-target">
+                <input id="confirm-auth-target" name="confirmAuthTarget" type="checkbox" disabled>
+                <span>
+                  <b>我确认把 Token 发往上方 origin</b>
+                  <small>Card 改变后必须重新确认；Token 不用于获取 Card。</small>
+                </span>
+              </label>
+            </div>
+
+            <label for="diagnostic-prompt">自然语言测试任务</label>
+            <textarea id="diagnostic-prompt" name="prompt" maxlength="4000" rows="5" required>请完成一个无外部副作用的自然语言测试任务，并清晰说明结论与依据。</textarea>
 
             <div class="split-row compact">
               <div>
-                <label for="timeout-ms">总超时</label>
+                <label for="timeout-ms">单次响应上限</label>
                 <select id="timeout-ms" name="timeoutMs">
-                  <option value="15000">15 秒</option>
-                  <option value="30000" selected>30 秒</option>
-                  <option value="60000">60 秒</option>
+                  <option value="60000">1 分钟</option>
+                  <option value="300000" selected>5 分钟</option>
+                  <option value="600000">10 分钟</option>
+                  <option value="1200000">20 分钟</option>
                 </select>
               </div>
               <label class="check-row stream-switch" for="run-streaming">
                 <input id="run-streaming" name="runStreaming" type="checkbox">
-                <span><b>同时检查流式调用</b><small>默认关闭</small></span>
+                <span><b>同时检查流式调用</b><small>默认关闭 · 独立计时</small></span>
               </label>
             </div>
 
             <div id="stream-warning" class="stream-warning" aria-live="polite">
               <strong>这会再次真实执行 Prompt</strong>
-              <p>可能重复产生费用或外部副作用。确认 Agent 和 Prompt 可安全重复执行。</p>
+              <p>可能重复产生费用或外部副作用。确认 Agent 和任务可以安全重复执行。</p>
               <label class="check-row danger" for="confirm-streaming">
                 <input id="confirm-streaming" name="confirmStreaming" type="checkbox" disabled>
                 <span><b>我确认进行第二次真实调用</b></span>
@@ -99,8 +128,28 @@
             </div>
           </fieldset>
 
+          <fieldset>
+            <legend>参评声明 · 待人工核验</legend>
+            <div class="attestation-box">
+              <label class="check-row" for="attestation-deepseek">
+                <input id="attestation-deepseek" name="attestationDeepseek" type="checkbox" required>
+                <span>
+                  <b>底座模型统一使用 DeepSeek V4 Pro</b>
+                  <small>勾选是提交者声明，不代表平台已自动识别模型。</small>
+                </span>
+              </label>
+              <label class="check-row" for="attestation-authorized">
+                <input id="attestation-authorized" name="attestationAuthorized" type="checkbox" required>
+                <span>
+                  <b>Agent 不绕过权限访问未授权数据</b>
+                  <small>一次调用无法替代正式的数据权限审计。</small>
+                </span>
+              </label>
+            </div>
+          </fieldset>
+
           <button id="run-diagnostics" class="run-button" type="submit">
-            <span>开始一次性诊断</span><i aria-hidden="true">→</i>
+            <span>开始技术预检</span><i aria-hidden="true">→</i>
           </button>
           <p id="form-error" class="form-error" role="alert"></p>
         </form>
@@ -108,36 +157,49 @@
 
       <section class="result-panel" aria-labelledby="result-title">
         <header class="section-head result-head">
-          <div><span>TRACE / 02</span><h2 id="result-title">协议轨迹</h2></div>
+          <div><span>TRACE / 02</span><h2 id="result-title">参评技术预检</h2></div>
           <p id="overall-state" class="overall-state" data-state="idle">等待输入</p>
         </header>
 
+        <section class="readiness-panel" aria-labelledby="readiness-title">
+          <div class="readiness-heading">
+            <div>
+              <span>GATE / TECHNICAL</span>
+              <h3 id="readiness-title">基础门槛</h3>
+            </div>
+            <small>不等于正式评分</small>
+          </div>
+          <div id="technical-readiness" class="technical-readiness" aria-live="polite">
+            <p class="readiness-empty">完成实测后，这里会汇总 Card、A2A 调用、响应时限与参评声明。</p>
+          </div>
+        </section>
+
         <div class="signal-rail" aria-live="polite">
-          <article id="check-discovery" class="check-card" data-status="idle">
+          <article id="check-card-input" class="check-card" data-status="idle">
             <i class="signal-node" aria-hidden="true"></i>
-            <header><span>01</span><h3>发现 Agent Card</h3><b class="check-status">等待</b></header>
-            <p class="check-summary">从服务根地址或指定 URL 读取 Card。</p>
+            <header><span>01</span><h3>读取 JSON 样本</h3><b class="check-status">等待</b></header>
+            <p class="check-summary">确认上传内容是一张可处理的 Agent Card。</p>
             <small class="check-duration">—</small>
             <div class="check-details"></div>
           </article>
           <article id="check-card-validation" class="check-card" data-status="idle">
             <i class="signal-node" aria-hidden="true"></i>
             <header><span>02</span><h3>校验接口声明</h3><b class="check-status">等待</b></header>
-            <p class="check-summary">核对协议版本、binding、tenant 与能力。</p>
+            <p class="check-summary">核对协议版本、binding、tenant、Skills 与能力。</p>
             <small class="check-duration">—</small>
             <div class="check-details"></div>
           </article>
           <article id="check-call" class="check-card" data-status="idle">
             <i class="signal-node" aria-hidden="true"></i>
             <header><span>03</span><h3>普通调用</h3><b class="check-status">等待</b></header>
-            <p class="check-summary">发送真实 Prompt 并验证 Message 或 Task。</p>
+            <p class="check-summary">发送真实自然语言任务并验证 Message 或 Task。</p>
             <small class="check-duration">—</small>
             <div class="check-details"></div>
           </article>
           <article id="check-stream" class="check-card" data-status="idle">
             <i class="signal-node" aria-hidden="true"></i>
             <header><span>04</span><h3>流式调用</h3><b class="check-status">默认关闭</b></header>
-            <p class="check-summary">仅在显式确认后执行第二次 Prompt。</p>
+            <p class="check-summary">仅在显式确认后第二次执行同一任务。</p>
             <small class="check-duration">—</small>
             <div class="check-details"></div>
           </article>
@@ -145,12 +207,12 @@
 
         <footer class="result-foot">
           <span>结果不保存</span>
-          <p>刷新页面后，访问密钥、Agent Token 和诊断结果都会消失。</p>
+          <p>刷新页面后，访问密钥、Agent Token、Card JSON 和预检结果都会消失。</p>
         </footer>
       </section>
     </div>
   </main>
 
-  <script type="module" src="/agent-check.js?v=20260723"></script>
+  <script type="module" src="/agent-check.js?v=20260724"></script>
 </body>
 </html>
