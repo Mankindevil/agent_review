@@ -13,6 +13,13 @@ test('defaults to loopback when HOST is absent', () => {
   assert.deepEqual(resolveServerAddress({}), { host: '127.0.0.1', port: 4173 });
 });
 
+test('defaults whitespace-only HOST to loopback while preserving PORT', () => {
+  assert.deepEqual(
+    resolveServerAddress({ HOST: '   ', PORT: '4312' }),
+    { host: '127.0.0.1', port: 4312 }
+  );
+});
+
 test('rejects invalid ports before starting the server', () => {
   assert.throws(() => resolveServerAddress({ PORT: '70000' }), /PORT/);
 });
