@@ -77,7 +77,7 @@ A2A 1.0 JSON-RPC 使用 `SendMessage`，0.3 兼容调用使用 `message/send`。
 4. 企业 Registry 是合理扩展，但 A2A 当前没有规定统一的 Registry API，因此本版本只预留产品入口，不伪造协议；
 5. Git 仓库、源码包和镜像属于平台托管部署输入，不是 A2A discovery。生产实现必须在沙箱部署成功后，再按 Agent Card 和 endpoint 进入相同评测流水线。
 
-远程发现拒绝重定向，限制响应为 1 MB，并复用 Agent URL 的 SSRF 防护。生产环境还需要 DNS 解析后的地址复核与域名 allowlist。
+远程发现拒绝重定向，限制响应为 1 MB，并复用 Agent URL 的 SSRF 防护。每次出站连接都会检查全部 DNS 结果并固定校验后的 IP，同时保留原始 Host 与 TLS SNI，避免 DNS rebinding。
 
 ### 3.2 Agent 必要性评分
 

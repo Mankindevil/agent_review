@@ -1,8 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 process.env.NODE_ENV = 'test';
-process.env.DATA_FILE = `/tmp/agent-roast-test-${process.pid}.json`;
+process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-test-${process.pid}.json`);
+process.env.AGENT_DIAGNOSTICS_ACCESS_KEY = 'test-diagnostics-key';
+process.env.AGENT_DIAGNOSTICS_RATE_LIMIT = '100';
+process.env.ALLOW_PRIVATE_AGENT_URLS = 'true';
 const { server } = await import('../server.js');
 
 let origin;
@@ -122,6 +128,116 @@ test('returns JSON 404 for unknown API routes instead of the SPA shell', async (
   assert.equal(response.status, 404);
   assert.match(response.headers.get('content-type'), /application\/json/);
   assert.deepEqual(await response.json(), { error: '接口不存在' });
+});
+
+test('serves a standalone diagnostics console with isolated credentials and explicit streaming consent', async () => {
+  const [pageResponse, scriptResponse, styleResponse] = await Promise.all([
+    fetch(`${origin}/agent-check.html`),
+    fetch(`${origin}/agent-check.js`),
+    fetch(`${origin}/agent-check.css`)
+  ]);
+  const [html, script, css] = await Promise.all([
+    pageResponse.text(),
+    scriptResponse.text(),
+    styleResponse.text()
+  ]);
+  assert.equal(pageResponse.status, 200);
+  assert.equal(scriptResponse.status, 200);
+  assert.equal(styleResponse.status, 200);
+  for (const id of [
+    'diagnostics-form', 'platform-key', 'agent-token', 'source-type', 'agent-url',
+    'diagnostic-prompt', 'allow-cross-origin', 'run-streaming', 'confirm-streaming',
+    'check-discovery', 'check-card-validation', 'check-call', 'check-stream'
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`), id);
+  }
+  assert.match(html, /再次真实执行 Prompt/);
+  assert.match(script, /\/api\/agent-diagnostics/);
+  assert.doesNotMatch(script, /localStorage|sessionStorage/);
+  assert.match(script, /pageshow/);
+  assert.match(css, /\.signal-rail/);
+  assert.match(css, /prefers-reduced-motion/);
+});
+
+test('documents diagnostics configuration, credential scopes, side effects, and troubleshooting', async () => {
+  const [guide, envExample, readme] = await Promise.all([
+    readFile(new URL('../docs/AGENT_DIAGNOSTICS_GUIDE.md', import.meta.url), 'utf8'),
+    readFile(new URL('../.env.example', import.meta.url), 'utf8'),
+    readFile(new URL('../README.md', import.meta.url), 'utf8')
+  ]);
+  for (const term of [
+    'AGENT_DIAGNOSTICS_ACCESS_KEY',
+    '平台访问密钥',
+    'Agent Bearer Token',
+    '再次真实执行',
+    'allowCrossOriginAuthorization',
+    'passed',
+    'blocked',
+    '429',
+    'SSRF'
+  ]) {
+    assert.match(guide, new RegExp(term), term);
+  }
+  assert.match(envExample, /AGENT_DIAGNOSTICS_RATE_LIMIT=6/);
+  assert.match(envExample, /AGENT_DIAGNOSTICS_CONCURRENCY=4/);
+  assert.match(readme, /AGENT_DIAGNOSTICS_GUIDE\.md/);
+  assert.match(readme, /agent-check\.html/);
+});
+
+test('protects diagnostics before parsing its request body', async () => {
+  const missing = await fetch(`${origin}/api/agent-diagnostics`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{not-json'
+  });
+  assert.equal(missing.status, 401);
+
+  const wrong = await fetch(`${origin}/api/agent-diagnostics`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer wrong' },
+    body: '{}'
+  });
+  assert.equal(wrong.status, 401);
+
+  const tooLarge = await fetch(`${origin}/api/agent-diagnostics`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer test-diagnostics-key' },
+    body: JSON.stringify({ padding: 'x'.repeat(33 * 1024) })
+  });
+  assert.equal(tooLarge.status, 413);
+});
+
+test('returns API input errors but keeps upstream diagnostics failures in HTTP 200 reports', async () => {
+  const invalid = await fetch(`${origin}/api/agent-diagnostics`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer test-diagnostics-key' },
+    body: JSON.stringify({
+      url: 'http://127.0.0.1:1',
+      sourceType: 'service-url',
+      runStreaming: true
+    })
+  });
+  assert.equal(invalid.status, 400);
+  assert.match((await invalid.json()).error, /再次真实执行/);
+
+  const before = await (await fetch(`${origin}/api/evaluations`)).json();
+  const response = await fetch(`${origin}/api/agent-diagnostics`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer test-diagnostics-key' },
+    body: JSON.stringify({
+      url: 'http://127.0.0.1:1',
+      sourceType: 'service-url',
+      timeoutMs: 5000
+    })
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  const report = await response.json();
+  assert.equal(report.ok, false);
+  assert.equal(report.checks[0].status, 'failed');
+  assert.equal(report.checks[1].status, 'blocked');
+  const after = await (await fetch(`${origin}/api/evaluations`)).json();
+  assert.equal(after.length, before.length);
 });
 
 test('reports honest local runtime availability', async () => {

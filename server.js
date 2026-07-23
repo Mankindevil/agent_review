@@ -10,6 +10,8 @@ import { EvaluationPipeline } from './src/pipeline.js';
 import { EvaluationStore } from './src/store.js';
 import { normalizeSeed, normalizeTemperature, readJsonBody } from './src/utils.js';
 import { resolveAgentCard } from './src/a2a.js';
+import { runAgentDiagnostics } from './src/agent-diagnostics.js';
+import { createDiagnosticsGuard } from './src/diagnostics-guard.js';
 import { getRuntimeStatus } from './src/runtime-status.js';
 import { createSkillBundle } from './src/runtimes.js';
 import { getPandaDataStatus, pandaDataConfig, queryPandaData } from './src/panda-data.js';
@@ -20,6 +22,7 @@ const store = new EvaluationStore(process.env.DATA_FILE || path.join(root, 'data
 const events = new EventEmitter();
 events.setMaxListeners(100);
 const pipeline = new EvaluationPipeline(store, events);
+const diagnosticsGuard = createDiagnosticsGuard();
 await store.load();
 await pipeline.recoverInterrupted();
 
@@ -41,6 +44,24 @@ export const server = createServer(async (request, response) => {
       if (!authorizedDataRequest(request, config.accessKey)) return json(response, 401, { error: 'PandaAI 数据查询鉴权失败' });
       const input = await readJsonBody(request, 100_000);
       return json(response, 200, await queryPandaData(String(input.method || ''), input.params || {}));
+    }
+    if (request.method === 'POST' && url.pathname === '/api/agent-diagnostics') {
+      response.setHeader('cache-control', 'no-store');
+      const release = diagnosticsGuard.enter(request.headers.authorization);
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      request.once('aborted', abort);
+      response.once('close', () => { if (!response.writableEnded) abort(); });
+      try {
+        const input = await readJsonBody(request, 32 * 1024);
+        return json(response, 200, await runAgentDiagnostics(input, {
+          signal: controller.signal,
+          secrets: [process.env.AGENT_DIAGNOSTICS_ACCESS_KEY]
+        }));
+      } finally {
+        request.off('aborted', abort);
+        release();
+      }
     }
     if (request.method === 'POST' && url.pathname === '/api/agent-cards/resolve') {
       const input = await readJsonBody(request);
@@ -100,7 +121,8 @@ export const server = createServer(async (request, response) => {
     if (request.method === 'GET') return staticFile(url.pathname, response);
     return json(response, 404, { error: '接口不存在' });
   } catch (error) {
-    if (!error.statusCode || error.statusCode >= 500) console.error(error);
+    if (error.retryAfter) response.setHeader('retry-after', String(error.retryAfter));
+    if (!error.statusCode || error.statusCode === 500) console.error(error);
     return json(response, error.statusCode || 500, { error: error.message || '服务器内部错误' });
   }
 });

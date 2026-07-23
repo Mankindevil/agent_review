@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { EvaluationPipeline } from '../src/pipeline.js';
 import { EvaluationStore } from '../src/store.js';
 
@@ -23,7 +25,7 @@ async function waitFor(store, id, predicate, attempts = 120) {
 }
 
 test('cancels an active evaluation and aborts its controller', async () => {
-  const store = new EvaluationStore(`/tmp/agent-roast-cancel-${process.pid}.json`);
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-cancel-${process.pid}.json`));
   const pipeline = new EvaluationPipeline(store, new EventEmitter());
   const item = evaluation('eval_cancel');
   const controller = new AbortController();
@@ -38,7 +40,7 @@ test('cancels an active evaluation and aborts its controller', async () => {
 });
 
 test('marks persisted running evaluations as interrupted after a restart', async () => {
-  const store = new EvaluationStore(`/tmp/agent-roast-recover-${process.pid}.json`);
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-recover-${process.pid}.json`));
   const pipeline = new EvaluationPipeline(store, new EventEmitter());
   await store.set(evaluation('eval_stale', 'running'));
   await store.set(evaluation('eval_done', 'completed'));
@@ -50,7 +52,7 @@ test('marks persisted running evaluations as interrupted after a restart', async
 });
 
 test('persists each completed reviewer, runtime and benchmark entry incrementally', async () => {
-  const store = new EvaluationStore(`/tmp/agent-roast-incremental-${process.pid}.json`);
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-incremental-${process.pid}.json`));
   const snapshots = [];
   const originalSet = store.set.bind(store);
   store.set = async (item) => {
@@ -79,7 +81,7 @@ test('persists each completed reviewer, runtime and benchmark entry incrementall
 });
 
 test('retries an individual stage and recalculates the derived verdict', async () => {
-  const store = new EvaluationStore(`/tmp/agent-roast-retry-${process.pid}.json`);
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-retry-${process.pid}.json`));
   const pipeline = new EvaluationPipeline(store, new EventEmitter());
   const created = await pipeline.create({ mode: 'demo', agentCard: evaluation('template').agentCard, cases: [{ name: 'case', prompt: 'test prompt' }] });
   let item = await waitFor(store, created.id, (value) => value.status === 'completed');
@@ -127,7 +129,7 @@ test('retries an individual stage and recalculates the derived verdict', async (
 });
 
 test('produces identical demo scores for the same explicit seed', async () => {
-  const store = new EvaluationStore(`/tmp/agent-roast-seed-${process.pid}.json`);
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-seed-${process.pid}.json`));
   const pipeline = new EvaluationPipeline(store, new EventEmitter());
   const input = { mode: 'demo', seed: 731, agentCard: evaluation('template').agentCard, cases: [{ name: 'case', prompt: 'same prompt' }] };
   const first = await pipeline.create(input);
@@ -152,7 +154,7 @@ test('marks a failed live Agent call as failed coverage', async () => {
     process.env.ENABLE_LOCAL_CURSOR_AGENT = 'false';
     delete process.env.ARK_BASE_URL;
     delete process.env.ARK_API_KEY;
-    const store = new EvaluationStore(`/tmp/agent-roast-coverage-${process.pid}.json`);
+    const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-coverage-${process.pid}.json`));
     const pipeline = new EvaluationPipeline(store, new EventEmitter());
     const card = evaluation('template').agentCard;
     card.supportedInterfaces[0].url = `http://127.0.0.1:${failingAgent.address().port}/a2a`;
@@ -175,7 +177,13 @@ test('uses one PandaAI snapshot to verify every benchmark output', async () => {
   const originalEnv = Object.fromEntries(envNames.map((name) => [name, process.env[name]]));
   const agent = createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify({ message: { parts: [{ text: '数据来源：PandaAI。沪深 300 期末收盘为 11.30 点，风险提示：历史数据不代表未来收益。' }] } }));
+    response.end(JSON.stringify({
+      message: {
+        messageId: 'panda-evidence-reply',
+        role: 'ROLE_AGENT',
+        parts: [{ text: '数据来源：PandaAI。沪深 300 期末收盘为 11.30 点，风险提示：历史数据不代表未来收益。' }]
+      }
+    }));
   });
   await new Promise((resolve) => agent.listen(0, '127.0.0.1', resolve));
   let queryCalls = 0;
@@ -187,7 +195,7 @@ test('uses one PandaAI snapshot to verify every benchmark output', async () => {
     process.env.ENABLE_LOCAL_CURSOR_AGENT = 'false';
     delete process.env.ARK_BASE_URL;
     delete process.env.ARK_API_KEY;
-    const store = new EvaluationStore(`/tmp/agent-roast-data-evidence-${process.pid}.json`);
+    const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-data-evidence-${process.pid}.json`));
     const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
       dataVerificationEnabled: true,
       dataQuery: async () => {
@@ -224,7 +232,7 @@ test('uses one PandaAI snapshot to verify every benchmark output', async () => {
 });
 
 test('rejects an unknown retry step and a retry while work is active', async () => {
-  const store = new EvaluationStore(`/tmp/agent-roast-retry-invalid-${process.pid}.json`);
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-retry-invalid-${process.pid}.json`));
   const pipeline = new EvaluationPipeline(store, new EventEmitter());
   const active = evaluation('eval_active');
   const done = evaluation('eval_done_retry', 'completed');

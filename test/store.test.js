@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { EvaluationStore } from '../src/store.js';
 
 test('persists set and delete operations as valid reloadable JSON', async () => {
-  const file = `/tmp/agent-roast-store-${process.pid}.json`;
+  const file = path.join(tmpdir(), `agent-roast-store-${process.pid}.json`);
   await rm(file, { force: true });
   await rm(`${file}.tmp`, { force: true });
   try {

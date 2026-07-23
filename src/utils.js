@@ -77,7 +77,7 @@ export async function readJsonBody(request, limit = 1_000_000) {
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > limit) throw Object.assign(new Error('请求体超过 1 MB'), { statusCode: 413 });
+    if (size > limit) throw Object.assign(new Error('请求体超过大小限制'), { statusCode: 413 });
     chunks.push(chunk);
   }
   try {

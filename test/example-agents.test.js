@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { callA2AAgent, resolveAgentCard } from '../src/a2a.js';
 import { startExampleAgents, stopExampleAgents } from '../examples/agents/server.js';
 import { EvaluationPipeline } from '../src/pipeline.js';
@@ -52,7 +54,7 @@ test('calls the A2A 0.3 JSON-RPC portfolio risk agent and extracts task artifact
 
 test('runs a complete live-mode platform evaluation against a real A2A agent', async () => {
   const card = (await resolveAgentCard('service-url', agents[1].origin)).card;
-  const store = new EvaluationStore(`/tmp/agent-roast-live-${process.pid}.json`);
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-live-${process.pid}.json`));
   const pipeline = new EvaluationPipeline(store, new EventEmitter());
   const created = await pipeline.create({
     mode: 'live', agentCard: card,

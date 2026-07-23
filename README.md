@@ -7,6 +7,7 @@
 ## 已实现功能
 
 - A2A 1.0 Agent Card 校验，兼容 0.3 顶层 `url` 形态；
+- 独立 Agent 协议检查台：受访问密钥保护，一次性检查发现、Card、普通调用和可选流式调用，不写入评测历史；
 - 文件拖拽、文件选择、JSON 粘贴、Agent Card URL 与服务根地址自动发现；
 - 1–5 个同 prompt 测试用例；
 - 投研 Agent 必要性五维评分，识别金融数据、时点、因子、回测、组合风险、协作、证据与合规信号；
@@ -27,7 +28,7 @@
 - 响应式前端、键盘焦点与 reduced-motion 支持；
 - Node 原生测试，无第三方运行依赖。
 
-详细实现与接口见 [架构文档](./docs/ARCHITECTURE.md)，逐项公式和阈值见 [评测与打分规则](./docs/SCORING.md)，当前技术债和实施优先级见 [全仓代码审查](./docs/CODE_REVIEW.md)。项目启动后也可以直接打开 `http://localhost:4173/methodology.html`，或点击顶部“评测规则”。
+详细实现与接口见 [架构文档](./docs/ARCHITECTURE.md)，逐项公式和阈值见 [评测与打分规则](./docs/SCORING.md)，Agent 测试入口见 [协议检查台使用指南](./docs/AGENT_DIAGNOSTICS_GUIDE.md)，当前技术债和实施优先级见 [全仓代码审查](./docs/CODE_REVIEW.md)。项目启动后也可以直接打开 `http://localhost:4173/methodology.html`，或点击顶部“评测规则”。
 
 ## 快速启动
 
@@ -41,6 +42,8 @@ npm start
 项目会在启动时自动读取根目录 `.env`；当前工作区已经生成该文件，首次克隆时可用上面的命令从模板创建。系统或终端中已经存在的同名环境变量优先级更高，便于 CI、容器和临时命令覆盖。
 
 打开 `http://localhost:4173`，选择任一“本地真实样本”，再点击“送进评测舱”即可体验演示评测。
+
+设置 `AGENT_DIAGNOSTICS_ACCESS_KEY` 后，可打开 `http://localhost:4173/agent-check.html` 使用独立协议检查台。平台访问密钥与 Agent Bearer Token 用途不同，配置与安全说明见 [Agent 协议检查台使用指南](./docs/AGENT_DIAGNOSTICS_GUIDE.md)。
 
 开发模式：
 
@@ -332,6 +335,9 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 | `PORT` | `4173` | HTTP 端口 |
 | `DATA_FILE` | `data/evaluations.json` | 评测持久化文件 |
 | `ALLOW_PRIVATE_AGENT_URLS` | `false` | 是否允许 localhost/私网 Agent URL，仅建议本地开发开启 |
+| `AGENT_DIAGNOSTICS_ACCESS_KEY` | 空 | 保护一次性 Agent 协议检查 API；为空时接口关闭 |
+| `AGENT_DIAGNOSTICS_RATE_LIMIT` | `6` | 每个诊断访问密钥每分钟的调用上限 |
+| `AGENT_DIAGNOSTICS_CONCURRENCY` | `4` | Agent 诊断全局并发上限 |
 | `PANDA_DATA_ENABLED` | `false` | 是否启用 PandaAI Quant 数据源 |
 | `PANDA_DATA_AUTO_VERIFY` | `false` | 真实 benchmark 前建立参考数据快照并验真输出 |
 | `PANDA_DATA_USERNAME` | 空 | 11 位手机号或 86 开头的数据服务账号，仅写入本机 `.env` |

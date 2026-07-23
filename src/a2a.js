@@ -1,5 +1,4 @@
-import { isIP } from 'node:net';
-import { withTimeout } from './utils.js';
+import { safeHttpRequest, validateSafeUrl } from './safe-http.js';
 
 const LEGACY_BINDINGS = { JSONRPC: 'JSONRPC', 'JSON-RPC': 'JSONRPC', HTTP_JSON: 'HTTP+JSON', 'HTTP+JSON': 'HTTP+JSON' };
 
@@ -33,11 +32,15 @@ export function getInterfaces(card) {
   if (Array.isArray(card?.supportedInterfaces)) {
     return card.supportedInterfaces
       .filter((item) => isNonEmptyString(item?.url))
-      .map((item) => ({
-        url: item.url,
-        binding: LEGACY_BINDINGS[item.protocolBinding] || item.protocolBinding || 'HTTP+JSON',
-        version: item.protocolVersion || card.protocolVersion || '1.0'
-      }));
+      .map((item) => {
+        const normalized = {
+          url: item.url,
+          binding: LEGACY_BINDINGS[item.protocolBinding] || item.protocolBinding || '',
+          version: item.protocolVersion || card.protocolVersion || ''
+        };
+        if (isNonEmptyString(item.tenant)) normalized.tenant = item.tenant;
+        return normalized;
+      });
   }
   if (isNonEmptyString(card?.url)) {
     return [{ url: card.url, binding: LEGACY_BINDINGS[card.preferredTransport] || 'JSONRPC', version: card.protocolVersion || '0.3' }];
@@ -45,22 +48,17 @@ export function getInterfaces(card) {
   return [];
 }
 
+export function selectInterface(card) {
+  return getInterfaces(card).find((item) =>
+    ['HTTP+JSON', 'JSONRPC'].includes(item.binding) &&
+    (/^1\./.test(String(item.version)) || /^0\.3(?:\.|$)/.test(String(item.version)))
+  ) || null;
+}
+
 function isNonEmptyString(value) { return typeof value === 'string' && value.trim().length > 0; }
 
 export function assertSafeAgentUrl(rawUrl) {
-  let url;
-  try { url = new URL(rawUrl); } catch { throw new Error('Agent 接口 URL 不合法'); }
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Agent 接口仅支持 HTTP(S)');
-  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  const privateName = hostname === 'localhost' || hostname.endsWith('.local');
-  const ipVersion = isIP(hostname);
-  const privateIpv4 = ipVersion === 4 && (/^127\./.test(hostname) || /^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname) || /^172\.(1[6-9]|2\d|3[01])\./.test(hostname));
-  const privateIpv6 = ipVersion === 6 && (hostname === '::' || hostname === '::1' || /^f[cd]/i.test(hostname) || /^fe[89ab]/i.test(hostname) || /^::ffff:/i.test(hostname));
-  const privateIp = privateIpv4 || privateIpv6;
-  if ((privateName || privateIp) && process.env.ALLOW_PRIVATE_AGENT_URLS !== 'true') {
-    throw new Error('为防止 SSRF，默认禁止内网 Agent URL；本地开发可设置 ALLOW_PRIVATE_AGENT_URLS=true');
-  }
-  return url;
+  return validateSafeUrl(rawUrl, { allowPrivate: process.env.ALLOW_PRIVATE_AGENT_URLS === 'true' });
 }
 
 export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000) {
@@ -69,14 +67,13 @@ export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000) {
   const target = sourceType === 'service-url'
     ? new URL('/.well-known/agent-card.json', input.origin)
     : input;
-  const response = await fetch(target, {
+  const response = await safeHttpRequest(target.toString(), {
     headers: { accept: 'application/json, application/a2a+json' },
-    redirect: 'error',
-    signal: AbortSignal.timeout(timeoutMs)
+    timeoutMs,
+    maxBytes: 1_000_000
   });
-  if (!response.ok) throw new Error(`Agent Card 获取失败：HTTP ${response.status}`);
-  const text = await response.text();
-  if (text.length > 1_000_000) throw new Error('Agent Card 超过 1 MB');
+  if (response.status < 200 || response.status >= 300) throw new Error(`Agent Card 获取失败：HTTP ${response.status}`);
+  const text = response.body.toString('utf8');
   let card;
   try { card = JSON.parse(text); } catch { throw new Error('远程地址没有返回合法 JSON'); }
   const validation = validateAgentCard(card);
@@ -85,25 +82,153 @@ export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000) {
 }
 
 export async function callA2AAgent(card, prompt, timeoutMs = 45_000, signal) {
-  const [target] = getInterfaces(card);
+  const target = selectInterface(card);
   if (!target) throw new Error('没有可调用的 A2A 接口');
-  const url = assertSafeAgentUrl(target.url);
-  const messageId = crypto.randomUUID();
+  assertSafeAgentUrl(target.url);
+  const requestId = crypto.randomUUID();
+  const request = buildA2ARequest(target, prompt, { requestId, messageId: crypto.randomUUID() });
+  const response = await safeHttpRequest(request.url, {
+    method: 'POST',
+    headers: request.headers,
+    body: JSON.stringify(request.body),
+    signal,
+    timeoutMs,
+    maxBytes: 2_000_000
+  });
+  if (response.status < 200 || response.status >= 300) throw new Error(`A2A 返回 HTTP ${response.status}`);
+  let payload;
+  try { payload = JSON.parse(response.body.toString('utf8')); } catch { throw new Error('A2A 返回的不是合法 JSON'); }
+  const parsed = parseA2AResponse(target, payload, requestId);
+  return { raw: payload, text: extractAgentText(parsed) };
+}
+
+export function buildA2ARequest(target, prompt, options = {}) {
+  const requestId = options.requestId || crypto.randomUUID();
+  const messageId = options.messageId || crypto.randomUUID();
+  const streaming = options.streaming === true;
   const isJsonRpc = target.binding === 'JSONRPC';
   const isV1 = !String(target.version).startsWith('0.');
-  const endpoint = isJsonRpc ? url : new URL(url.pathname.endsWith('/') ? 'message:send' : `${url.pathname}/message:send`, url);
-  const body = isJsonRpc
-    ? { jsonrpc: '2.0', id: messageId, method: isV1 ? 'SendMessage' : 'message/send', params: { message: { role: isV1 ? 'ROLE_USER' : 'user', messageId, parts: [isV1 ? { text: prompt } : { kind: 'text', text: prompt }] } } }
-    : { message: { role: 'ROLE_USER', messageId, parts: [{ text: prompt }] }, configuration: { acceptedOutputModes: ['text/plain', 'application/json'] } };
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'content-type': isJsonRpc ? 'application/json' : 'application/a2a+json', 'a2a-version': target.version },
-    body: JSON.stringify(body),
-    signal: withTimeout(signal, timeoutMs)
-  });
-  if (!response.ok) throw new Error(`A2A 返回 HTTP ${response.status}`);
-  const payload = await response.json();
-  return { raw: payload, text: extractAgentText(payload) };
+  if (!['JSONRPC', 'HTTP+JSON'].includes(target.binding)) throw new Error(`不支持的 A2A binding：${target.binding}`);
+  const message = {
+    role: isV1 ? 'ROLE_USER' : 'user',
+    messageId,
+    parts: [isV1 ? { text: String(prompt) } : { kind: 'text', text: String(prompt) }]
+  };
+  const params = { message };
+  if (target.tenant) params.tenant = target.tenant;
+  if (isJsonRpc) {
+    return {
+      url: assertSafeAgentUrl(target.url).toString(),
+      headers: { 'content-type': 'application/json', 'a2a-version': target.version },
+      body: {
+        jsonrpc: '2.0',
+        id: requestId,
+        method: streaming ? (isV1 ? 'SendStreamingMessage' : 'message/stream') : (isV1 ? 'SendMessage' : 'message/send'),
+        params
+      },
+      requestId
+    };
+  }
+  const endpoint = appendOperation(target.url, streaming ? 'message:stream' : 'message:send');
+  const body = {
+    message,
+    configuration: { acceptedOutputModes: ['text/plain', 'application/json'] }
+  };
+  if (target.tenant) body.tenant = target.tenant;
+  return {
+    url: endpoint,
+    headers: { 'content-type': isV1 ? 'application/a2a+json' : 'application/json', 'a2a-version': target.version },
+    body,
+    requestId
+  };
+}
+
+export function parseA2AResponse(target, payload, requestId) {
+  let root = payload;
+  if (target.binding === 'JSONRPC') {
+    if (!payload || payload.jsonrpc !== '2.0') throw new Error('A2A JSON-RPC 响应结构无效');
+    if (String(payload.id) !== String(requestId)) throw new Error('A2A 响应请求 ID 不匹配');
+    if (payload.error) throw new Error(`A2A 协议错误：${payload.error.message || payload.error.code || 'unknown'}`);
+    root = payload.result;
+  }
+  const legacyPayload = String(target.version).startsWith('0.') && (isMessageLike(root) || isTaskLike(root));
+  if (!root || typeof root !== 'object' || (!root.message && !root.task && !legacyPayload)) {
+    throw new Error('A2A 响应缺少 Message 或 Task');
+  }
+  if (root.message && !isMessageLike(root.message)) throw new Error('A2A Message 响应结构无效');
+  if (root.task && !isTaskLike(root.task)) throw new Error('A2A Task 响应结构无效');
+  return root;
+}
+
+export function parseSseEvents(text, options = {}) {
+  const maxEvents = options.maxEvents || 256;
+  const maxEventBytes = options.maxEventBytes || 64 * 1024;
+  const events = [];
+  let dataLines = [];
+  const flush = () => {
+    if (!dataLines.length) return;
+    const data = dataLines.join('\n');
+    dataLines = [];
+    if (Buffer.byteLength(data) > maxEventBytes) throw new Error('SSE 单个事件超过大小限制');
+    let parsed;
+    try { parsed = JSON.parse(data); } catch { throw new Error('SSE data 不是合法 JSON'); }
+    events.push(parsed);
+    if (events.length > maxEvents) throw new Error('SSE 事件数量超过限制');
+  };
+  for (const rawLine of String(text).split(/\n/)) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    if (line === '') {
+      flush();
+      continue;
+    }
+    if (line.startsWith(':')) continue;
+    if (line === 'data') dataLines.push('');
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
+  }
+  flush();
+  return events;
+}
+
+export function validateStreamResult(target, events, requestId) {
+  if (!events.length) throw new Error('SSE 未返回有效事件');
+  let terminal = false;
+  for (const event of events) {
+    let value = event;
+    if (target.binding === 'JSONRPC') {
+      if (event?.jsonrpc !== '2.0') throw new Error('SSE JSON-RPC 事件结构无效');
+      if (String(event.id) !== String(requestId)) throw new Error('SSE 事件请求 ID 不匹配');
+      if (event.error) throw new Error(`A2A 流式协议错误：${event.error.message || event.error.code || 'unknown'}`);
+      value = event.result;
+    }
+    if (!value || typeof value !== 'object') throw new Error('SSE 事件缺少协议结果');
+    if (value.message || (String(target.version).startsWith('0.') && isMessageLike(value))) terminal = true;
+    if (value.statusUpdate?.final === true || (value.kind === 'status-update' && value.final === true)) terminal = true;
+    const state = value.task?.status?.state || value.statusUpdate?.status?.state || value.status?.state;
+    if (isTerminalState(state)) terminal = true;
+  }
+  if (!terminal) throw new Error('A2A 流在结束前未到达终态');
+  return { terminal: true, eventCount: events.length, text: events.map(extractAgentText).filter(Boolean).join('\n') };
+}
+
+function appendOperation(rawUrl, operation) {
+  const url = assertSafeAgentUrl(rawUrl);
+  url.pathname = `${url.pathname.replace(/\/+$/, '')}/${operation}`;
+  return url.toString();
+}
+
+function isTerminalState(value) {
+  const normalized = String(value || '').toUpperCase().replace(/^TASK_STATE_/, '');
+  return ['COMPLETED', 'FAILED', 'CANCELED', 'CANCELLED', 'REJECTED', 'INTERRUPTED', 'INPUT_REQUIRED', 'AUTH_REQUIRED'].includes(normalized);
+}
+
+function isMessageLike(value) {
+  return value?.kind === 'message' ||
+    (typeof value?.messageId === 'string' && typeof value?.role === 'string' && Array.isArray(value?.parts));
+}
+
+function isTaskLike(value) {
+  return value?.kind === 'task' ||
+    (typeof value?.id === 'string' && value?.status && typeof value.status === 'object');
 }
 
 export function extractAgentText(payload) {
@@ -112,7 +237,11 @@ export function extractAgentText(payload) {
   const candidates = [
     root?.message?.parts,
     task?.message?.parts,
+    task?.status?.message?.parts,
+    root?.statusUpdate?.status?.message?.parts,
     task?.parts,
+    root?.artifact?.parts,
+    root?.artifactUpdate?.artifact?.parts,
     task?.artifacts?.flatMap((artifact) => artifact.parts || [])
   ].flat().filter(Boolean);
   const text = candidates.map((part) => part.text || part?.data?.text || '').filter(Boolean).join('\n');

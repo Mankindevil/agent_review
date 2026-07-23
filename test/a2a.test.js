@@ -1,6 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertSafeAgentUrl, extractAgentText, getInterfaces, validateAgentCard } from '../src/a2a.js';
+import {
+  assertSafeAgentUrl,
+  buildA2ARequest,
+  extractAgentText,
+  getInterfaces,
+  parseA2AResponse,
+  parseSseEvents,
+  selectInterface,
+  validateAgentCard,
+  validateStreamResult
+} from '../src/a2a.js';
 import { buildRoast, judgeOutput, scoreComplexity } from '../src/scoring.js';
 
 const card = {
@@ -33,6 +43,161 @@ test('rejects malformed field types without throwing', () => {
 test('supports legacy A2A cards with a top-level url', () => {
   const result = getInterfaces({ url: 'https://example.com/a2a', preferredTransport: 'JSONRPC', protocolVersion: '0.3' });
   assert.deepEqual(result[0], { url: 'https://example.com/a2a', binding: 'JSONRPC', version: '0.3' });
+});
+
+test('selects the first supported interface and preserves its tenant', () => {
+  const target = selectInterface({
+    supportedInterfaces: [
+      { url: 'wss://example.com/a2a', protocolBinding: 'CUSTOM', protocolVersion: '1.0' },
+      { url: 'https://example.com/rpc', protocolBinding: 'JSONRPC', protocolVersion: '1.0', tenant: 'desk-7' },
+      { url: 'https://example.com/rest', protocolBinding: 'HTTP+JSON', protocolVersion: '1.0' }
+    ]
+  });
+  assert.deepEqual(target, {
+    url: 'https://example.com/rpc',
+    binding: 'JSONRPC',
+    version: '1.0',
+    tenant: 'desk-7'
+  });
+});
+
+test('does not assume required 1.0 interface metadata or an unsupported version', () => {
+  assert.equal(selectInterface({
+    supportedInterfaces: [{ url: 'https://example.com/a2a', protocolVersion: '1.0' }]
+  }), null);
+  assert.equal(selectInterface({
+    supportedInterfaces: [{ url: 'https://example.com/a2a', protocolBinding: 'HTTP+JSON' }]
+  }), null);
+  assert.equal(selectInterface({
+    supportedInterfaces: [{ url: 'https://example.com/a2a', protocolBinding: 'HTTP+JSON', protocolVersion: '2.0' }]
+  }), null);
+});
+
+test('builds versioned A2A requests with tenant and binding-specific endpoints', () => {
+  const rpc = buildA2ARequest(
+    { url: 'https://example.com/rpc', binding: 'JSONRPC', version: '1.0', tenant: 'desk-7' },
+    'hello',
+    { requestId: 'req-1', messageId: 'msg-1' }
+  );
+  assert.equal(rpc.url, 'https://example.com/rpc');
+  assert.equal(rpc.body.method, 'SendMessage');
+  assert.equal(rpc.body.params.tenant, 'desk-7');
+  assert.equal(rpc.body.params.message.messageId, 'msg-1');
+
+  const legacy = buildA2ARequest(
+    { url: 'https://example.com/a2a', binding: 'JSONRPC', version: '0.3' },
+    'hello',
+    { requestId: 'req-2', messageId: 'msg-2' }
+  );
+  assert.equal(legacy.body.method, 'message/send');
+  assert.equal(legacy.body.params.message.role, 'user');
+
+  const rest = buildA2ARequest(
+    { url: 'https://example.com/a2a/v1', binding: 'HTTP+JSON', version: '1.0' },
+    'hello',
+    { requestId: 'req-3', messageId: 'msg-3', streaming: true }
+  );
+  assert.equal(rest.url, 'https://example.com/a2a/v1/message:stream');
+  assert.equal(rest.headers['content-type'], 'application/a2a+json');
+
+  const legacyRest = buildA2ARequest(
+    { url: 'https://example.com/a2a/v1', binding: 'HTTP+JSON', version: '0.3' },
+    'hello',
+    { requestId: 'req-4', messageId: 'msg-4' }
+  );
+  assert.equal(legacyRest.headers['content-type'], 'application/json');
+});
+
+test('rejects JSON-RPC errors and mismatched response ids', () => {
+  const target = { url: 'https://example.com/rpc', binding: 'JSONRPC', version: '1.0' };
+  assert.throws(
+    () => parseA2AResponse(target, { jsonrpc: '2.0', id: 'other', result: { message: {} } }, 'req-1'),
+    /请求 ID/
+  );
+  assert.throws(
+    () => parseA2AResponse(target, { jsonrpc: '2.0', id: 'req-1', error: { code: -32602, message: 'bad token' } }, 'req-1'),
+    /bad token/
+  );
+  assert.throws(
+    () => parseA2AResponse(target, { jsonrpc: '2.0', id: 'req-1', result: { message: {} } }, 'req-1'),
+    /Message/
+  );
+  assert.throws(
+    () => parseA2AResponse(target, { jsonrpc: '2.0', id: 'req-1', result: { task: { status: {} } } }, 'req-1'),
+    /Task/
+  );
+});
+
+test('accepts legacy 0.3 JSON-RPC results without a 1.0 response wrapper', () => {
+  const target = { url: 'https://example.com/rpc', binding: 'JSONRPC', version: '0.3' };
+  const message = {
+    kind: 'message',
+    messageId: 'reply-1',
+    role: 'agent',
+    parts: [{ kind: 'text', text: 'legacy reply' }]
+  };
+  assert.equal(
+    parseA2AResponse(target, { jsonrpc: '2.0', id: 'req-1', result: message }, 'req-1'),
+    message
+  );
+});
+
+test('parses SSE frames and requires a terminal stream result', () => {
+  const text = [
+    ': heartbeat\r\n',
+    'data: {"jsonrpc":"2.0","id":"req-1","result":{"task":{"id":"task-1","status":{"state":"TASK_STATE_WORKING"}}}}\r\n\r\n',
+    'data: {"jsonrpc":"2.0","id":"req-1","result":{"statusUpdate":{"taskId":"task-1",\r\n',
+    'data: "status":{"state":"TASK_STATE_COMPLETED"}}}}\r\n\r\n'
+  ].join('');
+  const events = parseSseEvents(text);
+  assert.equal(events.length, 2);
+  assert.equal(validateStreamResult({ binding: 'JSONRPC', version: '1.0' }, events, 'req-1').terminal, true);
+
+  const partial = parseSseEvents('data: {"jsonrpc":"2.0","id":"req-1","result":{"task":{"id":"task-1","status":{"state":"TASK_STATE_WORKING"}}}}\n\n');
+  assert.throws(
+    () => validateStreamResult({ binding: 'JSONRPC', version: '1.0' }, partial, 'req-1'),
+    /终态/
+  );
+  assert.throws(
+    () => validateStreamResult(
+      { binding: 'JSONRPC', version: '1.0' },
+      [{ jsonrpc: '2.0', id: 'other', result: { message: { messageId: 'm', role: 'ROLE_AGENT', parts: [] } } }],
+      'req-1'
+    ),
+    /请求 ID/
+  );
+  assert.throws(
+    () => validateStreamResult(
+      { binding: 'JSONRPC', version: '1.0' },
+      [{ jsonrpc: '2.0', id: 'req-1', error: { code: -32603, message: 'stream broke' } }],
+      'req-1'
+    ),
+    /stream broke/
+  );
+  assert.throws(
+    () => parseSseEvents('data: {"one":1}\n\ndata: {"two":2}\n\n', { maxEvents: 1 }),
+    /事件数量/
+  );
+  assert.throws(
+    () => parseSseEvents('data: {"large":"payload"}\n\n', { maxEventBytes: 4 }),
+    /单个事件/
+  );
+});
+
+test('accepts a legacy 0.3 terminal status update stream', () => {
+  const events = [{
+    jsonrpc: '2.0',
+    id: 'req-1',
+    result: {
+      kind: 'status-update',
+      taskId: 'task-1',
+      final: true,
+      status: { state: 'completed', message: { parts: [{ kind: 'text', text: 'legacy done' }] } }
+    }
+  }];
+  const result = validateStreamResult({ binding: 'JSONRPC', version: '0.3' }, events, 'req-1');
+  assert.equal(result.terminal, true);
+  assert.match(result.text, /legacy done/);
 });
 
 test('blocks loopback and private IPv6 Agent URLs by default', () => {
