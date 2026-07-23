@@ -53,7 +53,7 @@ export const server = createServer(async (request, response) => {
       request.once('aborted', abort);
       response.once('close', () => { if (!response.writableEnded) abort(); });
       try {
-        const input = await readJsonBody(request, 32 * 1024);
+        const input = await readJsonBody(request, Math.floor(1.25 * 1024 * 1024));
         return json(response, 200, await runAgentDiagnostics(input, {
           signal: controller.signal,
           secrets: [process.env.AGENT_DIAGNOSTICS_ACCESS_KEY]

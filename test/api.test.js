@@ -202,40 +202,55 @@ test('protects diagnostics before parsing its request body', async () => {
   const tooLarge = await fetch(`${origin}/api/agent-diagnostics`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer test-diagnostics-key' },
-    body: JSON.stringify({ padding: 'x'.repeat(33 * 1024) })
+    body: JSON.stringify({ padding: 'x'.repeat(Math.floor(1.25 * 1024 * 1024) + 1) })
   });
   assert.equal(tooLarge.status, 413);
 });
 
 test('returns API input errors but keeps upstream diagnostics failures in HTTP 200 reports', async () => {
+  const localCard = {
+    name: 'Local Agent',
+    description: 'Local failure target.',
+    url: 'http://127.0.0.1:1',
+    protocolVersion: '0.3',
+    skills: [{ id: 'status', name: 'Status', description: 'Return status.' }]
+  };
   const invalid = await fetch(`${origin}/api/agent-diagnostics`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer test-diagnostics-key' },
     body: JSON.stringify({
-      url: 'http://127.0.0.1:1',
-      sourceType: 'service-url',
-      runStreaming: true
+      agentCard: [localCard],
+      authMethod: 'none',
+      prompt: 'status',
+      attestations: { deepseekV4Pro: true, authorizedDataOnly: true }
     })
   });
   assert.equal(invalid.status, 400);
-  assert.match((await invalid.json()).error, /再次真实执行/);
+  assert.match((await invalid.json()).error, /单个|对象/);
 
   const before = await (await fetch(`${origin}/api/evaluations`)).json();
   const response = await fetch(`${origin}/api/agent-diagnostics`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer test-diagnostics-key' },
     body: JSON.stringify({
-      url: 'http://127.0.0.1:1',
-      sourceType: 'service-url',
-      timeoutMs: 5000
+      agentCard: {
+        ...localCard,
+        description: `Local failure target.${'x'.repeat(40 * 1024)}`
+      },
+      authMethod: 'none',
+      prompt: 'status',
+      timeoutMs: 60_000,
+      attestations: { deepseekV4Pro: true, authorizedDataOnly: true }
     })
   });
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'no-store');
   const report = await response.json();
   assert.equal(report.ok, false);
-  assert.equal(report.checks[0].status, 'failed');
-  assert.equal(report.checks[1].status, 'blocked');
+  assert.equal(report.checks[0].status, 'passed');
+  assert.equal(report.checks[1].status, 'passed');
+  assert.equal(report.checks[2].status, 'failed');
+  assert.equal(report.technicalReadinessOk, false);
   const after = await (await fetch(`${origin}/api/evaluations`)).json();
   assert.equal(after.length, before.length);
 });
