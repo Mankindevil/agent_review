@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 const read = (name) => readFile(new URL(`../deploy/${name}`, import.meta.url), 'utf8');
 
-test('systemd runs as the dedicated user with a root-owned environment file', async () => {
+test('systemd runs as the dedicated user with the root-managed environment-file path', async () => {
   const unit = await read('agent-review.service');
   assert.match(unit, /^User=agent-review$/m);
   assert.match(unit, /^EnvironmentFile=\/etc\/agent-review\/agent-review\.env$/m);
@@ -18,6 +18,7 @@ test('nginx keeps ACME on HTTP and proxies production through TLS', async () => 
   assert.match(bootstrap, /\/\.well-known\/acme-challenge\//);
   assert.match(production, /listen 443 ssl http2/);
   assert.match(production, /proxy_pass http:\/\/127\.0\.0\.1:4173/);
+  assert.match(production, /proxy_send_timeout 1260s/);
   assert.match(production, /proxy_read_timeout 1260s/);
   assert.match(production, /ssl_certificate \/etc\/letsencrypt\/live\/__PUBLIC_IP__\/fullchain\.pem/);
 });
