@@ -181,9 +181,20 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
   for (const term of [
     'AGENT_DIAGNOSTICS_ACCESS_KEY',
     '平台访问密钥',
+    'Agent Card JSON',
+    '一次只测试一张',
+    '多 Agent',
+    'tenant',
     'Agent Bearer Token',
+    'DeepSeek V4 Pro',
+    '最终报名表',
+    'confirmAuthorizationTarget',
     '再次真实执行',
-    'allowCrossOriginAuthorization',
+    '1 MiB',
+    '1.25 MiB',
+    '20 分钟',
+    'technicalReadinessOk',
+    'declared',
     'passed',
     'blocked',
     '429',
@@ -195,6 +206,8 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
   assert.match(envExample, /AGENT_DIAGNOSTICS_CONCURRENCY=4/);
   assert.match(readme, /AGENT_DIAGNOSTICS_GUIDE\.md/);
   assert.match(readme, /agent-check\.html/);
+  assert.match(readme, /Agent Card JSON 技术预检/);
+  assert.match(readme, /20 分钟/);
 });
 
 test('protects diagnostics before parsing its request body', async () => {
