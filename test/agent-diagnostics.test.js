@@ -16,6 +16,17 @@ const card = {
   skills: [{ id: 'status', name: 'Status', description: 'Return service status.' }]
 };
 
+const baseInput = {
+  agentCard: card,
+  authMethod: 'none',
+  prompt: 'status',
+  timeoutMs: 300_000,
+  attestations: {
+    deepseekV4Pro: true,
+    authorizedDataOnly: true
+  }
+};
+
 test('protects diagnostics with configuration, access key, rate, and concurrency limits', () => {
   const missing = createDiagnosticsGuard({ accessKey: '' });
   assert.throws(() => missing.enter('Bearer any'), (error) => error.statusCode === 503);
@@ -43,132 +54,216 @@ test('protects diagnostics with configuration, access key, rate, and concurrency
   assert.doesNotThrow(() => guard.enter('Bearer platform-secret')());
 });
 
-test('validates bounded input and requires confirmation for a second streaming call', () => {
+test('accepts one bounded Agent Card and rejects legacy, array, timeout, prompt, and attestation input', () => {
+  const normalized = validateDiagnosticsInput(baseInput);
+  assert.equal(normalized.agentCard, card);
+  assert.equal(normalized.timeoutMs, 300_000);
+  assert.equal(normalized.authMethod, 'none');
+
   assert.throws(
-    () => validateDiagnosticsInput({ url: 'https://agent.example', sourceType: 'service-url', runStreaming: true }),
-    /再次真实执行/
+    () => validateDiagnosticsInput({ ...baseInput, agentCard: [card] }),
+    /单个|对象/
   );
   assert.throws(
-    () => validateDiagnosticsInput({ url: 'https://user:pass@agent.example', sourceType: 'service-url' }),
-    /userinfo|凭据/
+    () => validateDiagnosticsInput({ ...baseInput, url: 'https://other.example' }),
+    /旧地址字段|agentCard/
   );
   assert.throws(
-    () => validateDiagnosticsInput({ url: 'https://agent.example', sourceType: 'service-url', prompt: 'x'.repeat(4001) }),
+    () => validateDiagnosticsInput({ ...baseInput, sourceType: 'card-url' }),
+    /旧地址字段|agentCard/
+  );
+  assert.throws(
+    () => validateDiagnosticsInput({ ...baseInput, timeoutMs: 59_999 }),
+    /60000/
+  );
+  assert.throws(
+    () => validateDiagnosticsInput({ ...baseInput, timeoutMs: 1_200_001 }),
+    /1200000/
+  );
+  assert.throws(
+    () => validateDiagnosticsInput({ ...baseInput, prompt: '  ' }),
     /prompt/i
   );
   assert.throws(
-    () => validateDiagnosticsInput({ url: 'http://127.0.0.1/a2a', sourceType: 'service-url' }),
-    (error) => error.statusCode === 400
+    () => validateDiagnosticsInput({
+      ...baseInput,
+      attestations: { deepseekV4Pro: false, authorizedDataOnly: true }
+    }),
+    /DeepSeek V4 Pro/
+  );
+  assert.throws(
+    () => validateDiagnosticsInput({
+      ...baseInput,
+      attestations: { deepseekV4Pro: true, authorizedDataOnly: false }
+    }),
+    /授权数据/
+  );
+  assert.throws(
+    () => validateDiagnosticsInput({
+      ...baseInput,
+      agentCard: { ...card, padding: 'x'.repeat(1024 * 1024) }
+    }),
+    /1 MiB/
   );
 });
 
-test('returns stable dependency states when discovery fails', async () => {
-  const report = await runAgentDiagnostics(
-    { url: 'https://agent.example', sourceType: 'service-url' },
-    { request: async () => { throw Object.assign(new Error('lookup failed'), { code: 'dns' }); } }
+test('requires consistent Agent authentication and explicit target confirmation', () => {
+  assert.throws(
+    () => validateDiagnosticsInput({ ...baseInput, authMethod: 'none', agentAuthorization: 'secret' }),
+    /无鉴权/
   );
-  assert.equal(report.ok, false);
-  assert.deepEqual(report.checks.map((check) => [check.id, check.status]), [
-    ['discovery', 'failed'],
-    ['card-validation', 'blocked'],
-    ['call', 'blocked'],
-    ['stream', 'blocked']
-  ]);
-  assert.match(report.checks[0].suggestion, /DNS|域名/);
+  assert.throws(
+    () => validateDiagnosticsInput({ ...baseInput, authMethod: 'bearer', agentAuthorization: '' }),
+    /Token/
+  );
+  assert.throws(
+    () => validateDiagnosticsInput({
+      ...baseInput,
+      authMethod: 'bearer',
+      agentAuthorization: 'secret',
+      confirmAuthorizationTarget: false
+    }),
+    /目标 origin/
+  );
+  assert.throws(
+    () => validateDiagnosticsInput({
+      ...baseInput,
+      authMethod: 'bearer',
+      agentAuthorization: 'line-one\nline-two',
+      confirmAuthorizationTarget: true
+    }),
+    /换行|8 KiB/
+  );
+  const bearer = validateDiagnosticsInput({
+    ...baseInput,
+    authMethod: 'bearer',
+    agentAuthorization: 'secret',
+    confirmAuthorizationTarget: true
+  });
+  assert.equal(bearer.agentAuthorization, 'secret');
+  assert.equal(bearer.confirmAuthorizationTarget, true);
 });
 
-test('reports an unsafe or malformed interface URL as a card validation failure', async () => {
-  for (const url of ['not-a-url', 'http://127.0.0.1/a2a']) {
-    const unsafeCard = {
-      ...card,
-      supportedInterfaces: [{ ...card.supportedInterfaces[0], url }]
-    };
-    const report = await runAgentDiagnostics(
-      { url: 'https://agent.example', sourceType: 'service-url' },
-      { request: async () => jsonResponse(unsafeCard) }
-    );
-    assert.equal(report.ok, false);
-    assert.equal(report.checks[1].status, 'failed');
-    assert.equal(report.checks[2].status, 'blocked');
-    assert.equal(report.checks[3].status, 'blocked');
-  }
-});
-
-test('keeps platform and Agent credentials scoped and skips streaming by default', async () => {
+test('uses the uploaded Card directly, propagates tenant, and reports technical readiness', async () => {
   const calls = [];
   const request = async (url, options) => {
     calls.push({ url, options });
-    if (options.method !== 'POST') return jsonResponse(card);
+    const body = JSON.parse(options.body);
+    assert.equal(body.params.tenant, 'finance');
+    return jsonResponse({
+      jsonrpc: '2.0',
+      id: body.id,
+      result: {
+        message: {
+          messageId: 'reply',
+          role: 'ROLE_AGENT',
+          parts: [{ text: 'healthy' }]
+        }
+      }
+    });
+  };
+
+  const report = await runAgentDiagnostics(baseInput, { request });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://agent.example/a2a');
+  assert.equal(calls[0].options.method, 'POST');
+  assert.equal(calls[0].options.timeoutMs, 300_000);
+  assert.equal('authorization' in calls[0].options.headers, false);
+  assert.deepEqual(report.checks.map(({ id, status }) => [id, status]), [
+    ['card-input', 'passed'],
+    ['card-validation', 'passed'],
+    ['call', 'passed'],
+    ['stream', 'skipped']
+  ]);
+  assert.equal(report.ok, true);
+  assert.equal(report.technicalReadinessOk, true);
+  assert.deepEqual(
+    report.technicalReadiness.checks.map(({ id, status }) => [id, status]),
+    [
+      ['agent-card', 'passed'],
+      ['a2a-call', 'passed'],
+      ['response-time', 'passed'],
+      ['competition-attestations', 'declared']
+    ]
+  );
+  assert.equal(report.technicalReadiness.checks[2].details.timeoutMs, 300_000);
+});
+
+test('blocks malformed and unsafe Cards before any network request', async () => {
+  for (const agentCard of [
+    { ...card, skills: [] },
+    {
+      ...card,
+      supportedInterfaces: [{ ...card.supportedInterfaces[0], url: 'http://127.0.0.1/a2a' }]
+    }
+  ]) {
+    let calls = 0;
+    const report = await runAgentDiagnostics(
+      { ...baseInput, agentCard },
+      { request: async () => { calls += 1; throw new Error('must not run'); } }
+    );
+    assert.equal(calls, 0);
+    assert.equal(report.ok, false);
+    assert.equal(report.checks[0].status, 'passed');
+    assert.equal(report.checks[1].status, 'failed');
+    assert.equal(report.checks[2].status, 'blocked');
+    assert.equal(report.checks[3].status, 'blocked');
+    assert.equal(report.technicalReadinessOk, false);
+  }
+});
+
+test('scopes and redacts a confirmed Bearer Token', async () => {
+  const calls = [];
+  const request = async (url, options) => {
+    calls.push({ url, options });
     const body = JSON.parse(options.body);
     return jsonResponse({
       jsonrpc: '2.0',
       id: body.id,
-      result: { message: { messageId: 'reply', role: 'ROLE_AGENT', parts: [{ text: 'healthy agent-secret' }] } }
+      result: {
+        message: {
+          messageId: 'reply',
+          role: 'ROLE_AGENT',
+          parts: [{ text: 'healthy agent-secret' }]
+        }
+      }
     });
   };
   const report = await runAgentDiagnostics({
-    url: 'https://agent.example',
-    sourceType: 'service-url',
+    ...baseInput,
+    authMethod: 'bearer',
     agentAuthorization: 'agent-secret',
-    prompt: 'status'
+    confirmAuthorizationTarget: true
   }, { request, secrets: ['platform-secret'] });
 
-  assert.equal(report.ok, true);
-  assert.equal(report.streamingOk, null);
-  assert.equal(report.checks[3].status, 'skipped');
-  assert.equal('authorization' in calls[0].options.headers, false);
-  assert.equal(calls[1].options.headers.authorization, 'Bearer agent-secret');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.headers.authorization, 'Bearer agent-secret');
   assert.doesNotMatch(JSON.stringify(report), /agent-secret|platform-secret/);
   assert.match(JSON.stringify(report), /\[REDACTED\]/);
 });
 
-test('blocks cross-origin Agent credentials unless the user explicitly authorizes the target', async () => {
-  const crossOriginCard = {
-    ...card,
-    supportedInterfaces: [{ ...card.supportedInterfaces[0], url: 'https://runtime.example/a2a' }]
-  };
-  const calls = [];
-  const request = async (url, options) => {
-    calls.push({ url, options });
-    return jsonResponse(crossOriginCard);
-  };
-  const report = await runAgentDiagnostics({
-    url: 'https://cards.example/agent-card.json',
-    sourceType: 'card-url',
-    agentAuthorization: 'agent-secret'
-  }, { request });
-  assert.equal(report.checks[2].status, 'blocked');
-  assert.equal(report.checks[3].status, 'skipped');
-  assert.equal(calls.length, 1);
-  assert.match(report.checks[2].suggestion, /跨域/);
+test('reports a failed ordinary call in both diagnostics and readiness results', async () => {
+  const report = await runAgentDiagnostics(baseInput, {
+    request: async () => {
+      throw Object.assign(new Error('lookup failed'), { code: 'dns' });
+    }
+  });
 
-  calls.length = 0;
-  const allowedRequest = async (url, options) => {
-    calls.push({ url, options });
-    if (options.method !== 'POST') return jsonResponse(crossOriginCard);
-    const body = JSON.parse(options.body);
-    return jsonResponse({
-      jsonrpc: '2.0',
-      id: body.id,
-      result: { message: { messageId: 'reply', role: 'ROLE_AGENT', parts: [{ text: 'authorized' }] } }
-    });
-  };
-  const allowed = await runAgentDiagnostics({
-    url: 'https://cards.example/agent-card.json',
-    sourceType: 'card-url',
-    agentAuthorization: 'agent-secret',
-    allowCrossOriginAuthorization: true
-  }, { request: allowedRequest });
-  assert.equal(allowed.checks[2].status, 'passed');
-  assert.equal(calls.length, 2);
-  assert.equal('authorization' in calls[0].options.headers, false);
-  assert.equal(calls[1].url, 'https://runtime.example/a2a');
-  assert.equal(calls[1].options.headers.authorization, 'Bearer agent-secret');
+  assert.equal(report.ok, false);
+  assert.equal(report.technicalReadinessOk, false);
+  assert.equal(report.checks[2].status, 'failed');
+  assert.match(report.checks[2].suggestion, /DNS|域名/);
+  assert.deepEqual(
+    report.technicalReadiness.checks.slice(1, 3).map((check) => check.status),
+    ['failed', 'failed']
+  );
 });
 
-test('validates an explicitly confirmed streaming terminal event independently', async () => {
+test('uses an independent full timeout for an explicitly confirmed streaming call', async () => {
+  const timeouts = [];
   const request = async (_url, options) => {
-    if (options.method !== 'POST') return jsonResponse(card);
+    timeouts.push(options.timeoutMs);
     const body = JSON.parse(options.body);
     if (body.method === 'SendStreamingMessage') {
       return {
@@ -177,22 +272,36 @@ test('validates an explicitly confirmed streaming terminal event independently',
         body: Buffer.from(`data: ${JSON.stringify({
           jsonrpc: '2.0',
           id: body.id,
-          result: { message: { messageId: 'stream-reply', role: 'ROLE_AGENT', parts: [{ text: 'stream ok' }] } }
+          result: {
+            message: {
+              messageId: 'stream-reply',
+              role: 'ROLE_AGENT',
+              parts: [{ text: 'stream ok' }]
+            }
+          }
         })}\n\n`)
       };
     }
     return jsonResponse({
       jsonrpc: '2.0',
       id: body.id,
-      result: { message: { messageId: 'reply', role: 'ROLE_AGENT', parts: [{ text: 'normal ok' }] } }
+      result: {
+        message: {
+          messageId: 'reply',
+          role: 'ROLE_AGENT',
+          parts: [{ text: 'normal ok' }]
+        }
+      }
     });
   };
   const report = await runAgentDiagnostics({
-    url: 'https://agent.example',
-    sourceType: 'service-url',
+    ...baseInput,
+    timeoutMs: 1_200_000,
     runStreaming: true,
     confirmStreamingSideEffects: true
   }, { request });
+
+  assert.deepEqual(timeouts, [1_200_000, 1_200_000]);
   assert.equal(report.ok, true);
   assert.equal(report.streamingOk, true);
   assert.equal(report.checks[3].status, 'passed');

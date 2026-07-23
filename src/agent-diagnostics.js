@@ -9,43 +9,81 @@ import {
 } from './a2a.js';
 import { safeHttpRequest, validateSafeUrl } from './safe-http.js';
 
-const DEFAULT_PROMPT = '请返回一句简短的服务状态说明，不执行任何外部操作。';
-const CHECK_IDS = ['discovery', 'card-validation', 'call', 'stream'];
+const CHECK_IDS = ['card-input', 'card-validation', 'call', 'stream'];
+const MIN_TIMEOUT_MS = 60_000;
+const DEFAULT_TIMEOUT_MS = 300_000;
+const MAX_TIMEOUT_MS = 1_200_000;
+const MAX_CARD_BYTES = 1024 * 1024;
 
 export function validateDiagnosticsInput(input) {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) throw clientError('请求体必须是 JSON 对象');
-  const sourceType = input.sourceType;
-  if (!['service-url', 'card-url'].includes(sourceType)) throw clientError('sourceType 必须是 service-url 或 card-url');
-  if (typeof input.url !== 'string' || !input.url.trim() || input.url.length > 2048) throw clientError('url 必须是有效且不超过 2048 字符的地址');
-  let url;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw clientError('请求体必须是 JSON 对象');
+  }
+  if (Object.hasOwn(input, 'url') || Object.hasOwn(input, 'sourceType')) {
+    throw clientError('请只提交 agentCard，不要同时提交旧地址字段 url 或 sourceType');
+  }
+  if (!input.agentCard || typeof input.agentCard !== 'object' || Array.isArray(input.agentCard)) {
+    throw clientError('agentCard 必须是单个 JSON 对象');
+  }
+
+  let cardBytes;
   try {
-    url = validateSafeUrl(input.url.trim(), { allowPrivate: process.env.ALLOW_PRIVATE_AGENT_URLS === 'true' });
-  } catch (error) {
-    throw clientError(error.message);
+    cardBytes = Buffer.byteLength(JSON.stringify(input.agentCard));
+  } catch {
+    throw clientError('agentCard 必须可以序列化为 JSON');
   }
-  if (input.prompt !== undefined && (typeof input.prompt !== 'string' || [...input.prompt].length > 4000)) {
-    throw clientError('prompt 必须是最多 4000 个字符的字符串');
+  if (cardBytes > MAX_CARD_BYTES) throw clientError('agentCard 不能超过 1 MiB');
+
+  const authMethod = input.authMethod;
+  if (!['none', 'bearer'].includes(authMethod)) {
+    throw clientError('authMethod 必须是 none 或 bearer');
   }
-  if (input.agentAuthorization !== undefined) {
-    if (typeof input.agentAuthorization !== 'string' || Buffer.byteLength(input.agentAuthorization) > 8192 || /[\r\n]/.test(input.agentAuthorization)) {
-      throw clientError('agentAuthorization 必须是不含换行且不超过 8 KiB 的 Token');
-    }
+  const token = input.agentAuthorization ?? '';
+  if (typeof token !== 'string' || Buffer.byteLength(token) > 8192 || /[\r\n]/.test(token)) {
+    throw clientError('agentAuthorization 必须是不含换行且不超过 8 KiB 的 Token');
   }
+  if (authMethod === 'none' && token) throw clientError('无鉴权模式不得提交 Agent Token');
+  if (authMethod === 'none' && input.confirmAuthorizationTarget === true) {
+    throw clientError('无鉴权模式不需要确认 Agent Token 目标');
+  }
+  if (authMethod === 'bearer' && !token) throw clientError('Bearer 鉴权必须填写 Agent Token');
+  if (authMethod === 'bearer' && input.confirmAuthorizationTarget !== true) {
+    throw clientError('发送 Agent Token 前必须确认目标 origin');
+  }
+
+  if (typeof input.prompt !== 'string' || !input.prompt.trim() || [...input.prompt].length > 4000) {
+    throw clientError('prompt 必须是 1–4000 个字符的字符串');
+  }
+  const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (!Number.isInteger(timeoutMs) || timeoutMs < MIN_TIMEOUT_MS || timeoutMs > MAX_TIMEOUT_MS) {
+    throw clientError('timeoutMs 必须是 60000–1200000 之间的整数');
+  }
+
   const runStreaming = input.runStreaming === true;
   if (runStreaming && input.confirmStreamingSideEffects !== true) {
     throw clientError('启用流式检查前必须确认它会再次真实执行 Prompt');
   }
-  const numericTimeout = Number(input.timeoutMs ?? 30_000);
-  const timeoutMs = Number.isFinite(numericTimeout) ? Math.min(60_000, Math.max(5_000, Math.round(numericTimeout))) : 30_000;
+  if (input.attestations?.deepseekV4Pro !== true) {
+    throw clientError('必须确认底座模型为 DeepSeek V4 Pro');
+  }
+  if (input.attestations?.authorizedDataOnly !== true) {
+    throw clientError('必须确认 Agent 仅访问授权数据');
+  }
+
   return {
-    url: url.toString(),
-    sourceType,
-    agentAuthorization: input.agentAuthorization || '',
-    allowCrossOriginAuthorization: input.allowCrossOriginAuthorization === true,
-    prompt: input.prompt?.trim() || DEFAULT_PROMPT,
+    agentCard: input.agentCard,
+    cardBytes,
+    authMethod,
+    agentAuthorization: token,
+    confirmAuthorizationTarget: authMethod === 'bearer',
+    prompt: input.prompt.trim(),
     timeoutMs,
     runStreaming,
-    confirmStreamingSideEffects: runStreaming
+    confirmStreamingSideEffects: runStreaming,
+    attestations: {
+      deepseekV4Pro: true,
+      authorizedDataOnly: true
+    }
   };
 }
 
@@ -53,73 +91,51 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
   const input = validateDiagnosticsInput(rawInput);
   const request = options.request || safeHttpRequest;
   const startedAt = Date.now();
-  const deadline = startedAt + input.timeoutMs;
   const checks = CHECK_IDS.map((id) => emptyCheck(id));
   const secrets = [input.agentAuthorization, ...(options.secrets || [])].filter(Boolean);
   const requestOptions = (overrides = {}) => ({
     signal: options.signal,
-    timeoutMs: Math.max(1, deadline - Date.now()),
+    timeoutMs: input.timeoutMs,
     ...overrides
   });
-  const discoveryUrl = input.sourceType === 'service-url'
-    ? new URL('/.well-known/agent-card.json', new URL(input.url).origin).toString()
-    : input.url;
 
-  let card;
-  const discoveryStarted = Date.now();
-  try {
-    const response = await request(discoveryUrl, requestOptions({
-      headers: { accept: 'application/json, application/a2a+json' },
-      maxBytes: 1024 * 1024
-    }));
-    requireSuccess(response, 'Agent Card');
-    requireContentType(response, ['application/json', 'application/a2a+json'], 'Agent Card');
-    try { card = JSON.parse(response.body.toString('utf8')); } catch { throw stageError('Agent Card 不是合法 JSON', 'json'); }
-    checks[0] = passed('discovery', discoveryStarted, '已读取 Agent Card', {
-      resolvedUrl: safeDisplayUrl(discoveryUrl),
-      contentType: String(response.headers['content-type'] || '')
-    });
-  } catch (error) {
-    checks[0] = failed('discovery', discoveryStarted, error);
-    block(checks, 1, '发现阶段失败，无法继续校验或调用');
-    return redactReport(finalize(checks, input.runStreaming, startedAt), secrets);
-  }
+  const inputStarted = Date.now();
+  checks[0] = passed('card-input', inputStarted, '已接收单个 Agent Card JSON', {
+    name: truncate(input.agentCard.name, 240),
+    sizeBytes: input.cardBytes
+  });
 
+  const card = input.agentCard;
   const validationStarted = Date.now();
   const validation = validateAgentCard(card);
   const target = validation.valid ? selectInterface(card) : null;
   if (!validation.valid || !target) {
-    const reason = !validation.valid ? validation.errors.join('；') : 'Agent Card 没有平台支持的接口 binding';
+    const reason = !validation.valid
+      ? validation.errors.join('；')
+      : 'Agent Card 没有平台支持的接口 binding';
     checks[1] = failed('card-validation', validationStarted, stageError(reason, 'protocol'));
     block(checks, 2, 'Card 校验失败，无法调用 Agent');
-    return redactReport(finalize(checks, input.runStreaming, startedAt), secrets);
+    return redactReport(finalize(checks, input, startedAt), secrets);
   }
+
   let targetUrl;
   try {
-    targetUrl = validateSafeUrl(target.url, { allowPrivate: process.env.ALLOW_PRIVATE_AGENT_URLS === 'true' });
+    targetUrl = validateSafeUrl(target.url, {
+      allowPrivate: process.env.ALLOW_PRIVATE_AGENT_URLS === 'true'
+    });
   } catch (error) {
     checks[1] = failed('card-validation', validationStarted, error);
     block(checks, 2, 'Card 接口地址校验失败，无法调用 Agent');
-    return redactReport(finalize(checks, input.runStreaming, startedAt), secrets);
+    return redactReport(finalize(checks, input, startedAt), secrets);
   }
   checks[1] = passed('card-validation', validationStarted, 'Agent Card 与接口声明有效', {
     version: validation.version,
     binding: target.binding,
     targetOrigin: targetUrl.origin,
     streaming: card.capabilities?.streaming === true,
-    tenant: target.tenant || null
+    tenant: target.tenant || null,
+    skillsCount: card.skills.length
   });
-
-  const hasCrossOriginSecret = Boolean(input.agentAuthorization) &&
-    targetUrl.origin !== new URL(discoveryUrl).origin &&
-    !input.allowCrossOriginAuthorization;
-  if (hasCrossOriginSecret) {
-    checks[2] = blockedCheck('call', 'Agent Token 的目标接口与发现地址不同源', '确认目标 origin 后启用跨域凭据授权并重试。');
-    checks[3] = input.runStreaming
-      ? blockedCheck('stream', 'Agent Token 的跨域转发未获授权', '确认目标 origin 后启用跨域凭据授权并重试。')
-      : skipped('stream', '未启用流式检查');
-    return redactReport(finalize(checks, input.runStreaming, startedAt), secrets);
-  }
 
   const callStarted = Date.now();
   try {
@@ -134,7 +150,11 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
     requireSuccess(response, 'A2A');
     requireContentType(response, ['application/json', 'application/a2a+json'], 'A2A');
     let payload;
-    try { payload = JSON.parse(response.body.toString('utf8')); } catch { throw stageError('A2A 响应不是合法 JSON', 'json'); }
+    try {
+      payload = JSON.parse(response.body.toString('utf8'));
+    } catch {
+      throw stageError('A2A 响应不是合法 JSON', 'json');
+    }
     const parsed = parseA2AResponse(target, payload, normalRequest.requestId);
     checks[2] = passed('call', callStarted, '普通 A2A 调用成功', {
       binding: target.binding,
@@ -161,7 +181,10 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
       }));
       requireSuccess(response, 'A2A 流式');
       requireContentType(response, ['text/event-stream'], 'A2A 流式');
-      const events = parseSseEvents(response.body.toString('utf8'), { maxEvents: 256, maxEventBytes: 64 * 1024 });
+      const events = parseSseEvents(response.body.toString('utf8'), {
+        maxEvents: 256,
+        maxEventBytes: 64 * 1024
+      });
       const result = validateStreamResult(target, events, streamRequest.requestId);
       checks[3] = passed('stream', streamStarted, '流式 A2A 调用到达终态', {
         eventCount: result.eventCount,
@@ -171,15 +194,30 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
       checks[3] = failed('stream', streamStarted, error);
     }
   }
-  return redactReport(finalize(checks, input.runStreaming, startedAt), secrets);
+
+  return redactReport(finalize(checks, input, startedAt), secrets);
 }
 
 function emptyCheck(id) {
-  return { id, status: 'blocked', durationMs: 0, summary: '尚未执行', details: {}, suggestion: null };
+  return {
+    id,
+    status: 'blocked',
+    durationMs: 0,
+    summary: '尚未执行',
+    details: {},
+    suggestion: null
+  };
 }
 
 function passed(id, startedAt, summary, details = {}) {
-  return { id, status: 'passed', durationMs: Date.now() - startedAt, summary, details, suggestion: null };
+  return {
+    id,
+    status: 'passed',
+    durationMs: Date.now() - startedAt,
+    summary,
+    details,
+    suggestion: null
+  };
 }
 
 function failed(id, startedAt, error) {
@@ -195,30 +233,103 @@ function failed(id, startedAt, error) {
 }
 
 function skipped(id, summary) {
-  return { id, status: 'skipped', durationMs: 0, summary, details: {}, suggestion: null };
+  return {
+    id,
+    status: 'skipped',
+    durationMs: 0,
+    summary,
+    details: {},
+    suggestion: null
+  };
 }
 
 function blockedCheck(id, summary, suggestion) {
-  return { id, status: 'blocked', durationMs: 0, summary, details: {}, suggestion };
+  return {
+    id,
+    status: 'blocked',
+    durationMs: 0,
+    summary,
+    details: {},
+    suggestion
+  };
 }
 
 function block(checks, start, reason) {
-  for (let index = start; index < checks.length; index += 1) checks[index] = blockedCheck(checks[index].id, reason, '先修复前置阶段后重新诊断。');
+  for (let index = start; index < checks.length; index += 1) {
+    checks[index] = blockedCheck(
+      checks[index].id,
+      reason,
+      '先修复前置阶段后重新诊断。'
+    );
+  }
 }
 
-function finalize(checks, streamingRequested, startedAt) {
+function finalize(checks, input, startedAt) {
   const requiredPassed = checks.slice(0, 3).every((check) => check.status === 'passed');
+  const technicalReadiness = buildTechnicalReadiness(checks, input.timeoutMs);
   return {
-    ok: requiredPassed,
+    ok: requiredPassed && technicalReadiness.ok,
+    technicalReadinessOk: technicalReadiness.ok,
+    technicalReadiness: { checks: technicalReadiness.checks },
     durationMs: Date.now() - startedAt,
-    streamingRequested,
-    streamingOk: streamingRequested ? checks[3].status === 'passed' : null,
+    timeoutMs: input.timeoutMs,
+    streamingRequested: input.runStreaming,
+    streamingOk: input.runStreaming ? checks[3].status === 'passed' : null,
     checks
   };
 }
 
+function buildTechnicalReadiness(checks, timeoutMs) {
+  const card = checks.find((check) => check.id === 'card-validation');
+  const call = checks.find((check) => check.id === 'call');
+  const cardStatus = readinessStatus(card);
+  const callStatus = readinessStatus(call);
+  const responseStatus = readinessStatus(call);
+  const readinessChecks = [
+    readinessCheck(
+      'agent-card',
+      cardStatus,
+      card?.summary || 'Agent Card 尚未校验'
+    ),
+    readinessCheck(
+      'a2a-call',
+      callStatus,
+      call?.summary || 'A2A 调用尚未执行'
+    ),
+    readinessCheck(
+      'response-time',
+      responseStatus,
+      call?.status === 'passed'
+        ? `普通调用在 ${timeoutMs} ms 上限内完成`
+        : '普通调用未在上限内完成',
+      { timeoutMs, durationMs: call?.durationMs || 0 }
+    ),
+    readinessCheck(
+      'competition-attestations',
+      'declared',
+      '两项参评声明已确认，仍需人工核验'
+    )
+  ];
+  return {
+    ok: readinessChecks.slice(0, 3).every((check) => check.status === 'passed'),
+    checks: readinessChecks
+  };
+}
+
+function readinessStatus(check) {
+  if (check?.status === 'passed') return 'passed';
+  if (check?.status === 'failed') return 'failed';
+  return 'blocked';
+}
+
+function readinessCheck(id, status, summary, details = {}) {
+  return { id, status, summary, details };
+}
+
 function withAgentAuthorization(headers, token) {
-  return token ? { ...headers, authorization: `Bearer ${token}` } : { ...headers };
+  return token
+    ? { ...headers, authorization: `Bearer ${token}` }
+    : { ...headers };
 }
 
 function requireSuccess(response, label) {
@@ -229,7 +340,9 @@ function requireSuccess(response, label) {
 
 function requireContentType(response, accepted, label) {
   const value = String(response.headers?.['content-type'] || '').toLowerCase();
-  if (!accepted.some((type) => value.includes(type))) throw stageError(`${label} Content-Type 不符合协议`, 'content-type');
+  if (!accepted.some((type) => value.includes(type))) {
+    throw stageError(`${label} Content-Type 不符合协议`, 'content-type');
+  }
 }
 
 function classifyError(error) {
@@ -240,7 +353,9 @@ function classifyError(error) {
 }
 
 function safeErrorMessage(error, category) {
-  if (['protocol', 'json', 'http', 'content-type'].includes(category)) return error?.message || '协议检查失败';
+  if (['protocol', 'json', 'http', 'content-type'].includes(category)) {
+    return error?.message || '协议检查失败';
+  }
   const labels = {
     dns: '域名解析失败',
     connection: '无法连接 Agent',
@@ -272,11 +387,18 @@ function suggestionFor(category) {
 
 function redactReport(value, secrets) {
   if (typeof value === 'string') {
-    return secrets.reduce((text, secret) => secret ? text.split(secret).join('[REDACTED]') : text, value);
+    return secrets.reduce(
+      (text, secret) => secret ? text.split(secret).join('[REDACTED]') : text,
+      value
+    );
   }
-  if (Array.isArray(value)) return value.map((item) => redactReport(item, secrets));
+  if (Array.isArray(value)) {
+    return value.map((item) => redactReport(item, secrets));
+  }
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactReport(item, secrets)]));
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, redactReport(item, secrets)])
+    );
   }
   return value;
 }
@@ -284,13 +406,6 @@ function redactReport(value, secrets) {
 function truncate(value, max) {
   const text = String(value || '');
   return text.length <= max ? text : `${text.slice(0, max)}…`;
-}
-
-function safeDisplayUrl(value) {
-  const url = new URL(value);
-  url.search = '';
-  url.hash = '';
-  return url.toString();
 }
 
 function stageError(message, code) {
