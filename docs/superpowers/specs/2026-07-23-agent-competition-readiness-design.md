@@ -1,139 +1,181 @@
-# Agent 参评资格预检设计
+# Agent 参评技术预检设计
+
+> 2026-07-24 修订：测试平台以单个 Agent Card JSON 为技术输入；团队与作品材料由最终报名表收集。
 
 ## 目标
 
-将现有 Agent 协议检查台升级为“参评资格预检 + A2A 实测”入口。平台同时检查参评材料完整性、参评声明和可自动验证的技术要求，并继续保持一次性执行、不保存历史、不进入正式评分。
+将现有 Agent 协议检查台升级为与评选标准一致的“一次性技术预检”入口。用户上传或粘贴一份 A2A Agent Card JSON，平台验证 Card、真实调用 Agent，并检查自然语言任务与 20 分钟响应要求。
 
-最终结果区分：
+平台继续保持：
 
-- `eligibilityOk`：参评材料、强制声明和响应时限是否满足要求；
-- `diagnosticsOk`：Agent Card 发现、协议校验和普通调用是否通过；
-- `ok`：以上两者均为 `true`。
+- 使用平台访问密钥；
+- 一次请求返回完整报告；
+- 不保存上传文件、凭据、测试历史或正式投稿；
+- 不执行正式评分、排名和人工评审。
 
-## 判断边界
+最终报名表单独收集团队信息、作品说明文档、示例问题与预期输出、数据 Skills、投研 Skills、代码仓库地址及正式 Agent Card URL。测试平台不重复收集这些字段。
 
-平台只把能由当前请求可靠证明的项目标记为自动验证通过。
+## 参评对象与多 Agent 规则
 
-### 自动验证
+一份上传 JSON 必须是一张 Agent Card，而不是 Card 数组或平台自定义的多 Agent 清单；一张 Card 对应一个技术预检结果。
 
-- 参评材料必填字段完整且格式有效；
-- Agent Card 可访问、字段完整，并声明平台支持的 A2A 接口；
-- 所选接口与提交的服务地址一致；
-- Agent 能接收自然语言 Prompt 并返回合法 Message 或 Task；
-- 单次普通调用在用户选择的 1–20 分钟上限内完成；
-- 用户启用流式检查时，第二次调用在同样的独立上限内到达明确终态。
+- 内部由多个子 Agent 组成、但只通过一个编排 Agent 对外服务的系统，可以提交编排 Agent 的一张 Card。平台把整个系统视为一个不透明的参评对象，不探测内部拓扑、子 Agent、提示词、记忆或工具。
+- 多个 Agent 分别具有独立身份和独立对外接口时，每个 Agent 应分别提供 Agent Card，并逐个上传、逐个测试。
+- 多个 Agent 可以共用域名、网关或服务端点。平台支持 Card 中不同 URL 路径、由鉴权凭据路由，以及 A2A 1.0 `supportedInterfaces[].tenant` 路由。
+- 所选接口声明 `tenant` 时，平台必须把该值原样放入每一次对应的 A2A 请求；未声明时不得擅自添加。
+- Card 的 `skills` 描述当前对外 Agent 或编排系统的公开能力，不用列出内部所有子 Agent。
 
-### 声明后进入人工核验
+## 自动验证与人工边界
+
+### 测试平台自动验证
+
+- 上传内容是单个合法 JSON 对象；
+- Agent Card 必填信息完整，并声明平台支持的 A2A 接口；
+- Card 中的服务地址为公开 HTTP(S) 地址并通过 SSRF 检查；
+- Agent 能接收自然语言 Prompt；
+- Agent 返回合法的 A2A Message 或 Task；
+- 普通调用在用户选择的 1–20 分钟上限内完成；
+- 用户启用流式检查时，第二次调用在同样的独立上限内到达明确终态；
+- Card 声明的 `tenant` 被正确透传。
+
+### 提交者声明，后续人工核验
+
+测试前必须确认：
+
+- 底座模型为 `DeepSeek V4 Pro`；
+- Agent 不绕过平台权限访问未授权数据。
+
+以下要求不可能通过一次技术调用可靠证明，由最终报名表与评审流程核验：
 
 - Agent Card 内容真实；
+- 正式 Agent Card URL 在评审期间保持可访问；
 - 服务在评审期间稳定在线；
 - 输出过程和最终结果清晰、可解释；
-- Agent 不绕过平台权限访问未授权数据；
-- 底座模型为 `DeepSeek V4 Pro`。
+- 团队、作品说明、示例问答、Skills 和代码仓库材料真实完整。
 
-勾选声明表示提交者承诺满足要求，不表示平台已从技术上证明。结果页面必须明确显示“已声明，待人工核验”。
+声明只代表提交者确认，不代表平台已经从技术上证明。
 
-## 方案
+## 用户流程
 
-沿用独立页面 `/agent-check.html` 和接口 `POST /api/agent-diagnostics`，不新增持久化投稿系统。
+1. 用户打开 `/agent-check.html`。
+2. 输入平台访问密钥。密钥只存在页面内存中。
+3. 通过文件选择器上传 `.json` 文件，或把 Agent Card JSON 粘贴到文本框。两者同时存在时，以最后一次有效输入为准。
+4. 页面在本地解析 JSON，并显示 Agent 名称、描述、协议版本、所选接口、`tenant`、Skills 数量和流式能力摘要。
+5. 用户选择 Agent 鉴权方式：无鉴权或 Bearer Token。选择 Bearer 时，页面显示 Card 选中接口的完整目标 origin，用户确认后 Token 才能发出。
+6. 用户填写自然语言测试 Prompt，选择 1、5、10 或 20 分钟的单次响应上限。
+7. 用户确认 `DeepSeek V4 Pro` 与“仅访问授权数据”两项声明。
+8. 流式检查默认关闭。开启后必须确认同一 Prompt 将再次真实执行。
+9. 页面提交预检并展示 JSON 输入、Card 校验、普通调用、可选流式调用和参评技术门槛结果。
+10. 页面刷新后，访问密钥、Agent Token、上传内容和结果全部消失。
 
-一次请求分两层执行：
+## 请求契约
 
-1. 服务端先校验参评材料和强制声明。硬门槛失败时直接返回结构化报告，不进行任何出站请求。
-2. 静态门槛通过后，执行 Agent Card 发现、接口核验、普通调用及可选流式调用。
+沿用 `POST /api/agent-diagnostics`。平台访问密钥继续使用：
 
-不采用纯前端校验，避免绕过；不新增数据库和投稿历史，避免把一次性检查台扩张为作品管理系统。
+```http
+Authorization: Bearer <AGENT_DIAGNOSTICS_ACCESS_KEY>
+```
 
-## 提交数据
-
-请求体新增必填 `submission` 对象：
+JSON 请求体：
 
 ```json
 {
-  "submission": {
-    "agentName": "研究 Agent",
-    "description": "Agent 的能力、使用场景和限制",
-    "team": "团队名称、成员或联系方式",
-    "cardUrl": "https://example.com/.well-known/agent-card.json",
-    "serviceUrl": "https://example.com/a2a",
-    "authMethod": "none",
-    "documentationUrl": "https://example.com/docs/agent",
-    "examples": [
+  "agentCard": {
+    "name": "Research Agent",
+    "description": "完成公开市场研究任务",
+    "supportedInterfaces": [
       {
-        "question": "分析某项自然语言投研任务",
-        "expectedOutput": "预期的输出范围、结构和证据"
+        "url": "https://agents.example.com/a2a",
+        "protocolBinding": "HTTP+JSON",
+        "protocolVersion": "1.0",
+        "tenant": "research"
       }
     ],
-    "dataSkills": ["行情数据"],
-    "researchSkills": ["因子研究"],
-    "repositoryUrl": "https://github.com/example/agent",
-    "foundationModel": "DeepSeek V4 Pro",
-    "attestations": {
-      "accurateCard": true,
-      "stableOnline": true,
-      "clearExplainableOutput": true,
-      "authorizedDataOnly": true,
-      "deepseekV4Pro": true
-    }
+    "capabilities": {
+      "streaming": false
+    },
+    "skills": []
   },
-  "agentAuthorization": "",
-  "prompt": "请完成一个无外部副作用的自然语言测试任务，并清晰说明结论与依据。",
+  "authMethod": "bearer",
+  "agentAuthorization": "agent bearer token",
+  "confirmAuthorizationTarget": true,
+  "prompt": "请完成一个无外部副作用的自然语言测试任务，并说明结论与依据。",
   "timeoutMs": 300000,
   "runStreaming": false,
-  "confirmStreamingSideEffects": false
+  "confirmStreamingSideEffects": false,
+  "attestations": {
+    "deepseekV4Pro": true,
+    "authorizedDataOnly": true
+  }
 }
 ```
 
 字段规则：
 
-- `agentName`：1–120 个 Unicode 字符；
-- `description`：1–2,000 个 Unicode 字符；
-- `team`：1–1,000 个 Unicode 字符；
-- `cardUrl`、`serviceUrl`：必填公开 HTTP(S) URL，最大 2,048 字符；
-- `authMethod`：`none` 或 `bearer`；选择 `bearer` 时页面提供现有 Agent Token 输入框；
-- `documentationUrl`：必填 HTTP(S) URL，最大 2,048 字符；
-- `examples`：1–3 组；问题最大 2,000 字符，预期输出最大 4,000 字符；
-- `dataSkills`、`researchSkills`：各至少 1 项、最多 30 项，每项最大 120 字符；
-- `repositoryUrl`：可选 HTTP(S) URL；
-- `foundationModel`：去除首尾空格并忽略大小写后必须等于 `DeepSeek V4 Pro`；
-- 五项 `attestations` 均必须为 `true`。
+- `agentCard`：必填 JSON 对象，序列化后最大 1 MiB；数组、字符串和 `null` 无效；
+- `authMethod`：必填，取值为 `none` 或 `bearer`；
+- `agentAuthorization`：`bearer` 时必填，最大 8 KiB 且不得包含换行；`none` 时必须为空；
+- `confirmAuthorizationTarget`：`bearer` 时必须为 `true`，表示用户已确认页面显示的目标 origin；`none` 时必须为 `false` 或省略；
+- `prompt`：必填，1–4,000 个 Unicode 字符；
+- `timeoutMs`：服务端只接受 `60,000–1,200,000` ms，默认 `300,000` ms；
+- `runStreaming`：默认 `false`；
+- `confirmStreamingSideEffects`：`runStreaming=true` 时必须为 `true`；
+- `attestations.deepseekV4Pro` 与 `attestations.authorizedDataOnly`：必须为 `true`。
 
-请求体上限由 32 KiB 调整为 64 KiB。平台访问密钥与 Agent Token 的既有范围、脱敏和不持久化规则不变。
+HTTP 请求体上限调整为 1.25 MiB，以容纳最大 Card 和固定请求字段。浏览器在读取文件前拒绝超过 1 MiB 的文件；服务端仍独立执行大小和类型校验。
 
-## 地址和鉴权
+旧的 `url`、`sourceType` 输入模式不再用于页面提交。API 对同时出现旧地址字段和 `agentCard` 的请求返回 `400`，避免两个服务地址来源不一致。
 
-- Agent Card 始终从 `submission.cardUrl` 获取，不再要求页面用户选择地址类型。
-- `submission.serviceUrl` 是参评者声明的服务地址。
-- Card 校验阶段选择首个受支持接口后，要求其 URL 与 `serviceUrl` 同源，且接口 URL 的路径位于提交服务地址路径下；不一致时阻断调用并提示修正材料或 Card。
-- Agent Token 不用于 Card 获取，只用于所选 A2A 调用接口。
-- Card URL 与调用接口不同源时，继续要求显式勾选跨域 Token 转发。
-- `authMethod=none` 时不得提交 Agent Token；`authMethod=bearer` 时 Token 为可选，因为部分服务可能允许匿名测试。
+## Agent Card 与接口选择
 
-## 资格报告
+- A2A 1.0 按 `supportedInterfaces` 顺序选择平台支持的第一个接口。
+- 兼容 A2A 0.3 Card 的顶层 `url` 与 `protocolVersion`。
+- 平台支持 A2A 1.0 HTTP+JSON、A2A 1.0 JSON-RPC 和 A2A 0.3 JSON-RPC；不支持 gRPC 与自定义 binding。
+- 未知 binding 不得猜测为 HTTP+JSON。
+- 服务地址完全来自上传 Card 的所选接口，页面仅展示，不允许另填覆盖地址。
+- 所选接口的 URL 必须通过现有公共地址、DNS/IP、地址固定和禁止重定向检查。
+- Card 中存在多个独立接口时，本次只测试首个受支持接口，并在结果中明确显示选择依据。
+- `tenant` 是不透明字符串；平台不解释其内容、不修改格式，也不将它当作组织或团队信息。
 
-响应新增：
+由于技术入口只接收上传的 Card JSON，而不接收正式 Card URL，本流程验证“Card 结构与声明接口可调用”，不声称验证“正式 Card URL 可访问”。正式报名表应收集 Card URL，并在报名或评审阶段另行执行可访问性检查。
+
+## 执行与结果
+
+一次请求依次执行：
+
+1. **JSON 输入**：服务端确认 `agentCard` 为单个对象、大小合规且没有冲突的旧地址字段。
+2. **Card 校验**：校验必填字段并选择受支持接口；静态校验失败时不进行 DNS 或出站请求。
+3. **普通调用**：按版本和 binding 构造自然语言 `SendMessage` 请求，透传所选接口的 `tenant`，接受合法 Message 或 Task。
+4. **流式调用**：仅在用户开启、二次确认且 Card 声明 streaming 时执行；它是第二次真实调用。
+5. **技术门槛**：汇总 Card、普通调用、20 分钟限制和两项声明。
+
+响应保留现有 `checks` 结构，并新增：
 
 ```json
 {
   "ok": true,
-  "eligibilityOk": true,
-  "diagnosticsOk": true,
-  "eligibility": {
+  "technicalReadinessOk": true,
+  "technicalReadiness": {
     "checks": [
       {
-        "id": "submission-materials",
+        "id": "agent-card",
         "status": "passed",
-        "summary": "参评材料完整"
+        "summary": "上传的 Agent Card 结构完整"
       },
       {
-        "id": "competition-declarations",
-        "status": "declared",
-        "summary": "强制声明已确认，仍需人工核验"
+        "id": "a2a-call",
+        "status": "passed",
+        "summary": "自然语言 A2A 调用成功"
       },
       {
         "id": "response-time",
         "status": "passed",
-        "summary": "普通调用在 20 分钟内完成"
+        "summary": "普通调用在所选上限内完成"
+      },
+      {
+        "id": "competition-attestations",
+        "status": "declared",
+        "summary": "两项参评声明已确认，仍需人工核验"
       }
     ]
   },
@@ -141,21 +183,15 @@
 }
 ```
 
-资格状态固定为：
+状态固定为：
 
 - `passed`：平台已自动验证；
-- `failed`：硬门槛不满足；
-- `declared`：提交者已声明，仍需人工核验；
-- `blocked`：依赖的技术调用未完成，无法判断。
+- `failed`：技术门槛不满足；
+- `declared`：提交者已确认，仍需人工核验；
+- `skipped`：用户没有请求可选检查；
+- `blocked`：依赖的前置阶段失败。
 
-静态材料或声明失败时：
-
-- HTTP 仍返回 `200`；
-- `eligibilityOk=false`、`diagnosticsOk=false`、`ok=false`；
-- 四个协议检查均为 `blocked`；
-- 不解析 DNS、不读取 Card、不调用 Agent。
-
-`response-time` 以普通调用阶段的实际 `durationMs` 为准。普通调用失败或超时则为 `failed`；因前置失败未调用则为 `blocked`。流式耗时独立显示，不重复决定基础参评资格。
+`ok` 与 `technicalReadinessOk` 都要求 Card 校验、普通调用和响应时限通过，且两项声明已确认。未请求流式检查不影响结果；请求后流式失败通过 `streamingOk=false` 独立显示，不改变普通调用已经得出的基础技术预检结论。
 
 ## 超时语义
 
@@ -166,61 +202,76 @@
 - 10 分钟；
 - 20 分钟。
 
-服务端把 `timeoutMs` 钳制到 `60,000–1,200,000` ms，默认 `300,000` ms。
+服务端拒绝而非静默钳制超出 `60,000–1,200,000` ms 的值，避免页面显示值与实际执行值不一致。
 
-为准确对应“Agent 从收到任务到完成结果返回不超过 20 分钟”：
+- 普通 Agent 调用使用一份完整的用户选择上限；
+- 流式调用使用另一份独立的相同上限；
+- DNS 和连接建立计入对应调用耗时；
+- 浏览器断连立即取消当前请求；
+- 任何单次 Agent 调用都不能超过 20 分钟；
+- 报告同时显示选择的上限与实际 `durationMs`。
 
-- Card 发现使用独立的 30 秒上限；
-- 普通 Agent 调用使用用户选择的完整上限；
-- 流式调用是第二次真实执行，也使用一份独立的完整上限；
-- 浏览器断连仍立即取消当前请求；
-- 任何单次 Agent 调用都不能超过 20 分钟。
+## 页面设计
 
-## 页面调整
+页面沿用现有协议检查台的深色操作台视觉，不改造成报名后台。信息结构收敛为四区：
 
-页面保持现有“协议检查台”视觉语言，增加两个输入区和一个资格结果区：
+1. **Agent Card JSON**：文件拖放/选择、粘贴文本框、解析摘要和错误定位；
+2. **服务实测**：鉴权方式、Agent Token、Token 目标 origin 确认、测试 Prompt、超时选项和默认关闭的流式开关；
+3. **参评声明**：`DeepSeek V4 Pro` 与“仅访问授权数据”两项确认，并明确标注待人工核验；
+4. **预检报告**：技术门槛摘要，以及 JSON、Card、普通调用和流式调用轨迹。
 
-1. **参评材料**：名称、简介、团队、Card URL、服务地址、鉴权方式、说明文档、示例问答、两类 Skills、可选仓库、底座模型；
-2. **参评声明**：五个必须逐项确认的声明，旁边固定显示“声明不等于自动证明”；
-3. **服务实测**：Agent Token、跨域授权、测试 Prompt、单次响应上限、流式开关；
-4. **资格门槛**：材料完整性、参评声明、20 分钟响应要求；
-5. **协议轨迹**：保留发现、Card、普通调用和流式调用四张结果卡。
+页面固定提示：
 
-示例问答首版提供一组问题和预期输出输入框，API 结构保留最多三组的能力；后续可以增加动态“添加示例”而不改变接口。
+- “一次只测试一张 Agent Card”；
+- “内部多 Agent 可通过一个编排 Agent 整体参评；独立 Agent 请分别上传”；
+- “团队与作品材料在最终报名表填写”；
+- “测试会真实调用 Agent，流式检查会再次执行同一任务”。
 
-## 错误处理
+所有动态 Card 内容和响应预览继续使用 `textContent` 渲染。界面支持窄屏、键盘焦点和 `prefers-reduced-motion`。
 
-- JSON 类型或字段格式错误返回 HTTP `400`；
-- 格式正确但不满足参评门槛返回 HTTP `200` 和资格失败报告；
-- 平台访问密钥、频率、并发、SSRF、响应大小和上游错误继续沿用现有状态码与错误分类；
-- 所有动态内容继续使用 `textContent` 渲染；
-- 返回报告不包含 Agent Token、平台访问密钥、完整响应正文或其他敏感请求头。
+## 安全与错误处理
+
+- JSON 语法、对象类型、字段格式、冲突字段或请求体大小错误返回 HTTP `400`；
+- 平台访问密钥错误返回 `401`，未配置返回 `503`；
+- 频率超限返回 `429`，并发已满返回 `503`；
+- 预期的上游 Agent 失败仍返回 HTTP `200` 和 `ok:false` 的结构化报告；
+- 静态 Card 或声明失败时不得解析 DNS、打开连接或调用 Agent；
+- Agent Token 不用于任何 Card 获取；服务端只有在目标确认有效后才把它发往 Card 选择出的接口；
+- 所选接口与任何其他来源不同源时也不自动转发 Token；
+- 沿用禁止 URL userinfo、私网地址、重定向、DNS rebinding、超限响应和敏感数据回显的保护；
+- 报告不包含平台访问密钥、Agent Token、完整请求头、完整上游响应或本地路径；
+- 上传文件和解析结果仅存在浏览器内存，服务端不落盘、不写入评测历史。
 
 ## 测试
 
-- 输入测试覆盖所有必填材料、URL、数组上限、模型名称、五项声明和 64 KiB 请求体；
-- 门槛测试确认材料失败时零出站请求且四个协议阶段均为 `blocked`；
-- 地址测试覆盖 Card 接口与提交服务地址同源/路径匹配和不匹配；
-- 超时测试覆盖 1 分钟下限、5 分钟默认、20 分钟上限和超范围钳制；
-- 资格汇总测试覆盖 `eligibilityOk`、`diagnosticsOk`、综合 `ok` 和响应耗时状态；
-- 前端静态测试覆盖全部提交字段、声明、四个超时选项和资格结果容器；
-- 回归测试继续覆盖凭据隔离、SSRF、A2A 1.0/0.3、流式二次确认和不写入历史；
+- 输入测试覆盖合法单对象、数组、`null`、无效 JSON、1 MiB Card、1.25 MiB 请求体和旧字段冲突；
+- Card 测试覆盖 A2A 1.0、A2A 0.3、多个接口、未知 binding、缺失必填字段和服务 URL；
+- 多 Agent 测试覆盖单张组合 Agent Card、拒绝 Card 数组，以及共享 URL 下的 `tenant` 透传与未声明时省略；
+- 凭据测试覆盖 `none`/`bearer` 一致性、换行 Token、目标 origin 未确认、只向所选接口发送和结果脱敏；
+- 门槛测试确认静态失败时零出站请求且后续阶段均为 `blocked`；
+- 超时测试覆盖 1 分钟下限、5 分钟默认、10 分钟、20 分钟上限和超范围拒绝；
+- 结果测试覆盖 `technicalReadinessOk`、综合 `ok`、声明状态与实际耗时；
+- 前端静态和浏览器测试覆盖 JSON 文件/粘贴输入、摘要、两项声明、四个超时选项、流式二次确认和多 Agent 提示；
+- 回归测试继续覆盖 SSRF、DNS 地址固定、A2A 1.0/0.3、SSE 终态、取消传播、不写入历史与凭据不进入 Web Storage；
 - 完成后运行 `npm test`、`npm run check` 和补丁格式检查。
 
 ## 文档
 
 同步更新：
 
-- `docs/AGENT_DIAGNOSTICS_GUIDE.md`：参评材料填写、自动验证与人工核验边界、20 分钟规则；
-- `.env.example`：无需新增环境变量；
-- `README.md`：将入口描述改为参评资格预检和协议实测。
+- `docs/AGENT_DIAGNOSTICS_GUIDE.md`：上传格式、操作步骤、多 Agent 规则、鉴权、结果解释、安全边界和故障排查；
+- `README.md`：将入口描述改为 Agent Card JSON 技术预检；
+- `.env.example`：保留现有环境变量，无需增加正式报名表配置。
 
 ## 非目标
 
-- 不保存正式投稿；
-- 不上传或托管作品说明文件；
-- 不自动检测实际底座模型；
-- 不通过单次请求证明服务长期稳定；
-- 不自动审计 Agent 内部的数据访问实现；
+- 不收集团队、作品说明、示例问答、Skills 清单或仓库地址；
+- 不保存、分享或导出正式投稿；
+- 不接受 Agent Card 数组或平台自定义多 Agent 清单；
+- 不发现或审计组合 Agent 内部的子 Agent；
+- 不自动检测真实底座模型；
+- 不通过单次调用证明服务长期稳定、Card 内容真实或输出始终可解释；
+- 不验证正式 Agent Card URL 的持续可访问性；
 - 不执行正式评分、排名或评委模型评审；
-- 不新增 OAuth、API Key 自定义请求头或浏览器交互登录。
+- 不新增 OAuth、API Key 自定义请求头或浏览器交互登录；
+- 不支持 gRPC 或自定义 A2A binding。
