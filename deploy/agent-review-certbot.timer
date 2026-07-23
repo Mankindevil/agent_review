@@ -1,0 +1,11 @@
+[Unit]
+Description=Twice-daily Agent Review certificate renewal
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=12h
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
