@@ -89,7 +89,7 @@ Runtime Probe 与“Description 直出记录”会显示实际后端：Ark 模�
 
 Key 只应写入本机 `.env` 或密钥管理系统，不要写入 `.env.example`。如需恢复 DeepSeek 官方 Anthropic-compatible API，可设置 `CLAUDE_BACKEND=deepseek` 并填写 `DEEPSEEK_API_KEY`。
 
-本地 Runtime 使用受限非交互模式：Claude Code 采用 `--tools "" --permission-mode plan --safe-mode`；Cursor Agent 只使用官方支持的 `-p <prompt> --output-format json`，并由临时工作区内的 `.cursor/cli.json` 禁止 Shell、WebFetch、WebSearch、全部 MCP、全部相对文件读写及 `/proc`、`/run`、`/tmp`、`/var` 等绝对路径读取。两个 CLI 都在独立进程组与一次性 HOME/cache/data/state/TMP 中运行，超时后依次向整个进程组发送 `SIGTERM` 和 `SIGKILL`。Claude 单次调用默认设置 `$0.25` 预算上限，可通过 `CLAUDE_MAX_BUDGET_USD` 调整。Cursor 仍需访问其模型服务，因此生产网络层还应把该服务账户的出口限制为业务所需目标；CLI 权限文件不是网络命名空间或防火墙的替代品。
+本地 Runtime 使用受限非交互模式：Claude Code 采用 `--tools "" --permission-mode plan --safe-mode`；Cursor Agent 只使用官方支持的 `-p <prompt> --output-format json --trust`，其中 `--trust` 仅确认平台刚创建的一次性空工作区，并由该工作区内的 `.cursor/cli.json` 禁止 Shell、WebFetch、WebSearch、全部 MCP、全部相对文件读写及 `/proc`、`/run`、`/tmp`、`/var` 等绝对路径读取。两个 CLI 都在独立进程组与一次性 HOME/cache/data/state/TMP 中运行，超时后依次向整个进程组发送 `SIGTERM` 和 `SIGKILL`。Claude 单次调用默认设置 `$0.25` 预算上限，可通过 `CLAUDE_MAX_BUDGET_USD` 调整。Cursor 仍需访问其模型服务，因此生产网络层还应把该服务账户的出口限制为业务所需目标；CLI 权限文件不是网络命名空间或防火墙的替代品。
 
 ### 生产 Runtime 工具、凭据与模型边界
 

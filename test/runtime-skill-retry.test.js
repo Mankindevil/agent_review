@@ -32,8 +32,30 @@ test('uses supported read-only Claude Code arguments', () => {
 test('uses documented Cursor Agent print arguments', () => {
   assert.deepEqual(localCliArgs('cursor', 'build a skill'), [
     '-p', 'build a skill',
-    '--output-format', 'json'
+    '--output-format', 'json',
+    '--trust'
   ]);
+});
+
+test('uses an unambiguous exact-token prompt for local readiness', async () => {
+  let receivedPrompt;
+  const ready = await probeRuntimeReadiness('claude-code', {
+    source: 'local',
+    kind: 'local-cli',
+    command: 'claude'
+  }, {
+    env: { RUNTIME_PROBE_TIMEOUT_MS: '1000' },
+    localCall: async (_runtimeId, prompt) => {
+      receivedPrompt = prompt;
+      return { text: 'READY' };
+    }
+  });
+
+  assert.equal(ready, true);
+  assert.equal(
+    receivedPrompt,
+    'Output exactly the five ASCII letters READY with no punctuation or other text.'
+  );
 });
 
 test('writes deny-by-default Cursor permissions only inside the temporary workspace', async () => {

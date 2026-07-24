@@ -17,6 +17,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 const CLAUDE_RUNTIME_SYSTEM_PROMPT = '你是 Agent 盲测平台中的隔离执行器。严格完成用户给出的单一任务，只输出最终内容。当前会话没有任何工具，不得浏览文件、探索代码库、启动子代理，也不得输出或模拟 tool_call、Bash、Explore 等工具调用。';
+const RUNTIME_READINESS_PROMPT =
+  'Output exactly the five ASCII letters READY with no punctuation or other text.';
 const DEFAULT_LOCAL_RUNTIME_TIMEOUT_MS = 180_000;
 const MAX_LOCAL_RUNTIME_TIMEOUT_MS = 1_200_000;
 
@@ -203,7 +205,7 @@ export function localCliArgs(runtimeId, prompt, { budget = '0.25' } = {}) {
     ];
   }
   if (runtimeId === 'cursor') {
-    return ['-p', prompt, '--output-format', 'json'];
+    return ['-p', prompt, '--output-format', 'json', '--trust'];
   }
   throw new Error(`Unsupported local Runtime: ${runtimeId}`);
 }
@@ -313,6 +315,7 @@ async function callRuntimeModel(
 export async function probeRuntimeReadiness(runtimeId, config, {
   env = process.env,
   fetchImpl = globalThis.fetch,
+  localCall = callLocalCli,
   signal
 } = {}) {
   const probeTimeout = Math.min(
@@ -323,14 +326,14 @@ export async function probeRuntimeReadiness(runtimeId, config, {
   try {
     if (config.kind === 'local-cli') {
       const probeEnv = { ...env, LOCAL_RUNTIME_TIMEOUT_MS: String(probeTimeout) };
-      const result = await callLocalCli(runtimeId, 'Reply with exactly READY.', probeSignal, {}, probeEnv);
+      const result = await localCall(runtimeId, RUNTIME_READINESS_PROMPT, probeSignal, {}, probeEnv);
       return isReadinessSentinel(result.text);
     }
     if (config.kind === 'model-api') {
       return isReadinessSentinel(
         await callRuntimeModel(
           config,
-          'Reply with exactly READY.',
+          RUNTIME_READINESS_PROMPT,
           probeSignal,
           {},
           env,

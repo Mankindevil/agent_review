@@ -73,7 +73,8 @@ test('uses supported read-only Claude Code arguments', () => {
 test('uses documented Cursor Agent print arguments', () => {
   assert.deepEqual(localCliArgs('cursor', 'build a skill'), [
     '-p', 'build a skill',
-    '--output-format', 'json'
+    '--output-format', 'json',
+    '--trust'
   ]);
 });
 ```
@@ -108,7 +109,7 @@ export function localCliArgs(runtimeId, prompt, { budget = '0.25' } = {}) {
     ];
   }
   if (runtimeId === 'cursor') {
-    return ['-p', prompt, '--output-format', 'json'];
+    return ['-p', prompt, '--output-format', 'json', '--trust'];
   }
   throw new Error(`不支持的本地 Runtime：${runtimeId}`);
 }
@@ -821,7 +822,7 @@ Expected: Claude Code and Doubao ready; Cursor ready only when direct connectivi
 
 - [ ] **Step 3: Execute isolated CLI smoke tests**
 
-Run Claude with the same environment and restricted flags used by the application, using a prompt that only returns a small JSON object. Run Cursor with `-p` and `--output-format json` in a new empty temporary directory. Confirm both produce valid JSON and do not create files outside their disposable workspace.
+Run Claude with the same environment and restricted flags used by the application, using a prompt that only returns a small JSON object. Run Cursor with `-p`, `--output-format json`, and `--trust` in a new empty temporary directory. Confirm both produce valid JSON and do not create files outside their disposable workspace.
 
 - [ ] **Step 4: Execute one real live platform evaluation**
 
