@@ -83,6 +83,7 @@ test('environment example documents the complete market analyst contract safely'
     'MARKET_REPORT_CACHE_DAYS',
     'MARKET_REPORT_MIN_LIQUIDITY_CNY',
     'MARKET_SMOKE_REPORT_DATE',
+    'MARKET_SMOKE_STATE_DIR',
     'MARKET_SMOKE_EMAIL_TO'
   ];
   for (const name of required) {
@@ -100,6 +101,7 @@ test('environment example documents the complete market analyst contract safely'
     'MARKET_REPORT_SMTP_PASSWORD',
     'MARKET_REPORT_MODEL_PRICING_JSON',
     'MARKET_SMOKE_REPORT_DATE',
+    'MARKET_SMOKE_STATE_DIR',
     'MARKET_SMOKE_EMAIL_TO'
   ]) {
     assert.equal(values[name], '', `${name} must not contain a committed value`);

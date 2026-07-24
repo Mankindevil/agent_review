@@ -8,6 +8,8 @@ import path from 'node:path';
 import { MarketOrchestrator } from '../agents/market-analyst/orchestrator.js';
 import { MarketTaskStore } from '../agents/market-analyst/task-store.js';
 import { parseCliArgs, runCli } from '../agents/market-analyst/cli.js';
+import { createMarketAgentServer } from '../agents/market-analyst/a2a-server.js';
+import { ownerScope } from '../agents/market-analyst/owner-scope.js';
 import {
   createSmtpMailer,
   deliveryKey
@@ -668,7 +670,10 @@ test('one-shot CLI prints one sanitized JSON summary and maps terminal exit code
   const lines = [];
   let orchestratorRequest;
   const code = await runCli(['--date', date, '--force-delivery'], {
-    env: { MARKET_REPORT_SMTP_PASSWORD: 'must-not-print' },
+    env: {
+      MARKET_AGENT_ACCESS_TOKEN: 'scheduled-access',
+      MARKET_REPORT_SMTP_PASSWORD: 'must-not-print'
+    },
     cwd: 'C:\\repo',
     stdout: { write: (value) => lines.push(value) },
     orchestratorFactory: () => ({
@@ -690,12 +695,18 @@ test('one-shot CLI prints one sanitized JSON summary and maps terminal exit code
     date
   });
   assert.equal(orchestratorRequest.trigger, 'scheduled');
+  assert.equal(
+    orchestratorRequest.ownerScope,
+    ownerScope('bearer:scheduled-access')
+  );
+  assert.equal('owner' in orchestratorRequest, false);
   assert.equal(orchestratorRequest.deliverEmail, true);
   assert.equal(orchestratorRequest.forceDelivery, true);
   assert.equal(lines.length, 1);
   assert.equal(lines[0].endsWith('\n'), true);
   assert.equal(JSON.parse(lines[0]).runId, 'run-cli');
   assert.doesNotMatch(lines[0], /must-not-print/);
+  assert.doesNotMatch(lines[0], /scheduled-access/);
 
   const canceled = await runCli(['--no-email'], {
     stdout: { write() {} },
@@ -721,6 +732,52 @@ test('one-shot CLI prints one sanitized JSON summary and maps terminal exit code
   assert.equal(emailFailure, 1);
   assert.equal(JSON.parse(emailFailureLines[0]).outcome, 'complete');
   assert.doesNotMatch(emailFailureLines[0], /private\.recipient@example\.com/);
+});
+
+test('scheduled CLI run is visible to its configured Bearer owner with linked detail', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const token = 'scheduled-detail-token';
+  let detailUrl;
+  const fixture = dependencies(stateDir, {
+    renderer: (evidenceValue) => {
+      detailUrl = evidenceValue.detailUrl;
+      return {
+        markdown: `# report\n\n${detailUrl}`,
+        html: `<a href="${detailUrl}">detail</a>`,
+        text: `detail: ${detailUrl}`
+      };
+    }
+  });
+  fixture.config.accessToken = token;
+  fixture.config.publicBaseUrl = 'https://reports.example.test';
+  const orchestrator = new MarketOrchestrator(fixture.config, fixture.deps);
+  const lines = [];
+  const code = await runCli(['--date', date], {
+    env: { MARKET_AGENT_ACCESS_TOKEN: token },
+    stdout: { write: (value) => lines.push(value) },
+    orchestratorFactory: () => orchestrator
+  });
+  assert.equal(code, 0);
+  const summary = JSON.parse(lines[0]);
+  assert.equal(detailUrl, `https://reports.example.test/runs/${summary.runId}`);
+  assert.equal(fixture.calls.mailer[0].message.html.includes(detailUrl), true);
+
+  const server = createMarketAgentServer({
+    config: fixture.config,
+    orchestrator
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const { port } = server.address();
+  const own = await fetch(`http://127.0.0.1:${port}/runs/${summary.runId}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  assert.equal(own.status, 200);
+  assert.equal((await own.json()).runId, summary.runId);
+  const wrong = await fetch(`http://127.0.0.1:${port}/runs/${summary.runId}`, {
+    headers: { Authorization: 'Bearer wrong-owner-token' }
+  });
+  assert.equal(wrong.status, 401);
 });
 
 test('one-shot CLI maps SIGTERM cancellation to 130 and removes both handlers', async () => {

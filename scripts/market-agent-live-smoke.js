@@ -64,6 +64,16 @@ export function validateSmokeEnvironment(env = process.env) {
     throw smokeError('SMOKE_DATE_INVALID');
   }
   const recipients = emailRecipients(env.MARKET_SMOKE_EMAIL_TO);
+  const configuredStateDir = String(env.MARKET_SMOKE_STATE_DIR || '').trim();
+  if (recipients.length && (
+    !configuredStateDir
+    || !path.isAbsolute(configuredStateDir)
+  )) {
+    throw smokeError('SMOKE_STATE_NOT_CONFIGURED');
+  }
+  if (configuredStateDir && !path.isAbsolute(configuredStateDir)) {
+    throw smokeError('SMOKE_STATE_NOT_CONFIGURED');
+  }
   if (recipients.length && (
     !String(env.MARKET_REPORT_EMAIL_FROM || '').trim()
     || !String(env.MARKET_REPORT_SMTP_HOST || '').trim()
@@ -73,7 +83,8 @@ export function validateSmokeEnvironment(env = process.env) {
   return Object.freeze({
     reportDate: reportDate || null,
     emailEnabled: recipients.length > 0,
-    recipients
+    recipients,
+    stateDir: configuredStateDir ? path.resolve(configuredStateDir) : null
   });
 }
 
@@ -152,8 +163,8 @@ function dateCandidates(explicitDate, now = new Date()) {
 function artifactPath(config, summary, name) {
   return path.join(
     path.resolve(config.stateDir),
-    'artifacts',
-    summary.reportDate,
+    'runs',
+    summary.reportDate.replaceAll('-', ''),
     summary.runId,
     name
   );
@@ -195,7 +206,7 @@ async function verifyPandaSdk(python) {
   }
 }
 
-async function validateArtifacts(config, summary) {
+export async function validateSmokeArtifacts(config, summary) {
   const required = new Map([
     ['market-report.md', null],
     ['market-report.html', null],
@@ -278,17 +289,11 @@ async function findCompletedReport(orchestrator, smoke) {
       operation: { operation: 'daily-market-report', date, topN: 3 },
       trigger: 'manual',
       owner: 'production-live-smoke',
-      deliverEmail: smoke.emailEnabled
+      deliverEmail: false
     });
     if (summary.outcome === 'skipped' && !smoke.reportDate) continue;
     if (!['complete', 'degraded'].includes(summary.outcome)) {
       throw smokeError('SMOKE_PANDA_RUN_FAILED');
-    }
-    if (
-      smoke.emailEnabled
-      && !['sent', 'already-sent'].includes(summary.emailStatus)
-    ) {
-      throw smokeError('SMOKE_EMAIL_FAILED');
     }
     return summary;
   }
@@ -296,8 +301,10 @@ async function findCompletedReport(orchestrator, smoke) {
 }
 
 async function verifyEmailIdempotency(orchestrator, smoke, report) {
-  if (!smoke.emailEnabled) return 'not-requested';
-  const replay = await orchestrator.run({
+  if (!smoke.emailEnabled) {
+    return { email: 'not-requested', emailReplay: 'not-requested' };
+  }
+  const request = {
     operation: {
       operation: 'daily-market-report',
       date: report.reportDate,
@@ -306,6 +313,17 @@ async function verifyEmailIdempotency(orchestrator, smoke, report) {
     trigger: 'manual',
     owner: 'production-live-smoke',
     deliverEmail: true
+  };
+  const delivery = await orchestrator.run(request);
+  if (
+    delivery.runId !== report.runId
+    || !['sent', 'already-sent'].includes(delivery.emailStatus)
+  ) {
+    throw smokeError('SMOKE_EMAIL_FAILED');
+  }
+  const replay = await orchestrator.run({
+    ...request,
+    operation: { ...request.operation }
   });
   if (
     replay.runId !== report.runId
@@ -313,7 +331,10 @@ async function verifyEmailIdempotency(orchestrator, smoke, report) {
   ) {
     throw smokeError('SMOKE_EMAIL_IDEMPOTENCY_FAILED');
   }
-  return replay.emailStatus;
+  return {
+    email: delivery.emailStatus,
+    emailReplay: replay.emailStatus
+  };
 }
 
 async function verifyA2A(config, orchestrator, token, reportDate) {
@@ -393,9 +414,29 @@ async function verifyA2A(config, orchestrator, token, reportDate) {
   }
 }
 
-export async function runLiveSmoke(env = process.env, cwd = process.cwd()) {
+function defaultCreateOrchestrator(config, smoke) {
+  const mailer = smoke.emailEnabled ? createSmtpMailer(config) : undefined;
+  return new MarketOrchestrator(config, { mailer });
+}
+
+export async function runLiveSmoke(
+  env = process.env,
+  cwd = process.cwd(),
+  dependencies = {}
+) {
   const smoke = validateSmokeEnvironment(env);
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), 'panda-market-live-smoke-'));
+  const {
+    verifyPandaSdk: verifySdk = verifyPandaSdk,
+    createOrchestrator = defaultCreateOrchestrator,
+    validateArtifacts = validateSmokeArtifacts,
+    verifyA2A: verifyA2AImplementation = verifyA2A,
+    makeTemporaryStateDir = () =>
+      mkdtemp(path.join(os.tmpdir(), 'panda-market-live-smoke-')),
+    removeTemporaryStateDir = (directory) =>
+      rm(directory, { recursive: true, force: true })
+  } = dependencies;
+  const disposableState = !smoke.stateDir;
+  const stateDir = smoke.stateDir || await makeTemporaryStateDir();
   const token = randomBytes(32).toString('hex');
   try {
     const configEnv = {
@@ -410,13 +451,17 @@ export async function runLiveSmoke(env = process.env, cwd = process.cwd()) {
       MARKET_REPORT_MODEL_ENABLED: 'false'
     };
     const config = marketAgentConfig(configEnv, cwd);
-    await verifyPandaSdk(config.python);
-    const mailer = smoke.emailEnabled ? createSmtpMailer(config) : undefined;
-    const orchestrator = new MarketOrchestrator(config, { mailer });
+    await verifySdk(config.python);
+    const orchestrator = createOrchestrator(config, smoke);
     const report = await findCompletedReport(orchestrator, smoke);
     const artifacts = await validateArtifacts(config, report);
-    const emailReplay = await verifyEmailIdempotency(orchestrator, smoke, report);
-    const a2a = await verifyA2A(config, orchestrator, token, report.reportDate);
+    const emailResult = await verifyEmailIdempotency(orchestrator, smoke, report);
+    const a2a = await verifyA2AImplementation(
+      config,
+      orchestrator,
+      token,
+      report.reportDate
+    );
     return sanitizeSmokeSummary({
       status: report.outcome === 'degraded' ? 'DEGRADED' : 'COMPLETE',
       reportDate: report.reportDate,
@@ -424,12 +469,12 @@ export async function runLiveSmoke(env = process.env, cwd = process.cwd()) {
       conclusionCount: artifacts.conclusionCount,
       sourceCount: artifacts.sourceCount,
       evidenceStatus: artifacts.evidenceStatus,
-      email: smoke.emailEnabled ? report.emailStatus : 'not-requested',
-      emailReplay,
+      email: emailResult.email,
+      emailReplay: emailResult.emailReplay,
       a2a
     });
   } finally {
-    await rm(stateDir, { recursive: true, force: true });
+    if (disposableState) await removeTemporaryStateDir(stateDir);
   }
 }
 

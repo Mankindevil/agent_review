@@ -9,8 +9,7 @@ User=agent-review
 Group=agent-review
 WorkingDirectory=/opt/agent-review/app
 EnvironmentFile=/etc/agent-review/agent-review.env
-Environment=MARKET_REPORT_STATE_DIR=/var/lib/agent-review/market-analyst
-ExecStart=/usr/bin/npm run market-report
+ExecStart=/usr/bin/env MARKET_REPORT_STATE_DIR=/var/lib/agent-review/market-analyst /usr/bin/npm run market-report
 TimeoutStartSec=20min
 UMask=0077
 NoNewPrivileges=true

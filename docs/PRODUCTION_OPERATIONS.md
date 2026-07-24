@@ -24,9 +24,10 @@ sudo systemctl enable --now market-report.timer
 ```
 
 The timer runs Monday through Friday at `18:30:00 Asia/Shanghai`, is persistent,
-and adds at most 30 seconds of randomized delay. This weekday schedule is only a
-wakeup mechanism: the CLI checks Panda's China exchange calendar and is the
-authoritative holiday gate.
+and applies a 0–30 second randomized delay with one-second timer accuracy. Allow
+up to 31 seconds after 18:30 for dispatch. This weekday schedule is only a wakeup
+mechanism: the CLI checks Panda's China exchange calendar and is the authoritative
+holiday gate.
 
 Verify the timer, service, loopback endpoint, and bounded recent logs:
 
@@ -40,11 +41,20 @@ sudo journalctl -u market-analyst.service -u market-report.service -n 200 --no-p
 Run the credential-gated acceptance smoke from the protected service
 environment. `MARKET_SMOKE_REPORT_DATE` may name a completed historical trading
 date. Leave `MARKET_SMOKE_EMAIL_TO` empty for Panda/A2A-only acceptance; set it
-to a dedicated test inbox only when an actual SMTP delivery is intended.
+to a dedicated test inbox only when an actual SMTP delivery is intended. An
+email-enabled smoke requires an absolute, durable `MARKET_SMOKE_STATE_DIR`; its
+delivery receipt is deliberately retained so the same-date smoke reuses it
+instead of sending twice.
 
 ```bash
-sudo sh -c \
-  'set -a; . /etc/agent-review/agent-review.env; set +a; cd /opt/agent-review/app; exec runuser -u agent-review -- npm run market:smoke'
+sudo install -d -o agent-review -g agent-review -m 0700 /var/lib/agent-review/market-smoke
+sudo systemd-run --wait --collect --pipe \
+  --uid=agent-review \
+  --gid=agent-review \
+  --property=WorkingDirectory=/opt/agent-review/app \
+  --property=EnvironmentFile=/etc/agent-review/agent-review.env \
+  --setenv=MARKET_SMOKE_STATE_DIR=/var/lib/agent-review/market-smoke \
+  /usr/bin/npm run market:smoke
 ```
 
 The command prints only bounded, sanitized JSON. A missing Panda enable flag or
@@ -63,8 +73,10 @@ credential policy. Rotate Panda, A2A, model, and SMTP credentials independently
 where possible.
 
 For SMTP testing, set `MARKET_SMOKE_EMAIL_TO` to one controlled test inbox and
-run `npm run market:smoke` once. Check the deterministic Message-ID and receipt
-in the persisted task state and mail-server logs. A `delivery-unknown` or
+run the transient unit above. The smoke first completes and validates a
+no-email Panda report, then performs delivery and an idempotent replay against
+the durable smoke state. Check the deterministic Message-ID and receipt in the
+persisted task state and mail-server logs. A `delivery-unknown` or
 `reconciliation-needed` state must be reconciled before any manual resend.
 
 ### Market artifact backup, restore, and retention

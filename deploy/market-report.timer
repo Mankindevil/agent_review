@@ -5,6 +5,7 @@ Description=Run Panda Market Analyst at 18:30 Asia/Shanghai on weekdays
 OnCalendar=Mon..Fri *-*-* 18:30:00 Asia/Shanghai
 Persistent=true
 RandomizedDelaySec=30
+AccuracySec=1s
 Unit=market-report.service
 
 [Install]

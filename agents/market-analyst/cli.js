@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 
 import { marketAgentConfig } from './config.js';
 import { MarketOrchestrator } from './orchestrator.js';
+import { ownerScope } from './owner-scope.js';
 import { sanitizeTraceValue } from './run-trace.js';
 import { createSmtpMailer } from './smtp-mailer.js';
 
@@ -99,7 +100,9 @@ export async function runCli(argv, {
         ...(options.date ? { date: options.date } : {})
       },
       trigger: 'scheduled',
-      owner: 'scheduled-cli',
+      ...(config.accessToken
+        ? { ownerScope: ownerScope(`bearer:${config.accessToken}`) }
+        : { owner: 'scheduled-cli' }),
       deliverEmail: options.deliverEmail,
       forceDelivery: options.forceDelivery,
       signal: controller.signal

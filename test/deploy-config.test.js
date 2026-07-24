@@ -39,8 +39,10 @@ test('market analyst service is hardened and writes only under managed state', a
   assert.match(unit, /^Group=agent-review$/m);
   assert.match(unit, /^WorkingDirectory=\/opt\/agent-review\/app$/m);
   assert.match(unit, /^EnvironmentFile=\/etc\/agent-review\/agent-review\.env$/m);
-  assert.match(unit, /^Environment=MARKET_REPORT_STATE_DIR=\/var\/lib\/agent-review\/market-analyst$/m);
-  assert.match(unit, /^ExecStart=\/usr\/bin\/npm run market-agent$/m);
+  assert.match(
+    unit,
+    /^ExecStart=\/usr\/bin\/env MARKET_REPORT_STATE_DIR=\/var\/lib\/agent-review\/market-analyst \/usr\/bin\/npm run market-agent$/m
+  );
   assert.match(unit, /^Restart=on-failure$/m);
   assert.match(unit, /^ReadWritePaths=\/var\/lib\/agent-review$/m);
   assert.match(unit, /^ProtectSystem=strict$/m);
@@ -54,12 +56,15 @@ test('market report oneshot and timer preserve Shanghai trading-day semantics', 
   assert.match(service, /^User=agent-review$/m);
   assert.match(service, /^WorkingDirectory=\/opt\/agent-review\/app$/m);
   assert.match(service, /^EnvironmentFile=\/etc\/agent-review\/agent-review\.env$/m);
-  assert.match(service, /^Environment=MARKET_REPORT_STATE_DIR=\/var\/lib\/agent-review\/market-analyst$/m);
-  assert.match(service, /^ExecStart=\/usr\/bin\/npm run market-report$/m);
+  assert.match(
+    service,
+    /^ExecStart=\/usr\/bin\/env MARKET_REPORT_STATE_DIR=\/var\/lib\/agent-review\/market-analyst \/usr\/bin\/npm run market-report$/m
+  );
   assert.match(service, /^ReadWritePaths=\/var\/lib\/agent-review$/m);
   assert.match(timer, /^OnCalendar=Mon\.\.Fri \*-\*-\* 18:30:00 Asia\/Shanghai$/m);
   assert.match(timer, /^Persistent=true$/m);
   assert.match(timer, /^RandomizedDelaySec=30$/m);
+  assert.match(timer, /^AccuracySec=1s$/m);
   assert.match(timer, /^Unit=market-report\.service$/m);
 });
 
@@ -75,4 +80,15 @@ test('market deployment units contain no embedded credential values', async () =
     /(?:PANDA_DATA_(?:USERNAME|PASSWORD)|MARKET_AGENT_ACCESS_TOKEN|MARKET_REPORT_SMTP_PASSWORD)=\S+/i
   );
   assert.doesNotMatch(combined, /Authorization:\s*Bearer/i);
+});
+
+test('production operations never shell-source the protected systemd environment', async () => {
+  const guide = await readFile(
+    new URL('../docs/PRODUCTION_OPERATIONS.md', import.meta.url),
+    'utf8'
+  );
+  assert.doesNotMatch(guide, /(?:^|[;&|]\s*)(?:source|\.)\s+\/etc\/agent-review\/agent-review\.env/m);
+  assert.match(guide, /systemd-run/);
+  assert.match(guide, /EnvironmentFile=\/etc\/agent-review\/agent-review\.env/);
+  assert.match(guide, /MARKET_SMOKE_STATE_DIR=\/var\/lib\/agent-review\/market-smoke/);
 });

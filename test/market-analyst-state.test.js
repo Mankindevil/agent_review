@@ -163,6 +163,149 @@ test('MarketTaskStore persists queued atomic writes and reloads them', async (t)
   assert.equal((await reloaded.findByMessageId('owner-a', 'message-1')).id, 'task-1');
 });
 
+test('MarketTaskStore preserves writes from a second long-running instance', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const first = new MarketTaskStore({ stateDir });
+  const second = new MarketTaskStore({ stateDir });
+  await first.load();
+  await second.create({
+    id: 'task-second',
+    owner: 'owner-b',
+    state: 'TASK_STATE_SUBMITTED'
+  });
+  await first.create({
+    id: 'task-first',
+    owner: 'owner-a',
+    state: 'TASK_STATE_SUBMITTED'
+  });
+
+  const persisted = JSON.parse(await readFile(path.join(stateDir, 'state.json'), 'utf8'));
+  assert.deepEqual(
+    persisted.tasks.map(({ id }) => id).sort(),
+    ['task-first', 'task-second']
+  );
+});
+
+test('MarketTaskStore serializes concurrent cross-instance mutations with unique temps', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const first = new MarketTaskStore({ stateDir });
+  const second = new MarketTaskStore({ stateDir });
+  await Promise.all([
+    first.create({
+      id: 'task-concurrent-a',
+      owner: 'owner-a',
+      state: 'TASK_STATE_SUBMITTED'
+    }),
+    second.create({
+      id: 'task-concurrent-b',
+      owner: 'owner-b',
+      state: 'TASK_STATE_SUBMITTED'
+    })
+  ]);
+
+  const files = await readdir(stateDir);
+  assert.deepEqual(
+    (await first.list()).map(({ id }) => id).sort(),
+    ['task-concurrent-a', 'task-concurrent-b']
+  );
+  assert.equal(files.some((name) => /^state\.json\..+\.tmp$/.test(name)), false);
+});
+
+test('MarketTaskStore reads atomically replaced state from other instances', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const reader = new MarketTaskStore({ stateDir });
+  const writer = new MarketTaskStore({ stateDir });
+  await reader.load();
+  await writer.create({
+    id: 'task-external',
+    owner: 'owner-a',
+    state: 'TASK_STATE_SUBMITTED'
+  });
+  assert.equal((await reader.get('task-external')).id, 'task-external');
+});
+
+test('MarketTaskStore recovers a stale dead-owner lock and cleans its own lock', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const lockPath = path.join(stateDir, 'state.json.lock');
+  const token = '00000000-0000-4000-8000-000000000099';
+  await mkdir(lockPath, { recursive: true });
+  await writeFile(path.join(lockPath, `owner-${token}.json`), JSON.stringify({
+    schemaVersion: '1.0',
+    pid: findDeadPid(),
+    hostname: os.hostname(),
+    token,
+    acquiredAt: new Date(Date.now() - 60_000).toISOString()
+  }));
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockPath, old, old);
+
+  const store = new MarketTaskStore({
+    stateDir,
+    lockStaleMs: 10,
+    lockTimeoutMs: 500,
+    lockRetryMs: 1
+  });
+  await store.create({
+    id: 'task-after-stale',
+    owner: 'owner-a',
+    state: 'TASK_STATE_SUBMITTED'
+  });
+  await assert.rejects(stat(lockPath), { code: 'ENOENT' });
+});
+
+test('MarketTaskStore times out on a live owner and leaves that lock untouched', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const lockPath = path.join(stateDir, 'state.json.lock');
+  const token = '00000000-0000-4000-8000-000000000100';
+  const ownerPath = path.join(lockPath, `owner-${token}.json`);
+  await mkdir(lockPath, { recursive: true });
+  await writeFile(ownerPath, JSON.stringify({
+    schemaVersion: '1.0',
+    pid: process.pid,
+    hostname: os.hostname(),
+    token,
+    acquiredAt: new Date().toISOString()
+  }));
+  const store = new MarketTaskStore({
+    stateDir,
+    lockStaleMs: 10,
+    lockTimeoutMs: 30,
+    lockRetryMs: 1
+  });
+  await assert.rejects(
+    store.create({
+      id: 'task-timeout',
+      owner: 'owner-a',
+      state: 'TASK_STATE_SUBMITTED'
+    }),
+    (error) => error?.code === 'STORE_LOCK_TIMEOUT'
+  );
+  assert.equal((await stat(ownerPath)).isFile(), true);
+});
+
+test('MarketTaskStore releases its owner lock when a mutation fails', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const lockPath = path.join(stateDir, 'state.json.lock');
+  const store = new MarketTaskStore({ stateDir });
+  await store.create({
+    id: 'task-before-updater-error',
+    owner: 'owner-a',
+    state: 'TASK_STATE_SUBMITTED'
+  });
+  await assert.rejects(
+    store.update('task-before-updater-error', () => {
+      throw new Error('updater failed');
+    }),
+    /updater failed/
+  );
+  await assert.rejects(stat(lockPath), { code: 'ENOENT' });
+  assert.equal((await store.create({
+    id: 'task-after-updater-error',
+    owner: 'owner-a',
+    state: 'TASK_STATE_SUBMITTED'
+  })).id, 'task-after-updater-error');
+});
+
 test('MarketTaskStore rejects terminal-to-working transitions without changing state', async (t) => {
   const stateDir = await temporaryDirectory(t);
   const store = new MarketTaskStore(stateDir);
@@ -199,23 +342,26 @@ test('MarketTaskStore publishes create and update only after durable persistence
     owner: 'owner-a',
     state: 'TASK_STATE_SUBMITTED'
   });
-  const tempPath = path.join(stateDir, 'state.json.tmp');
-  await mkdir(tempPath);
+  const statePath = path.join(stateDir, 'state.json');
+  const saved = await readFile(statePath);
+  await rm(statePath);
+  await mkdir(statePath);
 
   await assert.rejects(store.create({
     id: 'task-retry',
     owner: 'owner-a',
     state: 'TASK_STATE_SUBMITTED'
   }));
-  assert.equal(await store.get('task-retry'), null);
   await assert.rejects(store.update('task-base', (task) => ({
     ...task,
     state: 'TASK_STATE_WORKING',
     status: { ...task.status, state: 'TASK_STATE_WORKING' }
   })));
+  await rm(statePath, { recursive: true, force: true });
+  await writeFile(statePath, saved);
+  assert.equal(await store.get('task-retry'), null);
   assert.equal((await store.get('task-base')).state, 'TASK_STATE_SUBMITTED');
 
-  await rm(tempPath, { recursive: true, force: true });
   assert.equal((await store.create({
     id: 'task-retry',
     owner: 'owner-a',
