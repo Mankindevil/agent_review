@@ -114,6 +114,29 @@ class PandaCollector:
         self.records.append(record)
         self.trace(record)
 
+    def validation_failure(self, method, error, row_count):
+        now = datetime.now(timezone.utc)
+        self._sequence += 1
+        self._emit({
+            "id": f"panda-call-{self._sequence:03d}",
+            "type": "panda-validation",
+            "method": method,
+            "paramsHash": hashlib.sha256(b"{}").hexdigest(),
+            "startedAt": now.isoformat(),
+            "endedAt": now.isoformat(),
+            "durationMs": 0,
+            "rowCount": row_count,
+            "fields": [],
+            "dataAsOf": None,
+            "responseHash": None,
+            "status": "error",
+            "error": _sanitize_error(error),
+            "cacheStatus": "disabled",
+            "cacheKey": None,
+            "cacheError": None,
+            "truncated": True,
+        })
+
     def _cache_key(self, method, params):
         payload = {
             "sdkVersion": str(getattr(self.module, "__version__", SDK_VERSION)),
@@ -556,6 +579,14 @@ def _public_ranked(rows, top_n):
             for row in rows[:top_n]]
 
 
+def _listing_date(row):
+    for field in ("listing_date", "list_date", "ipo_date"):
+        value = _date_text(row.get(field))
+        if value:
+            return value
+    return ""
+
+
 def build_evidence_pack(request, collector, now):
     if request.get("operation") != "daily-market-report":
         raise ValueError("不支持的 operation")
@@ -596,6 +627,7 @@ def build_evidence_pack(request, collector, now):
             f"交易日历覆盖不足：需要 {REQUIRED_TRADING_SESSIONS} 个已完成交易日"
         )
     window_dates = trade_dates[-REQUIRED_TRADING_SESSIONS:]
+    window_date_set = set(window_dates)
 
     universe_rows = collector.call("get_trade_list", date=report_compact, exchange="SH")
     universe = sorted({str(row.get("symbol")) for row in universe_rows if row.get("symbol")})
@@ -612,9 +644,6 @@ def build_evidence_pack(request, collector, now):
         batch_rows = collector.call(
             "get_stock_daily",
             expected_max_rows=len(symbol_batch) * len(window_dates),
-            required_date=report_compact,
-            required_symbols=symbol_batch,
-            minimum_symbol_coverage=CORE_REPORT_DATE_COVERAGE,
             start_date=window_dates[0],
             end_date=window_dates[-1],
             symbol=symbol_batch,
@@ -624,7 +653,8 @@ def build_evidence_pack(request, collector, now):
         daily_rows.extend(batch_rows)
     daily_rows = [
         row for row in daily_rows
-        if str(row.get("symbol")) in universe and _date_text(row.get("date")) <= report_compact
+        if str(row.get("symbol")) in universe and
+        _date_text(row.get("date")) in window_date_set
     ]
     covered_symbols = {
         str(row.get("symbol"))
@@ -633,10 +663,42 @@ def build_evidence_pack(request, collector, now):
     }
     daily_coverage = len(covered_symbols) / len(universe)
     if daily_coverage < CORE_REPORT_DATE_COVERAGE:
-        raise ValueError(
+        error = ValueError(
             f"A股报告日日线覆盖不足：{daily_coverage:.1%} < "
             f"{CORE_REPORT_DATE_COVERAGE:.1%}"
         )
+        collector.validation_failure("get_stock_daily", error, len(daily_rows))
+        raise error
+
+    universe_by_symbol = {
+        str(row.get("symbol")): row for row in universe_rows if row.get("symbol")
+    }
+    expected_pairs = set()
+    window_start, window_end = window_dates[0], window_dates[-1]
+    for symbol in universe:
+        listing = _listing_date(universe_by_symbol.get(symbol, {}))
+        expected_dates = (
+            [value for value in window_dates if value >= listing]
+            if window_start <= listing <= window_end else window_dates
+        )
+        expected_pairs.update((symbol, value) for value in expected_dates)
+    actual_pairs = {
+        (str(row.get("symbol")), _date_text(row.get("date")))
+        for row in daily_rows
+        if str(row.get("symbol")) in universe and
+        _date_text(row.get("date")) in window_date_set
+    }
+    historical_coverage = (
+        len(actual_pairs & expected_pairs) / len(expected_pairs)
+        if expected_pairs else 0
+    )
+    if historical_coverage < CORE_REPORT_DATE_COVERAGE:
+        error = ValueError(
+            f"A股历史 symbol-session 覆盖不足：{historical_coverage:.1%} < "
+            f"{CORE_REPORT_DATE_COVERAGE:.1%}"
+        )
+        collector.validation_failure("get_stock_daily", error, len(daily_rows))
+        raise error
 
     daily = _daily_metrics(daily_rows)
     min_liquidity = float(request.get("minLiquidityCny", 20_000_000))
@@ -766,12 +828,14 @@ def build_evidence_pack(request, collector, now):
     )
     hot_industries = compute_hot_topics(industry_groups, lhb_available=lhb_available)
     hot_concepts = compute_hot_topics(concept_groups, lhb_available=lhb_available)
-    if active_industries and not hot_industries["ranked"]:
+    if any(item.get("reason") == "MIN_COVERAGE"
+           for item in hot_industries["excluded"]):
         _record_missing(
             missing_data, "hotIndustries", "get_industry_constituents",
             "COVERAGE_INSUFFICIENT",
         )
-    if concept_memberships and not hot_concepts["ranked"]:
+    if any(item.get("reason") == "MIN_COVERAGE"
+           for item in hot_concepts["excluded"]):
         _record_missing(
             missing_data, "hotConcepts", "get_concept_constituents",
             "COVERAGE_INSUFFICIENT",
@@ -851,6 +915,10 @@ def build_evidence_pack(request, collector, now):
             symbol=US_CONTEXT_SYMBOLS,
             fields=["symbol", "date", "name", "close", "pre_close"],
         )
+        us_rows = [
+            row for row in (us_rows or [])
+            if _date_text(row.get("date")) == us_date
+        ]
         if not us_rows:
             _record_missing(
                 missing_data, "us", "get_us_daily", "POINT_IN_TIME_INSUFFICIENT"
@@ -931,7 +999,12 @@ def build_evidence_pack(request, collector, now):
             "preliminaryCandidates": len(preliminary),
             "fullEnrichment": len(enriched),
         },
-        "coverage": {"aShareDaily": daily_coverage},
+        "coverage": {
+            "aShareDaily": daily_coverage,
+            "aShareHistorical": historical_coverage,
+            "historicalActualPairs": len(actual_pairs & expected_pairs),
+            "historicalExpectedPairs": len(expected_pairs),
+        },
         "missingData": missing_data,
         "metricVersion": "1.0",
         "leaderboards": {
