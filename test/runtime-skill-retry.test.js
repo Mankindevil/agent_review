@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, runSkill } from '../src/runtimes.js';
+import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, localRuntimeTimeout, runSkill } from '../src/runtimes.js';
 import { runtimeBuildSkillPrompt } from '../src/prompts.js';
 
 test('uses supported read-only Claude Code arguments', () => {
@@ -73,6 +73,16 @@ test('preserves the Claude Code environment behavior', () => {
     HOME: '/persistent/home',
     NO_COLOR: '1'
   });
+});
+
+test('normalizes local runtime timeout values with a 20-minute ceiling', () => {
+  assert.equal(localRuntimeTimeout(), 180_000);
+  assert.equal(localRuntimeTimeout('300000'), 300_000);
+  assert.equal(localRuntimeTimeout('1200001'), 1_200_000);
+
+  for (const invalidValue of ['NaN', 'Infinity', '-Infinity', '0', '-1', '1.5']) {
+    assert.equal(localRuntimeTimeout(invalidValue), 180_000);
+  }
 });
 
 test('materializes a read-only portable folder from normalized runtime output', () => {

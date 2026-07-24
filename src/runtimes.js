@@ -10,6 +10,8 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const CLAUDE_RUNTIME_SYSTEM_PROMPT = '你是 Agent 盲测平台中的隔离执行器。严格完成用户给出的单一任务，只输出最终内容。当前会话没有任何工具，不得浏览文件、探索代码库、启动子代理，也不得输出或模拟 tool_call、Bash、Explore 等工具调用。';
+const DEFAULT_LOCAL_RUNTIME_TIMEOUT_MS = 180_000;
+const MAX_LOCAL_RUNTIME_TIMEOUT_MS = 1_200_000;
 
 export const RUNTIMES = [
   { id: 'claude-code', name: 'Claude Code', model: 'Claude Sonnet', badge: 'CC' },
@@ -240,11 +242,19 @@ export function localCliEnv(runtimeId, workspace, parentEnv = process.env) {
   };
 }
 
+export function localRuntimeTimeout(value) {
+  const timeout = Number(value);
+  if (!Number.isFinite(timeout) || !Number.isInteger(timeout) || timeout <= 0) {
+    return DEFAULT_LOCAL_RUNTIME_TIMEOUT_MS;
+  }
+  return Math.min(timeout, MAX_LOCAL_RUNTIME_TIMEOUT_MS);
+}
+
 async function callLocalCli(runtimeId, prompt, signal, sampling = {}) {
   const workspace = await mkdtemp(path.join(tmpdir(), `agent-roast-${runtimeId}-`));
   let arkProxy;
   const startedAt = Date.now();
-  const timeout = Number(process.env.LOCAL_RUNTIME_TIMEOUT_MS || 180_000);
+  const timeout = localRuntimeTimeout(process.env.LOCAL_RUNTIME_TIMEOUT_MS);
   const budget = process.env.CLAUDE_MAX_BUDGET_USD || '0.25';
   const command = runtimeId === 'claude-code' ? 'claude' : 'cursor-agent';
   const args = localCliArgs(runtimeId, prompt, { budget });
@@ -273,11 +283,12 @@ async function callLocalCli(runtimeId, prompt, signal, sampling = {}) {
 async function callRuntimeModel(config, prompt, signal, sampling = {}) {
   const baseUrl = config.baseUrl.replace(/\/$/, '');
   const endpoint = baseUrl.endsWith('/chat/completions') ? baseUrl : baseUrl + '/chat/completions';
+  const timeout = localRuntimeTimeout(process.env.LOCAL_RUNTIME_TIMEOUT_MS);
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env[config.apiKeyEnv]}` },
     body: JSON.stringify({ model: config.model, temperature: sampling.temperature ?? 0, ...(Number.isInteger(sampling.seed) ? { seed: sampling.seed } : {}), max_tokens: 2400, ...(config.thinking ? { thinking: config.thinking } : {}), messages: [{ role: 'user', content: prompt }] }),
-    signal: withTimeout(signal, Number(process.env.LOCAL_RUNTIME_TIMEOUT_MS || 180_000))
+    signal: withTimeout(signal, timeout)
   });
   if (!response.ok) throw new Error(`Doubao runtime 返回 HTTP ${response.status}`);
   const payload = await response.json();
