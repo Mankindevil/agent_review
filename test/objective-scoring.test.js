@@ -813,6 +813,78 @@ test('aggregate returns a canonical result without aliasing frozen caller metric
   assert.deepEqual(metrics, before);
 });
 
+test('aggregate rejects a frozen metric accessor without invoking it', () => {
+  let scoreReads = 0;
+  const dynamic = metric('testSuccess', true, 50, 1);
+  Object.defineProperty(dynamic, 'score', {
+    enumerable: true,
+    configurable: true,
+    get() {
+      scoreReads += 1;
+      return scoreReads < 5 ? 50 : 100;
+    }
+  });
+  Object.freeze(dynamic.evidenceIds);
+  Object.freeze(dynamic.gaps);
+  Object.freeze(dynamic);
+  const metrics = [
+    dynamic,
+    metric('robustness', true, 50, 1),
+    metric('contextContinuity', true, 50, 1),
+    metric('a2aCompliance', true, 50, 1),
+    metric('efficiency', true, 50, 1),
+    metric('claimErrorHandling', true, 50, 1)
+  ];
+
+  assert.throws(
+    () => aggregateObjectiveCapability(metrics, RUBRIC_V1),
+    /accessor|descriptor|metric|data/i
+  );
+  assert.equal(scoreReads, 0);
+});
+
+test('aggregate rejects hidden and symbol metric fields', () => {
+  const hidden = metric('testSuccess', true, 100, 1);
+  Object.defineProperty(hidden, 'extra', {
+    value: 'hidden',
+    enumerable: false
+  });
+  const symbol = metric('testSuccess', true, 100, 1);
+  symbol[Symbol('extra')] = 'symbol';
+
+  for (const item of [hidden, symbol]) {
+    const metrics = [
+      item,
+      metric('robustness', true, 100, 1),
+      metric('contextContinuity', true, 100, 1),
+      metric('a2aCompliance', true, 100, 1),
+      metric('efficiency', true, 100, 1),
+      metric('claimErrorHandling', true, 100, 1)
+    ];
+    assert.throws(
+      () => aggregateObjectiveCapability(metrics, RUBRIC_V1),
+      /unknown|metric|field|symbol/i
+    );
+  }
+});
+
+test('aggregate accepts deeply frozen canonical data-descriptor metrics', () => {
+  const metrics = [
+    metric('testSuccess', true, 50, 1),
+    metric('robustness', true, 50, 1),
+    metric('contextContinuity', true, 50, 1),
+    metric('a2aCompliance', true, 50, 1),
+    metric('efficiency', true, 50, 1),
+    metric('claimErrorHandling', true, 50, 1)
+  ];
+  deepFreeze(metrics);
+
+  const result = aggregateObjectiveCapability(metrics, RUBRIC_V1);
+  assert.equal(result.status, 'complete');
+  assert.equal(result.score, 50);
+  assert.equal(result.coverage, 1);
+});
+
 function metric(id, applicable, score, coverage, overrides = {}) {
   const denominator = score === null ? 0 : 1;
   const numerator = score === null

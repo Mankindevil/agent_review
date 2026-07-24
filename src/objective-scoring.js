@@ -97,9 +97,8 @@ export function aggregateObjectiveCapability(metrics, rubric = RUBRIC_V1) {
   }
 
   const byId = new Map();
-  for (const item of metrics) {
-    assertClosedObject(item, METRIC_FIELD_SET, 'metric');
-    assertRequiredFields(item, METRIC_FIELDS, 'metric');
+  for (const metric of metrics) {
+    const item = snapshotMetric(metric);
     assertSafeId(item.id, 'metric id');
     if (!METRIC_IDS.includes(item.id)) {
       throw new TypeError(`unknown objective metric: ${item.id}`);
@@ -157,6 +156,35 @@ export function aggregateObjectiveCapability(metrics, rubric = RUBRIC_V1) {
     provisional: coverage < 0.70,
     metrics: canonicalMetrics
   };
+}
+
+function snapshotMetric(value) {
+  let keys;
+  try {
+    keys = Reflect.ownKeys(value);
+  } catch {
+    throw new TypeError('metric must be an object');
+  }
+  if (!isPlainObject(value)) throw new TypeError('metric must be an object');
+  if (
+    keys.length !== METRIC_FIELDS.length ||
+    keys.some((key) => typeof key !== 'string' || !METRIC_FIELD_SET.has(key))
+  ) {
+    throw new TypeError('metric must contain exactly the canonical fields');
+  }
+
+  const snapshot = {};
+  for (const field of METRIC_FIELDS) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, field);
+    if (
+      !descriptor?.enumerable ||
+      !Object.hasOwn(descriptor, 'value')
+    ) {
+      throw new TypeError(`metric ${field} must be an own enumerable data descriptor`);
+    }
+    snapshot[field] = descriptor.value;
+  }
+  return snapshot;
 }
 
 function buildTestSuccess(tests) {
