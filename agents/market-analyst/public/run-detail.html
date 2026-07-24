@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>市场报告运行详情</title>
+  <link rel="stylesheet" href="/run-detail.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">PANDA MARKET ANALYST</p>
+      <h1>运行详情</h1>
+    </div>
+    <form id="access-form">
+      <label for="access-token">操作员 Bearer Token</label>
+      <div class="token-row">
+        <input id="access-token" name="access-token" type="password"
+               autocomplete="off" spellcheck="false" required>
+        <button type="submit">加载详情</button>
+      </div>
+      <small>令牌只用于本次页面请求，不会持久化。</small>
+    </form>
+  </header>
+  <main>
+    <p id="status" role="status">输入访问令牌以加载受保护的运行产物。</p>
+    <div id="detail" class="detail-grid" hidden></div>
+  </main>
+  <script type="module" src="/run-detail.js"></script>
+</body>
+</html>

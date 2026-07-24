@@ -12,13 +12,19 @@
     "demo:real-runtimes": "ENABLE_LOCAL_CLAUDE_CODE=true ENABLE_LOCAL_CURSOR_AGENT=true node scripts/real-demo.js",
     "demo:deepseek": "node scripts/deepseek-demo.js",
     "data:probe": ".venv/bin/python scripts/panda-data-bridge.py --probe",
-    "test": "node scripts/run-tests.js",
+    "market-agent": "node agents/market-analyst/server.js",
+    "market-report": "node agents/market-analyst/cli.js",
+    "market:smoke": "node scripts/market-agent-live-smoke.js",
+    "test": "node scripts/run-tests.js && node scripts/run-market-worker-tests.js",
+    "test:node": "node scripts/run-tests.js",
+    "test:market-worker": "node scripts/run-market-worker-tests.js",
     "check": "node scripts/check-syntax.js"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "ajv": "8.17.1"
+    "ajv": "8.17.1",
+    "nodemailer": "^9.0.3"
   }
 }

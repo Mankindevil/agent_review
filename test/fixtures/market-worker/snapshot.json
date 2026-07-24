@@ -1,0 +1,13 @@
+{
+  "request": {
+    "operation": "daily-market-report",
+    "date": "2026-07-23",
+    "topN": 10,
+    "minLiquidityCny": 20000000,
+    "cacheDays": 30
+  },
+  "expected": {
+    "schemaVersion": "1.0",
+    "reportDate": "2026-07-23"
+  }
+}
