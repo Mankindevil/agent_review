@@ -5,8 +5,8 @@ import {
   buildGetTaskRequest,
   extractAgentText,
   parseA2AResponse,
-  parseA2AStreamEvent,
-  selectInterface
+  selectInterface,
+  validateStreamResult
 } from './a2a.js';
 import { safeHttpRequest, validateSafeUrl } from './safe-http.js';
 
@@ -16,6 +16,12 @@ const SNAPSHOT_AGGREGATE_MAX_BYTES = 4 * 1024 * 1024;
 const SNAPSHOT_MAX_URLS = 16;
 const SNAPSHOT_BATCH_TIMEOUT_MS = 30_000;
 const MIN_AUTHORIZATION_TOKEN_LENGTH = 3;
+const MAX_AUTHORIZATION_BYTES = 4_096;
+const MAX_SECRET_PATTERNS = 24;
+const MAX_SECRET_PATTERN_LENGTH = 64 * 1_024;
+const MAX_SECRET_DECODE_DEPTH = 3;
+const MAX_SECRET_DECODE_VIEWS = 8;
+const MAX_SECRET_DECODE_INPUT_LENGTH = 2 * 1_024 * 1_024;
 const POLL_DELAYS = [250, 500, 1000, 2000];
 const TERMINAL_STATES = new Set([
   'COMPLETED',
@@ -284,6 +290,7 @@ export function normalizeA2AResult(target, rawObjects) {
   const messages = [];
   let history = [];
   let taskArtifacts = [];
+  let taskArtifactsIndex = -1;
   const streamedArtifactUpdates = [];
   const statusMessages = [];
   const statusSequence = [];
@@ -293,7 +300,7 @@ export function normalizeA2AResult(target, rawObjects) {
   let terminal = false;
   let terminalState = null;
 
-  for (const raw of rawObjects || []) {
+  for (const [eventIndex, raw] of (rawObjects || []).entries()) {
     const root = protocolRoot(target, raw);
     if (!root || typeof root !== 'object') continue;
     const message = root.message || (isMessage(root) ? root : null);
@@ -313,10 +320,11 @@ export function normalizeA2AResult(target, rawObjects) {
       if (Array.isArray(task.history)) history = dedupeByIdentity(task.history, 'messageId');
       if (Array.isArray(task.artifacts)) {
         taskArtifacts = dedupeByIdentity(task.artifacts, 'artifactId', 'id');
+        taskArtifactsIndex = eventIndex;
       }
       if (task.status?.message) statusMessages.push(task.status.message);
       const state = task.status?.state;
-      if (state) statusSequence.push(state);
+      appendStateTransition(statusSequence, state);
       if (isTerminalState(state)) {
         terminal = true;
         terminalState = state;
@@ -328,7 +336,7 @@ export function normalizeA2AResult(target, rawObjects) {
       contextId = statusUpdate.contextId || contextId;
       if (statusUpdate.status?.message) statusMessages.push(statusUpdate.status.message);
       const state = statusUpdate.status?.state;
-      if (state) statusSequence.push(state);
+      appendStateTransition(statusSequence, state);
       if (statusUpdate.final === true || isTerminalState(state)) {
         terminal = true;
         terminalState = state || terminalState;
@@ -338,7 +346,10 @@ export function normalizeA2AResult(target, rawObjects) {
       responseKind = 'task';
       taskId = artifactUpdate.taskId || taskId;
       contextId = artifactUpdate.contextId || contextId;
-      if (artifactUpdate.artifact) streamedArtifactUpdates.push(artifactUpdate);
+      if (artifactUpdate.artifact) streamedArtifactUpdates.push({
+        eventIndex,
+        update: artifactUpdate
+      });
     }
   }
 
@@ -348,7 +359,8 @@ export function normalizeA2AResult(target, rawObjects) {
   for (const artifact of taskArtifacts) {
     artifactMap.set(identityFor(artifact, 'artifactId', 'id'), artifact);
   }
-  for (const update of streamedArtifactUpdates) {
+  for (const { eventIndex, update } of streamedArtifactUpdates) {
+    if (eventIndex <= taskArtifactsIndex) continue;
     const artifact = update.artifact;
     const key = identityFor(artifact, 'artifactId', 'id');
     const previous = artifactMap.get(key);
@@ -363,19 +375,25 @@ export function normalizeA2AResult(target, rawObjects) {
     }
   }
   const artifacts = [...artifactMap.values()];
-  const artifactTimeline = streamedArtifactUpdates.map((update) => ({
+  const artifactTimeline = streamedArtifactUpdates.map(({ update }) => ({
     artifactId: update.artifact.artifactId,
     append: update.append === true,
     lastChunk: update.lastChunk === true,
     partCount: update.artifact.parts?.length || 0
   }));
-  const partCandidates = [
-    ...uniqueMessages.flatMap((message) => message.parts || []),
-    ...history.flatMap((message) => message.parts || []),
-    ...dedupeByIdentity(statusMessages, 'messageId').flatMap((message) => message.parts || []),
-    ...artifacts.flatMap((artifact) => artifact.parts || [])
-  ];
-  const parts = dedupeByIdentity(partCandidates);
+  const parts = [];
+  const seenMessageIds = new Set();
+  for (const message of [
+    ...uniqueMessages,
+    ...history,
+    ...dedupeByIdentity(statusMessages, 'messageId')
+  ]) {
+    const identity = identityFor(message, 'messageId');
+    if (seenMessageIds.has(identity)) continue;
+    seenMessageIds.add(identity);
+    parts.push(...(message.parts || []));
+  }
+  for (const artifact of artifacts) parts.push(...(artifact.parts || []));
   return {
     responseKind,
     terminal,
@@ -395,8 +413,8 @@ export function normalizeA2AResult(target, rawObjects) {
 export async function snapshotUrlParts(parts, options = {}) {
   const request = options.request || safeHttpRequest;
   const persistSnapshot = options.persistSnapshot;
-  const scrubber = createSecretScrubber(options.authorization);
   validateAuthorization(options.authorization);
+  const scrubber = createSecretScrubber(options.authorization);
   const seen = new Set();
   const sources = [];
   const snapshots = [];
@@ -441,13 +459,16 @@ export async function snapshotUrlParts(parts, options = {}) {
   for (const { source, part } of sources) {
     let response;
     try {
-      response = await request(source, {
-        method: 'GET',
-        headers: { accept: '*/*' },
-        signal: options.signal,
-        timeoutMs: Math.min(10_000, remaining(deadline, clock)),
-        maxBytes: SNAPSHOT_MAX_BYTES
-      });
+      response = await runWithinDeadline(
+        ({ signal, remainingMs }) => request(source, {
+          method: 'GET',
+          headers: { accept: '*/*' },
+          signal,
+          timeoutMs: Math.min(10_000, remainingMs),
+          maxBytes: SNAPSHOT_MAX_BYTES
+        }),
+        { deadline, clock, signal: options.signal }
+      );
     } catch (error) {
       throw executorError(
         scrubber.text(error?.message || 'URL Part snapshot transport failed'),
@@ -463,6 +484,7 @@ export async function snapshotUrlParts(parts, options = {}) {
         { code: 'http-status', status: response?.status || 0 }
       );
     }
+    remaining(deadline, clock);
     const body = Buffer.from(response.body);
     if (body.length > SNAPSHOT_MAX_BYTES) {
       throw executorError(
@@ -486,14 +508,28 @@ export async function snapshotUrlParts(parts, options = {}) {
     const digest = sha256(body);
     let persisted;
     try {
-      persisted = await persistSnapshot({
-        bytes: body,
-        mediaType,
-        size: body.length,
-        sha256: digest,
-        sourceUrl
-      });
+      persisted = await runWithinDeadline(
+        ({ signal, remainingMs }) => persistSnapshot({
+          bytes: body,
+          mediaType,
+          size: body.length,
+          sha256: digest,
+          sourceUrl,
+          signal,
+          remainingMs
+        }),
+        { deadline, clock, signal: options.signal }
+      );
     } catch (error) {
+      const failure = classifyFailure(error);
+      if (['signal', 'timeout'].includes(failure.category)) {
+        throw executorError(
+          scrubber.text(error?.message || 'URL Part snapshot persistence was interrupted'),
+          failure.category,
+          failure.outcome,
+          { code: error?.code || failure.category }
+        );
+      }
       throw executorError(
         scrubber.text(error?.message || 'URL Part snapshot persistence failed'),
         'instrumentation',
@@ -617,7 +653,7 @@ function requireHttpSuccess(response) {
 
 function requireMediaType(actual, expected) {
   const accepted = Array.isArray(expected) ? expected : [expected];
-  if (!accepted.some((item) => actual.includes(item))) {
+  if (!accepted.includes(actual)) {
     throw executorError(
       'A2A response Content-Type does not match the protocol',
       'content-type',
@@ -628,51 +664,10 @@ function requireMediaType(actual, expected) {
 }
 
 function validateStreamObjects(target, objects, requestId) {
-  let phase = 'start';
-  let taskId = null;
-  let contextId = null;
-  let terminal = false;
-  for (const object of objects) {
-    let event;
-    try {
-      event = parseA2AStreamEvent(target, object, requestId);
-    } catch (error) {
-      throw executorError(error.message, 'protocol', 'agent-error');
-    }
-    if (phase === 'start') {
-      if (event.kind === 'message') {
-        phase = 'message';
-        terminal = true;
-        continue;
-      }
-      if (event.kind !== 'task') {
-        throw executorError('A2A stream update arrived before its initial Task', 'protocol', 'agent-error');
-      }
-      phase = 'task';
-      taskId = event.value.id;
-      contextId = event.value.contextId || null;
-      terminal = isTerminalState(event.value.status?.state);
-      continue;
-    }
-    if (phase === 'message') {
-      throw executorError('A2A Message stream must close after exactly one Message', 'protocol', 'agent-error');
-    }
-    if (terminal) {
-      throw executorError('A2A stream emitted an event after its terminal update', 'protocol', 'agent-error');
-    }
-    if (!['statusUpdate', 'artifactUpdate'].includes(event.kind)) {
-      throw executorError('A2A Task stream may contain only status/artifact updates', 'protocol', 'agent-error');
-    }
-    if (event.value.taskId !== taskId) {
-      throw executorError('A2A stream update Task id does not match', 'protocol', 'agent-error');
-    }
-    if (contextId && event.value.contextId && event.value.contextId !== contextId) {
-      throw executorError('A2A stream update contextId does not match', 'protocol', 'agent-error');
-    }
-    if (!contextId && event.value.contextId) contextId = event.value.contextId;
-    if (event.kind === 'statusUpdate') {
-      terminal = event.value.final === true || isTerminalState(event.value.status?.state);
-    }
+  try {
+    validateStreamResult(target, objects, requestId);
+  } catch (error) {
+    throw executorError(error.message, 'protocol', 'agent-error');
   }
 }
 
@@ -763,6 +758,10 @@ function isArtifactUpdate(value) {
 
 function collectParts(value, target) {
   if (Array.isArray(value)) target.push(...value);
+}
+
+function appendStateTransition(sequence, state) {
+  if (state && sequence.at(-1) !== state) sequence.push(state);
 }
 
 function dedupeByIdentity(values, ...keys) {
@@ -856,8 +855,7 @@ function publicError(message, category, authorization, details = {}) {
 }
 
 function bearer(value) {
-  const text = String(value);
-  return /^Bearer\s/iu.test(text) ? text : `Bearer ${text}`;
+  return `Bearer ${authorizationToken(value)}`;
 }
 
 function contentType(headers) {
@@ -868,6 +866,52 @@ function remaining(deadline, clock) {
   const value = deadline - clock();
   if (value <= 0) throw Object.assign(new Error('A2A execution timed out'), { code: 'timeout' });
   return value;
+}
+
+async function runWithinDeadline(operation, { deadline, clock, signal }) {
+  if (signal?.aborted) {
+    throw Object.assign(new Error('A2A execution cancelled'), { code: 'cancelled' });
+  }
+  const remainingMs = remaining(deadline, clock);
+  const controller = new AbortController();
+  const timeoutError = Object.assign(new Error('A2A execution timed out'), { code: 'timeout' });
+  const onExternalAbort = () => {
+    if (!controller.signal.aborted) {
+      controller.abort(Object.assign(new Error('A2A execution cancelled'), {
+        code: 'cancelled',
+        name: 'AbortError'
+      }));
+    }
+  };
+  signal?.addEventListener('abort', onExternalAbort, { once: true });
+  if (signal?.aborted) onExternalAbort();
+
+  let onInternalAbort;
+  let timer;
+  const aborted = new Promise((_, reject) => {
+    onInternalAbort = () => reject(
+      controller.signal.reason ||
+      Object.assign(new Error('A2A execution cancelled'), { code: 'cancelled' })
+    );
+    controller.signal.addEventListener('abort', onInternalAbort, { once: true });
+  });
+  timer = setTimeout(() => {
+    if (!controller.signal.aborted) controller.abort(timeoutError);
+  }, remainingMs);
+
+  const pending = Promise.resolve().then(() => operation({
+    signal: controller.signal,
+    remainingMs
+  }));
+  try {
+    const result = await Promise.race([pending, aborted]);
+    remaining(deadline, clock);
+    return result;
+  } finally {
+    clearTimeout(timer);
+    controller.signal.removeEventListener('abort', onInternalAbort);
+    signal?.removeEventListener('abort', onExternalAbort);
+  }
 }
 
 async function sleepWithinDeadline(delay, deadline, clock, signal, sleep) {
@@ -965,17 +1009,31 @@ function redactText(value, secret) {
 
 function validateAuthorization(value) {
   if (value === undefined || value === null) return;
+  authorizationToken(value);
+}
+
+function authorizationToken(value) {
   if (typeof value !== 'string') {
     throw executorError('Authorization must be a string', 'configuration', 'platform-error');
   }
-  const token = value.match(/^Bearer\s+(.+)$/iu)?.[1] ?? value;
+  const bearerMatch = value.match(/^Bearer ([A-Za-z0-9\-._~+/]+=*)$/iu);
+  const rawMatch = value.match(/^([A-Za-z0-9\-._~+/]+=*)$/u);
+  const token = bearerMatch?.[1] ?? rawMatch?.[1];
   if (
     value.trim() !== value ||
+    !token ||
+    /^Bearer$/iu.test(value) ||
     token.length < MIN_AUTHORIZATION_TOKEN_LENGTH ||
+    Buffer.byteLength(value) > MAX_AUTHORIZATION_BYTES ||
     /[\u0000-\u001f\u007f]/u.test(value)
   ) {
-    throw executorError('Authorization is blank, too short, or contains unsafe characters', 'configuration', 'platform-error');
+    throw executorError(
+      'Authorization is blank, too short, too long, or contains unsafe characters',
+      'configuration',
+      'platform-error'
+    );
   }
+  return token;
 }
 
 function createSecretScrubber(authorization) {
@@ -986,40 +1044,142 @@ function createSecretScrubber(authorization) {
       contains: () => false
     };
   }
-  const token = authorization.match(/^Bearer\s+(.+)$/iu)?.[1] ?? authorization;
+  let token;
+  try {
+    token = authorizationToken(authorization);
+  } catch {
+    return literalSecretScrubber(authorization);
+  }
   const header = bearer(token);
-  const variants = new Set([authorization]);
+  const patterns = [];
+  const patternKeys = new Set();
+  const addPattern = (source, caseInsensitive = false) => {
+    if (
+      typeof source !== 'string' ||
+      source.length < MIN_AUTHORIZATION_TOKEN_LENGTH ||
+      source.length > MAX_SECRET_PATTERN_LENGTH
+    ) return;
+    const key = `${caseInsensitive ? 'i' : ''}:${source}`;
+    if (patternKeys.has(key) || patterns.length >= MAX_SECRET_PATTERNS) return;
+    patternKeys.add(key);
+    patterns.push({
+      source,
+      regex: new RegExp(source, caseInsensitive ? 'giu' : 'gu')
+    });
+  };
+  const addLiteral = (value, caseInsensitive = false) => {
+    if (typeof value !== 'string') return;
+    addPattern(escapeRegExp(value), caseInsensitive);
+  };
+
   for (const value of [token, header]) {
     const bytes = Buffer.from(value);
+    const base64 = bytes.toString('base64');
+    const base64url = bytes.toString('base64url');
     const uriEncoded = encodeURIComponent(value);
-    variants.add(value);
-    variants.add(value.replaceAll('/', '\\/'));
-    variants.add(JSON.stringify(value).slice(1, -1));
-    variants.add(uriEncoded);
-    variants.add(uriEncoded.replace(/%[0-9A-F]{2}/gu, (item) => item.toLowerCase()));
-    variants.add(bytes.toString('base64'));
-    variants.add(bytes.toString('base64url'));
-    variants.add(bytes.toString('hex'));
+    addLiteral(value);
+    addLiteral(value.replaceAll('/', '\\/'));
+    addLiteral(JSON.stringify(value).slice(1, -1));
+    addPattern(percentFlexiblePattern(value), true);
+    addLiteral(uriEncoded, true);
+    addLiteral(uriEncoded.replaceAll('%20', '+'), true);
+    addLiteral(base64);
+    addLiteral(base64.replace(/=+$/u, ''));
+    addLiteral(base64url);
+    addLiteral(base64url.padEnd(Math.ceil(base64url.length / 4) * 4, '='));
+    addLiteral(bytes.toString('hex'), true);
   }
-  const ordered = [...variants]
-    .filter((value) => value.length >= MIN_AUTHORIZATION_TOKEN_LENGTH)
-    .sort((left, right) => right.length - left.length);
-  const text = (input) => ordered.reduce(
-    (result, variant) => result.split(variant).join('[REDACTED]'),
-    String(input)
-  );
-  const value = (input) => {
-    if (typeof input === 'string') return text(input);
-    if (Array.isArray(input)) return input.map(value);
-    if (input && typeof input === 'object') {
-      return Object.fromEntries(
-        Object.entries(input).map(([key, item]) => [text(key), value(item)])
-      );
+  patterns.sort((left, right) => right.source.length - left.source.length);
+  const text = (input) => {
+    const redacted = patterns.reduce(
+      (result, pattern) => {
+        pattern.regex.lastIndex = 0;
+        return result.replace(pattern.regex, '[REDACTED]');
+      },
+      String(input)
+    );
+    if (decodedSecretViews(redacted).some((view) => matchesSecretPattern(patterns, view))) {
+      return '[REDACTED]';
     }
-    return input;
+    return redacted;
   };
-  const contains = (input) => ordered.some((variant) => String(input).includes(variant));
+  const value = (input) => scrubObjectValue(input, text);
+  const contains = (input) => decodedSecretViews(input)
+    .some((view) => matchesSecretPattern(patterns, view));
   return { text, value, contains };
+}
+
+function matchesSecretPattern(patterns, input) {
+  return patterns.some((pattern) => {
+    pattern.regex.lastIndex = 0;
+    const found = pattern.regex.test(String(input));
+    pattern.regex.lastIndex = 0;
+    return found;
+  });
+}
+
+function decodedSecretViews(input) {
+  const source = String(input);
+  if (source.length > MAX_SECRET_DECODE_INPUT_LENGTH) return [source];
+  const views = [source];
+  const seen = new Set(views);
+  const queue = [{ value: source, depth: 0 }];
+  while (queue.length > 0 && views.length < MAX_SECRET_DECODE_VIEWS) {
+    const current = queue.shift();
+    if (current.depth >= MAX_SECRET_DECODE_DEPTH) continue;
+    const candidates = [current.value, current.value.replaceAll('+', '%20')];
+    for (const candidate of candidates) {
+      let decoded;
+      try {
+        decoded = decodeURIComponent(candidate);
+      } catch {
+        continue;
+      }
+      if (seen.has(decoded)) continue;
+      seen.add(decoded);
+      views.push(decoded);
+      if (views.length >= MAX_SECRET_DECODE_VIEWS) break;
+      queue.push({ value: decoded, depth: current.depth + 1 });
+    }
+  }
+  return views;
+}
+
+function literalSecretScrubber(secret) {
+  const text = (input) => String(input).split(secret).join('[REDACTED]');
+  return {
+    text,
+    value: (input) => scrubObjectValue(input, text),
+    contains: (input) => String(input).includes(secret)
+  };
+}
+
+function scrubObjectValue(input, text) {
+  if (typeof input === 'string') return text(input);
+  if (Array.isArray(input)) return input.map((item) => scrubObjectValue(item, text));
+  if (input && typeof input === 'object') {
+    return Object.fromEntries(
+      Object.entries(input).map(([key, item]) => [text(key), scrubObjectValue(item, text)])
+    );
+  }
+  return input;
+}
+
+function percentFlexiblePattern(value) {
+  return [...value].map((character) => {
+    const raw = escapeRegExp(character);
+    const percentEncoded = [...Buffer.from(character)]
+      .map((byte) => `%${byte.toString(16).padStart(2, '0')}`)
+      .join('');
+    const alternatives = character === ' '
+      ? [raw, percentEncoded, '\\+']
+      : [raw, percentEncoded];
+    return `(?:${alternatives.join('|')})`;
+  }).join('');
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
 function emptyNormalized() {

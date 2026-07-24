@@ -447,7 +447,9 @@ export function parseA2AStreamEvent(target, payload, requestId) {
 function unwrapResponseEnvelope(target, payload, requestId) {
   if (target.binding !== 'JSONRPC') return payload;
   if (!payload || payload.jsonrpc !== '2.0') throw new Error('A2A JSON-RPC response envelope is invalid');
-  if (String(payload.id) !== String(requestId)) throw new Error('A2A 响应请求 ID does not match');
+  if (!isJsonRpcId(payload.id) || !isJsonRpcId(requestId) || payload.id !== requestId) {
+    throw new Error('A2A 响应请求 ID does not match');
+  }
   const hasResult = Object.hasOwn(payload, 'result');
   const hasError = Object.hasOwn(payload, 'error');
   if (hasResult === hasError) {
@@ -504,7 +506,7 @@ export function validateStreamResult(target, events, requestId) {
   let taskId = null;
   let contextId = null;
   let terminal = false;
-  for (const event of events) {
+  for (const [index, event] of events.entries()) {
     const parsed = parseA2AStreamEvent(target, event, requestId);
     if (phase === 'start') {
       if (parsed.kind === 'message') {
@@ -520,7 +522,19 @@ export function validateStreamResult(target, events, requestId) {
       continue;
     }
     if (phase === 'message') throw new Error('A2A Message stream must close after exactly one Message');
-    if (terminal) throw new Error('A2A stream emitted an event after its terminal result');
+    if (terminal) {
+      const isFinalV1HttpTask = (
+        target.binding === 'HTTP+JSON' &&
+        !String(target.version).startsWith('0.') &&
+        parsed.kind === 'task' &&
+        parsed.value.id === taskId &&
+        (parsed.value.contextId || null) === contextId &&
+        isTerminalState(parsed.value.status?.state) &&
+        index === events.length - 1
+      );
+      if (isFinalV1HttpTask) continue;
+      throw new Error('A2A stream emitted an invalid event after its terminal result');
+    }
     if (!['statusUpdate', 'artifactUpdate'].includes(parsed.kind)) {
       throw new Error('A2A Task stream may contain only status/artifact updates');
     }
@@ -539,7 +553,7 @@ export function validateStreamResult(target, events, requestId) {
 
 function validateMessage(value, { isV1, topLevel = false } = {}) {
   if (!isPlainObject(value)) throw new Error('A2A Message must be an object');
-  if ((!isV1 && value.kind !== 'message') || (isV1 && value.kind !== undefined && value.kind !== 'message')) {
+  if ((!isV1 && value.kind !== 'message') || (isV1 && Object.hasOwn(value, 'kind'))) {
     throw new Error('A2A Message kind is invalid');
   }
   if (!isNonEmptyString(value.messageId)) throw new Error('A2A Message messageId must be non-empty');
@@ -560,7 +574,7 @@ function validateMessage(value, { isV1, topLevel = false } = {}) {
 
 function validateTask(value, { isV1 } = {}) {
   if (!isPlainObject(value)) throw new Error('A2A GetTask/Task response must be an object');
-  if ((!isV1 && value.kind !== 'task') || (isV1 && value.kind !== undefined && value.kind !== 'task')) {
+  if ((!isV1 && value.kind !== 'task') || (isV1 && Object.hasOwn(value, 'kind'))) {
     throw new Error('A2A Task kind is invalid');
   }
   if (!isNonEmptyString(value.id)) throw new Error('A2A Task id must be non-empty');
@@ -594,17 +608,17 @@ function validateTaskStatus(value, { isV1 } = {}) {
   if (!isPlainObject(value) || !isNonEmptyString(value.state)) {
     throw new Error('A2A Task status/state is invalid');
   }
-  const state = String(value.state).toUpperCase().replace(/^TASK_STATE_/u, '').replace(/-/gu, '_');
   const allowed = new Set(isV1
     ? [
-      'UNSPECIFIED', 'SUBMITTED', 'WORKING', 'COMPLETED', 'FAILED',
-      'CANCELED', 'REJECTED', 'INPUT_REQUIRED', 'AUTH_REQUIRED'
+      'TASK_STATE_UNSPECIFIED', 'TASK_STATE_SUBMITTED', 'TASK_STATE_WORKING',
+      'TASK_STATE_COMPLETED', 'TASK_STATE_FAILED', 'TASK_STATE_CANCELED',
+      'TASK_STATE_REJECTED', 'TASK_STATE_INPUT_REQUIRED', 'TASK_STATE_AUTH_REQUIRED'
     ]
     : [
-      'UNKNOWN', 'SUBMITTED', 'WORKING', 'COMPLETED', 'FAILED',
-      'CANCELED', 'REJECTED', 'INPUT_REQUIRED', 'AUTH_REQUIRED'
+      'unknown', 'submitted', 'working', 'completed', 'failed',
+      'canceled', 'rejected', 'input-required', 'auth-required'
     ]);
-  if (!allowed.has(state)) throw new Error('A2A Task status state is invalid');
+  if (!allowed.has(value.state)) throw new Error('A2A Task status state is invalid');
   if (value.message !== undefined) validateMessage(value.message, { isV1, topLevel: true });
 }
 
@@ -612,7 +626,7 @@ function validateStatusUpdate(value, { isV1 } = {}) {
   if (!isPlainObject(value)) throw new Error('A2A status update must be an object');
   if (
     (!isV1 && value.kind !== 'status-update') ||
-    (isV1 && value.kind !== undefined && value.kind !== 'status-update')
+    (isV1 && Object.hasOwn(value, 'kind'))
   ) {
     throw new Error('A2A status update kind is invalid');
   }
@@ -636,7 +650,7 @@ function validateArtifactUpdate(value, { isV1 } = {}) {
   if (!isPlainObject(value)) throw new Error('A2A artifact update must be an object');
   if (
     (!isV1 && value.kind !== 'artifact-update') ||
-    (isV1 && value.kind !== undefined && value.kind !== 'artifact-update')
+    (isV1 && Object.hasOwn(value, 'kind'))
   ) {
     throw new Error('A2A artifact update kind is invalid');
   }
@@ -669,6 +683,7 @@ function validateArtifact(value, { isV1, path }) {
 function validatePart(value, { isV1, path }) {
   if (!isPlainObject(value)) throw new Error(`A2A ${path} Part must be an object`);
   if (isV1) {
+    if (Object.hasOwn(value, 'kind')) throw new Error(`A2A ${path} Part kind is invalid`);
     const choices = ['text', 'raw', 'url', 'data'].filter((key) => Object.hasOwn(value, key));
     if (choices.length !== 1) throw new Error(`A2A ${path} Part oneof is invalid`);
     const choice = choices[0];
@@ -721,6 +736,10 @@ function validateHttpUrl(value, path) {
     throw new Error(`A2A ${path} must be a valid URL`);
   }
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`A2A ${path} must use HTTP(S)`);
+}
+
+function isJsonRpcId(value) {
+  return typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value));
 }
 
 function looksLikeMessage(value) {

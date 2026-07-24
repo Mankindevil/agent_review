@@ -113,8 +113,65 @@ test('redacts the token portion when authorization already includes the Bearer s
   assert.doesNotMatch(JSON.stringify(run), /prefixed-secret/);
 });
 
+test('accepts only RFC 6750 b64token authorization and emits one canonical Bearer scheme', async () => {
+  const valid = [
+    ['abc-._~+/==', 'Bearer abc-._~+/=='],
+    ['bEaReR abc+def==', 'Bearer abc+def==']
+  ];
+  for (const [authorization, expectedHeader] of valid) {
+    let observed;
+    const run = await executeA2ATurn({
+      card: rpcCard,
+      input: { parts: [{ type: 'text', text: 'run' }] },
+      authorization,
+      request: async (_url, options) => {
+        observed = options.headers.authorization;
+        const body = JSON.parse(options.body);
+        return jsonResponse({
+          jsonrpc: '2.0',
+          id: body.id,
+          result: {
+            message: {
+              messageId: 'valid-auth',
+              role: 'ROLE_AGENT',
+              parts: [{ text: 'ok' }]
+            }
+          }
+        });
+      }
+    });
+    assert.equal(run.outcome.status, 'succeeded');
+    assert.equal(observed, expectedHeader);
+  }
+
+  for (const authorization of [
+    'Bearer',
+    'Basic abc',
+    'abc def',
+    'Bearer Bearer abc',
+    ' Bearer abc',
+    'Bearer abc ',
+    'Bearer  abc'
+  ]) {
+    let calls = 0;
+    const run = await executeA2ATurn({
+      card: rpcCard,
+      input: { parts: [{ type: 'text', text: 'run' }] },
+      authorization,
+      request: async () => {
+        calls += 1;
+        throw new Error('transport must not run');
+      }
+    });
+    assert.equal(calls, 0);
+    assert.equal(run.outcome.status, 'platform-error');
+    assert.equal(run.error.category, 'configuration');
+    assert.equal(JSON.stringify(run).includes(authorization), false);
+  }
+});
+
 test('rejects unsafe authorization before transport and scrubs encoded and escaped echoes', async () => {
-  for (const authorization of ['', 'ab', 'abc\u0007']) {
+  for (const authorization of ['', 'ab', 'abc\u0007', 'x'.repeat(4_097)]) {
     let called = false;
     const run = await executeA2ATurn({
       card: rpcCard,
@@ -146,10 +203,10 @@ test('rejects unsafe authorization before transport and scrubs encoded and escap
   assert.match(serialized, /\[REDACTED\]/);
 });
 
-test('scrubs credential encodings and JSON-escaped credentials from metadata keys and values', async () => {
-  const token = 'q"\\x/9';
+test('scrubs credential encodings and slash-escaped credentials from metadata keys and values', async () => {
+  const token = 'q/x+9';
   const encoded = [
-    JSON.stringify(token).slice(1, -1),
+    token.replaceAll('/', '\\/'),
     Buffer.from(token).toString('base64'),
     Buffer.from(token).toString('base64url'),
     Buffer.from(token).toString('hex')
@@ -175,7 +232,7 @@ test('scrubs credential encodings and JSON-escaped credentials from metadata key
   });
   const serialized = JSON.stringify(run);
   for (const value of encoded) assert.equal(serialized.includes(value), false);
-  assert.doesNotMatch(serialized, /q"\\x\/9/);
+  assert.doesNotMatch(serialized, /q\/x\+9/);
 });
 
 test('polls a non-terminal Task on the locked schedule within one wall-clock deadline', async () => {
@@ -225,8 +282,6 @@ test('polls a non-terminal Task on the locked schedule within one wall-clock dea
   assert.deepEqual(methods, ['SendMessage', 'GetTask', 'GetTask', 'GetTask']);
   assert.deepEqual(timeouts, [5_000, 4_750, 4_250, 3_250]);
   assert.deepEqual(run.response.normalized.statusSequence, [
-    'TASK_STATE_WORKING',
-    'TASK_STATE_WORKING',
     'TASK_STATE_WORKING',
     'TASK_STATE_COMPLETED'
   ]);
@@ -381,6 +436,84 @@ test('enforces the streaming Message-or-Task lifecycle state machine', async () 
   assert.equal(noContextRun.response.normalized.contextId, null);
 });
 
+test('accepts one final v1 HTTP Task snapshot and normalizes cumulative evidence once', async () => {
+  const httpCard = {
+    ...rpcCard,
+    supportedInterfaces: [{
+      url: 'https://agent.example/a2a',
+      protocolBinding: 'HTTP+JSON',
+      protocolVersion: '1.0'
+    }]
+  };
+  const historyMessage = {
+    messageId: 'history-1',
+    role: 'ROLE_AGENT',
+    parts: [{ text: 'history' }]
+  };
+  const statusMessage = {
+    messageId: 'status-1',
+    role: 'ROLE_AGENT',
+    parts: [{ text: 'done' }]
+  };
+  const events = [
+    { task: {
+      id: 'task-1',
+      contextId: 'ctx-1',
+      status: { state: 'TASK_STATE_WORKING' },
+      history: [historyMessage]
+    } },
+    { artifactUpdate: {
+      taskId: 'task-1',
+      contextId: 'ctx-1',
+      artifact: { artifactId: 'artifact-1', parts: [{ text: 'ha' }] },
+      append: true
+    } },
+    { artifactUpdate: {
+      taskId: 'task-1',
+      contextId: 'ctx-1',
+      artifact: { artifactId: 'artifact-1', parts: [{ text: 'ha' }] },
+      append: true
+    } },
+    { statusUpdate: {
+      taskId: 'task-1',
+      contextId: 'ctx-1',
+      status: { state: 'TASK_STATE_COMPLETED', message: statusMessage }
+    } },
+    { task: {
+      id: 'task-1',
+      contextId: 'ctx-1',
+      status: { state: 'TASK_STATE_COMPLETED', message: statusMessage },
+      history: [historyMessage],
+      artifacts: [{
+        artifactId: 'artifact-1',
+        parts: [{ text: 'ha' }, { text: 'ha' }]
+      }]
+    } }
+  ];
+  const run = await executeA2ATurn({
+    card: httpCard,
+    input: { parts: [{ type: 'text', text: 'stream' }] },
+    streaming: true,
+    request: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+      body: Buffer.from(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''))
+    })
+  });
+
+  assert.equal(run.outcome.status, 'succeeded');
+  assert.deepEqual(run.response.normalized.statusSequence, [
+    'TASK_STATE_WORKING',
+    'TASK_STATE_COMPLETED'
+  ]);
+  assert.equal(run.response.normalized.history.length, 1);
+  assert.deepEqual(
+    run.response.normalized.artifacts[0].parts,
+    [{ text: 'ha' }, { text: 'ha' }]
+  );
+  assert.equal(run.response.normalized.text, 'history\ndone\nha\nha');
+});
+
 test('locks GetTask polling to the initial Task and context identity', async () => {
   const invalidPollResults = [
     { id: 'task-other', contextId: 'ctx-1', status: { state: 'TASK_STATE_COMPLETED' } },
@@ -522,6 +655,101 @@ test('uses the documented failure taxonomy with public code and status fields', 
   assert.equal(rpcError.error.code, 'jsonrpc-error');
   assert.equal(rpcError.error.protocolCode, -32602);
   assert.doesNotMatch(JSON.stringify(rpcError), /rpc-secret/);
+});
+
+test('matches exact Content-Type essences while allowing legal parameters', async () => {
+  const jsonPayload = (id) => ({
+    jsonrpc: '2.0',
+    id,
+    result: {
+      message: {
+        messageId: 'content-type',
+        role: 'ROLE_AGENT',
+        parts: [{ text: 'ok' }]
+      }
+    }
+  });
+  for (const mediaType of ['application/jsonp', 'application/json-evil']) {
+    const run = await executeA2ATurn({
+      card: rpcCard,
+      input: { parts: [{ type: 'text', text: 'run' }] },
+      request: async (_url, options) => {
+        const body = JSON.parse(options.body);
+        return {
+          status: 200,
+          headers: { 'content-type': mediaType },
+          body: Buffer.from(JSON.stringify(jsonPayload(body.id)))
+        };
+      }
+    });
+    assert.equal(run.outcome.status, 'agent-error');
+    assert.equal(run.error.category, 'content-type');
+  }
+
+  const parameterized = await executeA2ATurn({
+    card: rpcCard,
+    input: { parts: [{ type: 'text', text: 'run' }] },
+    request: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      return {
+        status: 200,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+        body: Buffer.from(JSON.stringify(jsonPayload(body.id)))
+      };
+    }
+  });
+  assert.equal(parameterized.outcome.status, 'succeeded');
+
+  const legacyCard = {
+    ...rpcCard,
+    supportedInterfaces: [{
+      url: 'https://agent.example/a2a',
+      protocolBinding: 'JSONRPC',
+      protocolVersion: '0.3'
+    }]
+  };
+  const legacyParameterized = await executeA2ATurn({
+    card: legacyCard,
+    input: { parts: [{ type: 'text', text: 'run' }] },
+    request: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      return {
+        status: 200,
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+        body: Buffer.from(JSON.stringify({
+          jsonrpc: '2.0',
+          id: body.id,
+          result: {
+            kind: 'message',
+            messageId: 'legacy-content-type',
+            role: 'agent',
+            parts: [{ kind: 'text', text: 'ok' }]
+          }
+        }))
+      };
+    }
+  });
+  assert.equal(legacyParameterized.outcome.status, 'succeeded');
+
+  const requestId = 'evil-stream-type';
+  const stream = await executeA2ATurn({
+    card: rpcCard,
+    input: { parts: [{ type: 'text', text: 'stream' }] },
+    streaming: true,
+    requestId,
+    request: async () => ({
+      ...eventStreamResponse(requestId, [{
+        message: {
+          messageId: 'stream-content-type',
+          role: 'ROLE_AGENT',
+          parts: [{ text: 'ok' }]
+        }
+      }]),
+      headers: { 'content-type': 'text/event-stream-evil' }
+    })
+  });
+  assert.equal(stream.outcome.status, 'agent-error');
+  assert.equal(stream.error.category, 'content-type');
 });
 
 test('classifies input and authorization requirements as interrupted continuations', async () => {
@@ -691,6 +919,59 @@ test('assembles streamed artifact append chunks and preserves their timeline', (
     { artifactId: 'artifact-1', append: true, lastChunk: true, partCount: 1 }
   ]);
   assert.equal(normalized.text, 'chunk one\nchunk two');
+});
+
+test('preserves equal artifact append chunks while deduplicating replayed snapshots', () => {
+  const repeatedHistory = {
+    messageId: 'history-1',
+    role: 'ROLE_AGENT',
+    parts: [{ text: 'history' }]
+  };
+  const normalized = normalizeA2AResult(
+    { binding: 'HTTP+JSON', version: '1.0' },
+    [
+      { task: {
+        id: 'task-1',
+        contextId: 'ctx-1',
+        status: { state: 'TASK_STATE_WORKING' },
+        history: [repeatedHistory]
+      } },
+      { task: {
+        id: 'task-1',
+        contextId: 'ctx-1',
+        status: { state: 'TASK_STATE_WORKING' },
+        history: [repeatedHistory]
+      } },
+      { artifactUpdate: {
+        taskId: 'task-1',
+        contextId: 'ctx-1',
+        artifact: { artifactId: 'artifact-1', parts: [{ text: 'ha' }] },
+        append: true
+      } },
+      { artifactUpdate: {
+        taskId: 'task-1',
+        contextId: 'ctx-1',
+        artifact: { artifactId: 'artifact-1', parts: [{ text: 'ha' }] },
+        append: true
+      } },
+      { statusUpdate: {
+        taskId: 'task-1',
+        contextId: 'ctx-1',
+        status: { state: 'TASK_STATE_COMPLETED' }
+      } }
+    ]
+  );
+
+  assert.equal(normalized.history.length, 1);
+  assert.deepEqual(
+    normalized.artifacts[0].parts,
+    [{ text: 'ha' }, { text: 'ha' }]
+  );
+  assert.deepEqual(
+    normalized.parts,
+    [{ text: 'history' }, { text: 'ha' }, { text: 'ha' }]
+  );
+  assert.equal(normalized.text, 'history\nha\nha');
 });
 
 test('reuses task IDs only for interrupted continuations and checks adjacent contexts', async () => {
@@ -898,6 +1179,156 @@ test('rejects a URL Part containing a submission credential before snapshot tran
   assert.equal(calls, 0);
 });
 
+test('rejects bounded encoded credential URL variants before any snapshot request', async (t) => {
+  const latin1Token = '\u00ff\u00ffx';
+  assert.deepEqual(
+    [...latin1Token].map((character) => character.codePointAt(0)),
+    [0xff, 0xff, 0x78]
+  );
+  const cases = [
+    {
+      name: 'uppercase hexadecimal in a path',
+      token: 'xyz',
+      encoded: '78797A',
+      url: 'https://files.example/78797A/report.csv'
+    },
+    {
+      name: 'mixed-case per-byte percent encoding in a path',
+      token: 'a/b?',
+      encoded: 'a%2fb%3F',
+      url: 'https://files.example/a%2fb%3F/report.csv',
+      expectedCode: 'configuration'
+    },
+    {
+      name: 'form plus encoding in a path',
+      token: 'a b',
+      encoded: 'a+b',
+      url: 'https://files.example/a+b/report.csv',
+      expectedCode: 'configuration'
+    },
+    {
+      name: 'unpadded standard base64 in a path',
+      token: latin1Token,
+      encoded: 'w7/Dv3g',
+      url: 'https://files.example/w7/Dv3g/report.csv',
+      expectedCode: 'configuration'
+    },
+    {
+      name: 'unpadded base64url in a query',
+      token: '~~~x',
+      encoded: 'fn5-eA',
+      url: 'https://files.example/report.csv?credential=fn5-eA'
+    },
+    {
+      name: 'mixed-case percent encoding for a legal token',
+      token: 'a/b',
+      encoded: 'a%2fb',
+      url: 'https://files.example/a%2fb/report.csv'
+    },
+    {
+      name: 'bounded recursively encoded percent representation',
+      token: 'a/b',
+      encoded: 'a%252fb',
+      url: 'https://files.example/a%252fb/report.csv'
+    },
+    {
+      name: 'form encoding of the canonical Bearer header',
+      token: 'abc',
+      encoded: 'Bearer+abc',
+      url: 'https://files.example/Bearer+abc/report.csv'
+    },
+    {
+      name: 'unpadded standard base64 for a legal token',
+      token: '~~~x',
+      encoded: 'fn5+eA',
+      url: 'https://files.example/fn5+eA/report.csv'
+    }
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      let calls = 0;
+      await assert.rejects(
+        snapshotUrlParts([{ url: item.url }], {
+          authorization: item.token,
+          persistSnapshot: async () => ({ evidenceId: 'unused' }),
+          request: async () => {
+            calls += 1;
+            return { status: 200, headers: {}, body: Buffer.from('private') };
+          }
+        }),
+        (error) => error?.code === (item.expectedCode || 'credential-in-url')
+      );
+      assert.equal(calls, 0);
+    });
+  }
+});
+
+test('scrubs encoded credential URLs from every failed run evidence surface', async (t) => {
+  const latin1Token = '\u00ff\u00ffx';
+  const cases = [
+    ['xyz', '78797A', 'https://files.example/78797A/report.csv', 'agent-error', 'credential-in-url'],
+    ['a/b?', 'a%2fb%3F', 'https://files.example/a%2fb%3F/report.csv', 'platform-error', 'configuration'],
+    ['a b', 'a+b', 'https://files.example/a+b/report.csv', 'platform-error', 'configuration'],
+    [latin1Token, 'w7/Dv3g', 'https://files.example/w7/Dv3g/report.csv', 'platform-error', 'configuration'],
+    ['~~~x', 'fn5-eA', 'https://files.example/report.csv?credential=fn5-eA', 'agent-error', 'credential-in-url'],
+    ['a/b', 'a%2fb', 'https://files.example/a%2fb/report.csv', 'agent-error', 'credential-in-url'],
+    ['a/b', 'a%252fb', 'https://files.example/a%252fb/report.csv', 'agent-error', 'credential-in-url'],
+    ['abc', 'Bearer+abc', 'https://files.example/Bearer+abc/report.csv', 'agent-error', 'credential-in-url'],
+    ['~~~x', 'fn5+eA', 'https://files.example/fn5+eA/report.csv', 'agent-error', 'credential-in-url']
+  ];
+
+  for (const [token, encoded, url, expectedOutcome, expectedCode] of cases) {
+    await t.test(encoded, async () => {
+      let snapshotCalls = 0;
+      const run = await executeA2ATurn({
+        card: rpcCard,
+        input: { parts: [{ type: 'text', text: 'run' }] },
+        authorization: token,
+        request: async (_url, options) => {
+          const body = JSON.parse(options.body);
+          return jsonResponse({
+            jsonrpc: '2.0',
+            id: body.id,
+            result: {
+              message: {
+                messageId: 'reply-credential-url',
+                role: 'ROLE_AGENT',
+                parts: [{ url }]
+              }
+            }
+          });
+        },
+        snapshotRequest: async () => {
+          snapshotCalls += 1;
+          return { status: 200, headers: {}, body: Buffer.from('must-not-fetch') };
+        },
+        persistSnapshot: async () => ({ evidenceId: 'must-not-persist' })
+      });
+
+      assert.equal(snapshotCalls, 0);
+      assert.equal(run.outcome.status, expectedOutcome);
+      assert.equal(run.error.code, expectedCode);
+      assert.deepEqual(run.response.snapshots, []);
+      const surfaces = [
+        run,
+        run.outcome,
+        run.response.rawObjects,
+        run.response.normalized,
+        run.error
+      ];
+      for (const surface of surfaces) {
+        const serialized = JSON.stringify(surface);
+        assert.equal(serialized.includes(token), false);
+        assert.equal(serialized.includes(encoded), false);
+        assert.equal(serialized.toLowerCase().includes(encoded.toLowerCase()), false);
+        assert.equal(serialized.includes(url), false);
+        assert.equal(serialized.includes('sourceUrl'), false);
+      }
+    });
+  }
+});
+
 test('does not fetch a URL Part when snapshot persistence is unavailable', async () => {
   let calls = 0;
   await assert.rejects(
@@ -958,6 +1389,65 @@ test('bounds URL Part snapshot count, aggregate bytes, and total batch time', as
     }),
     (error) => error.category === 'timeout' && error.outcome === 'platform-error'
   );
+});
+
+test('bounds persistence by the batch deadline and propagates deadline-aware cancellation', async () => {
+  let persistenceSignal;
+  let persistenceBudget;
+  let persistenceCompleted = false;
+  const started = performance.now();
+  await assert.rejects(
+    snapshotUrlParts([{ url: 'https://files.example/deadline-persist.csv' }], {
+      batchTimeoutMs: 1,
+      clock: () => 0,
+      request: async () => ({
+        status: 200,
+        headers: { 'content-type': 'text/csv' },
+        body: Buffer.from('x')
+      }),
+      persistSnapshot: async ({ signal, remainingMs }) => {
+        persistenceSignal = signal;
+        persistenceBudget = remainingMs;
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        persistenceCompleted = true;
+        return { evidenceId: 'must-not-succeed' };
+      }
+    }),
+    (error) => error.category === 'timeout' && error.outcome === 'platform-error'
+  );
+  const elapsed = performance.now() - started;
+  assert.ok(persistenceSignal instanceof AbortSignal);
+  assert.equal(persistenceSignal.aborted, true);
+  assert.ok(persistenceBudget > 0 && persistenceBudget <= 1);
+  assert.ok(elapsed < 50, `deadline returned after ${elapsed}ms`);
+  assert.equal(persistenceCompleted, false);
+
+  const controller = new AbortController();
+  let externalSignal;
+  const pending = snapshotUrlParts([{ url: 'https://files.example/abort-persist.csv' }], {
+    signal: controller.signal,
+    request: async () => ({
+      status: 200,
+      headers: {},
+      body: Buffer.from('x')
+    }),
+    persistSnapshot: ({ signal }) => {
+      externalSignal = signal;
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve({ evidenceId: 'too-late' }), 30);
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(Object.assign(new Error('cancelled persistence'), { name: 'AbortError' }));
+        }, { once: true });
+      });
+    }
+  });
+  setTimeout(() => controller.abort(), 1);
+  await assert.rejects(
+    pending,
+    (error) => error.category === 'signal' && error.outcome === 'platform-error'
+  );
+  assert.equal(externalSignal.aborted, true);
 });
 
 test('validates URL Parts before invoking an injected snapshot transport', async () => {

@@ -459,6 +459,20 @@ test('rejects JSON-RPC errors and mismatched response ids', () => {
     () => parseA2AResponse(target, { jsonrpc: '2.0', id: 'req-1', result: { task: { status: {} } } }, 'req-1'),
     /Task/
   );
+  assert.throws(
+    () => parseA2AResponse(target, {
+      jsonrpc: '2.0',
+      id: 1,
+      result: {
+        message: {
+          messageId: 'numeric-id',
+          role: 'ROLE_AGENT',
+          parts: [{ text: 'must not match string id' }]
+        }
+      }
+    }, '1'),
+    /ID|id/i
+  );
 });
 
 test('accepts legacy 0.3 JSON-RPC results without a 1.0 response wrapper', () => {
@@ -580,6 +594,76 @@ test('strictly validates Message, Part, Task, history, and artifact schemas', ()
   }
 });
 
+test('enforces exact v1 enums and rejects every legacy discriminator while preserving 0.3', () => {
+  const v1 = { url: 'https://example.com/a2a', binding: 'HTTP+JSON', version: '1.0' };
+  const v03 = { url: 'https://example.com/a2a', binding: 'HTTP+JSON', version: '0.3' };
+  const message = {
+    messageId: 'message-1',
+    role: 'ROLE_AGENT',
+    parts: [{ text: 'ok' }]
+  };
+
+  assert.throws(
+    () => parseA2AResponse(v1, { message: { ...message, kind: 'message' } }, 'unused'),
+    /kind|legacy/i
+  );
+  assert.throws(
+    () => parseA2AResponse(v1, {
+      message: { ...message, parts: [{ kind: 'text', text: 'ok' }] }
+    }, 'unused'),
+    /kind|legacy|Part/i
+  );
+  for (const state of ['completed', 'COMPLETED', 'task_state_completed']) {
+    assert.throws(
+      () => parseA2AResponse(v1, {
+        task: { id: 'task-1', status: { state } }
+      }, 'unused'),
+      /state/i
+    );
+  }
+  assert.throws(
+    () => parseA2AResponse(v1, {
+      task: {
+        kind: 'task',
+        id: 'task-1',
+        status: { state: 'TASK_STATE_COMPLETED' }
+      }
+    }, 'unused'),
+    /kind|legacy/i
+  );
+  assert.throws(
+    () => parseA2AStreamEvent(v1, {
+      statusUpdate: {
+        kind: 'status-update',
+        taskId: 'task-1',
+        contextId: 'ctx-1',
+        status: { state: 'TASK_STATE_COMPLETED' }
+      }
+    }, 'unused'),
+    /kind|legacy/i
+  );
+  assert.throws(
+    () => parseA2AStreamEvent(v1, {
+      artifactUpdate: {
+        kind: 'artifact-update',
+        taskId: 'task-1',
+        contextId: 'ctx-1',
+        artifact: { artifactId: 'artifact-1', parts: [{ text: 'done' }] }
+      }
+    }, 'unused'),
+    /kind|legacy/i
+  );
+
+  assert.doesNotThrow(() => parseA2AResponse(v03, {
+    task: {
+      kind: 'task',
+      id: 'legacy-task',
+      contextId: 'legacy-context',
+      status: { state: 'completed' }
+    }
+  }, 'unused'));
+});
+
 test('binds GetTask responses to Task only and requires 0.3 task context', () => {
   const v1Rpc = { url: 'https://example.com/rpc', binding: 'JSONRPC', version: '1.0' };
   const task = {
@@ -699,6 +783,92 @@ test('accepts a legacy 0.3 terminal status update stream', () => {
       'req-1'
     ),
     /before|Task/i
+  );
+});
+
+test('allows exactly one final same-Task snapshot only for v1 HTTP streaming', () => {
+  const target = { binding: 'HTTP+JSON', version: '1.0' };
+  const initial = {
+    task: {
+      id: 'task-1',
+      contextId: 'ctx-1',
+      status: { state: 'TASK_STATE_WORKING' }
+    }
+  };
+  const terminal = {
+    statusUpdate: {
+      taskId: 'task-1',
+      contextId: 'ctx-1',
+      status: { state: 'TASK_STATE_COMPLETED' }
+    }
+  };
+  const finalSnapshot = {
+    task: {
+      id: 'task-1',
+      contextId: 'ctx-1',
+      status: { state: 'TASK_STATE_COMPLETED' }
+    }
+  };
+  assert.equal(
+    validateStreamResult(target, [initial, terminal, finalSnapshot], 'unused').terminal,
+    true
+  );
+
+  const invalid = [
+    [initial, terminal, { task: { ...finalSnapshot.task, id: 'task-other' } }],
+    [initial, terminal, { task: { ...finalSnapshot.task, contextId: 'ctx-other' } }],
+    [initial, terminal, { task: {
+      ...finalSnapshot.task,
+      status: { state: 'TASK_STATE_WORKING' }
+    } }],
+    [initial, terminal, finalSnapshot, finalSnapshot],
+    [initial, terminal, finalSnapshot, {
+      artifactUpdate: {
+        taskId: 'task-1',
+        contextId: 'ctx-1',
+        artifact: { artifactId: 'late', parts: [{ text: 'late' }] }
+      }
+    }]
+  ];
+  for (const events of invalid) {
+    assert.throws(() => validateStreamResult(target, events, 'unused'), /terminal|Task|context|last/i);
+  }
+
+  const rpcTarget = { binding: 'JSONRPC', version: '1.0' };
+  const envelope = (result) => ({ jsonrpc: '2.0', id: 'req', result });
+  assert.throws(
+    () => validateStreamResult(
+      rpcTarget,
+      [initial, terminal, finalSnapshot].map(envelope),
+      'req'
+    ),
+    /terminal/i
+  );
+
+  const legacyTarget = { binding: 'HTTP+JSON', version: '0.3' };
+  assert.throws(
+    () => validateStreamResult(legacyTarget, [
+      { task: {
+        kind: 'task',
+        id: 'task-1',
+        contextId: 'ctx-1',
+        status: { state: 'working' }
+      } },
+      { statusUpdate: {
+        kind: 'status-update',
+        taskId: 'task-1',
+        contextId: 'ctx-1',
+        final: true,
+        status: { state: 'completed' }
+      } },
+      { task: {
+        kind: 'task',
+        id: 'task-1',
+        contextId: 'ctx-1',
+        status: { state: 'completed' }
+      } }
+    ], 'unused'),
+    /terminal/i
   );
 });
 
