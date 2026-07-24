@@ -5,7 +5,7 @@ Agent Card JSON 技术预检平台是锐评局中的独立测试入口。参赛�
 入口：
 
 ```text
-http://localhost:4173/agent-check.html
+http://localhost:4173/agent-check
 ```
 
 本平台不会创建正式投稿、不执行金融评分、不进入往期战绩，也不保存上传文件、Card、访问密钥、Agent Token 或预检结果。
@@ -140,7 +140,7 @@ A2A 1.0 示例：
 
 ## 5. 页面操作步骤
 
-1. 打开 `/agent-check.html`。
+1. 打开 `/agent-check`。
 2. 输入管理员提供的平台访问密钥。
 3. 把 `.json` 文件拖到上传区、点击“选择文件”，或直接粘贴 Agent Card JSON。
 4. 检查页面生成的摘要：

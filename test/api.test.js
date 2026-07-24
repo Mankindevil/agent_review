@@ -141,17 +141,21 @@ test('returns JSON 404 for unknown API routes instead of the SPA shell', async (
 });
 
 test('serves an Agent Card upload readiness console with isolated credentials and explicit streaming consent', async () => {
-  const [pageResponse, scriptResponse, styleResponse] = await Promise.all([
+  const [pageResponse, aliasResponse, scriptResponse, styleResponse] = await Promise.all([
     fetch(`${origin}/agent-check.html`),
+    fetch(`${origin}/agent-check`),
     fetch(`${origin}/agent-check.js`),
     fetch(`${origin}/agent-check.css`)
   ]);
-  const [html, script, css] = await Promise.all([
+  const [html, aliasHtml, script, css] = await Promise.all([
     pageResponse.text(),
+    aliasResponse.text(),
     scriptResponse.text(),
     styleResponse.text()
   ]);
   assert.equal(pageResponse.status, 200);
+  assert.equal(aliasResponse.status, 200);
+  assert.match(aliasHtml, /diagnostics-form/);
   assert.equal(scriptResponse.status, 200);
   assert.equal(styleResponse.status, 200);
   for (const id of [
@@ -215,7 +219,8 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
   assert.match(envExample, /AGENT_DIAGNOSTICS_RATE_LIMIT=6/);
   assert.match(envExample, /AGENT_DIAGNOSTICS_CONCURRENCY=4/);
   assert.match(readme, /AGENT_DIAGNOSTICS_GUIDE\.md/);
-  assert.match(readme, /agent-check\.html/);
+  assert.match(readme, /\/agent-check\b/);
+  assert.doesNotMatch(readme, /\/agent-check\.html/);
   assert.match(readme, /Agent Card JSON 技术预检/);
   assert.match(readme, /20 分钟/);
 });

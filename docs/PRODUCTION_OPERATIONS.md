@@ -4,8 +4,9 @@ Run these commands on the production host as an authorized administrator. Never 
 
 ## Service inventory
 
-- Public application: <https://14.103.143.171/>
-- Browser diagnostics: <https://14.103.143.171/agent-check.html>
+- Public application surface: diagnostics allowlist only; all other HTTPS paths return `404`
+- Browser diagnostics: <https://14.103.143.171/agent-check>
+- Private full application: <http://127.0.0.1:4173/> through an SSH tunnel
 - Services: `agent-review` (application) and Nginx (TLS reverse proxy)
 - Firewall: UFW; certificate timer: `agent-review-certbot.timer`
 - Active release when this guide was written: `29324596a665206ff273bdba94e9a98f0a131acd`
@@ -13,7 +14,17 @@ Run these commands on the production host as an authorized administrator. Never 
 - State: `/var/lib/agent-review/evaluations.json`
 - Environment: `/etc/agent-review/agent-review.env`, owned by `root:root`, mode `0600`
 
-Manage the app only through systemd; do not start an additional Node process. Nginx remains the public TLS endpoint.
+Manage the app only through systemd; do not start an additional Node process. Nginx remains the public TLS endpoint and exposes only `/agent-check`, its JS/CSS, `/api/agent-diagnostics`, and `/api/health`.
+
+## Private administrator access
+
+Run the following command on the administrator workstation, not on the production host:
+
+```powershell
+ssh -N -L 4173:127.0.0.1:4173 root@14.103.143.171
+```
+
+Keep that session open, then visit <http://127.0.0.1:4173/>. This connects directly to the Node service on the production loopback interface and does not pass through the public Nginx allowlist.
 
 ## Daily health and logs
 
@@ -28,17 +39,24 @@ require_200() {
   status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-redirs 0 --connect-timeout 5 --max-time 15 "$url")"
   test "$status" = '200'
 }
+require_404() {
+  local url="$1" status
+  status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-redirs 0 --connect-timeout 5 --max-time 15 "$url")"
+  test "$status" = '404'
+}
 sudo systemctl status agent-review --no-pager
 readlink -f /opt/agent-review/app
 health_ok
-require_200 https://14.103.143.171/
-require_200 https://14.103.143.171/agent-check.html
+require_200 https://14.103.143.171/agent-check
+require_404 https://14.103.143.171/
+require_404 https://14.103.143.171/api/evaluations
+require_404 https://14.103.143.171/methodology.html
 sudo journalctl -u agent-review --since '24 hours ago' --no-pager
 sudo systemctl status nginx --no-pager
 sudo journalctl -u nginx --since '24 hours ago' --no-pager
 ```
 
-The health response must contain JSON with `ok: true`; page checks require an exact HTTP 200 and do not follow redirects. The existing failed `cloud-monitor-agent` and `console-setup` units are unrelated to this platform; record and investigate them separately unless evidence links them to the incident.
+The health response must contain JSON with `ok: true`; the diagnostics page must return exactly `200`, while the full evaluation UI and non-allowlisted APIs must return exactly `404`. These checks do not follow redirects. The existing failed `cloud-monitor-agent` and `console-setup` units are unrelated to this platform; record and investigate them separately unless evidence links them to the incident.
 
 ## Restart and reboot validation
 
