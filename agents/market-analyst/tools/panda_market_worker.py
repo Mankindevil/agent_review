@@ -109,6 +109,7 @@ class PandaCollector:
         self.report_date = None
         self.records = []
         self._sequence = 0
+        self._cache_transaction = None
 
     def _emit(self, record):
         self.records.append(record)
@@ -215,6 +216,51 @@ class PandaCollector:
                     pass
             return _sanitize_error(error)
 
+    def begin_cache_transaction(self, method):
+        if self._cache_transaction is not None:
+            raise RuntimeError("cache transaction already active")
+        self._cache_transaction = {
+            "method": method,
+            "pending": {},
+            "hits": set(),
+        }
+
+    def _invalidate_cache(self, cache_key):
+        if not self.cache_dir:
+            return
+        for path in self._cache_paths(cache_key):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def rollback_cache_transaction(self):
+        transaction = self._cache_transaction
+        self._cache_transaction = None
+        if transaction is None:
+            return
+        for cache_key in transaction["hits"]:
+            self._invalidate_cache(cache_key)
+
+    def commit_cache_transaction(self):
+        transaction = self._cache_transaction
+        self._cache_transaction = None
+        if transaction is None:
+            return
+        pending = transaction["pending"]
+        write_errors = {}
+        try:
+            for cache_key, rows in pending.items():
+                write_error = self._write_cache(cache_key, rows)
+                if write_error:
+                    write_errors[cache_key] = write_error
+                    break
+        except Exception as error:
+            write_errors["transaction"] = _sanitize_error(error)
+        if write_errors:
+            for cache_key in pending:
+                self._invalidate_cache(cache_key)
+
     def call(self, method, *, expected_max_rows=None, required_date=None,
              required_symbols=None, minimum_symbol_coverage=None, **params):
         started = datetime.now(timezone.utc)
@@ -234,6 +280,9 @@ class PandaCollector:
             cached, cache_status, cache_error = self._read_cache(cache_key)
             if cached is not None:
                 rows = cached
+                if (self._cache_transaction is not None and
+                        self._cache_transaction["method"] == method):
+                    self._cache_transaction["hits"].add(cache_key)
             else:
                 rows = _records(operation(**params))
                 provider_fetched = True
@@ -268,12 +317,17 @@ class PandaCollector:
                     )
             if (provider_fetched and self.cache_dir and self.cache_days > 0 and
                     self.report_date):
-                write_error = self._write_cache(cache_key, rows)
-                if write_error:
-                    cache_status = "write-error"
-                    cache_error = write_error
-                else:
+                if (self._cache_transaction is not None and
+                        self._cache_transaction["method"] == method):
+                    self._cache_transaction["pending"][cache_key] = rows
                     cache_status = "miss"
+                else:
+                    write_error = self._write_cache(cache_key, rows)
+                    if write_error:
+                        cache_status = "write-error"
+                        cache_error = write_error
+                    else:
+                        cache_status = "miss"
             status = "ok"
             return rows
         except Exception as cause:
@@ -634,23 +688,28 @@ def build_evidence_pack(request, collector, now):
     if not universe:
         raise ValueError("在售股票列表为空")
 
+    collector.begin_cache_transaction("get_stock_daily")
     daily_rows = []
     daily_fields = [
         "symbol", "date", "name", "open", "close", "high", "low", "volume", "amount",
         "pre_close", "limit_up", "limit_down", "trade_status",
     ]
     daily_batch_size = max(1, SAFE_DAILY_ROW_BUDGET // len(window_dates))
-    for symbol_batch in _batches(universe, daily_batch_size):
-        batch_rows = collector.call(
-            "get_stock_daily",
-            expected_max_rows=len(symbol_batch) * len(window_dates),
-            start_date=window_dates[0],
-            end_date=window_dates[-1],
-            symbol=symbol_batch,
-            fields=daily_fields,
-            st=True,
-        )
-        daily_rows.extend(batch_rows)
+    try:
+        for symbol_batch in _batches(universe, daily_batch_size):
+            batch_rows = collector.call(
+                "get_stock_daily",
+                expected_max_rows=len(symbol_batch) * len(window_dates),
+                start_date=window_dates[0],
+                end_date=window_dates[-1],
+                symbol=symbol_batch,
+                fields=daily_fields,
+                st=True,
+            )
+            daily_rows.extend(batch_rows)
+    except Exception:
+        collector.rollback_cache_transaction()
+        raise
     daily_rows = [
         row for row in daily_rows
         if str(row.get("symbol")) in universe and
@@ -668,6 +727,7 @@ def build_evidence_pack(request, collector, now):
             f"{CORE_REPORT_DATE_COVERAGE:.1%}"
         )
         collector.validation_failure("get_stock_daily", error, len(daily_rows))
+        collector.rollback_cache_transaction()
         raise error
 
     universe_by_symbol = {
@@ -698,7 +758,10 @@ def build_evidence_pack(request, collector, now):
             f"{CORE_REPORT_DATE_COVERAGE:.1%}"
         )
         collector.validation_failure("get_stock_daily", error, len(daily_rows))
+        collector.rollback_cache_transaction()
         raise error
+
+    collector.commit_cache_transaction()
 
     daily = _daily_metrics(daily_rows)
     min_liquidity = float(request.get("minLiquidityCny", 20_000_000))

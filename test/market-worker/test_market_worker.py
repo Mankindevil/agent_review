@@ -266,6 +266,178 @@ class MarketWorkerTests(unittest.TestCase):
                 now="2026-07-24T10:30:00Z",
             )
 
+    def test_failed_daily_cache_transaction_does_not_poison_complete_retry(self):
+        class IncompleteCountingPanda(FakePanda):
+            def __init__(self):
+                self.daily_calls = 0
+
+            def get_stock_daily(self, *args, **kwargs):
+                self.daily_calls += 1
+                rows = super().get_stock_daily(*args, **kwargs).to_dict()
+                return FakeFrame([
+                    row for index, row in enumerate(rows)
+                    if index % worker.REQUIRED_TRADING_SESSIONS >= 10
+                ])
+
+        class CompleteCountingPanda(FakePanda):
+            def __init__(self):
+                self.daily_calls = 0
+
+            def get_stock_daily(self, *args, **kwargs):
+                self.daily_calls += 1
+                return super().get_stock_daily(*args, **kwargs)
+
+        request = {
+            "operation": "daily-market-report",
+            "date": "2026-07-23",
+            "topN": 10,
+            "minLiquidityCny": 20_000_000,
+        }
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.cwd()) as cache_dir:
+            incomplete = IncompleteCountingPanda()
+            failed_trace = []
+            with self.assertRaisesRegex(ValueError, "鍘嗗彶|session|瑕嗙洊"):
+                worker.build_evidence_pack(
+                    request,
+                    worker.PandaCollector(
+                        incomplete, failed_trace.append, cache_dir, 30
+                    ),
+                    now="2026-07-24T10:30:00Z",
+                )
+
+            daily_keys = {
+                item["cacheKey"] for item in failed_trace
+                if item["method"] == "get_stock_daily" and item["cacheKey"]
+            }
+            self.assertTrue(daily_keys)
+            for cache_key in daily_keys:
+                self.assertFalse(
+                    (pathlib.Path(cache_dir) / f"{cache_key}.parquet").exists()
+                )
+                self.assertFalse(
+                    (pathlib.Path(cache_dir) / f"{cache_key}.json").exists()
+                )
+
+            complete = CompleteCountingPanda()
+            pack = worker.build_evidence_pack(
+                request,
+                worker.PandaCollector(complete, lambda _: None, cache_dir, 30),
+                now="2026-07-24T10:30:00Z",
+            )
+            self.assertEqual(pack["coverage"]["aShareHistorical"], 1)
+            self.assertGreater(complete.daily_calls, 0)
+
+    def test_successful_daily_cache_transaction_commits_for_later_hit(self):
+        class CountingPanda(FakePanda):
+            def __init__(self):
+                self.daily_calls = 0
+
+            def get_stock_daily(self, *args, **kwargs):
+                self.daily_calls += 1
+                return super().get_stock_daily(*args, **kwargs)
+
+        request = {
+            "operation": "daily-market-report",
+            "date": "2026-07-23",
+            "topN": 10,
+            "minLiquidityCny": 20_000_000,
+        }
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.cwd()) as cache_dir:
+            provider = CountingPanda()
+            first_trace = []
+            worker.build_evidence_pack(
+                request,
+                worker.PandaCollector(
+                    provider, first_trace.append, cache_dir, 30
+                ),
+                now="2026-07-24T10:30:00Z",
+            )
+            first_call_count = provider.daily_calls
+            self.assertGreater(first_call_count, 0)
+
+            second_trace = []
+            worker.build_evidence_pack(
+                request,
+                worker.PandaCollector(
+                    provider, second_trace.append, cache_dir, 30
+                ),
+                now="2026-07-24T10:30:00Z",
+            )
+            self.assertEqual(provider.daily_calls, first_call_count)
+            daily_traces = [
+                item for item in second_trace
+                if item["method"] == "get_stock_daily"
+            ]
+            self.assertTrue(daily_traces)
+            self.assertTrue(all(
+                item["cacheStatus"] == "hit" for item in daily_traces
+            ))
+
+    def test_failed_daily_validation_invalidates_existing_daily_cache_hit(self):
+        class CountingPanda(FakePanda):
+            def __init__(self):
+                self.daily_calls = 0
+
+            def get_stock_daily(self, *args, **kwargs):
+                self.daily_calls += 1
+                return super().get_stock_daily(*args, **kwargs)
+
+        request = {
+            "operation": "daily-market-report",
+            "date": "2026-07-23",
+            "topN": 10,
+            "minLiquidityCny": 20_000_000,
+        }
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.cwd()) as cache_dir:
+            seed_trace = []
+            seed_collector = worker.PandaCollector(
+                FakePanda(), seed_trace.append, cache_dir, 30
+            )
+            worker.build_evidence_pack(
+                request, seed_collector, now="2026-07-24T10:30:00Z"
+            )
+            daily_key = next(
+                item["cacheKey"] for item in seed_trace
+                if item["method"] == "get_stock_daily"
+            )
+            complete_rows = FakePanda().get_stock_daily(
+                "20260430", "20260723", FakePanda.symbols
+            ).to_dict()
+            report_date_only = [
+                row for row in complete_rows if row["date"] == "20260723"
+            ]
+            self.assertIsNone(
+                seed_collector._write_cache(daily_key, report_date_only)
+            )
+
+            cached_failure_provider = CountingPanda()
+            with self.assertRaisesRegex(ValueError, "鍘嗗彶|session|瑕嗙洊"):
+                worker.build_evidence_pack(
+                    request,
+                    worker.PandaCollector(
+                        cached_failure_provider, lambda _: None, cache_dir, 30
+                    ),
+                    now="2026-07-24T10:30:00Z",
+                )
+            self.assertEqual(cached_failure_provider.daily_calls, 0)
+            self.assertFalse(
+                (pathlib.Path(cache_dir) / f"{daily_key}.parquet").exists()
+            )
+            self.assertFalse(
+                (pathlib.Path(cache_dir) / f"{daily_key}.json").exists()
+            )
+
+            retry_provider = CountingPanda()
+            pack = worker.build_evidence_pack(
+                request,
+                worker.PandaCollector(
+                    retry_provider, lambda _: None, cache_dir, 30
+                ),
+                now="2026-07-24T10:30:00Z",
+            )
+            self.assertEqual(pack["coverage"]["aShareHistorical"], 1)
+            self.assertGreater(retry_provider.daily_calls, 0)
+
     def test_empty_candidate_set_does_not_expand_optional_calls_to_all_stocks(self):
         class NoUnboundedEnrichmentPanda(FakePanda):
             def get_lhb_list(self, **params):
