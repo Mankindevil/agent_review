@@ -207,6 +207,39 @@ export function localCliArgs(runtimeId, prompt, { budget = '0.25' } = {}) {
   throw new Error(`Unsupported local Runtime: ${runtimeId}`);
 }
 
+const CURSOR_EXECUTION_ENV_KEYS = [
+  'PATH', 'Path', 'PATHEXT',
+  'SystemRoot', 'SYSTEMROOT', 'WINDIR',
+  'ComSpec', 'COMSPEC',
+  'LANG', 'LANGUAGE', 'LC_ALL', 'TERM'
+];
+
+export function localCliEnv(runtimeId, workspace, parentEnv = process.env) {
+  if (runtimeId !== 'cursor') return { ...parentEnv, NO_COLOR: '1' };
+
+  const env = { NO_COLOR: '1' };
+  for (const key of CURSOR_EXECUTION_ENV_KEYS) {
+    if (typeof parentEnv[key] === 'string' && parentEnv[key]) env[key] = parentEnv[key];
+  }
+  if (typeof parentEnv.CURSOR_API_KEY === 'string' && parentEnv.CURSOR_API_KEY) {
+    env.CURSOR_API_KEY = parentEnv.CURSOR_API_KEY;
+  }
+  return {
+    ...env,
+    HOME: workspace,
+    USERPROFILE: workspace,
+    APPDATA: workspace,
+    LOCALAPPDATA: workspace,
+    XDG_CONFIG_HOME: workspace,
+    XDG_CACHE_HOME: workspace,
+    XDG_DATA_HOME: workspace,
+    XDG_STATE_HOME: workspace,
+    TMPDIR: workspace,
+    TMP: workspace,
+    TEMP: workspace
+  };
+}
+
 async function callLocalCli(runtimeId, prompt, signal, sampling = {}) {
   const workspace = await mkdtemp(path.join(tmpdir(), `agent-roast-${runtimeId}-`));
   let arkProxy;
@@ -216,7 +249,7 @@ async function callLocalCli(runtimeId, prompt, signal, sampling = {}) {
   const command = runtimeId === 'claude-code' ? 'claude' : 'cursor-agent';
   const args = localCliArgs(runtimeId, prompt, { budget });
   try {
-    const commandEnv = { ...process.env, NO_COLOR: '1' };
+    const commandEnv = localCliEnv(runtimeId, workspace);
     if (runtimeId === 'claude-code' && shouldUseArkClaude(commandEnv)) {
       arkProxy = await startArkAnthropicProxy({ baseUrl: commandEnv.ARK_BASE_URL, apiKey: commandEnv.ARK_API_KEY, model: commandEnv.CLAUDE_ARK_MODEL || commandEnv.REVIEW_MODEL_DEEPSEEK, signal, ...sampling });
       applyArkClaudeEnv(commandEnv, arkProxy.baseUrl);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, runSkill } from '../src/runtimes.js';
+import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, runSkill } from '../src/runtimes.js';
 import { runtimeBuildSkillPrompt } from '../src/prompts.js';
 
 test('uses supported read-only Claude Code arguments', () => {
@@ -25,6 +25,54 @@ test('uses documented Cursor Agent print arguments', () => {
     '-p', 'build a skill',
     '--output-format', 'json'
   ]);
+});
+
+test('isolates Cursor Agent from host secrets and persistent user directories', () => {
+  const workspace = '/tmp/agent-roast-cursor';
+  const env = localCliEnv('cursor', workspace, {
+    CURSOR_API_KEY: 'cursor-only-key',
+    PATH: '/safe/bin',
+    SystemRoot: 'C:\\Windows',
+    ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+    AWS_SECRET_ACCESS_KEY: 'must-not-leak',
+    DEEPSEEK_API_KEY: 'must-not-leak',
+    HOME: '/persistent/home',
+    XDG_CONFIG_HOME: '/persistent/config',
+    XDG_CACHE_HOME: '/persistent/cache',
+    TMPDIR: '/persistent/tmp'
+  });
+
+  assert.equal(env.CURSOR_API_KEY, 'cursor-only-key');
+  assert.equal(env.PATH, '/safe/bin');
+  assert.equal(env.SystemRoot, 'C:\\Windows');
+  assert.equal(env.ComSpec, 'C:\\Windows\\System32\\cmd.exe');
+  assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
+  assert.equal(env.DEEPSEEK_API_KEY, undefined);
+  assert.equal(env.HOME, workspace);
+  assert.equal(env.USERPROFILE, workspace);
+  assert.equal(env.APPDATA, workspace);
+  assert.equal(env.LOCALAPPDATA, workspace);
+  assert.equal(env.XDG_CONFIG_HOME, workspace);
+  assert.equal(env.XDG_CACHE_HOME, workspace);
+  assert.equal(env.XDG_DATA_HOME, workspace);
+  assert.equal(env.XDG_STATE_HOME, workspace);
+  assert.equal(env.TMPDIR, workspace);
+  assert.equal(env.TMP, workspace);
+  assert.equal(env.TEMP, workspace);
+  assert.equal(env.NO_COLOR, '1');
+});
+
+test('preserves the Claude Code environment behavior', () => {
+  const env = localCliEnv('claude-code', '/tmp/agent-roast-claude', {
+    DEEPSEEK_API_KEY: 'available-to-claude',
+    HOME: '/persistent/home'
+  });
+
+  assert.deepEqual(env, {
+    DEEPSEEK_API_KEY: 'available-to-claude',
+    HOME: '/persistent/home',
+    NO_COLOR: '1'
+  });
 });
 
 test('materializes a read-only portable folder from normalized runtime output', () => {
