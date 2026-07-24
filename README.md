@@ -91,6 +91,22 @@ Key 只应写入本机 `.env` 或密钥管理系统，不要写入 `.env.example
 
 本地 Runtime 使用只读模式：Claude Code 采用 `--tools "" --permission-mode plan --safe-mode`，Cursor Agent 采用 `--mode ask --sandbox enabled`。每次调用都在独立临时目录运行并在结束后删除。Claude 单次调用默认设置 `$0.25` 预算上限，可通过 `CLAUDE_MAX_BUDGET_USD` 调整。
 
+### 生产 Runtime 工具、凭据与模型边界
+
+生产主机将固定版本的 CLI 发布物放在 `/opt/agent-review/tools/releases/<release>/`，由 `root` 安装和维护；`/opt/agent-review/tools/bin` 仅放受控启动器并加入服务的 `PATH`。服务运行账户不得写入这两个目录，也不要把 `PATH` 指向用户可写的 Node、npm 或临时安装目录。升级时先安装新的固定 release，再原子切换启动器；不要让应用自行下载或替换 CLI。
+
+默认保持 `ENABLE_LOCAL_CLAUDE_CODE=false` 和 `ENABLE_LOCAL_CURSOR_AGENT=false`。生产环境优先通过 `RUNTIME_ADAPTERS_JSON` 指向隔离的 Runtime 服务；只有受信任的开发机才可显式把本地开关改为 `true`。示例配置只提供空变量名，任何真实 Key 都只能放在部署密钥管理系统或被 Git 忽略的 `.env`。
+
+#### 评审模型与 Runtime 模型独立配置
+
+评审模型、Runtime 模型、参赛 Agent 资格是三件事。评审模型由 `OPENAI_*`、`ARK_*`、`REVIEW_MODEL_*` 或 `MODEL_REVIEWERS_JSON` 配置；Runtime 模型由本地 CLI、方舟豆包 adapter 或 `RUNTIME_ADAPTERS_JSON` 配置；它们可以分别启用、分别使用各自的凭据。只有参赛 Agent Card 与最终报名表的声明要求 DeepSeek V4 Pro；这是参赛资格声明，不会改写平台的评审或 Runtime 配置。评审模型以及 Claude、Cursor、Doubao Runtime 不受该底模限制。
+
+- Claude Code 继续使用既有的 Ark 协议桥：`CLAUDE_BACKEND=ark` 时通过 `ARK_BASE_URL`、`ARK_API_KEY` 和 `CLAUDE_ARK_MODEL` 访问方舟 DeepSeek endpoint，方舟 Key 不传入 Claude 子进程。
+- Cursor Agent 的 `CURSOR_API_KEY` 是独立凭据，可替代本地登录状态用于就绪探测，并只传给 `cursor-agent` 子进程；不要复用 `ARK_API_KEY`、`DEEPSEEK_API_KEY` 或任何评审模型 Key。
+- Doubao Runtime 维持原有方舟 API adapter：同时提供 `ARK_BASE_URL`、`ARK_API_KEY` 与 `REVIEW_MODEL_DOUBAO` 即可就绪，或由隔离的 `RUNTIME_ADAPTERS_JSON` adapter 覆盖。
+
+`GET /api/runtimes` 只报告运行时可用性，不判断参赛资格。每个条目的 `installed` 表示 CLI 是否被探测到，`authenticated` 表示相应凭据或登录状态是否存在，`enabled` 表示本地开关或远程 adapter 是否已启用；`runtimeReady` 只有在远程 adapter 契约完整，或本地 CLI 已安装、已认证且显式启用时才为 `true`。因此“已安装”或“有 Key”都不等于平台会真实调用它。
+
 随后在页面选择样本，把评测模式切换为“真实对测”。三个 Agent 分别监听：
 
 - `http://127.0.0.1:4181`：因子显微镜，A2A 1.0 HTTP+JSON；
@@ -368,6 +384,7 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 | `RUNTIME_ADAPTERS_JSON` | 内置三种 demo runtime | 隔离 runtime adapter 配置 |
 | `ENABLE_LOCAL_CLAUDE_CODE` | `false` | 允许真实调用已登录的本机 Claude Code |
 | `ENABLE_LOCAL_CURSOR_AGENT` | `false` | 允许真实调用已登录的本机 Cursor Agent CLI |
+| `CURSOR_API_KEY` | 空 | Cursor Agent 的独立 API Key；只放在部署密钥或本机 `.env`，不与评审或方舟凭据共用 |
 | `CLAUDE_MAX_BUDGET_USD` | `0.25` | Claude Code 单次无头调用预算上限 |
 | `LOCAL_RUNTIME_TIMEOUT_MS` | `180000` | 本地 CLI 单次执行时限 |
 | `CLAUDE_BACKEND` | `ark` | Claude Code 的 DeepSeek 后端：`ark` 或 `deepseek` |

@@ -211,6 +211,24 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
   assert.match(readme, /20 分钟/);
 });
 
+test('documents production runtime tool configuration and independent model responsibilities', async () => {
+  const [envExample, readme] = await Promise.all([
+    readFile(new URL('../.env.example', import.meta.url), 'utf8'),
+    readFile(new URL('../README.md', import.meta.url), 'utf8')
+  ]);
+  assert.match(envExample, /CURSOR_API_KEY=/);
+  assert.match(envExample, /\/opt\/agent-review\/tools\/bin/);
+  assert.match(envExample, /^ENABLE_LOCAL_CLAUDE_CODE=false$/m);
+  assert.match(envExample, /^ENABLE_LOCAL_CURSOR_AGENT=false$/m);
+  assert.match(readme, /评审模型与 Runtime 模型独立配置/);
+  assert.match(readme, /Cursor Agent.*CURSOR_API_KEY/s);
+  assert.match(readme, /评审模型、Runtime 模型、参赛 Agent 资格是三件事/);
+  assert.match(readme, /只有参赛 Agent Card 与最终报名表的声明要求 DeepSeek V4 Pro/);
+  assert.match(readme, /评审模型以及 Claude、Cursor、Doubao Runtime 不受该底模限制/);
+  assert.match(readme, /GET \/api\/runtimes/);
+  assert.match(readme, /runtimeReady/);
+});
+
 test('protects diagnostics before parsing its request body', async () => {
   const missing = await fetch(`${origin}/api/agent-diagnostics`, {
     method: 'POST',
