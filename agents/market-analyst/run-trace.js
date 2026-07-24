@@ -155,6 +155,15 @@ function uniquePropertyKey(property, result, context) {
   return null;
 }
 
+function defineDataProperty(target, property, value) {
+  Object.defineProperty(target, property, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true
+  });
+}
+
 function sanitize(value, context, depth, key) {
   if (depth > MAX_DEPTH) {
     markTruncated(context, 'depth-limit');
@@ -175,10 +184,23 @@ function sanitize(value, context, depth, key) {
   }
   if (typeof value === 'bigint') {
     const result = value.toString();
-    consumeBudget(context, result.length);
-    return result;
+    if (result.length > MAX_STRING_LENGTH) markTruncated(context, 'string-length');
+    return sanitize(result, context, depth, key);
   }
   if (typeof value === 'function' || typeof value === 'symbol') return undefined;
+  if (value instanceof Error) {
+    if (context.seen.has(value)) {
+      markTruncated(context, 'circular-reference');
+      return truncation('circular-reference');
+    }
+    context.seen.add(value);
+    return sanitize({
+      name: value.name,
+      message: value.message,
+      ...(typeof value.stack === 'string' ? { stack: value.stack } : {}),
+      ...(value.code === undefined ? {} : { code: value.code })
+    }, context, depth, key);
+  }
   if (!consumeBudget(context)) return truncation('node-budget');
   if (value instanceof Date) {
     try {
@@ -187,13 +209,6 @@ function sanitize(value, context, depth, key) {
       markTruncated(context, 'invalid-date');
       return truncation('invalid-date');
     }
-  }
-  if (value instanceof Error) {
-    return {
-      name: sanitizeString(value.name),
-      message: sanitizeString(value.message),
-      ...(value.code ? { code: sanitizeString(value.code) } : {})
-    };
   }
   if (context.seen.has(value)) {
     markTruncated(context, 'circular-reference');
@@ -232,16 +247,17 @@ function sanitize(value, context, depth, key) {
     const item = value[rawProperty];
     const safeUsageMetric = TOKEN_USAGE_KEY.test(property)
       && (item === null || typeof item === 'number');
-    result[property] = SECRET_KEY.test(property) && !safeUsageMetric
+    const sanitizedItem = SECRET_KEY.test(property) && !safeUsageMetric
       ? REDACTED
       : sanitize(item, context, depth + 1, property);
+    defineDataProperty(result, property, sanitizedItem);
   }
   if (Object.keys(result).length < keys.length) {
     const reason = entries.length < keys.length ? 'object-key-limit' : 'global-budget';
     markTruncated(context, reason);
-    result._truncated = truncation(reason, {
+    defineDataProperty(result, '_truncated', truncation(reason, {
       omitted: keys.length - Object.keys(result).length
-    });
+    }));
   }
   return result;
 }
@@ -255,10 +271,10 @@ export function sanitizeTraceValue(value) {
   };
   const result = sanitize(value, context, 0, '');
   if (context.reasons.size && result && typeof result === 'object' && !Array.isArray(result)) {
-    result._sanitization = {
+    defineDataProperty(result, '_sanitization', {
       truncated: true,
       reasons: [...context.reasons].sort()
-    };
+    });
   }
   return result;
 }

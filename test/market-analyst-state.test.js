@@ -365,6 +365,86 @@ test('sanitization redacts object keys and resolves sanitized collisions determi
   assert.deepEqual(apiKeys, ['api_key = [REDACTED]', 'api_key = [REDACTED]~001']);
 });
 
+test('sanitization bounds BigInt and Error content in memory and persisted state', async (t) => {
+  const hugeDigits = `9${'0'.repeat(270_000)}`;
+  const hugeBigInt = BigInt(hugeDigits);
+  const errors = Array.from({ length: 100 }, (_, index) => {
+    const error = new Error(`message-${index}-${'m'.repeat(8_000)}`);
+    error.name = `ErrorName-${index}-${'n'.repeat(8_000)}`;
+    error.stack = `stack-${index}-${'s'.repeat(8_000)}`;
+    return error;
+  });
+
+  assert.equal(sanitizeTraceValue(42n), '42');
+  const sanitizedError = sanitizeTraceValue(errors[0]);
+  assert.equal(Object.hasOwn(sanitizedError, 'stack'), true);
+  assert.match(JSON.stringify(sanitizedError), /TRUNCATED|_truncated|sanitization/i);
+
+  const sanitized = sanitizeTraceValue({
+    ordinaryBigInt: 42n,
+    hugeBigInt,
+    errors
+  });
+  const serialized = JSON.stringify(sanitized);
+  assert.equal(sanitized.ordinaryBigInt, '42');
+  assert.ok(Buffer.byteLength(sanitized.hugeBigInt) < 5_000);
+  assert.ok(sanitized.errors.length < errors.length);
+  assert.ok(Buffer.byteLength(serialized) < 400_000);
+  assert.match(serialized, /TRUNCATED|_truncated|sanitization/i);
+
+  const budgetProbe = sanitizeTraceValue([
+    ...Array.from({ length: 65 }, () => 'x'.repeat(4_000)),
+    hugeBigInt
+  ]);
+  assert.deepEqual(budgetProbe.at(-1), {
+    _truncated: true,
+    reason: 'byte-budget'
+  });
+
+  const stateDir = await temporaryDirectory(t);
+  const store = new MarketTaskStore(stateDir);
+  await store.create({
+    id: 'task-bounded-native-values',
+    state: 'TASK_STATE_SUBMITTED',
+    hugeBigInt,
+    errors
+  });
+  const persisted = await readFile(path.join(stateDir, 'state.json'), 'utf8');
+  assert.ok(Buffer.byteLength(persisted) < 400_000);
+  assert.equal(persisted.includes(hugeDigits), false);
+  assert.match(persisted, /TRUNCATED|_truncated|sanitization/i);
+});
+
+test('sanitization preserves prototype-like keys as safe own data properties', () => {
+  const malicious = JSON.parse(`{
+    "__proto__": { "attackerInherited": true },
+    "constructor": { "kind": "constructor" },
+    "prototype": { "kind": "prototype" },
+    "__defineGetter__": { "kind": "getter" },
+    "hasOwnProperty": { "kind": "shadow" }
+  }`);
+  const sanitized = sanitizeTraceValue(malicious);
+
+  assert.equal(Object.getPrototypeOf(sanitized), Object.prototype);
+  for (const key of [
+    '__proto__',
+    'constructor',
+    'prototype',
+    '__defineGetter__',
+    'hasOwnProperty'
+  ]) {
+    assert.equal(Object.hasOwn(sanitized, key), true, `${key} disappeared`);
+  }
+  assert.equal(sanitized.attackerInherited, undefined);
+
+  const serialized = JSON.stringify(sanitized);
+  assert.equal(serialized, JSON.stringify(sanitizeTraceValue(malicious)));
+  const parsed = JSON.parse(serialized);
+  assert.equal(Object.hasOwn(parsed, '__proto__'), true);
+  assert.equal(parsed.__proto__.attackerInherited, true);
+  assert.equal(Object.prototype.attackerInherited, undefined);
+});
+
 test('sanitization and RunTrace apply global depth, size, count, and lineage bounds', () => {
   const cyclic = { value: 'safe' };
   cyclic.self = cyclic;
