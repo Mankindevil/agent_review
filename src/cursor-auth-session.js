@@ -1,5 +1,6 @@
 import { constants } from 'node:fs';
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -19,7 +20,7 @@ const MAX_AUTH_FILE_BYTES = 1_048_576;
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
 const IS_LINUX = process.platform === 'linux';
-const CAN_OPEN_DIRECTORY = process.platform !== 'win32';
+const LINUX_O_PATH = 0o10000000;
 const AUTH_SESSION_ERRORS = Symbol('cursorAuthSessionErrors');
 const authLocks = new Map();
 
@@ -31,6 +32,9 @@ export async function withCursorAuthSession(
 ) {
   const authRoot = cursorAuthConfigHome(env);
   if (!authRoot) throw new Error('CURSOR_AUTH_CONFIG_HOME must be an absolute path');
+  if (!IS_LINUX) {
+    throw new Error('Cursor auth session requires Linux race-safe directory anchoring');
+  }
   return withAuthRootLock(lockKey(authRoot), signal, async () => {
     let boundary;
     let temporary;
@@ -220,15 +224,8 @@ async function createTemporaryBoundary(workspace) {
   } catch (error) {
     const errors = [];
     appendSessionErrors(errors, error);
-    for (const anchor of [cursorDirectory, rootDirectory]) {
-      try {
-        await closeDirectoryAnchor(anchor);
-      } catch (closeError) {
-        appendSessionErrors(errors, closeError);
-      }
-    }
     try {
-      await rm(temporaryXdg, { recursive: true, force: true });
+      await cleanupTemporaryBoundary({ cursorDirectory, rootDirectory });
     } catch (cleanupError) {
       appendSessionErrors(errors, cleanupError);
     }
@@ -251,51 +248,57 @@ async function ensureDirectoryExists(directory, label) {
 async function openDirectoryAnchor(openPath, visiblePath, label) {
   const initialInfo = await lstat(openPath);
   validateDirectoryInfo(initialInfo, label);
+  let identityHandle;
+  let directoryHandle;
+  let anchor;
+  const errors = [];
 
-  if (CAN_OPEN_DIRECTORY) {
-    let handle;
-    try {
-      const flags = constants.O_RDONLY
-        | (constants.O_DIRECTORY ?? 0)
-        | (constants.O_NOFOLLOW ?? 0);
-      handle = await open(openPath, flags);
-      const openedInfo = await handle.stat();
-      validateDirectoryInfo(openedInfo, label);
-      if (!sameIdentity(fileIdentity(initialInfo), fileIdentity(openedInfo))) {
-        throw new Error(`${label} changed while it was being verified`);
-      }
-      await handle.chmod(DIRECTORY_MODE);
-      const accessPath = IS_LINUX
-        ? `/proc/self/fd/${handle.fd}`
-        : await realpath(openPath);
-      return {
-        accessPath,
-        handle,
-        identity: fileIdentity(openedInfo),
-        label,
-        realDirectory: await realpath(accessPath),
-        visiblePath
-      };
-    } catch (error) {
-      await handle?.close();
-      throw error;
+  try {
+    identityHandle = await open(
+      openPath,
+      LINUX_O_PATH | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0)
+    );
+    const identityInfo = await identityHandle.stat();
+    validateDirectoryInfo(identityInfo, label);
+    if (!sameIdentity(fileIdentity(initialInfo), fileIdentity(identityInfo))) {
+      throw new Error(`${label} changed while it was being verified`);
     }
+
+    const identityAccessPath = `/proc/self/fd/${identityHandle.fd}`;
+    await chmod(identityAccessPath, DIRECTORY_MODE);
+    directoryHandle = await open(
+      `${identityAccessPath}/.`,
+      constants.O_RDONLY
+        | (constants.O_DIRECTORY ?? 0)
+        | (constants.O_NOFOLLOW ?? 0)
+    );
+    const openedInfo = await directoryHandle.stat();
+    validateDirectoryInfo(openedInfo, label);
+    if (!sameIdentity(fileIdentity(identityInfo), fileIdentity(openedInfo))) {
+      throw new Error(`${label} changed while it was being opened`);
+    }
+
+    const accessPath = `/proc/self/fd/${directoryHandle.fd}`;
+    anchor = {
+      accessPath,
+      directoryHandle,
+      identity: fileIdentity(identityInfo),
+      identityAccessPath,
+      identityHandle,
+      label,
+      realDirectory: await realpath(identityAccessPath),
+      visiblePath
+    };
+  } catch (error) {
+    appendSessionErrors(errors, error);
   }
 
-  const finalInfo = await lstat(openPath);
-  validateDirectoryInfo(finalInfo, label);
-  if (!sameIdentity(fileIdentity(initialInfo), fileIdentity(finalInfo))) {
-    throw new Error(`${label} changed while it was being verified`);
+  if (!anchor) {
+    await closeHandleProperty({ directoryHandle }, 'directoryHandle', errors);
+    await closeHandleProperty({ identityHandle }, 'identityHandle', errors);
+    throwSessionErrors(errors, `${label} anchor setup failed`);
   }
-  const realDirectory = await realpath(openPath);
-  return {
-    accessPath: realDirectory,
-    handle: null,
-    identity: fileIdentity(finalInfo),
-    label,
-    realDirectory,
-    visiblePath
-  };
+  return anchor;
 }
 
 function validateDirectoryInfo(info, label) {
@@ -329,19 +332,17 @@ async function revalidateDirectoryAnchor(anchor) {
     throw new Error(`${anchor.label} changed during the auth session`);
   }
 
-  if (anchor.handle) {
-    const openedInfo = await anchor.handle.stat();
-    validateDirectoryInfo(openedInfo, anchor.label);
-    if (!sameIdentity(anchor.identity, fileIdentity(openedInfo))) {
-      throw new Error(`${anchor.label} changed during the auth session`);
-    }
-    await anchor.handle.chmod(DIRECTORY_MODE);
-    return;
-  }
-
-  if (await realpath(anchor.visiblePath) !== anchor.realDirectory) {
+  const identityInfo = await anchor.identityHandle.stat();
+  validateDirectoryInfo(identityInfo, anchor.label);
+  if (!sameIdentity(anchor.identity, fileIdentity(identityInfo))) {
     throw new Error(`${anchor.label} changed during the auth session`);
   }
+  const directoryInfo = await anchor.directoryHandle.stat();
+  validateDirectoryInfo(directoryInfo, anchor.label);
+  if (!sameIdentity(anchor.identity, fileIdentity(directoryInfo))) {
+    throw new Error(`${anchor.label} changed during the auth session`);
+  }
+  await chmod(anchor.identityAccessPath, DIRECTORY_MODE);
 }
 
 async function revalidatePersistentBoundary(boundary) {
@@ -408,18 +409,22 @@ async function snapshotAllowedFiles(boundary, temporary) {
 }
 
 async function writeNewFile(destination, bytes) {
-  const handle = await open(
-    destination,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
-    FILE_MODE
-  );
+  const holder = { handle: null };
+  const errors = [];
   try {
-    await handle.writeFile(bytes);
-    await handle.chmod(FILE_MODE);
-    await handle.sync();
-  } finally {
-    await handle.close();
+    holder.handle = await open(
+      destination,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+      FILE_MODE
+    );
+    await holder.handle.writeFile(bytes);
+    await holder.handle.chmod(FILE_MODE);
+    await holder.handle.sync();
+  } catch (error) {
+    appendSessionErrors(errors, error);
   }
+  await closeHandleProperty(holder, 'handle', errors);
+  throwSessionErrors(errors, 'Temporary credential snapshot write failed');
 }
 
 async function runAndWriteBack(run, temporary, boundary) {
@@ -480,23 +485,35 @@ async function atomicWriteAllowedFile(cursorDirectory, name, bytes) {
     throw new Error('refusing to write a nonallowlisted persistent file');
   }
 
-  let handle;
+  const holder = { handle: null };
+  const errors = [];
   try {
-    handle = await open(
+    holder.handle = await open(
       temporaryPath,
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
       FILE_MODE
     );
-    await handle.writeFile(bytes);
-    await handle.chmod(FILE_MODE);
-    await handle.sync();
-    await handle.close();
-    handle = null;
-    await rename(temporaryPath, destination);
-  } finally {
-    await handle?.close();
-    await removeDirectoryChild(cursorDirectory, temporaryName);
+    await holder.handle.writeFile(bytes);
+    await holder.handle.chmod(FILE_MODE);
+    await holder.handle.sync();
+  } catch (error) {
+    appendSessionErrors(errors, error);
   }
+  await closeHandleProperty(holder, 'handle', errors);
+
+  if (errors.length === 0) {
+    try {
+      await rename(temporaryPath, destination);
+    } catch (error) {
+      appendSessionErrors(errors, error);
+    }
+  }
+  try {
+    await removeDirectoryChild(cursorDirectory, temporaryName);
+  } catch (error) {
+    appendSessionErrors(errors, error);
+  }
+  throwSessionErrors(errors, `Atomic ${name} writeback failed`);
 }
 
 async function readValidatedJsonFile(file, { allowMissing = false, label }) {
@@ -514,35 +531,58 @@ async function readValidatedJsonFile(file, { allowMissing = false, label }) {
     throw new Error(`${label} must not exceed 1_048_576 bytes`);
   }
 
-  const noFollow = constants.O_NOFOLLOW ?? 0;
-  const handle = await open(file, constants.O_RDONLY | noFollow);
+  const holder = {
+    identityHandle: null,
+    readHandle: null
+  };
+  const errors = [];
   let bytes;
   try {
-    const openedInfo = await handle.stat();
+    holder.identityHandle = await open(
+      file,
+      LINUX_O_PATH | (constants.O_NOFOLLOW ?? 0)
+    );
+    const identityInfo = await holder.identityHandle.stat();
+    if (!identityInfo.isFile()) throw new Error(`${label} must be a regular file`);
+    if (!sameIdentity(fileIdentity(info), fileIdentity(identityInfo))) {
+      throw new Error(`${label} changed while it was being verified`);
+    }
+    if (identityInfo.size > MAX_AUTH_FILE_BYTES) {
+      throw new Error(`${label} must not exceed 1_048_576 bytes`);
+    }
+
+    const identityAccessPath = `/proc/self/fd/${holder.identityHandle.fd}`;
+    await chmod(identityAccessPath, FILE_MODE);
+    holder.readHandle = await open(identityAccessPath, constants.O_RDONLY);
+    const openedInfo = await holder.readHandle.stat();
     if (!openedInfo.isFile()) throw new Error(`${label} must be a regular file`);
+    if (!sameIdentity(fileIdentity(identityInfo), fileIdentity(openedInfo))) {
+      throw new Error(`${label} changed while it was being opened`);
+    }
     if (openedInfo.size > MAX_AUTH_FILE_BYTES) {
       throw new Error(`${label} must not exceed 1_048_576 bytes`);
     }
-    bytes = await readBounded(handle);
-    await handle.chmod(FILE_MODE);
-  } finally {
-    await handle.close();
+    bytes = await readBounded(holder.readHandle);
+    if (bytes.length > MAX_AUTH_FILE_BYTES) {
+      throw new Error(`${label} must not exceed 1_048_576 bytes`);
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(bytes.toString('utf8'));
+    } catch {
+      throw new Error(`${label} must contain a valid JSON object`);
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`${label} must contain a valid JSON object`);
+    }
+  } catch (error) {
+    appendSessionErrors(errors, error);
   }
 
-  if (bytes.length > MAX_AUTH_FILE_BYTES) {
-    throw new Error(`${label} must not exceed 1_048_576 bytes`);
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(bytes.toString('utf8'));
-  } catch {
-    throw new Error(`${label} must contain a valid JSON object`);
-  }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`${label} must contain a valid JSON object`);
-  }
-
+  await closeHandleProperty(holder, 'readHandle', errors);
+  await closeHandleProperty(holder, 'identityHandle', errors);
+  throwSessionErrors(errors, `${label} validation failed`);
   return bytes;
 }
 
@@ -561,28 +601,27 @@ async function readBounded(handle) {
 async function cleanupTemporaryBoundary(temporary) {
   const errors = [];
 
-  try {
-    await clearDirectory(temporary.cursorDirectory);
-  } catch (error) {
-    appendSessionErrors(errors, error);
+  if (temporary.cursorDirectory) {
+    try {
+      await clearDirectory(temporary.cursorDirectory);
+    } catch (error) {
+      appendSessionErrors(errors, error);
+    }
   }
   try {
     await closeDirectoryAnchor(temporary.cursorDirectory);
   } catch (error) {
     appendSessionErrors(errors, error);
   }
-  try {
-    await clearDirectory(temporary.rootDirectory);
-  } catch (error) {
-    appendSessionErrors(errors, error);
+  if (temporary.rootDirectory) {
+    try {
+      await clearDirectory(temporary.rootDirectory);
+    } catch (error) {
+      appendSessionErrors(errors, error);
+    }
   }
   try {
     await closeDirectoryAnchor(temporary.rootDirectory);
-  } catch (error) {
-    appendSessionErrors(errors, error);
-  }
-  try {
-    await rm(temporary.temporaryXdg, { recursive: true, force: true });
   } catch (error) {
     appendSessionErrors(errors, error);
   }
@@ -617,10 +656,22 @@ async function closeAnchors(anchors, originalError, message = 'Directory-handle 
 }
 
 async function closeDirectoryAnchor(anchor) {
-  if (!anchor?.handle) return;
-  const handle = anchor.handle;
-  anchor.handle = null;
-  await handle.close();
+  if (!anchor) return;
+  const errors = [];
+  await closeHandleProperty(anchor, 'directoryHandle', errors);
+  await closeHandleProperty(anchor, 'identityHandle', errors);
+  throwSessionErrors(errors, `${anchor.label} handle cleanup failed`);
+}
+
+async function closeHandleProperty(holder, property, errors) {
+  const handle = holder?.[property];
+  if (!handle) return;
+  holder[property] = null;
+  try {
+    await handle.close();
+  } catch (error) {
+    appendSessionErrors(errors, error);
+  }
 }
 
 function appendSessionErrors(errors, error) {

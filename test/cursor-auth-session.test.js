@@ -18,6 +18,8 @@ import path from 'node:path';
 import { withCursorAuthSession } from '../src/cursor-auth-session.js';
 
 const isPosix = process.platform !== 'win32';
+const isLinux = process.platform === 'linux';
+const sessionTest = isLinux ? test : test.skip;
 
 function deferred() {
   let resolve;
@@ -60,7 +62,39 @@ async function createSymlinkOrSkip(t, target, linkPath, type) {
   }
 }
 
-test('snapshots allowlisted credentials, returns the callback result, and safely writes back', async () => {
+test('fails closed on platforms without race-safe directory anchoring', {
+  skip: isLinux && 'Linux provides race-safe directory anchoring'
+}, async () => {
+  const value = await fixture();
+  try {
+    const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
+    const persistentJunk = path.join(value.cursorDirectory, 'keep-me');
+    await writeFile(persistentAuth, '{"token":"untouched"}');
+    await writeFile(persistentJunk, 'untouched');
+    const beforeEntries = await readdir(value.cursorDirectory);
+    const beforeWorkspace = await readdir(value.workspace);
+    let called = false;
+
+    await assert.rejects(
+      withCursorAuthSession(value.workspace, {
+        CURSOR_AUTH_CONFIG_HOME: value.authRoot
+      }, async () => {
+        called = true;
+      }),
+      /requires Linux race-safe directory anchoring/
+    );
+
+    assert.equal(called, false);
+    assert.deepEqual(await readdir(value.cursorDirectory), beforeEntries);
+    assert.deepEqual(await readdir(value.workspace), beforeWorkspace);
+    assert.equal(await readFile(persistentAuth, 'utf8'), '{"token":"untouched"}');
+    assert.equal(await readFile(persistentJunk, 'utf8'), 'untouched');
+  } finally {
+    await removeFixture(value);
+  }
+});
+
+sessionTest('snapshots allowlisted credentials, returns the callback result, and safely writes back', async () => {
   const value = await fixture();
   try {
     await writeFile(path.join(value.cursorDirectory, 'auth.json'), '{"token":"old"}');
@@ -97,9 +131,12 @@ test('snapshots allowlisted credentials, returns the callback result, and safely
       JSON.parse(await readFile(path.join(value.cursorDirectory, 'cli-config.json'), 'utf8')),
       { theme: 'dark' }
     );
-    assert.equal(
-      (await readdir(value.workspace)).some((entry) => entry.startsWith('.cursor-xdg-')),
-      false
+    const sessionDirectories = (await readdir(value.workspace))
+      .filter((entry) => entry.startsWith('.cursor-xdg-'));
+    assert.equal(sessionDirectories.length, 1);
+    assert.deepEqual(
+      await readdir(path.join(value.workspace, sessionDirectories[0])),
+      []
     );
 
     if (isPosix) {
@@ -119,7 +156,7 @@ test('snapshots allowlisted credentials, returns the callback result, and safely
   }
 });
 
-test('creates missing persistent boundaries with private modes', async () => {
+sessionTest('creates missing persistent boundaries with private modes', async () => {
   const value = await fixture();
   try {
     await rm(value.authRoot, { recursive: true });
@@ -147,7 +184,7 @@ test('creates missing persistent boundaries with private modes', async () => {
   }
 });
 
-test('keeps a persistent allowlisted file when the temporary copy is removed', async () => {
+sessionTest('keeps a persistent allowlisted file when the temporary copy is removed', async () => {
   const value = await fixture();
   try {
     const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
@@ -165,7 +202,7 @@ test('keeps a persistent allowlisted file when the temporary copy is removed', a
   }
 });
 
-test('rejects a non-absolute credential root before calling the callback', async () => {
+sessionTest('rejects a non-absolute credential root before calling the callback', async () => {
   const value = await fixture();
   try {
     let called = false;
@@ -183,7 +220,7 @@ test('rejects a non-absolute credential root before calling the callback', async
   }
 });
 
-test('rejects malformed persistent JSON before calling the callback', async () => {
+sessionTest('rejects malformed persistent JSON before calling the callback', async () => {
   const value = await fixture();
   try {
     await writeFile(path.join(value.cursorDirectory, 'auth.json'), '{bad json');
@@ -202,7 +239,7 @@ test('rejects malformed persistent JSON before calling the callback', async () =
   }
 });
 
-test('rejects persistent JSON arrays', async () => {
+sessionTest('rejects persistent JSON arrays', async () => {
   const value = await fixture();
   try {
     await writeFile(path.join(value.cursorDirectory, 'auth.json'), '[]');
@@ -217,7 +254,7 @@ test('rejects persistent JSON arrays', async () => {
   }
 });
 
-test('rejects an allowlisted persistent path that is a directory', async () => {
+sessionTest('rejects an allowlisted persistent path that is a directory', async () => {
   const value = await fixture();
   try {
     await mkdir(path.join(value.cursorDirectory, 'auth.json'));
@@ -232,7 +269,7 @@ test('rejects an allowlisted persistent path that is a directory', async () => {
   }
 });
 
-test('rejects an allowlisted persistent symbolic link', async (t) => {
+sessionTest('rejects an allowlisted persistent symbolic link', async (t) => {
   const value = await fixture();
   try {
     const target = path.join(value.root, 'outside.json');
@@ -255,7 +292,7 @@ test('rejects an allowlisted persistent symbolic link', async (t) => {
   }
 });
 
-test('rejects a symbolic-link credential root', async (t) => {
+sessionTest('rejects a symbolic-link credential root', async (t) => {
   const value = await fixture();
   try {
     const realRoot = path.join(value.root, 'real-auth');
@@ -274,7 +311,7 @@ test('rejects a symbolic-link credential root', async (t) => {
   }
 });
 
-test('rejects a symbolic-link cursor child', async (t) => {
+sessionTest('rejects a symbolic-link cursor child', async (t) => {
   const value = await fixture();
   try {
     const realCursor = path.join(value.root, 'real-cursor');
@@ -293,7 +330,7 @@ test('rejects a symbolic-link cursor child', async (t) => {
   }
 });
 
-test('rejects an allowlisted file larger than 1 MiB', async () => {
+sessionTest('rejects an allowlisted file larger than 1 MiB', async () => {
   const value = await fixture();
   try {
     await writeFile(
@@ -311,7 +348,7 @@ test('rejects an allowlisted file larger than 1 MiB', async () => {
   }
 });
 
-test('does not replace valid persistence with a malformed temporary file', async () => {
+sessionTest('does not replace valid persistence with a malformed temporary file', async () => {
   const value = await fixture();
   try {
     const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
@@ -332,7 +369,7 @@ test('does not replace valid persistence with a malformed temporary file', async
   }
 });
 
-test('does not replace valid persistence with a temporary symbolic link', async (t) => {
+sessionTest('does not replace valid persistence with a temporary symbolic link', async (t) => {
   const value = await fixture();
   try {
     const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
@@ -365,7 +402,7 @@ test('does not replace valid persistence with a temporary symbolic link', async 
   }
 });
 
-test('rejects a replacement temporary cursor directory object', async () => {
+sessionTest('rejects a replacement temporary cursor directory object', async () => {
   const value = await fixture();
   try {
     const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
@@ -389,7 +426,7 @@ test('rejects a replacement temporary cursor directory object', async () => {
   }
 });
 
-test('rejects a temporary cursor parent symlink without reading or chmodding outside JSON', async (t) => {
+sessionTest('rejects a temporary cursor parent symlink without reading or chmodding outside JSON', async (t) => {
   const value = await fixture();
   try {
     const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
@@ -435,7 +472,7 @@ test('rejects a temporary cursor parent symlink without reading or chmodding out
   }
 });
 
-test('rejects a replacement persistent cursor directory object', async () => {
+sessionTest('rejects a replacement persistent cursor directory object', async () => {
   const value = await fixture();
   try {
     const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
@@ -467,7 +504,7 @@ test('rejects a replacement persistent cursor directory object', async () => {
   }
 });
 
-test('preserves runtime and writeback failures together', async () => {
+sessionTest('preserves runtime and writeback failures together', async () => {
   const value = await fixture();
   try {
     const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
@@ -495,7 +532,7 @@ test('preserves runtime and writeback failures together', async () => {
   }
 });
 
-test('serializes calls for one root and snapshots the preceding refreshed token', async () => {
+sessionTest('serializes calls for one root and snapshots the preceding refreshed token', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'cursor-auth-lock-'));
   const workspaceOne = path.join(root, 'workspace-one');
   const workspaceTwo = path.join(root, 'workspace-two');
@@ -531,7 +568,7 @@ test('serializes calls for one root and snapshots the preceding refreshed token'
   }
 });
 
-test('allows calls for different credential roots to enter concurrently', async () => {
+sessionTest('allows calls for different credential roots to enter concurrently', async () => {
   const first = await fixture('cursor-auth-first-');
   const second = await fixture('cursor-auth-second-');
   const firstEntered = deferred();
@@ -562,7 +599,7 @@ test('allows calls for different credential roots to enter concurrently', async 
   }
 });
 
-test('an aborted queued call rejects and releases its queue position', async () => {
+sessionTest('an aborted queued call rejects and releases its queue position', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'cursor-auth-abort-'));
   const workspaceOne = path.join(root, 'workspace-one');
   const workspaceTwo = path.join(root, 'workspace-two');
@@ -604,7 +641,7 @@ test('an aborted queued call rejects and releases its queue position', async () 
   }
 });
 
-test('normalizes existing persistent directory and file modes on POSIX', {
+sessionTest('normalizes existing persistent directory and file modes on Linux', {
   skip: !isPosix && 'POSIX mode assertions'
 }, async () => {
   const value = await fixture();
@@ -627,11 +664,39 @@ test('normalizes existing persistent directory and file modes on POSIX', {
   }
 });
 
-test('writes replacement files with exact private modes under a restrictive umask', {
+sessionTest('normalizes owned mode-0000 directories and files through pinned anchors', async () => {
+  const value = await fixture();
+  try {
+    const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
+    await writeFile(persistentAuth, '{"token":"old"}');
+    await chmod(persistentAuth, 0o000);
+    await chmod(value.cursorDirectory, 0o000);
+    await chmod(value.authRoot, 0o000);
+
+    await withCursorAuthSession(value.workspace, {
+      CURSOR_AUTH_CONFIG_HOME: value.authRoot
+    }, async (xdgHome) => {
+      assert.deepEqual(
+        JSON.parse(await readFile(path.join(xdgHome, 'cursor', 'auth.json'), 'utf8')),
+        { token: 'old' }
+      );
+    });
+
+    assert.equal((await stat(value.authRoot)).mode & 0o777, 0o700);
+    assert.equal((await stat(value.cursorDirectory)).mode & 0o777, 0o700);
+    assert.equal((await stat(persistentAuth)).mode & 0o777, 0o600);
+  } finally {
+    await chmod(value.authRoot, 0o700).catch(() => {});
+    await chmod(value.cursorDirectory, 0o700).catch(() => {});
+    await removeFixture(value);
+  }
+});
+
+sessionTest('writes replacement files with exact private modes under an owner-stripping umask', {
   skip: !isPosix && 'POSIX mode assertions'
 }, async () => {
   const value = await fixture();
-  const originalUmask = process.umask(0o177);
+  const originalUmask = process.umask(0o600);
   try {
     const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
     await writeFile(persistentAuth, '{"token":"old"}');
@@ -649,7 +714,7 @@ test('writes replacement files with exact private modes under a restrictive umas
   }
 });
 
-test('preserves runtime, writeback, and cleanup errors while scrubbing pinned credentials', {
+sessionTest('preserves runtime, writeback, and cleanup errors while scrubbing pinned credentials', {
   skip: process.platform !== 'linux' && 'Linux directory-handle cleanup assertion'
 }, async () => {
   const value = await fixture();
