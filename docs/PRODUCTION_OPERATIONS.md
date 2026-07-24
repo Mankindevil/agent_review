@@ -18,29 +18,47 @@ Manage the app only through systemd; do not start an additional Node process. Ng
 ## Daily health and logs
 
 ```bash
+set -euo pipefail
+health_ok() {
+  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+    python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
+}
+require_200() {
+  local url="$1" status
+  status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-redirs 0 "$url")"
+  test "$status" = '200'
+}
 sudo systemctl status agent-review --no-pager
 readlink -f /opt/agent-review/app
-curl --fail --silent --show-error https://14.103.143.171/api/health
-curl --fail --silent --show-error --output /dev/null https://14.103.143.171/
-curl --fail --silent --show-error --output /dev/null https://14.103.143.171/agent-check.html
+health_ok
+require_200 https://14.103.143.171/
+require_200 https://14.103.143.171/agent-check.html
 sudo journalctl -u agent-review --since '24 hours ago' --no-pager
 sudo systemctl status nginx --no-pager
 sudo journalctl -u nginx --since '24 hours ago' --no-pager
 ```
 
-The health response must report `ok: true`. The existing failed `cloud-monitor-agent` and `console-setup` units are unrelated to this platform; record and investigate them separately unless evidence links them to the incident.
+The health response must contain JSON with `ok: true`; page checks require an exact HTTP 200 and do not follow redirects. The existing failed `cloud-monitor-agent` and `console-setup` units are unrelated to this platform; record and investigate them separately unless evidence links them to the incident.
 
 ## Restart and reboot validation
 
 Do not assume a restart is immediately ready. Restart, then condition-poll the health endpoint:
 
 ```bash
+set -euo pipefail
+health_ok() {
+  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+    python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
+}
+wait_for_health() {
+  for attempt in $(seq 1 30); do
+    if health_ok; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
 sudo systemctl restart agent-review
-for attempt in $(seq 1 30); do
-  curl --fail --silent --show-error https://14.103.143.171/api/health && break
-  sleep 2
-done
-curl --fail --silent --show-error https://14.103.143.171/api/health
+wait_for_health
 ```
 
 On failure, collect bounded evidence before retrying:
@@ -54,10 +72,22 @@ sudo nginx -t
 After a reboot verify application, release target, endpoint, proxy, and firewall:
 
 ```bash
-sudo systemctl is-active agent-review
+set -euo pipefail
+health_ok() {
+  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+    python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
+}
+wait_for_health() {
+  for attempt in $(seq 1 30); do
+    if health_ok; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+sudo systemctl is-active --quiet agent-review
 readlink -f /opt/agent-review/app
-curl --fail --silent --show-error https://14.103.143.171/api/health
-sudo systemctl is-active nginx
+wait_for_health
+sudo systemctl is-active --quiet nginx
 sudo ufw status verbose
 ```
 
@@ -66,66 +96,113 @@ sudo ufw status verbose
 Release directories are immutable and named with a full Git SHA. Validate a candidate before switching. Do not edit files through `/opt/agent-review/app`.
 
 ```bash
+set -euo pipefail
+health_ok() {
+  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+    python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
+}
+wait_for_health() {
+  for attempt in $(seq 1 30); do
+    if health_ok; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
 release_sha='<approved full Git SHA>'
 release_dir="/opt/agent-review/releases/$release_sha"
 test -d "$release_dir"
 test -f "$release_dir/package.json"
-readlink -f /opt/agent-review/app
-sudo ln -s "$release_dir" /opt/agent-review/app.next
-sudo mv -T /opt/agent-review/app.next /opt/agent-review/app
+release_dir="$(readlink -f "$release_dir")"
+stage_link="/opt/agent-review/app.next.$$"
+sudo ln -s "$release_dir" "$stage_link"
+test "$(readlink -f "$stage_link")" = "$release_dir"
+sudo mv -Tf "$stage_link" /opt/agent-review/app
 sudo systemctl restart agent-review
-for attempt in $(seq 1 30); do
-  curl --fail --silent --show-error https://14.103.143.171/api/health && break
-  sleep 2
-done
-curl --fail --silent --show-error https://14.103.143.171/api/health
+wait_for_health
 ```
 
 If validation fails, switch only to a known retained directory. The documented active SHA is a rollback target while it remains present:
 
 ```bash
+set -euo pipefail
+health_ok() {
+  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+    python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
+}
+wait_for_health() {
+  for attempt in $(seq 1 30); do
+    if health_ok; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
 rollback_sha='29324596a665206ff273bdba94e9a98f0a131acd'
 rollback_dir="/opt/agent-review/releases/$rollback_sha"
 test -d "$rollback_dir"
-sudo ln -s "$rollback_dir" /opt/agent-review/app.next
-sudo mv -T /opt/agent-review/app.next /opt/agent-review/app
+test -f "$rollback_dir/package.json"
+rollback_dir="$(readlink -f "$rollback_dir")"
+stage_link="/opt/agent-review/app.next.$$"
+sudo ln -s "$rollback_dir" "$stage_link"
+test "$(readlink -f "$stage_link")" = "$rollback_dir"
+sudo mv -Tf "$stage_link" /opt/agent-review/app
 sudo systemctl restart agent-review
-for attempt in $(seq 1 30); do
-  curl --fail --silent --show-error https://14.103.143.171/api/health && break
-  sleep 2
-done
-curl --fail --silent --show-error https://14.103.143.171/api/health
+wait_for_health
 ```
 
-If a switch is interrupted, inspect the explicit `app` and `app.next` paths before acting. Do not remove release directories during an incident.
+If a switch is interrupted, inspect the explicit `app` and uniquely named `app.next.<PID>` paths before acting. Do not remove release directories during an incident.
 
 ## Backup and restore
 
 Back up state before a release and on the operations schedule. Keep backups outside the state directory with restrictive permissions:
 
 ```bash
+set -euo pipefail
 backup_dir=/var/backups/agent-review
 sudo install -d -o root -g root -m 0700 "$backup_dir"
 sudo cp -p /var/lib/agent-review/evaluations.json "$backup_dir/evaluations.json.$(date -u +%Y%m%dT%H%M%SZ)"
 sudo sha256sum "$backup_dir"/evaluations.json.*
 ```
 
-Restore only a named backup; first preserve the current state, stop the service, enforce owner and mode, then poll readiness:
+Restore only an explicit, named backup. The selected backup and the pre-restore preservation copy are validated before state is modified. The temporary restored state is owned by the service account and atomically renamed only after the service stops:
 
 ```bash
+set -euo pipefail
+health_ok() {
+  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+    python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
+}
+wait_for_health() {
+  for attempt in $(seq 1 30); do
+    if health_ok; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
 restore_file='/var/backups/agent-review/evaluations.json.<UTC timestamp>'
 test -f "$restore_file"
-sudo cp -p /var/lib/agent-review/evaluations.json /var/backups/agent-review/evaluations.json.pre-restore
+sudo python3 - "$restore_file" <<'PY'
+import json, pathlib, sys
+json.load(pathlib.Path(sys.argv[1]).open(encoding='utf-8'))
+PY
+preserved_file="/var/backups/agent-review/evaluations.json.pre-restore.$(date -u +%Y%m%dT%H%M%SZ)"
+sudo cp -p /var/lib/agent-review/evaluations.json "$preserved_file"
+sudo test -s "$preserved_file"
+sudo python3 - "$preserved_file" <<'PY'
+import json, pathlib, sys
+json.load(pathlib.Path(sys.argv[1]).open(encoding='utf-8'))
+PY
+restore_tmp="/var/lib/agent-review/evaluations.json.restore.$$"
+sudo cp -- "$restore_file" "$restore_tmp"
+sudo python3 - "$restore_tmp" <<'PY'
+import json, pathlib, sys
+json.load(pathlib.Path(sys.argv[1]).open(encoding='utf-8'))
+PY
+sudo chown agent-review:agent-review "$restore_tmp"
+sudo chmod 0600 "$restore_tmp"
 sudo systemctl stop agent-review
-sudo cp "$restore_file" /var/lib/agent-review/evaluations.json
-sudo chown root:root /var/lib/agent-review/evaluations.json
-sudo chmod 0600 /var/lib/agent-review/evaluations.json
+sudo mv -Tf "$restore_tmp" /var/lib/agent-review/evaluations.json
 sudo systemctl start agent-review
-for attempt in $(seq 1 30); do
-  curl --fail --silent --show-error https://14.103.143.171/api/health && break
-  sleep 2
-done
-curl --fail --silent --show-error https://14.103.143.171/api/health
+wait_for_health
 ```
 
 ## Configuration and secret rotation
@@ -136,22 +213,77 @@ Check configuration metadata without exposing contents:
 sudo stat -c '%U:%G %a %n' /etc/agent-review/agent-review.env
 ```
 
-Expected metadata is `root:root 600`. Use `sudoedit /etc/agent-review/agent-review.env` for changes, never commands that print it.
+Expected metadata is `root:root 600`. The browser diagnostics retrieval copy is `/root/agent-review-access-key.txt`, also `root:root` mode `0600`. Authorized operators retrieve it only through their approved privileged-access procedure.
 
-The browser diagnostics retrieval copy is `/root/agent-review-access-key.txt`, also `root:root` mode `0600`. Authorized operators retrieve it only through their approved privileged-access procedure. During rotation, create a replacement without printing it, update `AGENT_DIAGNOSTICS_ACCESS_KEY` in the environment file to the same value, then restart and poll. Updating just one location is invalid.
+Rotation creates a protected `.next` key, updates exactly one environment entry through a root Python script and atomic replacement, validates equality without output, then replaces the retrieval copy. If environment update or validation fails, the old retrieval copy remains intact.
 
 ```bash
-sudo sh -c 'umask 077; openssl rand -hex 32 > /root/agent-review-access-key.txt'
-sudo chown root:root /root/agent-review-access-key.txt
-sudo chmod 0600 /root/agent-review-access-key.txt
-sudo stat -c '%U:%G %a %n' /root/agent-review-access-key.txt
-sudoedit /etc/agent-review/agent-review.env
+set -euo pipefail
+health_ok() {
+  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+    python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
+}
+wait_for_health() {
+  for attempt in $(seq 1 30); do
+    if health_ok; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+env_file=/etc/agent-review/agent-review.env
+key_file=/root/agent-review-access-key.txt
+key_next=/root/agent-review-access-key.next
+sudo sh -c 'umask 077; openssl rand -hex 32 > "$1"' sh "$key_next"
+sudo chown root:root "$key_next"
+sudo chmod 0600 "$key_next"
+sudo python3 - "$env_file" "$key_next" <<'PY'
+import os, pathlib, re, sys
+env_path, key_path = map(pathlib.Path, sys.argv[1:])
+key = key_path.read_text(encoding='utf-8').strip()
+if not key:
+    raise SystemExit('replacement key is empty')
+lines = env_path.read_text(encoding='utf-8').splitlines(keepends=True)
+pattern = re.compile(r'^(\s*(?:export\s+)?AGENT_DIAGNOSTICS_ACCESS_KEY\s*=).*$')
+matches = [index for index, line in enumerate(lines) if pattern.match(line)]
+if len(matches) != 1:
+    raise SystemExit('expected exactly one AGENT_DIAGNOSTICS_ACCESS_KEY entry')
+index = matches[0]
+prefix = pattern.match(lines[index]).group(1)
+lines[index] = f'{prefix}{key}\n'
+temporary = env_path.with_name(f'{env_path.name}.next.{os.getpid()}')
+fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+    handle.writelines(lines)
+    handle.flush()
+    os.fsync(handle.fileno())
+os.chown(temporary, 0, 0)
+os.chmod(temporary, 0o600)
+os.replace(temporary, env_path)
+PY
+sudo python3 - "$env_file" "$key_next" <<'PY'
+import hmac, pathlib, re, sys
+env_path, key_path = map(pathlib.Path, sys.argv[1:])
+key = key_path.read_text(encoding='utf-8').strip()
+pattern = re.compile(r'^\s*(?:export\s+)?AGENT_DIAGNOSTICS_ACCESS_KEY\s*=\s*(.*?)\s*$')
+values = [match.group(1) for line in env_path.read_text(encoding='utf-8').splitlines() if (match := pattern.match(line))]
+raise SystemExit(0 if len(values) == 1 and hmac.compare_digest(values[0], key) else 1)
+PY
+sudo mv -Tf "$key_next" "$key_file"
 sudo systemctl restart agent-review
-for attempt in $(seq 1 30); do
-  curl --fail --silent --show-error https://14.103.143.171/api/health && break
-  sleep 2
-done
-curl --fail --silent --show-error https://14.103.143.171/api/health
+wait_for_health
+sudo python3 - "$key_file" <<'PY'
+import pathlib, sys, urllib.error, urllib.request
+key = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8').strip()
+request = urllib.request.Request(
+    'https://14.103.143.171/api/agent-diagnostics', data=b'{}', method='POST',
+    headers={'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'},
+)
+try:
+    urllib.request.urlopen(request, timeout=15)
+except urllib.error.HTTPError as error:
+    raise SystemExit(0 if error.code == 400 else 1)
+raise SystemExit(1)
+PY
 ```
 
 `PANDA_DATA_ACCESS_KEY` is absent, so the public Panda query gateway remains closed. Internal auto-verification is configured. Do not open the public gateway as an incident workaround without an approved change and separate access key.
@@ -161,6 +293,7 @@ curl --fail --silent --show-error https://14.103.143.171/api/health
 The IP certificate is a short-lived Let's Encrypt certificate. The `agent-review-certbot.timer` runs every 12 hours. Check it and perform the prescribed dry run:
 
 ```bash
+set -euo pipefail
 sudo systemctl status agent-review-certbot.timer --no-pager
 sudo systemctl list-timers agent-review-certbot.timer --all
 sudo openssl s_client -connect 14.103.143.171:443 -servername 14.103.143.171 </dev/null 2>/dev/null | openssl x509 -noout -dates -issuer
@@ -170,6 +303,7 @@ sudo /opt/certbot/bin/certbot renew --dry-run
 Test Nginx before any reload:
 
 ```bash
+set -euo pipefail
 sudo nginx -t
 sudo systemctl reload nginx
 sudo ufw status verbose
@@ -182,4 +316,4 @@ Preserve the approved SSH management path before modifying firewall rules.
 
 SSH key access uses a documented, human-accepted trust-on-first-use boundary. The pinned host-key fingerprint is in the deployment record; compare the presented fingerprint before accepting a new or changed host key. Never include or request an SSH password.
 
-For an incident: stabilize with service/Nginx/health checks; record UTC time, symlink target, statuses, and bounded logs with secrets redacted; roll back an implicated release; preserve then restore state only when needed; and escalate any credential exposure for rotation. For certificate issues inspect timer, expiry, renewal logs, and Nginx before changing application or firewall settings. Make one reversible observable change at a time—never use broad deletion, mass release cleanup, or unverified configuration rewrites.
+For an incident: stabilize with service/Nginx/health checks; record UTC time, symlink target, statuses, and bounded logs with secrets redacted; roll back an implicated release; preserve then restore state only when needed; and escalate any credential exposure for rotation. For certificate issues inspect timer, expiry, renewal logs, and Nginx before changing application or firewall settings. Make one reversible, observable change at a time. Never use broad deletion, mass release cleanup, or unverified configuration rewrites.
