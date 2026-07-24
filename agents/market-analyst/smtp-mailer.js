@@ -106,15 +106,28 @@ function throwIfAborted(signal) {
   if (signal?.aborted) throw abortError(signal);
 }
 
-function sendWithSignal(transport, message, signal) {
+function sendWithSignal(transport, message, signal, {
+  reconciliationTimeoutMs,
+  setReconciliationTimer,
+  clearReconciliationTimer
+}) {
   throwIfAborted(signal);
-  if (!signal) return transport.sendMail(message);
+  if (!signal) {
+    return Promise.resolve(transport.sendMail(message)).then((info) => ({
+      status: 'accepted',
+      info,
+      canceledAfterAcceptance: false
+    }));
+  }
   return new Promise((resolve, reject) => {
     let settled = false;
-    let abortHandle;
+    let canceled = false;
+    let reconciliationTimer;
     const cleanup = () => {
       signal.removeEventListener('abort', onAbort);
-      if (abortHandle) clearImmediate(abortHandle);
+      if (reconciliationTimer !== undefined) {
+        clearReconciliationTimer(reconciliationTimer);
+      }
     };
     const settle = (callback, value) => {
       if (settled) return;
@@ -123,13 +136,20 @@ function sendWithSignal(transport, message, signal) {
       callback(value);
     };
     const onAbort = () => {
+      if (canceled || settled) return;
+      canceled = true;
       try {
         if (typeof transport.abort === 'function') transport.abort();
         else if (typeof transport.close === 'function') transport.close();
       } catch {
-        // Cancellation settlement below remains authoritative.
+        // The bounded reconciliation timer remains authoritative.
       }
-      abortHandle = setImmediate(() => settle(reject, abortError(signal)));
+      reconciliationTimer = setReconciliationTimer(() => {
+        settle(resolve, {
+          status: 'delivery-unknown',
+          canceledDuringDelivery: true
+        });
+      }, reconciliationTimeoutMs);
     };
     signal.addEventListener('abort', onAbort, { once: true });
     let pending;
@@ -140,9 +160,14 @@ function sendWithSignal(transport, message, signal) {
       return;
     }
     Promise.resolve(pending).then(
-      (info) => settle(resolve, info),
-      (error) => settle(reject, error)
+      (info) => settle(resolve, {
+        status: 'accepted',
+        info,
+        canceledAfterAcceptance: canceled
+      }),
+      (error) => settle(reject, canceled ? abortError(signal) : error)
     );
+    if (signal.aborted) onAbort();
   });
 }
 
@@ -154,6 +179,8 @@ function attemptRecord({
   status,
   deliveryKey,
   messageId,
+  canceledAfterAcceptance,
+  canceledDuringDelivery,
   info,
   error
 }) {
@@ -168,6 +195,8 @@ function attemptRecord({
     smtpResponse: smtpResponse(info),
     deliveryKey,
     messageId,
+    ...(canceledAfterAcceptance ? { canceledAfterAcceptance: true } : {}),
+    ...(canceledDuringDelivery ? { canceledDuringDelivery: true } : {}),
     providerMessageId: typeof info?.messageId === 'string'
       ? sanitizeTraceValue(info.messageId)
       : null,
@@ -190,7 +219,10 @@ export function createSmtpMailer(config, {
   createTransport = nodemailer.createTransport,
   wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   jitter = (maximum) => Math.floor(Math.random() * Math.min(maximum, 250)),
-  clock = () => new Date()
+  clock = () => new Date(),
+  reconciliationTimeoutMs = 1_000,
+  setReconciliationTimer = setTimeout,
+  clearReconciliationTimer = clearTimeout
 } = {}) {
   if (!config || typeof config !== 'object') throw new TypeError('config is required');
   const recipients = normalizeRecipients(config.email?.to);
@@ -227,12 +259,19 @@ export function createSmtpMailer(config, {
       if (
         !forceDelivery
         && previousReceipt?.deliveryKey === key
-        && ['sent', 'already-sent'].includes(previousReceipt.status)
+        && ['sent', 'already-sent', 'reconciliation-needed'].includes(
+          previousReceipt.status
+        )
       ) {
         return sanitizeTraceValue({
-          status: 'already-sent',
+          status: previousReceipt.status === 'reconciliation-needed'
+            ? 'reconciliation-needed'
+            : 'already-sent',
           deliveryKey: key,
           messageId,
+          ...(previousReceipt.reconciliationReason
+            ? { reconciliationReason: previousReceipt.reconciliationReason }
+            : {}),
           attemptCount: 0,
           attempts: []
         });
@@ -245,15 +284,55 @@ export function createSmtpMailer(config, {
         const startedAt = started.toISOString();
         const startedMs = started.getTime();
         try {
-          const info = await sendWithSignal(transport, {
+          const settlement = await sendWithSignal(transport, {
             from,
             to: recipients,
             subject: message.subject,
             text: message.text,
             ...(message.html === undefined ? {} : { html: message.html }),
             messageId
-          }, signal);
+          }, signal, {
+            reconciliationTimeoutMs,
+            setReconciliationTimer,
+            clearReconciliationTimer
+          });
           const endedAt = clock().toISOString();
+          if (settlement.status === 'delivery-unknown') {
+            const record = attemptRecord({
+              attempt,
+              startedAt,
+              endedAt,
+              startedMs,
+              status: 'delivery-unknown',
+              deliveryKey: key,
+              messageId,
+              canceledDuringDelivery: true
+            });
+            attempts.push(record);
+            const receipt = sanitizeTraceValue({
+              status: 'reconciliation-needed',
+              reconciliationReason: 'delivery-unknown',
+              deliveryKey: key,
+              recipientHash: sha256(recipients.join('\n')),
+              recipientCount: recipients.length,
+              messageId,
+              attemptCount: attempts.length,
+              attempts
+            });
+            try {
+              await onAttempt(record);
+            } catch (cause) {
+              const persistenceFailure = new Error('SMTP receipt persistence failed');
+              persistenceFailure.code = 'SMTP_RECEIPT_PERSIST_FAILED';
+              persistenceFailure.receipt = receipt;
+              persistenceFailure.cause = cause;
+              throw persistenceFailure;
+            }
+            const canceled = abortError(signal);
+            canceled.receipt = receipt;
+            throw canceled;
+          }
+          const info = settlement.info;
           const record = attemptRecord({
             attempt,
             startedAt,
@@ -262,11 +341,20 @@ export function createSmtpMailer(config, {
             status: 'sent',
             deliveryKey: key,
             messageId,
+            canceledAfterAcceptance: settlement.canceledAfterAcceptance,
             info
           });
           attempts.push(record);
           const receipt = sanitizeTraceValue({
-            status: 'sent',
+            status: settlement.canceledAfterAcceptance
+              ? 'reconciliation-needed'
+              : 'sent',
+            ...(settlement.canceledAfterAcceptance
+              ? {
+                  canceledAfterAcceptance: true,
+                  reconciliationReason: 'canceled-after-acceptance'
+                }
+              : {}),
             deliveryKey: key,
             recipientHash: sha256(recipients.join('\n')),
             recipientCount: recipients.length,
@@ -287,7 +375,10 @@ export function createSmtpMailer(config, {
           return receipt;
         } catch (error) {
           if (error?.code === 'SMTP_RECEIPT_PERSIST_FAILED') throw error;
-          if (signal?.aborted) throw abortError(signal);
+          if (signal?.aborted) {
+            if (error?.receipt) throw error;
+            throw abortError(signal);
+          }
           const endedAt = clock().toISOString();
           const record = attemptRecord({
             attempt,

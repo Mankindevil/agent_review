@@ -8,7 +8,10 @@ import path from 'node:path';
 import { MarketOrchestrator } from '../agents/market-analyst/orchestrator.js';
 import { MarketTaskStore } from '../agents/market-analyst/task-store.js';
 import { parseCliArgs, runCli } from '../agents/market-analyst/cli.js';
-import { deliveryKey } from '../agents/market-analyst/smtp-mailer.js';
+import {
+  createSmtpMailer,
+  deliveryKey
+} from '../agents/market-analyst/smtp-mailer.js';
 
 const date = '2026-07-23';
 
@@ -249,6 +252,85 @@ test('caller abort at delivery preserves completed report artifacts', async (t) 
   assert.equal(task.artifactsReady, true);
   assert.equal(task.email.status, 'canceled');
   assert.equal(task.artifacts.some(({ name }) => name === 'market-report.txt'), true);
+});
+
+test('accepted SMTP settlement after cancellation is persisted and suppresses automatic resend', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const controller = new AbortController();
+  const fixture = dependencies(stateDir);
+  let sends = 0;
+  let resolveSend;
+  fixture.deps.mailer = createSmtpMailer(fixture.config, {
+    createTransport: () => ({
+      sendMail(message) {
+        sends += 1;
+        queueMicrotask(() => controller.abort(new Error('scheduler stopped')));
+        return new Promise((resolve) => {
+          resolveSend = () => resolve({
+            response: '250 accepted after close',
+            accepted: message.to,
+            rejected: []
+          });
+        });
+      },
+      close() {
+        resolveSend();
+      }
+    }),
+    setReconciliationTimer: () => 1,
+    clearReconciliationTimer: () => {},
+    wait: async () => {},
+    jitter: () => 0
+  });
+  const orchestrator = new MarketOrchestrator(fixture.config, fixture.deps);
+
+  const first = await orchestrator.run(request({ signal: controller.signal }));
+  assert.equal(first.outcome, 'complete');
+  assert.equal(first.emailStatus, 'reconciliation-needed');
+  const persisted = (await fixture.deps.store.list())[0];
+  assert.equal(persisted.email.receipt.status, 'reconciliation-needed');
+  assert.equal(persisted.email.attempts[0].status, 'sent');
+  assert.equal(persisted.email.attempts[0].canceledAfterAcceptance, true);
+
+  const duplicate = await orchestrator.run(request());
+  assert.equal(duplicate.emailStatus, 'reconciliation-needed');
+  assert.equal(sends, 1);
+});
+
+test('unknown SMTP settlement after cancellation is persisted and suppresses automatic resend', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const controller = new AbortController();
+  const fixture = dependencies(stateDir);
+  let sends = 0;
+  fixture.deps.mailer = createSmtpMailer(fixture.config, {
+    createTransport: () => ({
+      sendMail() {
+        sends += 1;
+        queueMicrotask(() => controller.abort(new Error('scheduler stopped')));
+        return new Promise(() => {});
+      },
+      close() {}
+    }),
+    setReconciliationTimer: (callback) => {
+      queueMicrotask(callback);
+      return 1;
+    },
+    clearReconciliationTimer: () => {},
+    wait: async () => {},
+    jitter: () => 0
+  });
+  const orchestrator = new MarketOrchestrator(fixture.config, fixture.deps);
+
+  const first = await orchestrator.run(request({ signal: controller.signal }));
+  assert.equal(first.outcome, 'canceled');
+  assert.equal(first.emailStatus, 'reconciliation-needed');
+  const persisted = (await fixture.deps.store.list())[0];
+  assert.equal(persisted.email.receipt.status, 'reconciliation-needed');
+  assert.equal(persisted.email.attempts[0].status, 'delivery-unknown');
+
+  const duplicate = await orchestrator.run(request());
+  assert.equal(duplicate.emailStatus, 'reconciliation-needed');
+  assert.equal(sends, 1);
 });
 
 test('confirmed scheduled delivery is not duplicated and force delivery reuses artifacts', async (t) => {
@@ -596,6 +678,18 @@ test('verified artifact reader rejects containment, symlink, replacement, growth
     ino: 2,
     size: 4
   };
+  const readBytes = (value) => {
+    const source = Buffer.from(value);
+    let position = 0;
+    return async (buffer, offset, length) => {
+      const bytesRead = Math.min(length, source.length - position);
+      if (bytesRead > 0) {
+        source.copy(buffer, offset, position, position + bytesRead);
+        position += bytesRead;
+      }
+      return { bytesRead, buffer };
+    };
+  };
   const calls = { open: 0 };
   const symlinkFs = {
     lstat: async () => ({ ...regular, isSymbolicLink: () => true }),
@@ -635,7 +729,7 @@ test('verified artifact reader rejects containment, symlink, replacement, growth
         handleStat += 1;
         return handleStat === 1 ? regular : { ...regular, size: 5 };
       },
-      readFile: async () => Buffer.from('safe'),
+      read: readBytes('safe'),
       close: async () => {}
     })
   };
@@ -657,7 +751,7 @@ test('verified artifact reader rejects containment, symlink, replacement, growth
     })(),
     open: async () => ({
       stat: async () => regular,
-      readFile: async () => Buffer.from('safe'),
+      read: readBytes('safe'),
       close: async () => {}
     })
   };
@@ -676,7 +770,7 @@ test('verified artifact reader rejects containment, symlink, replacement, growth
     realpath: async (value) => value,
     open: async () => ({
       stat: async () => regular,
-      readFile: async () => Buffer.from('safe'),
+      read: readBytes('safe'),
       close: async () => {}
     })
   };
@@ -689,4 +783,67 @@ test('verified artifact reader rejects containment, symlink, replacement, growth
     }, stableFs),
     (error) => error.code === 'ARTIFACT_INTEGRITY_FAILED'
   );
+});
+
+test('verified artifact reader caps every growth-race allocation at maximum plus one', async () => {
+  const { readVerifiedArtifact } = await import(
+    '../agents/market-analyst/orchestrator.js'
+  );
+  const maximum = 8;
+  const regular = {
+    isFile: () => true,
+    isSymbolicLink: () => false,
+    dev: 1,
+    ino: 2,
+    size: 4
+  };
+  let readFileCalls = 0;
+  let readCalls = 0;
+  let requestedBytes = 0;
+  let largestBuffer = 0;
+  let pathStats = 0;
+  let handleStats = 0;
+  const growingFs = {
+    lstat: async () => {
+      pathStats += 1;
+      return regular;
+    },
+    realpath: async (value) => value,
+    open: async () => ({
+      stat: async () => {
+        handleStats += 1;
+        return regular;
+      },
+      readFile: async () => {
+        readFileCalls += 1;
+        throw new Error('unbounded readFile must not be called');
+      },
+      read: async (buffer, offset, length) => {
+        readCalls += 1;
+        requestedBytes += length;
+        largestBuffer = Math.max(largestBuffer, buffer.length);
+        assert.ok(length <= maximum + 1);
+        assert.ok(requestedBytes <= maximum + 1);
+        buffer.fill(0x78, offset, offset + length);
+        return { bytesRead: length, buffer };
+      },
+      close: async () => {}
+    })
+  };
+
+  await assert.rejects(
+    readVerifiedArtifact('C:\\safe\\report.txt', {
+      root: 'C:\\safe',
+      maximum,
+      expectedSize: 4,
+      expectedSha256: 'unused'
+    }, growingFs),
+    (error) => error.code === 'ARTIFACT_INTEGRITY_FAILED'
+  );
+  assert.equal(readFileCalls, 0);
+  assert.ok(readCalls > 0);
+  assert.ok(requestedBytes <= maximum + 1);
+  assert.ok(largestBuffer <= maximum + 1);
+  assert.equal(pathStats, 2);
+  assert.equal(handleStats, 2);
 });

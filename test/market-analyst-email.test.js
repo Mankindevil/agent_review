@@ -222,16 +222,12 @@ test('a receipt persistence failure after SMTP acceptance never resends', async 
   assert.equal(sends, 1);
 });
 
-test('SMTP delivery honors caller cancellation before and during a pending send', async () => {
+test('SMTP delivery honors caller cancellation before starting a send', async () => {
   let sends = 0;
-  let closes = 0;
   const transport = {
     sendMail() {
       sends += 1;
       return new Promise(() => {});
-    },
-    close() {
-      closes += 1;
     }
   };
   const mailer = createSmtpMailer(config, {
@@ -252,20 +248,176 @@ test('SMTP delivery honors caller cancellation before and during a pending send'
     (error) => error.name === 'AbortError' && error.code === 'ABORT_ERR'
   );
   assert.equal(sends, 0);
+});
 
+test('SMTP cancellation reconciles acceptance after transport close and suppresses resend', async () => {
   const controller = new AbortController();
-  const pending = mailer.send(message, { signal: controller.signal });
+  let sends = 0;
+  let resolveSend;
+  let timers = 0;
+  let clearedTimers = 0;
+  const attempts = [];
+  const mailer = createSmtpMailer(config, {
+    createTransport: () => ({
+      sendMail(message) {
+        sends += 1;
+        return new Promise((resolve) => {
+          resolveSend = () => resolve({
+            response: '250 accepted after close',
+            accepted: message.to,
+            rejected: []
+          });
+        });
+      },
+      close() {
+        resolveSend();
+      }
+    }),
+    setReconciliationTimer: () => {
+      timers += 1;
+      return 1;
+    },
+    clearReconciliationTimer: () => {
+      clearedTimers += 1;
+    },
+    wait: async () => {},
+    jitter: () => 0
+  });
+  const message = {
+    reportDate: '2026-07-23',
+    reportVersion: 'v1',
+    subject: 'report',
+    text: 'report'
+  };
+  const pending = mailer.send(message, {
+    signal: controller.signal,
+    onAttempt: async (attempt) => attempts.push(attempt)
+  });
   await Promise.resolve();
   controller.abort();
+  const receipt = await pending;
+  assert.equal(receipt.status, 'reconciliation-needed');
+  assert.equal(receipt.canceledAfterAcceptance, true);
+  assert.equal(attempts[0].status, 'sent');
+  assert.equal(attempts[0].canceledAfterAcceptance, true);
+  const duplicate = await mailer.send(message, { previousReceipt: receipt });
+  assert.equal(duplicate.status, 'reconciliation-needed');
+  assert.equal(sends, 1);
+  assert.equal(timers, 1);
+  assert.equal(clearedTimers, 1);
+});
+
+test('SMTP cancellation propagates AbortError after confirmed rejection and permits retry', async () => {
+  const controller = new AbortController();
+  let sends = 0;
+  let rejectSend;
+  let reconciliationTimeout;
+  const mailer = createSmtpMailer(config, {
+    createTransport: () => ({
+      sendMail(message) {
+        sends += 1;
+        if (sends > 1) {
+          return Promise.resolve({
+            response: '250 accepted on retry',
+            accepted: message.to,
+            rejected: []
+          });
+        }
+        return new Promise((_resolve, reject) => {
+          rejectSend = reject;
+        });
+      },
+      close() {}
+    }),
+    setReconciliationTimer: (callback) => {
+      reconciliationTimeout = callback;
+      return 1;
+    },
+    clearReconciliationTimer: () => {},
+    wait: async () => {},
+    jitter: () => 0
+  });
+  const message = {
+    reportDate: '2026-07-23',
+    reportVersion: 'v1',
+    subject: 'report',
+    text: 'report'
+  };
+  const pending = mailer.send(message, { signal: controller.signal });
+  let settled = false;
+  pending.then(
+    () => { settled = true; },
+    () => { settled = true; }
+  );
+  await Promise.resolve();
+  controller.abort();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.equal(typeof reconciliationTimeout, 'function');
+  rejectSend(new Error('socket closed before acceptance'));
   await assert.rejects(
     pending,
     (error) => error.name === 'AbortError' && error.code === 'ABORT_ERR'
   );
+  const retry = await mailer.send(message);
+  assert.equal(retry.status, 'sent');
+  assert.equal(sends, 2);
+});
+
+test('SMTP cancellation persists delivery-unknown after bounded reconciliation and suppresses resend', async () => {
+  const controller = new AbortController();
+  let sends = 0;
+  let closes = 0;
+  const attempts = [];
+  const mailer = createSmtpMailer(config, {
+    createTransport: () => ({
+      sendMail() {
+        sends += 1;
+        return new Promise(() => {});
+      },
+      close() {
+        closes += 1;
+      }
+    }),
+    setReconciliationTimer: (callback) => {
+      queueMicrotask(callback);
+      return 1;
+    },
+    clearReconciliationTimer: () => {},
+    wait: async () => {},
+    jitter: () => 0
+  });
+  const message = {
+    reportDate: '2026-07-23',
+    reportVersion: 'v1',
+    subject: 'report',
+    text: 'report'
+  };
+  const pending = mailer.send(message, {
+    signal: controller.signal,
+    onAttempt: async (attempt) => attempts.push(attempt)
+  });
+  await Promise.resolve();
+  controller.abort();
+  let ambiguousReceipt;
+  await assert.rejects(pending, (error) => {
+    ambiguousReceipt = error.receipt;
+    return error.name === 'AbortError'
+      && error.code === 'ABORT_ERR'
+      && error.receipt?.status === 'reconciliation-needed';
+  });
+  assert.equal(attempts[0].status, 'delivery-unknown');
+  assert.equal(attempts[0].canceledDuringDelivery, true);
+  assert.equal(attempts[0].canceledAfterAcceptance, undefined);
+  const duplicate = await mailer.send(message, {
+    previousReceipt: ambiguousReceipt
+  });
+  assert.equal(duplicate.status, 'reconciliation-needed');
   assert.equal(sends, 1);
   assert.equal(closes, 1);
 });
 
-test('SMTP acceptance wins a same-turn abort race and remains delivered', async () => {
+test('SMTP acceptance after a same-turn abort requires reconciliation', async () => {
   const controller = new AbortController();
   const mailer = createSmtpMailer(config, {
     createTransport: () => ({
@@ -283,6 +435,7 @@ test('SMTP acceptance wins a same-turn abort race and remains delivered', async 
     subject: 'report',
     text: 'report'
   }, { signal: controller.signal });
-  assert.equal(receipt.status, 'sent');
+  assert.equal(receipt.status, 'reconciliation-needed');
+  assert.equal(receipt.canceledAfterAcceptance, true);
   assert.equal(receipt.attemptCount, 1);
 });

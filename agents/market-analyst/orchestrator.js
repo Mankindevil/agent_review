@@ -126,6 +126,27 @@ function sameFile(left, right) {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+async function readHandleBounded(handle, maximum) {
+  const capacity = maximum + 1;
+  const buffer = Buffer.allocUnsafe(capacity);
+  let offset = 0;
+  while (offset < capacity) {
+    const requested = capacity - offset;
+    const result = await handle.read(buffer, offset, requested, null);
+    const bytesRead = Number(result?.bytesRead);
+    if (
+      !Number.isSafeInteger(bytesRead)
+      || bytesRead < 0
+      || bytesRead > requested
+    ) {
+      throw artifactIntegrityError();
+    }
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  return buffer.subarray(0, offset);
+}
+
 export async function readVerifiedArtifact(file, {
   root,
   maximum,
@@ -161,10 +182,7 @@ export async function readVerifiedArtifact(file, {
     ) {
       throw artifactIntegrityError();
     }
-    const data = await handle.readFile();
-    if (data.length > maximum || data.length !== expectedSize) {
-      throw artifactIntegrityError();
-    }
+    const data = await readHandleBounded(handle, maximum);
     const afterHandle = await handle.stat();
     const afterPath = await fsOps.lstat(resolvedFile);
     if (
@@ -174,6 +192,8 @@ export async function readVerifiedArtifact(file, {
       || !sameFile(beforeHandle, afterPath)
       || afterHandle.size !== beforeHandle.size
       || afterPath.size !== beforeHandle.size
+      || data.length > maximum
+      || data.length !== expectedSize
     ) {
       throw artifactIntegrityError();
     }
@@ -255,16 +275,24 @@ function expectedDeliveryIdentity(task, config) {
 function persistedDeliveryState(task, config) {
   const receiptStatus = task.email?.receipt?.status;
   if (['sent', 'already-sent'].includes(receiptStatus)) return 'already-sent';
-  if (task.email?.status === 'sent') return 'reconciliation-needed';
+  if (
+    receiptStatus === 'reconciliation-needed'
+    || ['sent', 'reconciliation-needed'].includes(task.email?.status)
+  ) {
+    return 'reconciliation-needed';
+  }
   const expected = expectedDeliveryIdentity(task, config);
   if (!expected) return null;
-  const accepted = (task.email?.attempts || []).some((attempt) =>
-    attempt?.status === 'sent'
+  const ambiguous = (task.email?.attempts || []).some((attempt) =>
+    ['sent', 'delivery-unknown'].includes(attempt?.status)
     && attempt?.deliveryKey === expected.deliveryKey
     && attempt?.messageId === expected.messageId
-    && Number(attempt?.acceptedCount) > 0
+    && (
+      attempt.status === 'delivery-unknown'
+      || Number(attempt?.acceptedCount) > 0
+    )
   );
-  return accepted ? 'reconciliation-needed' : null;
+  return ambiguous ? 'reconciliation-needed' : null;
 }
 
 export class MarketOrchestrator {
@@ -656,10 +684,14 @@ export class MarketOrchestrator {
       });
       return this.#persistReceipt(task.id, receipt);
     } catch (error) {
+      let receiptTask;
+      if (error?.receipt) {
+        receiptTask = await this.#persistReceipt(task.id, error.receipt);
+      }
       if (signal?.aborted) {
         throw cancellationError(signal);
       }
-      return this.#persistReceipt(task.id, error?.receipt || {
+      return receiptTask || this.#persistReceipt(task.id, {
         status: 'failed',
         error: safeError(error)
       });
@@ -713,10 +745,14 @@ export class MarketOrchestrator {
       const updated = await this.#persistReceipt(task.id, receipt);
       return taskSummary(updated);
     } catch (error) {
+      let receiptTask;
+      if (error?.receipt) {
+        receiptTask = await this.#persistReceipt(task.id, error.receipt);
+      }
       if (signal?.aborted) {
         throw cancellationError(signal);
       }
-      const updated = await this.#persistReceipt(task.id, error?.receipt || {
+      const updated = receiptTask || await this.#persistReceipt(task.id, {
         status: 'failed',
         error: safeError(error)
       });
@@ -755,7 +791,11 @@ export class MarketOrchestrator {
       ),
       email: {
         ...current.email,
-        status: attempt.status === 'sent' ? 'sent' : 'failed',
+        status: attempt.status === 'sent'
+          ? 'sent'
+          : attempt.status === 'delivery-unknown'
+            ? 'reconciliation-needed'
+            : 'failed',
         attempts: [
           ...(current.email?.attempts || []).slice(-(TRACE_LIMITS.emailAttempts - 2)),
           sanitizeTraceValue(attempt)
@@ -787,11 +827,18 @@ export class MarketOrchestrator {
     if (canceled) {
       const current = await this.store.get(task.id);
       if (current?.status?.state === 'TASK_STATE_COMPLETED') {
+        const deliveryState = persistedDeliveryState(current, this.config);
         if (current.email?.status === 'sent') {
           return taskSummary(
             current,
-            persistedDeliveryState(current, this.config) || 'reconciliation-needed'
+            deliveryState || 'reconciliation-needed'
           );
+        }
+        if (deliveryState === 'reconciliation-needed') {
+          return sanitizeTraceValue({
+            ...taskSummary(current, deliveryState),
+            outcome: 'canceled'
+          });
         }
         const preserved = await this.store.update(task.id, (record) => ({
           ...record,
