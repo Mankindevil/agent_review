@@ -92,12 +92,67 @@ function safeError(error) {
   });
 }
 
+function abortError(signal) {
+  const error = new Error(
+    String(signal?.reason?.message || 'SMTP delivery canceled')
+  );
+  error.name = 'AbortError';
+  error.code = 'ABORT_ERR';
+  if (signal?.reason !== undefined) error.cause = signal.reason;
+  return error;
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortError(signal);
+}
+
+function sendWithSignal(transport, message, signal) {
+  throwIfAborted(signal);
+  if (!signal) return transport.sendMail(message);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let abortHandle;
+    const cleanup = () => {
+      signal.removeEventListener('abort', onAbort);
+      if (abortHandle) clearImmediate(abortHandle);
+    };
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onAbort = () => {
+      try {
+        if (typeof transport.abort === 'function') transport.abort();
+        else if (typeof transport.close === 'function') transport.close();
+      } catch {
+        // Cancellation settlement below remains authoritative.
+      }
+      abortHandle = setImmediate(() => settle(reject, abortError(signal)));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    let pending;
+    try {
+      pending = transport.sendMail(message);
+    } catch (error) {
+      settle(reject, error);
+      return;
+    }
+    Promise.resolve(pending).then(
+      (info) => settle(resolve, info),
+      (error) => settle(reject, error)
+    );
+  });
+}
+
 function attemptRecord({
   attempt,
   startedAt,
   endedAt,
   startedMs,
   status,
+  deliveryKey,
   messageId,
   info,
   error
@@ -111,6 +166,7 @@ function attemptRecord({
     acceptedCount: Array.isArray(info?.accepted) ? info.accepted.length : 0,
     rejectedCount: Array.isArray(info?.rejected) ? info.rejected.length : 0,
     smtpResponse: smtpResponse(info),
+    deliveryKey,
     messageId,
     providerMessageId: typeof info?.messageId === 'string'
       ? sanitizeTraceValue(info.messageId)
@@ -161,8 +217,10 @@ export function createSmtpMailer(config, {
     async send(message, {
       previousReceipt,
       forceDelivery = false,
-      onAttempt = async () => {}
+      onAttempt = async () => {},
+      signal
     } = {}) {
+      throwIfAborted(signal);
       const maxAttempts = validateMessage(message);
       const key = keyFor(message);
       const messageId = `<market-report.${sha256(key)}@market-analyst.local>`;
@@ -182,18 +240,19 @@ export function createSmtpMailer(config, {
 
       const attempts = [];
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        throwIfAborted(signal);
         const started = clock();
         const startedAt = started.toISOString();
         const startedMs = started.getTime();
         try {
-          const info = await transport.sendMail({
+          const info = await sendWithSignal(transport, {
             from,
             to: recipients,
             subject: message.subject,
             text: message.text,
             ...(message.html === undefined ? {} : { html: message.html }),
             messageId
-          });
+          }, signal);
           const endedAt = clock().toISOString();
           const record = attemptRecord({
             attempt,
@@ -201,6 +260,7 @@ export function createSmtpMailer(config, {
             endedAt,
             startedMs,
             status: 'sent',
+            deliveryKey: key,
             messageId,
             info
           });
@@ -227,6 +287,7 @@ export function createSmtpMailer(config, {
           return receipt;
         } catch (error) {
           if (error?.code === 'SMTP_RECEIPT_PERSIST_FAILED') throw error;
+          if (signal?.aborted) throw abortError(signal);
           const endedAt = clock().toISOString();
           const record = attemptRecord({
             attempt,
@@ -234,6 +295,7 @@ export function createSmtpMailer(config, {
             endedAt,
             startedMs,
             status: 'failed',
+            deliveryKey: key,
             messageId,
             error
           });
@@ -261,6 +323,7 @@ export function createSmtpMailer(config, {
               ? Math.min(Math.floor(extraDelay), baseDelay)
               : 0
           ));
+          throwIfAborted(signal);
         }
       }
       throw new Error('unreachable SMTP delivery state');

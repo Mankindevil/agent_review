@@ -678,15 +678,8 @@ def build_evidence_pack(request, collector, now):
         raise ValueError("date 必须为 YYYY-MM-DD") from error
     if requested > shanghai_now.date():
         raise ValueError("报告日期尚未完成")
-    if requested == shanghai_now.date() and shanghai_now.hour < 15:
-        raise ValueError("报告日期交易时段尚未完成")
-
     report_compact = requested.strftime("%Y%m%d")
     collector.report_date = report_compact
-    latest_rows = collector.call("get_last_trade_date", exchange="SH")
-    latest = max((_date_text(row.get("date")) for row in latest_rows), default="")
-    if not latest:
-        raise ValueError("Panda latest completed trading date is unavailable")
     target_calendar = collector.call(
         "get_trade_cal",
         start_date=report_compact,
@@ -707,6 +700,12 @@ def build_evidence_pack(request, collector, now):
             requested,
             "Panda SH exchange calendar reports a non-trading day",
         )
+    if requested == shanghai_now.date() and shanghai_now.hour < 15:
+        raise ValueError("报告日期交易时段尚未完成")
+    latest_rows = collector.call("get_last_trade_date", exchange="SH")
+    latest = max((_date_text(row.get("date")) for row in latest_rows), default="")
+    if not latest:
+        raise ValueError("Panda latest completed trading date is unavailable")
     calendar_start = (requested - timedelta(days=120)).strftime("%Y%m%d")
     sh_calendar = collector.call(
         "get_trade_cal",

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, stat } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, mkdir, open, realpath, rename } from 'node:fs/promises';
 import path from 'node:path';
 
 import { acquireRunLock } from './run-lock.js';
@@ -10,6 +11,7 @@ import { generateNarrative } from './narrative-adapter.js';
 import { renderReport } from './report-renderer.js';
 import { validateReport } from './report-validator.js';
 import { validateEvidencePack, validateOperation } from './schemas.js';
+import { deliveryKey } from './smtp-mailer.js';
 
 const REPORT_VERSION = 'market-report-v1';
 const ALLOWED_TRIGGERS = new Set(['scheduled', 'manual', 'a2a']);
@@ -28,6 +30,18 @@ function safeError(error) {
     code: error?.code || null,
     message: String(error?.message || error || 'market report failed')
   });
+}
+
+function cancellationError(signal) {
+  const error = new Error(String(signal?.reason?.message || 'market report canceled'));
+  error.name = 'AbortError';
+  error.code = 'ABORT_ERR';
+  if (signal?.reason !== undefined) error.cause = signal.reason;
+  return error;
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw cancellationError(signal);
 }
 
 function dateInTimezone(now, timezone) {
@@ -97,12 +111,85 @@ async function atomicWrite(file, value, maximum) {
   };
 }
 
-async function boundedRead(file, maximum) {
-  const info = await stat(file);
-  if (!info.isFile() || info.size > maximum) {
-    throw new RangeError('persisted artifact exceeds safe bounds');
+function artifactIntegrityError() {
+  const error = new Error('persisted report artifact failed integrity verification');
+  error.code = 'ARTIFACT_INTEGRITY_FAILED';
+  return error;
+}
+
+function isContained(root, file) {
+  const relative = path.relative(path.resolve(root), path.resolve(file));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function sameFile(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+export async function readVerifiedArtifact(file, {
+  root,
+  maximum,
+  expectedSize,
+  expectedSha256
+}, fsOps = { lstat, realpath, open }) {
+  let handle;
+  try {
+    const resolvedRoot = path.resolve(root);
+    const resolvedFile = path.resolve(file);
+    if (!isContained(resolvedRoot, resolvedFile)) throw artifactIntegrityError();
+    const beforePath = await fsOps.lstat(resolvedFile);
+    if (
+      beforePath.isSymbolicLink()
+      || !beforePath.isFile()
+      || beforePath.size > maximum
+      || beforePath.size !== expectedSize
+    ) {
+      throw artifactIntegrityError();
+    }
+    const canonical = path.resolve(await fsOps.realpath(resolvedFile));
+    if (canonical !== resolvedFile || !isContained(resolvedRoot, canonical)) {
+      throw artifactIntegrityError();
+    }
+    const noFollow = fsConstants.O_NOFOLLOW || 0;
+    handle = await fsOps.open(resolvedFile, fsConstants.O_RDONLY | noFollow);
+    const beforeHandle = await handle.stat();
+    if (
+      !beforeHandle.isFile()
+      || !sameFile(beforePath, beforeHandle)
+      || beforeHandle.size > maximum
+      || beforeHandle.size !== expectedSize
+    ) {
+      throw artifactIntegrityError();
+    }
+    const data = await handle.readFile();
+    if (data.length > maximum || data.length !== expectedSize) {
+      throw artifactIntegrityError();
+    }
+    const afterHandle = await handle.stat();
+    const afterPath = await fsOps.lstat(resolvedFile);
+    if (
+      !afterPath.isFile()
+      || afterPath.isSymbolicLink()
+      || !sameFile(beforeHandle, afterHandle)
+      || !sameFile(beforeHandle, afterPath)
+      || afterHandle.size !== beforeHandle.size
+      || afterPath.size !== beforeHandle.size
+    ) {
+      throw artifactIntegrityError();
+    }
+    if (
+      typeof expectedSha256 !== 'string'
+      || sha256(data) !== expectedSha256
+    ) {
+      throw artifactIntegrityError();
+    }
+    return data.toString('utf8');
+  } catch (error) {
+    if (error?.code === 'ARTIFACT_INTEGRITY_FAILED') throw error;
+    throw artifactIntegrityError();
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
-  return readFile(file, 'utf8');
 }
 
 function artifactMetadata(name, mediaType, result) {
@@ -141,10 +228,43 @@ function taskSummary(task, emailStatus) {
     reportDate: task.reportDate,
     outcome: task.outcome,
     taskState: task.status?.state || task.state,
+    trigger: task.trigger,
+    deliveryRequested: task.deliveryRequested === true,
     emailStatus: emailStatus || task.email?.status || 'not-requested',
     modelFallback: Boolean(task.modelFallback),
     artifacts: task.artifacts || []
   });
+}
+
+function reportVersionFromArtifacts(artifacts) {
+  const html = artifacts.find(({ name }) => name === 'market-report.html');
+  const text = artifacts.find(({ name }) => name === 'market-report.txt');
+  if (!html?.sha256 || !text?.sha256) return null;
+  return sha256(`html:${html.sha256}\ntext:${text.sha256}`);
+}
+
+function expectedDeliveryIdentity(task, config) {
+  if (!task.reportVersion) return null;
+  const key = deliveryKey(task.reportDate, config.email?.to, task.reportVersion);
+  return {
+    deliveryKey: key,
+    messageId: `<market-report.${sha256(key)}@market-analyst.local>`
+  };
+}
+
+function persistedDeliveryState(task, config) {
+  const receiptStatus = task.email?.receipt?.status;
+  if (['sent', 'already-sent'].includes(receiptStatus)) return 'already-sent';
+  if (task.email?.status === 'sent') return 'reconciliation-needed';
+  const expected = expectedDeliveryIdentity(task, config);
+  if (!expected) return null;
+  const accepted = (task.email?.attempts || []).some((attempt) =>
+    attempt?.status === 'sent'
+    && attempt?.deliveryKey === expected.deliveryKey
+    && attempt?.messageId === expected.messageId
+    && Number(attempt?.acceptedCount) > 0
+  );
+  return accepted ? 'reconciliation-needed' : null;
 }
 
 export class MarketOrchestrator {
@@ -216,32 +336,39 @@ export class MarketOrchestrator {
       return taskSummary(rejected);
     }
 
+    throwIfAborted(input.signal);
     const lock = await this.acquireLock({
       stateDir: this.config.stateDir,
       reportDate
     });
     try {
+      throwIfAborted(input.signal);
       const prior = await this.#findReusableReport(operation.operation, reportDate);
+      throwIfAborted(input.signal);
       if (prior) {
         if (prior.outcome === 'skipped' || !deliverEmail) {
           return taskSummary(prior, 'not-requested');
         }
-        if (
-          !forceDelivery
-          && ['sent', 'already-sent'].includes(prior.email?.receipt?.status)
-        ) {
-          return taskSummary(prior, 'already-sent');
+        const deliveryState = persistedDeliveryState(prior, this.config);
+        if (!forceDelivery && deliveryState) {
+          return taskSummary(prior, deliveryState);
         }
-        return this.#deliverPersisted(prior, { forceDelivery });
+        throwIfAborted(input.signal);
+        return await this.#deliverPersisted(prior, {
+          forceDelivery,
+          signal: input.signal
+        });
       }
 
-      const task = await this.store.create({
+      throwIfAborted(input.signal);
+      let task = await this.store.create({
         id: taskId,
         runId,
         owner,
         reportDate,
         operation: operation.operation,
         trigger,
+        deliveryRequested: deliverEmail,
         outcome: 'working',
         status: {
           state: 'TASK_STATE_WORKING',
@@ -249,6 +376,7 @@ export class MarketOrchestrator {
         },
         email: { status: deliverEmail ? 'pending' : 'not-requested', attempts: [] }
       });
+      throwIfAborted(input.signal);
       const trace = createRunTrace({
         runId,
         taskId,
@@ -271,6 +399,7 @@ export class MarketOrchestrator {
           signal: input.signal,
           onTrace: (event) => trace.addWorkerEvent(event)
         });
+        throwIfAborted(input.signal);
         validateEvidencePack(evidence);
         if (evidence.runId !== runId || evidence.reportDate !== reportDate) {
           const error = new Error('worker Evidence Pack identity does not match the run');
@@ -291,12 +420,14 @@ export class MarketOrchestrator {
         };
 
         if (evidence.status === 'skipped') {
+          throwIfAborted(input.signal);
           const artifacts = await this.#writeSkippedArtifacts({
             reportDate,
             runId,
             evidence,
             trace
           });
+          throwIfAborted(input.signal);
           const completed = await this.store.update(taskId, (current) => ({
             ...current,
             outcome: 'skipped',
@@ -309,6 +440,7 @@ export class MarketOrchestrator {
             artifactsReady: true,
             email: { status: 'not-requested', attempts: [] }
           }));
+          task = completed;
           return taskSummary(completed);
         }
 
@@ -323,11 +455,15 @@ export class MarketOrchestrator {
             signal: input.signal
           });
         } catch (error) {
+          if (input.signal?.aborted) {
+            throw cancellationError(input.signal);
+          }
           narrative = {
             sections: [],
             fallbackReason: `model request failed: ${String(error?.message || error).slice(0, 300)}`
           };
         }
+        throwIfAborted(input.signal);
         if (narrative?.usage) {
           trace.addModelUsage({
             ...narrative.usage,
@@ -343,6 +479,7 @@ export class MarketOrchestrator {
         });
         activeStep = undefined;
 
+        throwIfAborted(input.signal);
         stage = 'render';
         activeStep = trace.startStep({
           skillId: operation.operation,
@@ -360,6 +497,7 @@ export class MarketOrchestrator {
         trace.finishStep(activeStep, { status: 'ok' });
         activeStep = undefined;
 
+        throwIfAborted(input.signal);
         stage = 'artifacts';
         const artifacts = await this.#writeReportArtifacts({
           reportDate,
@@ -368,6 +506,9 @@ export class MarketOrchestrator {
           report,
           trace
         });
+        throwIfAborted(input.signal);
+        const reportVersion = reportVersionFromArtifacts(artifacts);
+        if (!reportVersion) throw artifactIntegrityError();
         let completed = await this.store.update(taskId, (current) => ({
           ...current,
           outcome: evidence.status === 'degraded' ? 'degraded' : 'complete',
@@ -380,14 +521,21 @@ export class MarketOrchestrator {
           },
           artifacts,
           artifactsReady: true,
+          reportVersion,
           modelFallback,
           email: {
             status: deliverEmail ? 'pending' : 'not-requested',
             attempts: current.email?.attempts || []
           }
         }));
+        task = completed;
+        throwIfAborted(input.signal);
         if (!deliverEmail) return taskSummary(completed);
-        completed = await this.#deliverNew(completed, report, trace, { forceDelivery });
+        throwIfAborted(input.signal);
+        completed = await this.#deliverNew(completed, report, trace, {
+          forceDelivery,
+          signal: input.signal
+        });
         return taskSummary(completed);
       } catch (error) {
         if (activeStep !== undefined) {
@@ -396,9 +544,7 @@ export class MarketOrchestrator {
             error: safeError(error)
           });
         }
-        const canceled = input.signal?.aborted
-          || error?.name === 'AbortError'
-          || error?.code === 'ABORT_ERR';
+        const canceled = input.signal?.aborted;
         return this.#finishFailure({
           task,
           trace,
@@ -460,6 +606,11 @@ export class MarketOrchestrator {
       report.html,
       MAX_REPORT_BYTES
     );
+    const text = await atomicWrite(
+      path.join(directory, 'market-report.txt'),
+      report.text,
+      MAX_REPORT_BYTES
+    );
     const evidenceResult = await atomicWrite(
       path.join(directory, 'evidence-pack.json'),
       `${JSON.stringify(evidence, null, 2)}\n`,
@@ -473,12 +624,14 @@ export class MarketOrchestrator {
     return [
       artifactMetadata('market-report.md', 'text/markdown', markdown),
       artifactMetadata('market-report.html', 'text/html', html),
+      artifactMetadata('market-report.txt', 'text/plain', text),
       artifactMetadata('evidence-pack.json', 'application/json', evidenceResult),
       artifactMetadata('run-trace.json', 'application/json', traceResult)
     ];
   }
 
-  async #deliverNew(task, report, trace, { forceDelivery }) {
+  async #deliverNew(task, report, trace, { forceDelivery, signal }) {
+    throwIfAborted(signal);
     if (!this.mailer) {
       return this.store.update(task.id, (current) => ({
         ...current,
@@ -489,14 +642,13 @@ export class MarketOrchestrator {
         }
       }));
     }
-    const reportVersion = task.artifacts.find(
-      ({ name }) => name === 'market-report.html'
-    )?.sha256;
-    const message = this.#reportMessage(task, report, reportVersion);
+    const message = this.#reportMessage(task, report, task.reportVersion);
     try {
+      throwIfAborted(signal);
       const receipt = await this.mailer.send(message, {
         previousReceipt: task.email?.receipt,
         forceDelivery,
+        signal,
         onAttempt: async (attempt) => {
           trace.addEmailAttempt(attempt);
           await this.#persistTraceAttempt(task, trace.toJSON(), attempt);
@@ -504,6 +656,9 @@ export class MarketOrchestrator {
       });
       return this.#persistReceipt(task.id, receipt);
     } catch (error) {
+      if (signal?.aborted) {
+        throw cancellationError(signal);
+      }
       return this.#persistReceipt(task.id, error?.receipt || {
         status: 'failed',
         error: safeError(error)
@@ -511,33 +666,45 @@ export class MarketOrchestrator {
     }
   }
 
-  async #deliverPersisted(task, { forceDelivery }) {
+  async #deliverPersisted(task, { forceDelivery, signal }) {
+    throwIfAborted(signal);
     if (!this.mailer) return taskSummary(task, 'failed');
     const directory = artifactDirectory(this.config.stateDir, task.reportDate, task.runId);
-    const markdown = await boundedRead(
-      path.join(directory, 'market-report.md'),
-      MAX_REPORT_BYTES
-    );
-    const html = await boundedRead(
-      path.join(directory, 'market-report.html'),
-      MAX_REPORT_BYTES
-    );
-    const trace = JSON.parse(await boundedRead(
-      path.join(directory, 'run-trace.json'),
-      MAX_JSON_BYTES
-    ));
-    const reportVersion = task.artifacts.find(
-      ({ name }) => name === 'market-report.html'
-    )?.sha256 || sha256(html);
+    const artifact = (name) => {
+      const metadata = task.artifacts?.find((item) => item.name === name);
+      if (!metadata) throw artifactIntegrityError();
+      return metadata;
+    };
+    const read = async (name, maximum) => {
+      const metadata = artifact(name);
+      const value = await readVerifiedArtifact(path.join(directory, name), {
+        root: directory,
+        maximum,
+        expectedSize: metadata.size,
+        expectedSha256: metadata.sha256
+      });
+      throwIfAborted(signal);
+      return value;
+    };
+    const html = await read('market-report.html', MAX_REPORT_BYTES);
+    const text = await read('market-report.txt', MAX_REPORT_BYTES);
+    const trace = JSON.parse(await read('run-trace.json', MAX_JSON_BYTES));
+    const reportVersion = reportVersionFromArtifacts(task.artifacts);
+    if (!reportVersion || reportVersion !== task.reportVersion) {
+      throw artifactIntegrityError();
+    }
+    throwIfAborted(signal);
     const message = this.#reportMessage(
       task,
-      { markdown, html, text: markdown },
+      { html, text },
       reportVersion
     );
     try {
+      throwIfAborted(signal);
       const receipt = await this.mailer.send(message, {
         previousReceipt: task.email?.receipt,
         forceDelivery,
+        signal,
         onAttempt: async (attempt) => {
           appendPlainAttempt(trace, attempt);
           await this.#persistTraceAttempt(task, trace, attempt);
@@ -546,6 +713,9 @@ export class MarketOrchestrator {
       const updated = await this.#persistReceipt(task.id, receipt);
       return taskSummary(updated);
     } catch (error) {
+      if (signal?.aborted) {
+        throw cancellationError(signal);
+      }
       const updated = await this.#persistReceipt(task.id, error?.receipt || {
         status: 'failed',
         error: safeError(error)
@@ -614,6 +784,29 @@ export class MarketOrchestrator {
     deliverEmail,
     trigger
   }) {
+    if (canceled) {
+      const current = await this.store.get(task.id);
+      if (current?.status?.state === 'TASK_STATE_COMPLETED') {
+        if (current.email?.status === 'sent') {
+          return taskSummary(
+            current,
+            persistedDeliveryState(current, this.config) || 'reconciliation-needed'
+          );
+        }
+        const preserved = await this.store.update(task.id, (record) => ({
+          ...record,
+          cancellationRequested: true,
+          email: {
+            ...record.email,
+            status: 'canceled'
+          }
+        }));
+        return sanitizeTraceValue({
+          ...taskSummary(preserved, 'canceled'),
+          outcome: 'canceled'
+        });
+      }
+    }
     const directory = artifactDirectory(
       this.config.stateDir,
       task.reportDate,

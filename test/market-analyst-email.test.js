@@ -221,3 +221,68 @@ test('a receipt persistence failure after SMTP acceptance never resends', async 
   );
   assert.equal(sends, 1);
 });
+
+test('SMTP delivery honors caller cancellation before and during a pending send', async () => {
+  let sends = 0;
+  let closes = 0;
+  const transport = {
+    sendMail() {
+      sends += 1;
+      return new Promise(() => {});
+    },
+    close() {
+      closes += 1;
+    }
+  };
+  const mailer = createSmtpMailer(config, {
+    createTransport: () => transport,
+    wait: async () => {},
+    jitter: () => 0
+  });
+  const message = {
+    reportDate: '2026-07-23',
+    reportVersion: 'v1',
+    subject: 'report',
+    text: 'report'
+  };
+  const preAborted = new AbortController();
+  preAborted.abort();
+  await assert.rejects(
+    mailer.send(message, { signal: preAborted.signal }),
+    (error) => error.name === 'AbortError' && error.code === 'ABORT_ERR'
+  );
+  assert.equal(sends, 0);
+
+  const controller = new AbortController();
+  const pending = mailer.send(message, { signal: controller.signal });
+  await Promise.resolve();
+  controller.abort();
+  await assert.rejects(
+    pending,
+    (error) => error.name === 'AbortError' && error.code === 'ABORT_ERR'
+  );
+  assert.equal(sends, 1);
+  assert.equal(closes, 1);
+});
+
+test('SMTP acceptance wins a same-turn abort race and remains delivered', async () => {
+  const controller = new AbortController();
+  const mailer = createSmtpMailer(config, {
+    createTransport: () => ({
+      async sendMail(message) {
+        controller.abort();
+        return { response: '250 accepted', accepted: message.to, rejected: [] };
+      }
+    }),
+    wait: async () => {},
+    jitter: () => 0
+  });
+  const receipt = await mailer.send({
+    reportDate: '2026-07-23',
+    reportVersion: 'v1',
+    subject: 'report',
+    text: 'report'
+  }, { signal: controller.signal });
+  assert.equal(receipt.status, 'sent');
+  assert.equal(receipt.attemptCount, 1);
+});

@@ -53,9 +53,22 @@ function defaultOrchestrator(config) {
   return new MarketOrchestrator(config, { mailer });
 }
 
-function exitCode(outcome) {
-  if (outcome === 'canceled') return 130;
-  return ['complete', 'degraded', 'skipped'].includes(outcome) ? 0 : 1;
+function exitCode(summary) {
+  if (summary?.outcome === 'canceled') return 130;
+  if (
+    ['scheduled', 'manual'].includes(summary?.trigger)
+    && summary?.deliveryRequested === true
+    && ['failed', 'artifact-integrity-failed'].includes(summary?.emailStatus)
+  ) {
+    return 1;
+  }
+  if (
+    ['complete', 'degraded'].includes(summary?.outcome)
+    && summary?.emailStatus === 'failed'
+  ) {
+    return 1;
+  }
+  return ['complete', 'degraded', 'skipped'].includes(summary?.outcome) ? 0 : 1;
 }
 
 export async function runCli(argv, {
@@ -79,6 +92,7 @@ export async function runCli(argv, {
       })
     );
     process.once('SIGINT', onInterrupt);
+    process.once('SIGTERM', onInterrupt);
     summary = await orchestrator.run({
       operation: {
         operation: 'daily-market-report',
@@ -102,11 +116,14 @@ export async function runCli(argv, {
       })
     };
   } finally {
-    if (onInterrupt) process.removeListener('SIGINT', onInterrupt);
+    if (onInterrupt) {
+      process.removeListener('SIGINT', onInterrupt);
+      process.removeListener('SIGTERM', onInterrupt);
+    }
   }
   const safeSummary = sanitizeTraceValue(summary);
   stdout.write(`${JSON.stringify(safeSummary)}\n`);
-  return exitCode(safeSummary?.outcome);
+  return exitCode(safeSummary);
 }
 
 const isMain = process.argv[1]
