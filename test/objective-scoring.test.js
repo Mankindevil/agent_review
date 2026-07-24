@@ -885,6 +885,114 @@ test('aggregate accepts deeply frozen canonical data-descriptor metrics', () => 
   assert.equal(result.coverage, 1);
 });
 
+test('aggregate rejects frozen gap index accessors without invoking them', () => {
+  let getterReads = 0;
+  const gaps = [];
+  Object.defineProperty(gaps, '0', {
+    enumerable: true,
+    configurable: true,
+    get() {
+      getterReads += 1;
+      return getterReads === 1 ? 'validated-gap' : { unvalidated: true };
+    }
+  });
+  Object.freeze(gaps);
+  const first = metric('testSuccess', true, 50, 1, { gaps });
+  Object.freeze(first.evidenceIds);
+  Object.freeze(first);
+
+  assert.throws(
+    () => aggregateObjectiveCapability(completeMetricSet(first), RUBRIC_V1),
+    /accessor|descriptor|gap|array|data/i
+  );
+  assert.equal(getterReads, 0);
+});
+
+test('aggregate rejects frozen evidence index accessors without invoking them', () => {
+  let getterReads = 0;
+  const evidenceIds = [];
+  Object.defineProperty(evidenceIds, '0', {
+    enumerable: true,
+    configurable: true,
+    get() {
+      getterReads += 1;
+      return getterReads === 1 ? 'ev_first' : { unvalidated: true };
+    }
+  });
+  Object.freeze(evidenceIds);
+  const first = metric('testSuccess', true, 50, 1, { evidenceIds });
+  Object.freeze(first.gaps);
+  Object.freeze(first);
+
+  assert.throws(
+    () => aggregateObjectiveCapability(completeMetricSet(first), RUBRIC_V1),
+    /accessor|descriptor|evidence|array|data/i
+  );
+  assert.equal(getterReads, 0);
+});
+
+test('aggregate rejects non-canonical evidence and gap array structures', () => {
+  const cases = [
+    (array) => Object.defineProperty(array, 'extra', { value: 'hidden' }),
+    (array) => { array[Symbol('extra')] = 'symbol'; },
+    (array) => { array.extra = 'enumerable'; },
+    (array) => {
+      Object.defineProperty(array, '0', {
+        value: array[0],
+        enumerable: false,
+        writable: true,
+        configurable: true
+      });
+    },
+    () => new Array(1)
+  ];
+
+  for (const field of ['evidenceIds', 'gaps']) {
+    for (const mutate of cases) {
+      const canonical = [field === 'evidenceIds' ? 'ev_first' : 'gap:first'];
+      const altered = mutate(canonical) ?? canonical;
+      const first = metric('testSuccess', true, 50, 1, {
+        [field]: altered
+      });
+      assert.throws(
+        () => aggregateObjectiveCapability(completeMetricSet(first), RUBRIC_V1),
+        /array|evidence|gap|index|field|canonical|string/i
+      );
+    }
+  }
+});
+
+test('aggregate snapshots deeply frozen canonical string arrays without aliasing', () => {
+  const first = metric('testSuccess', true, 50, 1, {
+    evidenceIds: ['ev_first'],
+    gaps: ['gap:first']
+  });
+  const metrics = completeMetricSet(first);
+  deepFreeze(metrics);
+
+  const result = aggregateObjectiveCapability(metrics, RUBRIC_V1);
+  const output = byId(result.metrics, 'testSuccess');
+  assert.deepEqual(output.evidenceIds, ['ev_first']);
+  assert.deepEqual(output.gaps, ['gap:first']);
+  assert.notStrictEqual(output.evidenceIds, first.evidenceIds);
+  assert.notStrictEqual(output.gaps, first.gaps);
+  output.evidenceIds.push('ev_second');
+  output.gaps.push('gap:second');
+  assert.deepEqual(first.evidenceIds, ['ev_first']);
+  assert.deepEqual(first.gaps, ['gap:first']);
+});
+
+function completeMetricSet(first) {
+  return [
+    first,
+    metric('robustness', true, 50, 1),
+    metric('contextContinuity', true, 50, 1),
+    metric('a2aCompliance', true, 50, 1),
+    metric('efficiency', true, 50, 1),
+    metric('claimErrorHandling', true, 50, 1)
+  ];
+}
+
 function metric(id, applicable, score, coverage, overrides = {}) {
   const denominator = score === null ? 0 : 1;
   const numerator = score === null

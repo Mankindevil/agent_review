@@ -182,7 +182,74 @@ function snapshotMetric(value) {
     ) {
       throw new TypeError(`metric ${field} must be an own enumerable data descriptor`);
     }
-    snapshot[field] = descriptor.value;
+    if (field === 'evidenceIds') {
+      snapshot[field] = snapshotMetricStringArray(
+        descriptor.value,
+        field,
+        (item) => assertSafeId(item, 'evidence identifier')
+      );
+    } else if (field === 'gaps') {
+      snapshot[field] = snapshotMetricStringArray(
+        descriptor.value,
+        field,
+        (item) => {
+          if (typeof item !== 'string') {
+            throw new TypeError('metric gap must be a string');
+          }
+        }
+      );
+    } else {
+      snapshot[field] = descriptor.value;
+    }
+  }
+  return snapshot;
+}
+
+function snapshotMetricStringArray(value, field, validateItem) {
+  if (!Array.isArray(value)) {
+    throw new TypeError(`metric ${field} must be an array`);
+  }
+  const keys = Reflect.ownKeys(value);
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  if (
+    !lengthDescriptor ||
+    lengthDescriptor.enumerable ||
+    !Object.hasOwn(lengthDescriptor, 'value') ||
+    !Number.isSafeInteger(lengthDescriptor.value) ||
+    lengthDescriptor.value < 0
+  ) {
+    throw new TypeError(`metric ${field} must have a canonical array length`);
+  }
+  const length = lengthDescriptor.value;
+  if (
+    keys.length !== length + 1 ||
+    keys.some((key) => {
+      if (key === 'length') return false;
+      if (typeof key !== 'string') return true;
+      const index = Number(key);
+      return !Number.isSafeInteger(index) ||
+        index < 0 ||
+        index >= length ||
+        String(index) !== key;
+    })
+  ) {
+    throw new TypeError(`metric ${field} must contain only dense canonical indices`);
+  }
+
+  const snapshot = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (
+      !descriptor?.enumerable ||
+      !Object.hasOwn(descriptor, 'value')
+    ) {
+      throw new TypeError(`metric ${field} index must be an own enumerable data descriptor`);
+    }
+    if (typeof descriptor.value !== 'string') {
+      throw new TypeError(`metric ${field} values must be strings`);
+    }
+    validateItem(descriptor.value);
+    snapshot.push(descriptor.value);
   }
   return snapshot;
 }
