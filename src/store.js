@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { migrateStoredEvaluation } from './evaluation-model.js';
 
 export class EvaluationStore {
@@ -73,6 +74,7 @@ export class EvaluationStore {
       if (!next || typeof next !== 'object' || Array.isArray(next) || next.id !== id) {
         throw new TypeError('mutation updater must return the same evaluation record');
       }
+      assertV2Identity(stored, next);
       next.revision = currentRevision + 1;
       next.updatedAt = new Date().toISOString();
       const committed = structuredClone(next);
@@ -103,6 +105,18 @@ export class EvaluationStore {
     const temporary = `${this.file}.tmp`;
     await writeFile(temporary, snapshot);
     await rename(temporary, this.file);
+  }
+}
+
+function assertV2Identity(stored, next) {
+  if (stored.schemaVersion !== 2) return;
+  if (
+    next.schemaVersion !== 2 ||
+    next.id !== stored.id ||
+    next.createdAt !== stored.createdAt ||
+    !isDeepStrictEqual(next.submission, stored.submission)
+  ) {
+    throw new TypeError('V2 mutation must preserve schemaVersion and frozen record identity');
   }
 }
 

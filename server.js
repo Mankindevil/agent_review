@@ -20,12 +20,15 @@ import { projectEvaluation } from './src/evaluation-projection.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.join(root, 'public');
-const store = new EvaluationStore(process.env.DATA_FILE || path.join(root, 'data/evaluations.json'));
+export const evaluationStore = new EvaluationStore(
+  process.env.DATA_FILE || path.join(root, 'data/evaluations.json')
+);
+const store = evaluationStore;
 const events = new EventEmitter();
 events.setMaxListeners(100);
-const pipeline = new EvaluationPipeline(store, events);
+const pipeline = new EvaluationPipeline(evaluationStore, events);
 const diagnosticsGuard = createDiagnosticsGuard();
-await store.load();
+await evaluationStore.load();
 await pipeline.recoverInterrupted();
 
 export const server = createServer(async (request, response) => {

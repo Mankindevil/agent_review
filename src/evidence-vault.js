@@ -33,7 +33,7 @@ export class EvidenceVault {
 
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.key, iv);
-    cipher.setAAD(this.aad(canonicalRecord.evidenceId));
+    cipher.setAAD(this.aad(canonicalRecord.evidenceId, canonicalRecord.recordHash));
     const encrypted = Buffer.concat([
       cipher.update(JSON.stringify(canonicalRecord), 'utf8'),
       cipher.final()
@@ -44,7 +44,8 @@ export class EvidenceVault {
       iv: iv.toString('base64'),
       tag: cipher.getAuthTag().toString('base64'),
       ciphertext: encrypted.toString('base64'),
-      payloadHash: canonicalRecord.payloadHash
+      payloadHash: canonicalRecord.payloadHash,
+      recordHash: canonicalRecord.recordHash
     };
 
     const file = this.fileFor(canonicalRecord.evidenceId);
@@ -57,9 +58,9 @@ export class EvidenceVault {
     return canonicalRecord;
   }
 
-  async get(evidenceId, expectedPayloadHash) {
+  async get(evidenceId, expectedRecordHash) {
     assertSafeId(evidenceId, 'evidenceId');
-    assertExpectedPayloadHash(expectedPayloadHash);
+    assertExpectedRecordHash(expectedRecordHash);
     await this.assertSecureDirectory();
     const file = this.fileFor(evidenceId);
     await assertRegularFile(file);
@@ -71,14 +72,14 @@ export class EvidenceVault {
       throw new Error('evidence envelope integrity check failed', { cause: error });
     }
     validateEnvelope(envelope);
-    if (envelope.payloadHash !== expectedPayloadHash) {
-      throw new Error('evidence does not match expected payload hash commitment');
+    if (envelope.recordHash !== expectedRecordHash) {
+      throw new Error('evidence does not match expected record hash commitment');
     }
 
     let record;
     try {
       const decipher = createDecipheriv('aes-256-gcm', this.key, decodeBase64(envelope.iv, 'iv', 12));
-      decipher.setAAD(this.aad(evidenceId));
+      decipher.setAAD(this.aad(evidenceId, expectedRecordHash));
       decipher.setAuthTag(decodeBase64(envelope.tag, 'tag', 16));
       const plaintext = Buffer.concat([
         decipher.update(decodeBase64(envelope.ciphertext, 'ciphertext')),
@@ -90,19 +91,24 @@ export class EvidenceVault {
     }
 
     if (record?.evidenceId !== evidenceId) throw new Error('evidence identity integrity check failed');
+    if (record?.recordHash !== expectedRecordHash) {
+      throw new Error('evidence record hash commitment mismatch');
+    }
     const reconstructed = canonicalizeEvidenceRecord(record);
     if (
       record.payloadHash !== reconstructed.payloadHash ||
       envelope.payloadHash !== reconstructed.payloadHash ||
-      expectedPayloadHash !== reconstructed.payloadHash
+      record.recordHash !== reconstructed.recordHash ||
+      envelope.recordHash !== reconstructed.recordHash ||
+      expectedRecordHash !== reconstructed.recordHash
     ) {
-      throw new Error('evidence payload hash mismatch');
+      throw new Error('evidence record commitment mismatch');
     }
     return reconstructed;
   }
 
-  aad(evidenceId) {
-    return Buffer.from(`${this.evaluationId}:${evidenceId}`, 'utf8');
+  aad(evidenceId, recordHash) {
+    return Buffer.from(`${this.evaluationId}:${evidenceId}:${recordHash}`, 'utf8');
   }
 
   fileFor(evidenceId) {
@@ -112,22 +118,28 @@ export class EvidenceVault {
   }
 
   async prepareDirectory() {
+    await assertNoLinkedPathComponents(this.root, 'configured evidence root');
     await rejectSymlinkIfPresent(this.root, 'evidence root');
     await mkdir(this.root, { recursive: true, mode: 0o700 });
+    await assertNoLinkedPathComponents(this.root, 'configured evidence root');
     await assertSecureDirectoryPath(this.root, 'evidence root');
     if (process.platform !== 'win32') await chmod(this.root, 0o700);
 
+    await assertNoLinkedPathComponents(this.directory, 'evaluation evidence directory');
     await rejectSymlinkIfPresent(this.directory, 'evaluation evidence directory');
     try {
       await mkdir(this.directory, { mode: 0o700 });
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
     }
+    await assertNoLinkedPathComponents(this.directory, 'evaluation evidence directory');
     await this.assertSecureDirectory();
     if (process.platform !== 'win32') await chmod(this.directory, 0o700);
   }
 
   async assertSecureDirectory() {
+    await assertNoLinkedPathComponents(this.root, 'configured evidence root');
+    await assertNoLinkedPathComponents(this.directory, 'evaluation evidence directory');
     await assertSecureDirectoryPath(this.root, 'evidence root');
     await assertSecureDirectoryPath(this.directory, 'evaluation evidence directory');
     const [rootPath, directoryPath] = await Promise.all([
@@ -159,11 +171,14 @@ function validateEnvelope(envelope) {
   if (!/^[a-f0-9]{64}$/u.test(envelope.payloadHash || '')) {
     throw new Error('evidence payload hash mismatch');
   }
+  if (!/^[a-f0-9]{64}$/u.test(envelope.recordHash || '')) {
+    throw new Error('evidence record hash mismatch');
+  }
 }
 
-function assertExpectedPayloadHash(value) {
+function assertExpectedRecordHash(value) {
   if (typeof value !== 'string' || !/^[a-f0-9]{64}$/u.test(value)) {
-    throw new TypeError('expected payload hash is required');
+    throw new TypeError('expected record hash is required');
   }
 }
 
@@ -201,6 +216,45 @@ async function rejectSymlinkIfPresent(target, label) {
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
+}
+
+async function assertNoLinkedPathComponents(target, label) {
+  const resolved = path.resolve(target);
+  const parsed = path.parse(resolved);
+  const segments = resolved
+    .slice(parsed.root.length)
+    .split(path.sep)
+    .filter(Boolean);
+  let current = parsed.root;
+  let unverifiedAncestor = false;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        if (unverifiedAncestor) {
+          throw new TypeError(`${label} ancestor cannot be securely inspected`);
+        }
+        return;
+      }
+      if (['EACCES', 'EPERM'].includes(error.code)) {
+        unverifiedAncestor = true;
+        continue;
+      }
+      throw error;
+    }
+    if (info.isSymbolicLink()) {
+      throw new TypeError(`${label} ancestor must not be a symlink, junction, or reparse point`);
+    }
+    const canonical = await realpath(current);
+    if (normalizePathForComparison(canonical) !== normalizePathForComparison(current)) {
+      throw new TypeError(`${label} ancestor must use its canonical real path`);
+    }
+    unverifiedAncestor = false;
+  }
+  if (unverifiedAncestor) throw new TypeError(`${label} ancestor cannot be securely inspected`);
 }
 
 async function assertSecureDirectoryPath(target, label) {

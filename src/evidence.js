@@ -7,7 +7,7 @@ const CREATE_FIELDS = new Set([
   'capturedAt', 'payload'
 ]);
 const RECORD_FIELDS = new Set([
-  ...CREATE_FIELDS, 'evidenceVersion', 'payloadHash'
+  ...CREATE_FIELDS, 'evidenceVersion', 'payloadHash', 'recordHash'
 ]);
 export const EVIDENCE_KIND_GRADES = Object.freeze({
   'platform-timing': 'A',
@@ -16,7 +16,7 @@ export const EVIDENCE_KIND_GRADES = Object.freeze({
   'protocol-request': 'B',
   'protocol-response': 'B',
   'protocol-event': 'B',
-  'agent-output': 'B',
+  'agent-output': 'C',
   'agent-card-claim': 'C',
   'agent-example-claim': 'C',
   'agent-claim': 'C',
@@ -24,12 +24,18 @@ export const EVIDENCE_KIND_GRADES = Object.freeze({
 });
 const URL_PATTERN = /https?:\/\/[^\s<>"']+/giu;
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]+/giu;
-const BASIC_PATTERN = /\bBasic\s+[A-Za-z0-9+/=]+/giu;
-const JWT_PATTERN = /\b[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}\b/gu;
-const COOKIE_HEADER_PATTERN = /((?:^|[\s;,])(?:Set-Cookie|Cookie)\s*:\s*)[^\r\n]*/giu;
-const SENSITIVE_ASSIGNMENT_PATTERN = /\b(?:authorization|authentication|authenticate|hidden(?:[-_\s]+)input|(?:access[-_\s]*)?token|secret)\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;\r\n]+)/giu;
+const AUTHORIZATION_HEADER_PATTERN = /(\b(?:Proxy-)?Authorization\s*:\s*)(?:Basic|Bearer)\s+[A-Za-z0-9._~+/=-]+/giu;
+const JWT_PATTERN = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]*(?![A-Za-z0-9_-])/gu;
+const COOKIE_LINE_HEADER_PATTERN = /(^|[\r\n])(\s*(?:Set-Cookie|Cookie)\s*:\s*)[^\r\n]*/giu;
+const COOKIE_CONTEXT_HEADER_PATTERN = /(\b(?:request|response)\s+(?:headers?\s+)?(?:Set-Cookie|Cookie)\s*:\s*)[^\r\n]*/giu;
+const ASSIGNMENT_PATTERN = /\b([A-Za-z][A-Za-z0-9_-]*(?:[ \t]+[A-Za-z][A-Za-z0-9_-]*)?)\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;\r\n]+)/gu;
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu;
 const MAINLAND_PHONE_PATTERN = /(?<!\d)1[3-9]\d{9}(?!\d)/gu;
+const SENSITIVE_TOKENS = new Set([
+  'authorization', 'authentication', 'authenticate', 'auth', 'cookie', 'jwt',
+  'token', 'secret', 'password', 'passwd', 'credential', 'credentials', 'session'
+]);
+const SENSITIVE_KEY_PREFIXES = new Set(['api', 'access', 'private', 'signing']);
 
 export function createEvidenceRecord(input = {}) {
   const values = readEvidenceFields(input, CREATE_FIELDS, 'evidence input');
@@ -56,6 +62,19 @@ export function createEvidenceRecord(input = {}) {
   assertOptionalIndex(turnIndex, 'turnIndex');
   assertOptionalIndex(repeatIndex, 'repeatIndex');
   const immutablePayload = canonicalClone(payload, 'payload');
+  const payloadHash = sha256(JSON.stringify(immutablePayload));
+  const recordHash = hashRecordCommitment({
+    evidenceId,
+    evidenceVersion: '1.0',
+    runId,
+    grade,
+    kind,
+    testId,
+    turnIndex,
+    repeatIndex,
+    capturedAt,
+    payloadHash
+  });
   return deepFreeze({
     evidenceId,
     evidenceVersion: '1.0',
@@ -66,7 +85,8 @@ export function createEvidenceRecord(input = {}) {
     turnIndex,
     repeatIndex,
     capturedAt,
-    payloadHash: sha256(JSON.stringify(immutablePayload)),
+    payloadHash,
+    recordHash,
     payload: immutablePayload
   });
 }
@@ -88,7 +108,26 @@ export function canonicalizeEvidenceRecord(record) {
   if (values.payloadHash !== canonical.payloadHash) {
     throw new TypeError('evidence payload hash mismatch');
   }
+  if (values.recordHash !== canonical.recordHash) {
+    throw new TypeError('evidence record hash mismatch');
+  }
   return canonical;
+}
+
+function hashRecordCommitment(record) {
+  const commitment = {
+    evidenceId: record.evidenceId,
+    evidenceVersion: record.evidenceVersion,
+    runId: record.runId,
+    grade: record.grade,
+    kind: record.kind,
+    testId: record.testId,
+    capturedAt: record.capturedAt,
+    payloadHash: record.payloadHash
+  };
+  if (record.turnIndex !== undefined) commitment.turnIndex = record.turnIndex;
+  if (record.repeatIndex !== undefined) commitment.repeatIndex = record.repeatIndex;
+  return sha256(canonicalJson(commitment));
 }
 
 export function redactEvidence(value, secrets = []) {
@@ -142,29 +181,42 @@ function redactString(value, secrets) {
   let result = value;
   for (const secret of secrets) result = result.split(secret).join('[SECRET_REDACTED]');
   result = result.replace(URL_PATTERN, redactUrl);
+  result = result.replace(AUTHORIZATION_HEADER_PATTERN, '$1[AUTHORIZATION_REDACTED]');
   result = result.replace(BEARER_PATTERN, '[BEARER_REDACTED]');
-  result = result.replace(BASIC_PATTERN, '[BASIC_REDACTED]');
   result = result.replace(JWT_PATTERN, redactJwt);
-  result = result.replace(COOKIE_HEADER_PATTERN, '$1[COOKIE_REDACTED]');
-  result = result.replace(SENSITIVE_ASSIGNMENT_PATTERN, '[SENSITIVE_REDACTED]');
+  result = result.replace(COOKIE_LINE_HEADER_PATTERN, '$1$2[COOKIE_REDACTED]');
+  result = result.replace(COOKIE_CONTEXT_HEADER_PATTERN, '$1[COOKIE_REDACTED]');
+  result = result.replace(ASSIGNMENT_PATTERN, redactSensitiveAssignment);
   result = result.replace(EMAIL_PATTERN, '[EMAIL_REDACTED]');
   result = result.replace(MAINLAND_PHONE_PATTERN, '[PHONE_REDACTED]');
   return result;
 }
 
 function isSensitiveField(field) {
-  const tokens = String(field)
+  const tokens = tokenizeFieldName(field);
+  if (tokens.some((token) => SENSITIVE_TOKENS.has(token))) return true;
+  if (tokens.some((token, index) =>
+    token === 'key' && SENSITIVE_KEY_PREFIXES.has(tokens[index - 1])
+  )) return true;
+  return tokens.some((token, index) =>
+    token === 'input' && tokens[index - 1] === 'hidden'
+  );
+}
+
+function tokenizeFieldName(field) {
+  return String(field)
+    .replace(/([A-Z]+)([A-Z][a-z])/gu, '$1-$2')
     .replace(/([a-z0-9])([A-Z])/gu, '$1-$2')
     .toLowerCase()
     .split(/[^a-z0-9]+/u)
     .filter(Boolean);
-  if (tokens.some((token) => [
-    'authorization', 'authentication', 'authenticate', 'auth', 'cookie', 'jwt',
-    'token', 'secret', 'password', 'passwd', 'credential', 'credentials', 'session'
-  ].includes(token))) return true;
-  return tokens.some((token, index) =>
-    token === 'key' && ['api', 'access', 'private', 'signing'].includes(tokens[index - 1])
-  );
+}
+
+function redactSensitiveAssignment(match, field) {
+  const tokens = tokenizeFieldName(field);
+  return !tokens.includes('cookie') && isSensitiveField(field)
+    ? '[SENSITIVE_REDACTED]'
+    : match;
 }
 
 function redactObjectKey(key, secrets, usedKeys) {

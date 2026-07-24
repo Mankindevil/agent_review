@@ -43,9 +43,10 @@ test('stores authenticated AES-256-GCM envelopes append-only and round-trips imm
     assert.equal(envelope.version, 1);
     assert.equal(envelope.algorithm, 'aes-256-gcm');
     assert.equal(envelope.payloadHash, record.payloadHash);
+    assert.equal(envelope.recordHash, record.recordHash);
     assert.equal(rawEnvelope.includes('plaintext-sentinel'), false);
-    await assert.rejects(() => vault.get(record.evidenceId), /expected payload hash/i);
-    assert.deepEqual(await vault.get(record.evidenceId, record.payloadHash), record);
+    await assert.rejects(() => vault.get(record.evidenceId), /expected record hash/i);
+    assert.deepEqual(await vault.get(record.evidenceId, record.recordHash), record);
     if (process.platform !== 'win32') {
       assert.equal((await stat(root)).mode & 0o777, 0o700);
       assert.equal((await stat(path.join(root, 'eval_vault'))).mode & 0o777, 0o700);
@@ -75,7 +76,7 @@ test('round-trips evidence records whose optional turn and repeat coordinates ar
   });
   try {
     await vault.put(record);
-    assert.deepEqual(await vault.get(record.evidenceId, record.payloadHash), record);
+    assert.deepEqual(await vault.get(record.evidenceId, record.recordHash), record);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -104,7 +105,7 @@ test('rejects invalid record poisoning before an append-only ID is occupied', as
   try {
     await assert.rejects(() => vault.put(poisoned), /grade.*kind|kind.*grade/i);
     await vault.put(correct);
-    assert.deepEqual(await vault.get(correct.evidenceId, correct.payloadHash), correct);
+    assert.deepEqual(await vault.get(correct.evidenceId, correct.recordHash), correct);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -128,7 +129,7 @@ test('round-trips prototype-named payload keys without changing their JSON meani
   });
   try {
     await vault.put(record);
-    const restored = await vault.get(record.evidenceId, record.payloadHash);
+    const restored = await vault.get(record.evidenceId, record.recordHash);
     assert.deepEqual(restored, record);
     assert.equal(Object.hasOwn(restored.payload, '__proto__'), true);
     assert.equal(restored.payload.__proto__.value, 'preserved');
@@ -166,20 +167,23 @@ test('rejects ciphertext, tag, payload-hash, and AAD tampering', async () => {
       tampered[field] = bytes.toString('base64');
       await writeFile(file, JSON.stringify(tampered));
       await assert.rejects(
-        () => vault.get(record.evidenceId, record.payloadHash),
+        () => vault.get(record.evidenceId, record.recordHash),
         /authentic|integrity|tamper|commitment/i
       );
     }
 
     await writeFile(file, JSON.stringify({ ...original, payloadHash: '0'.repeat(64) }));
-    await assert.rejects(() => vault.get(record.evidenceId, record.payloadHash), /payload hash|commitment/i);
+    await assert.rejects(() => vault.get(record.evidenceId, record.recordHash), /payload hash|record hash|commitment/i);
+
+    await writeFile(file, JSON.stringify({ ...original, recordHash: '0'.repeat(64) }));
+    await assert.rejects(() => vault.get(record.evidenceId, record.recordHash), /record hash|commitment/i);
 
     const copiedDirectory = path.join(root, 'eval_copied');
     await mkdir(copiedDirectory, { recursive: true });
     await writeFile(path.join(copiedDirectory, 'ev_tamper.json.enc'), JSON.stringify(original));
     const copiedVault = new EvidenceVault({ root, evaluationId: 'eval_copied', key });
     await assert.rejects(
-      () => copiedVault.get(record.evidenceId, record.payloadHash),
+      () => copiedVault.get(record.evidenceId, record.recordHash),
       /authentic|integrity|tamper/i
     );
   } finally {
@@ -187,7 +191,7 @@ test('rejects ciphertext, tag, payload-hash, and AAD tampering', async () => {
   }
 });
 
-test('rejects a valid same-identity envelope that does not match the independent manifest hash', async () => {
+test('rejects a valid same-identity envelope that does not match the manifest record hash', async () => {
   const rootOne = path.join(tmpdir(), `agent-review-vault-commit-one-${process.pid}-${Date.now()}`);
   const rootTwo = path.join(tmpdir(), `agent-review-vault-commit-two-${process.pid}-${Date.now()}`);
   const key = randomBytes(32).toString('base64');
@@ -212,8 +216,56 @@ test('rejects a valid same-identity envelope that does not match the independent
     );
 
     await assert.rejects(
-      () => firstVault.get(original.evidenceId, original.payloadHash),
-      /expected payload hash|commitment/i
+      () => firstVault.get(original.evidenceId, original.recordHash),
+      /expected record hash|commitment/i
+    );
+  } finally {
+    await rm(rootOne, { recursive: true, force: true });
+    await rm(rootTwo, { recursive: true, force: true });
+  }
+});
+
+test('rejects same-payload replacement with different evidence metadata', async () => {
+  const rootOne = path.join(tmpdir(), `agent-review-vault-metadata-one-${process.pid}-${Date.now()}`);
+  const rootTwo = path.join(tmpdir(), `agent-review-vault-metadata-two-${process.pid}-${Date.now()}`);
+  const key = randomBytes(32).toString('base64');
+  const firstVault = new EvidenceVault({ root: rootOne, evaluationId: 'eval_metadata', key });
+  const secondVault = new EvidenceVault({ root: rootTwo, evaluationId: 'eval_metadata', key });
+  const original = createEvidenceRecord({
+    evidenceId: 'ev_metadata',
+    runId: 'run_original',
+    testId: 'test_original',
+    grade: 'D',
+    kind: 'reviewer-inference',
+    turnIndex: 1,
+    repeatIndex: 2,
+    capturedAt: '2026-07-24T10:00:00.000Z',
+    payload: { same: 'payload' }
+  });
+  const replacement = createEvidenceRecord({
+    evidenceId: 'ev_metadata',
+    runId: 'run_replaced',
+    testId: 'test_replaced',
+    grade: 'A',
+    kind: 'transport-fact',
+    turnIndex: 3,
+    repeatIndex: 4,
+    capturedAt: '2026-07-24T11:00:00.000Z',
+    payload: { same: 'payload' }
+  });
+  assert.equal(original.payloadHash, replacement.payloadHash);
+  assert.notEqual(original.recordHash, replacement.recordHash);
+
+  try {
+    await firstVault.put(original);
+    await secondVault.put(replacement);
+    await copyFile(
+      path.join(rootTwo, 'eval_metadata', 'ev_metadata.json.enc'),
+      path.join(rootOne, 'eval_metadata', 'ev_metadata.json.enc')
+    );
+    await assert.rejects(
+      () => firstVault.get(original.evidenceId, original.recordHash),
+      /expected record hash|commitment/i
     );
   } finally {
     await rm(rootOne, { recursive: true, force: true });
@@ -257,6 +309,40 @@ test('rejects symlinked vault roots and evaluation directories when the OS suppo
     });
     await assert.rejects(() => linkedDirectoryVault.put(record), /symlink|reparse|real path/i);
     await assert.rejects(() => stat(path.join(outside, 'ev_link.json.enc')), (error) => error.code === 'ENOENT');
+  } finally {
+    await rm(container, { recursive: true, force: true });
+  }
+});
+
+test('rejects a configured vault root beneath an ancestor symlink or junction', async (t) => {
+  const container = path.join(tmpdir(), `agent-review-vault-ancestor-link-${process.pid}-${Date.now()}`);
+  const outsideParent = path.join(container, 'outside-parent');
+  const linkedParent = path.join(container, 'linked-parent');
+  const root = path.join(linkedParent, 'vault-root');
+  const key = randomBytes(32).toString('base64');
+  const record = fixtureRecord('ev_ancestor_link');
+  await mkdir(outsideParent, { recursive: true });
+  try {
+    try {
+      await symlink(outsideParent, linkedParent, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) {
+        t.skip(`symlink creation unavailable: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+
+    const vault = new EvidenceVault({
+      root,
+      evaluationId: 'eval_ancestor_link',
+      key
+    });
+    await assert.rejects(() => vault.put(record), /ancestor|symlink|junction|reparse|real path/i);
+    await assert.rejects(
+      () => stat(path.join(outsideParent, 'vault-root', 'eval_ancestor_link', 'ev_ancestor_link.json.enc')),
+      (error) => error.code === 'ENOENT'
+    );
   } finally {
     await rm(container, { recursive: true, force: true });
   }

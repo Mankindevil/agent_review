@@ -7,6 +7,7 @@ import {
 } from '../src/evidence.js';
 
 const VALID_JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjMifQ.signature';
+const UNSECURED_JWT = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ.';
 
 test('creates deterministic deeply immutable evidence records without retaining mutable payload input', () => {
   const payload = { z: [1, { ok: true }], a: 'value' };
@@ -33,7 +34,9 @@ test('creates deterministic deeply immutable evidence records without retaining 
 
   assert.equal(record.evidenceVersion, '1.0');
   assert.match(record.payloadHash, /^[a-f0-9]{64}$/);
+  assert.match(record.recordHash, /^[a-f0-9]{64}$/);
   assert.equal(record.payloadHash, samePayload.payloadHash);
+  assert.notEqual(record.recordHash, samePayload.recordHash);
   assert.equal(Object.isFrozen(record), true);
   assert.equal(Object.isFrozen(record.payload), true);
   assert.equal(Object.isFrozen(record.payload.z), true);
@@ -41,6 +44,36 @@ test('creates deterministic deeply immutable evidence records without retaining 
   payload.a = 'changed';
   assert.deepEqual(record.payload, { z: [1, { ok: true }], a: 'value' });
   assert.throws(() => { record.payload.z.push(2); }, TypeError);
+});
+
+test('recordHash commits every evidence identity and metadata field', () => {
+  const base = {
+    evidenceId: 'ev_record_commitment',
+    runId: 'run_record_commitment',
+    grade: 'B',
+    kind: 'protocol-response',
+    testId: 'test_record_commitment',
+    turnIndex: 1,
+    repeatIndex: 2,
+    capturedAt: '2026-07-24T10:00:00.000Z',
+    payload: { same: 'payload' }
+  };
+  const original = createEvidenceRecord(base);
+  const alternatives = [
+    { evidenceId: 'ev_record_commitment_changed' },
+    { runId: 'run_record_commitment_changed' },
+    { grade: 'D', kind: 'reviewer-inference' },
+    { testId: 'test_record_commitment_changed' },
+    { turnIndex: 3 },
+    { repeatIndex: 4 },
+    { capturedAt: '2026-07-24T11:00:00.000Z' }
+  ];
+
+  for (const patch of alternatives) {
+    const changed = createEvidenceRecord({ ...base, ...patch });
+    assert.equal(changed.payloadHash, original.payloadHash);
+    assert.notEqual(changed.recordHash, original.recordHash, JSON.stringify(patch));
+  }
 });
 
 test('rejects invalid evidence grades and non-JSON payloads', () => {
@@ -65,7 +98,7 @@ test('exports and enforces the closed evidence kind-to-grade contract', () => {
     'protocol-request': 'B',
     'protocol-response': 'B',
     'protocol-event': 'B',
-    'agent-output': 'B',
+    'agent-output': 'C',
     'agent-card-claim': 'C',
     'agent-example-claim': 'C',
     'agent-claim': 'C',
@@ -96,6 +129,39 @@ test('exports and enforces the closed evidence kind-to-grade contract', () => {
     capturedAt: '2026-07-24T10:00:00.000Z',
     payload: {}
   }), /grade.*kind|kind.*grade/i);
+});
+
+test('grades a response envelope as B but its Agent-authored content as C', () => {
+  const common = {
+    runId: 'run_response_grades',
+    testId: 'test_response_grades',
+    capturedAt: '2026-07-24T10:00:00.000Z'
+  };
+  const envelope = createEvidenceRecord({
+    ...common,
+    evidenceId: 'ev_response_envelope',
+    grade: 'B',
+    kind: 'protocol-response',
+    payload: { status: 200, artifactCount: 1 }
+  });
+  const content = createEvidenceRecord({
+    ...common,
+    evidenceId: 'ev_response_content',
+    grade: 'C',
+    kind: 'agent-output',
+    payload: { claim: 'I used ten private subagents' }
+  });
+
+  assert.equal(envelope.grade, 'B');
+  assert.equal(content.grade, 'C');
+  assert.throws(
+    () => createEvidenceRecord({ ...common, evidenceId: 'ev_output_escalated', grade: 'B', kind: 'agent-output', payload: {} }),
+    /grade.*kind|kind.*grade/i
+  );
+  assert.throws(
+    () => createEvidenceRecord({ ...common, evidenceId: 'ev_protocol_downgraded', grade: 'C', kind: 'protocol-response', payload: {} }),
+    /grade.*kind|kind.*grade/i
+  );
 });
 
 test('validates evidence identifiers, timestamp, coordinates, and unknown fields', () => {
@@ -254,10 +320,14 @@ test('redacts secret-bearing keys, auth schemes, and cookie headers with stable 
     "authentication": "opaque-authentication-value",
     "authenticate": "opaque-authenticate-value",
     "jwt": "opaque-jwt-value",
-    "basic": "Basic dXNlcjpwYXNzd29yZA==",
+    "basicDocumentation": "Use a basic QWxhZGRpbjpvcGVuIHNlc2FtZQ== example in documentation",
+    "ordinaryText": "The cookie: chocolate improves UX; final score=9",
     "headersText": "Authorization: Basic dXNlcjpwYXNzd29yZA==\\nSet-Cookie: prefs=\\"private-value\\"; Path=/\\nCookie: theme=dark; arbitrary=\\"quoted-value\\"",
+    "proxyHeadersText": "Proxy-Authorization: Basic cHJveHk6c2VjcmV0",
     "flatHeaderText": "upstream response Set-Cookie: session=flat-cookie-secret",
+    "flatAssignments": "password=flat-password-secret; passwd=flat-passwd-secret; credential=flat-credential-secret; credentials=flat-credentials-secret; session=flat-session-secret; apiKey=flat-api-secret; api_key=flat-api-snake-secret; api-key=flat-api-kebab-secret; accessKey=flat-access-secret; access_key=flat-access-snake-secret; privateKey=flat-private-camel-secret; private-key=flat-private-secret; signingKey=flat-signing-camel-secret; signing_key=flat-signing-secret",
     "claim": "${VALID_JWT}",
+    "unsecuredClaim": "${UNSECURED_JWT}",
     "ordinary": "build 10.20.30; monkey=banana; aaa.bbb.ccc"
   }`);
 
@@ -267,7 +337,13 @@ test('redacts secret-bearing keys, auth schemes, and cookie headers with stable 
   for (const secret of [
     'run-secret', 'analyst@example.com', 'opaque-authentication-value',
     'opaque-authenticate-value', 'opaque-jwt-value', 'dXNlcjpwYXNzd29yZA==',
-    'private-value', 'quoted-value', 'flat-cookie-secret', VALID_JWT
+    'cHJveHk6c2VjcmV0',
+    'private-value', 'quoted-value', 'flat-cookie-secret', VALID_JWT, UNSECURED_JWT,
+    'flat-password-secret', 'flat-passwd-secret', 'flat-credential-secret',
+    'flat-credentials-secret', 'flat-session-secret', 'flat-api-secret',
+    'flat-api-snake-secret', 'flat-api-kebab-secret', 'flat-access-secret',
+    'flat-access-snake-secret', 'flat-private-camel-secret', 'flat-private-secret',
+    'flat-signing-camel-secret', 'flat-signing-secret'
   ]) {
     assert.equal(serialized.includes(secret), false, secret);
   }
@@ -279,7 +355,16 @@ test('redacts secret-bearing keys, auth schemes, and cookie headers with stable 
   assert.equal(redacted.authenticate, '[REDACTED]');
   assert.equal(redacted.jwt, '[REDACTED]');
   assert.equal(redacted.ordinary, 'build 10.20.30; monkey=banana; aaa.bbb.ccc');
+  assert.equal(
+    redacted.basicDocumentation,
+    'Use a basic QWxhZGRpbjpvcGVuIHNlc2FtZQ== example in documentation'
+  );
+  assert.equal(
+    redacted.ordinaryText,
+    'The cookie: chocolate improves UX; final score=9'
+  );
   assert.match(redacted.claim, /\[JWT_REDACTED\]/);
+  assert.match(redacted.unsecuredClaim, /\[JWT_REDACTED\]/);
   assert.match(redacted.headersText, /Set-Cookie: \[COOKIE_REDACTED\]/);
   assert.match(redacted.headersText, /Cookie: \[COOKIE_REDACTED\]/);
   assert.match(redacted.flatHeaderText, /Set-Cookie: \[COOKIE_REDACTED\]/);

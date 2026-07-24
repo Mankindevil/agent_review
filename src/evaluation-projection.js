@@ -69,7 +69,7 @@ function projectManifestItem(item, secrets) {
     'occurredAt'
   ];
   if (item?.visibility === 'public') fields.push('summary');
-  fields.push('payloadHash', 'visibility', 'redaction');
+  fields.push('payloadHash', 'recordHash', 'visibility', 'redaction');
   return pick(item, fields, {
     redaction: (value, nestedSecrets) => pick(value, ['status', 'count'], {}, nestedSecrets)
   }, secrets);

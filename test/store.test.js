@@ -173,6 +173,65 @@ test('does not share V2 references across set, get, list, mutate, or returned va
   }
 });
 
+test('rejects V2 schema downgrades and changes to frozen record identity', async () => {
+  const file = path.join(tmpdir(), `agent-roast-store-v2-identity-${process.pid}.json`);
+  await rm(file, { force: true });
+  try {
+    const store = new EvaluationStore(file);
+    const original = {
+      id: 'eval_v2_identity',
+      schemaVersion: 2,
+      createdAt: '2026-07-20T00:00:00.000Z',
+      updatedAt: '2026-07-20T00:00:00.000Z',
+      revision: 0,
+      submission: {
+        submissionVersion: '1.0',
+        frozenAt: '2026-07-20T00:00:00.000Z',
+        agentCard: { sha256: 'a'.repeat(64) }
+      },
+      rawEvidence: { secret: 'original-secret' }
+    };
+    await store.set(original);
+
+    let retainedDowngrade;
+    const mutations = [
+      (current) => {
+        retainedDowngrade = current;
+        current.schemaVersion = 1;
+        return current;
+      },
+      (current) => ({ ...current, schemaVersion: '2' }),
+      (current) => {
+        delete current.schemaVersion;
+        return current;
+      },
+      (current) => ({ ...current, createdAt: '2026-07-21T00:00:00.000Z' }),
+      (current) => ({
+        ...current,
+        submission: { ...current.submission, frozenAt: '2026-07-21T00:00:00.000Z' }
+      })
+    ];
+
+    for (const mutate of mutations) {
+      await assert.rejects(
+        () => store.mutate(original.id, 0, mutate),
+        /V2|schemaVersion|identity|frozen/i
+      );
+    }
+    retainedDowngrade.rawEvidence.secret = 'changed-through-rejected-alias';
+
+    const stored = store.get(original.id);
+    assert.equal(stored.schemaVersion, 2);
+    assert.equal(stored.createdAt, original.createdAt);
+    assert.deepEqual(stored.submission, original.submission);
+    assert.equal(stored.rawEvidence.secret, 'original-secret');
+    assert.equal(stored.revision, 0);
+  } finally {
+    await rm(file, { force: true });
+    await rm(`${file}.tmp`, { force: true });
+  }
+});
+
 test('publishes set, delete, and mutate only after persistence and recovers its queue after failure', async () => {
   const root = path.join(tmpdir(), `agent-roast-store-rollback-${process.pid}`);
   const blockedTarget = path.join(root, 'blocked-target');

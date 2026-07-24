@@ -2,6 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { projectEvaluation } from '../src/evaluation-projection.js';
 
+const UNSECURED_JWT = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ.';
+const FLAT_ASSIGNMENTS = [
+  'password=projection-password-secret',
+  'apiKey=projection-api-secret',
+  'session=projection-session-secret',
+  'credentials=projection-credential-secret',
+  `jwt=${UNSECURED_JWT}`
+].join('; ');
+
 function unsafeEvaluation() {
   return {
     schemaVersion: 2,
@@ -37,6 +46,7 @@ function unsafeEvaluation() {
         occurredAt: '2026-07-24T10:00:30.000Z',
         summary: 'Completed in 30ms',
         payloadHash: 'c'.repeat(64),
+        recordHash: 'd'.repeat(64),
         visibility: 'public',
         redaction: { status: 'applied', count: 2 },
         payload: { raw: 'raw-payload-secret' }
@@ -89,6 +99,7 @@ test('constructs a public V2 projection from explicit allow-listed fields', () =
     occurredAt: '2026-07-24T10:00:30.000Z',
     summary: 'Completed in 30ms',
     payloadHash: 'c'.repeat(64),
+    recordHash: 'd'.repeat(64),
     visibility: 'public',
     redaction: { status: 'applied', count: 2 }
   });
@@ -149,6 +160,9 @@ test('type-checks and redacts every projected leaf, including allowed summaries 
   source.absoluteReview.findings = ['hidden input = finding-secret'];
   source.resultV2.repairSuggestion = 'fetch https://example.test/?token=repair-secret';
   source.auditEvents[0].summary = 'Bearer audit.secret.token';
+  source.execution.stage += `; ${FLAT_ASSIGNMENTS}`;
+  source.objectiveCapability.reason += `; ${FLAT_ASSIGNMENTS}`;
+  source.auditEvents[0].summary += `; ${FLAT_ASSIGNMENTS}`;
 
   for (const audience of ['public', 'admin']) {
     const projection = projectEvaluation(source, {
@@ -160,7 +174,9 @@ test('type-checks and redacts every projected leaf, including allowed summaries 
       'top-level-object-secret', 'revision-object-secret', 'archive-object-secret',
       'run-explicit-secret', 'stage.secret.token', 'qualification-secret',
       'manifest-secret', 'hidden-manifest-secret', 'objective-secret',
-      'finding-secret', 'repair-secret', 'audit.secret.token'
+      'finding-secret', 'repair-secret', 'projection-password-secret',
+      'projection-api-secret', 'projection-session-secret',
+      'projection-credential-secret', UNSECURED_JWT
     ]) {
       assert.equal(serialized.includes(secret), false, `${audience}: ${secret}`);
     }

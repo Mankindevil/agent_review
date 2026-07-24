@@ -9,13 +9,19 @@ process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-test-${process.pid}.jso
 process.env.AGENT_DIAGNOSTICS_ACCESS_KEY = 'test-diagnostics-key';
 process.env.AGENT_DIAGNOSTICS_RATE_LIMIT = '100';
 process.env.ALLOW_PRIVATE_AGENT_URLS = 'true';
+const API_UNSECURED_JWT = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ.';
 const v2Fixture = {
   schemaVersion: 2,
   id: 'eval_v2_projection',
   createdAt: '2026-07-24T09:00:00.000Z',
   updatedAt: '2026-07-24T09:01:00.000Z',
   revision: 0,
-  execution: { status: 'completed', stage: 'complete', progress: 100, authorization: 'api-auth-secret' },
+  execution: {
+    status: 'completed',
+    stage: `password=api-flat-password; apiKey=api-flat-key; session=api-flat-session; credentials=api-flat-credentials; jwt=${API_UNSECURED_JWT}`,
+    progress: 100,
+    authorization: 'api-auth-secret'
+  },
   governance: { phase: 'waiting_model', anonymousMapping: { A: 'api-mapping-secret' } },
   qualification: { status: 'passed', attemptRunIds: ['run_api'], hiddenInput: 'api-hidden-secret' },
   evidenceManifest: {
@@ -31,6 +37,7 @@ const v2Fixture = {
       occurredAt: '2026-07-24T09:00:30.000Z',
       summary: 'Completed',
       payloadHash: 'd'.repeat(64),
+      recordHash: 'e'.repeat(64),
       visibility: 'public',
       redaction: { status: 'applied', count: 1 },
       payload: { value: 'api-raw-secret' }
@@ -51,7 +58,7 @@ const v2Fixture = {
 };
 await writeFile(process.env.DATA_FILE, JSON.stringify({ schemaVersion: '1.0', items: [v2Fixture] }));
 const serverModule = await import('../server.js');
-const { server, serializeEvaluationForResponse } = serverModule;
+const { server, evaluationStore, serializeEvaluationForResponse } = serverModule;
 
 let origin;
 test.before(async () => {
@@ -80,13 +87,22 @@ test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes'
   const forbidden = [
     'api-auth-secret', 'api-mapping-secret', 'api-hidden-secret', 'api-raw-secret',
     'api-seal-secret', 'api-card-secret', 'api-skill-secret', 'api-audit-secret',
-    'api-raw-top-secret', 'api-sensitive-log-secret'
+    'api-raw-top-secret', 'api-sensitive-log-secret', 'api-flat-password',
+    'api-flat-key', 'api-flat-session', 'api-flat-credentials', API_UNSECURED_JWT
   ];
+  await assert.rejects(
+    () => evaluationStore.mutate(v2Fixture.id, 0, (current) => ({
+      ...current,
+      schemaVersion: 1
+    })),
+    /V2|schemaVersion|identity/i
+  );
   const listResponse = await fetch(`${origin}/api/evaluations`);
   const listed = (await listResponse.json()).find((item) => item.id === v2Fixture.id);
   assert.equal(listResponse.status, 200);
   assert.equal(listed.schemaVersion, 2);
   assert.equal(listed.evidenceManifest.items[0].summary, 'Completed');
+  assert.equal(listed.evidenceManifest.items[0].recordHash, 'e'.repeat(64));
 
   const detailResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
   const detailText = await detailResponse.text();
