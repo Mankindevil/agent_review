@@ -238,11 +238,41 @@ function assertError(payload, { code, status, reason }) {
 }
 
 const SKILL_ROOT = new URL('../agents/market-analyst/skills/', import.meta.url);
-const ANALYTICAL_SKILL_TOOLS = [
-  'narrative-adapter',
-  'panda-market-worker',
-  'report-renderer',
-  'report-validator'
+const SKILL_TOOL_BOUNDARIES = {
+  'daily-market-report': [
+    'narrative-adapter',
+    'panda-market-worker',
+    'report-renderer',
+    'report-validator'
+  ],
+  'hot-topic-analysis': [
+    'narrative-adapter',
+    'panda-market-worker',
+    'report-renderer',
+    'report-validator'
+  ],
+  'sell-pressure-scan': [
+    'narrative-adapter',
+    'panda-market-worker',
+    'report-renderer',
+    'report-validator'
+  ],
+  'potential-watchlist': [
+    'narrative-adapter',
+    'panda-market-worker',
+    'report-renderer',
+    'report-validator'
+  ],
+  'inspect-run-trace': ['run-store']
+};
+
+const REQUIRED_SKILL_SECTIONS = [
+  'Input contract',
+  'Deterministic workflow',
+  'Panda-only financial data boundary',
+  'Freshness, coverage, and missing-data rules',
+  'Output schema and trace requirements',
+  'Research-only safety boundary'
 ];
 
 function parseSkillFrontMatter(source) {
@@ -327,22 +357,29 @@ test('repository Skills stay synchronized with the Agent Card and tool boundarie
 
   assert.deepEqual(loaded.map(({ frontMatter }) => frontMatter.name).sort(), expectedIds);
   for (const { id, source, frontMatter } of loaded) {
+    assert.equal(frontMatter.name, id, `${id} path must declare the same Skill name`);
     assert.ok(frontMatter.description, `${id} must have a trigger description`);
     assert.match(frontMatter.description, /^Use when\b/);
     assert.equal(frontMatter['financial-data-source'], 'panda_data-only');
-    assert.equal(frontMatter.trading, 'prohibited');
+    assert.equal(frontMatter['trading-execution'], 'prohibited');
+    assert.equal(frontMatter['missing-data-fabrication'], 'prohibited');
+    assert.equal(frontMatter['research-use'], 'only');
     const tools = parseAllowedTools(frontMatter['allowed-tools']);
     assert.deepEqual(
       tools,
-      id === 'inspect-run-trace' ? ['run-store'] : ANALYTICAL_SKILL_TOOLS,
+      SKILL_TOOL_BOUNDARIES[id],
       `${id} exposes an unexpected internal tool`
     );
-    assert.match(source, /Panda-only financial data boundary/);
-    assert.match(source, /research-only/i);
-    assert.doesNotMatch(
-      source,
-      /(?:Yahoo Finance|\bBloomberg\b|\bRefinitiv\b|\bWind\b|\bEastmoney\b|\bAkShare\b)/i
-    );
+    for (const section of REQUIRED_SKILL_SECTIONS) {
+      assert.match(source, new RegExp(`^## ${section}$`, 'm'), `${id} is missing ${section}`);
+    }
+    if (id === 'sell-pressure-scan') {
+      assert.equal(
+        frontMatter['score-components'],
+        '[downside_volume=0.25, lhb_net_sell=0.25, northbound_reduction=0.20, margin_contraction=0.15, discount_event=0.15]'
+      );
+      assert.equal(frontMatter['minimum-components'], '3');
+    }
   }
 });
 

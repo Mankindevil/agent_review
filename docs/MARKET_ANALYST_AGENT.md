@@ -45,7 +45,7 @@ Copy-Item .env.example .env
 | Panda | `PANDA_DATA_USERNAME`, `PANDA_DATA_PASSWORD` | `panda_data` 登录凭据 |
 | Panda | `PANDA_DATA_BASE_URL` | Panda API 地址 |
 | Python | `PANDA_DATA_PYTHON` | Python 3.10 解释器绝对路径 |
-| Python | `PANDA_DATA_TIMEOUT_MS` | 单次 Panda 请求基础超时（毫秒） |
+| Python | `PANDA_DATA_TIMEOUT_MS` | Python worker deadline 的基数（毫秒）；运行时取该值的 10 倍作为整个 worker 子进程期限，不是单次 Panda API 调用超时 |
 | A2A | `MARKET_AGENT_HOST`, `MARKET_AGENT_PORT` | 监听地址与端口，默认 `127.0.0.1:4190` |
 | A2A | `MARKET_AGENT_PUBLIC_BASE_URL` | 反向代理后的公开 HTTPS 根地址 |
 | A2A | `MARKET_AGENT_ACCESS_TOKEN` | 保护任务与运行详情的 Bearer token |
@@ -59,9 +59,9 @@ Copy-Item .env.example .env
 | SMTP | `MARKET_REPORT_SMTP_SECURE` | `true` 表示隐式 TLS |
 | SMTP | `MARKET_REPORT_SMTP_STARTTLS` | 默认要求 STARTTLS；仅明确需要时设 `false` |
 | SMTP | `MARKET_REPORT_SMTP_USERNAME`, `MARKET_REPORT_SMTP_PASSWORD` | SMTP 登录凭据 |
-| SMTP | `MARKET_REPORT_SEND_FAILURE_ALERTS` | 是否发送运行失败提醒 |
+| SMTP | `MARKET_REPORT_SEND_FAILURE_ALERTS` | 已实现的失败提醒开关；仅在计划/手动邮件运行、mailer 已配置且失败时生效，设 `false` 禁用 |
 | 存储 | `MARKET_REPORT_STATE_DIR` | 任务、产物、trace、邮件状态和锁的根目录 |
-| 存储 | `MARKET_REPORT_RETENTION_DAYS` | 运行产物保留天数 |
+| 存储 | `MARKET_REPORT_RETENTION_DAYS` | 预留配置；当前仅解析但尚未执行自动清理，不能据此承诺产物已按期删除 |
 | 缓存 | `MARKET_REPORT_CACHE_DAYS` | Panda 日级缓存保留天数 |
 | 分析 | `MARKET_REPORT_MIN_LIQUIDITY_CNY` | 默认最低流动性门槛 |
 | 调度 | `MARKET_REPORT_TIMEZONE` | 必须为 `Asia/Shanghai` |
@@ -78,7 +78,7 @@ Copy-Item .env.example .env
 npm run market-agent
 ```
 
-生成最近一个已完成交易日并发送邮件：
+以当前配置时区的本地日期运行并发送邮件：
 
 ```bash
 npm run market-report
@@ -91,6 +91,8 @@ npm run market-report -- --date 2026-07-23 --no-email
 ```
 
 对同一日期的成功产物会复用；普通重跑可只恢复失败的邮件发送。`--force-delivery` 可能造成重复邮件，只能在人工核对 SMTP/收件箱、确认此前没有投递后使用。
+
+省略 `--date` 不会自动选择上一个已完成交易日：CLI 把当前本地日期交给 worker。若当天是周末或交易所休市日，任务返回 `skipped`；若当天是交易日但上海时间尚未到 15:00，任务失败并报告交易时段未完成。指定未来日期同样失败。
 
 ## A2A 1.0
 
@@ -143,9 +145,9 @@ curl -fsS -X POST http://127.0.0.1:4190/a2a/v1/message:send \
 
 ## 每日 18:30 调度
 
-CLI 会再次用 Panda 交易日历判断当日是否为已完成交易日；周末、休市日或未收盘会安全跳过。
+CLI 会用 Panda 交易日历验证当前日期。周末和交易所休市日安全跳过；交易日 15:00 前会失败而不是跳过；实现不会回退到前一个交易日。默认 18:30 调度位于收盘后，但交易所日历仍是最终依据。
 
-systemd 推荐拆分长期 A2A 服务和 oneshot 日报服务。部署 `deploy/market-analyst.service`、`deploy/market-report.service` 与 `deploy/market-report.timer` 后：
+systemd 推荐拆分长期 A2A 服务和 oneshot 日报服务。Task 8 只定义运行契约，不交付这些 unit；Task 9 将创建并验证 `deploy/market-analyst.service`、`deploy/market-report.service` 与 `deploy/market-report.timer`。只有 Task 9 完成、unit 已安装后才执行：
 
 ```bash
 sudo systemctl daemon-reload

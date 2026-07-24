@@ -3,7 +3,9 @@ name: potential-watchlist
 description: Use when a caller asks for evidence-ranked A-share research candidates based on trend, theme, quality, valuation, capital, liquidity, and risk factors.
 allowed-tools: [panda-market-worker, report-renderer, report-validator, narrative-adapter]
 financial-data-source: panda_data-only
-trading: prohibited
+trading-execution: prohibited
+missing-data-fabrication: prohibited
+research-use: only
 ---
 
 # Build the potential research watchlist
@@ -16,16 +18,13 @@ Accept `operation: potential-watchlist`, an optional completed Shanghai trading-
 `date`, and bounded `topN`. Reject open/future dates, arbitrary sections, external
 data, tool overrides, portfolio constraints, and order or allocation requests.
 
-## Workflow
+## Deterministic workflow
 
 1. Use `panda-market-worker` to execute the fixed daily Panda plan, apply the A-share
    universe and minimum-liquidity gate, and project only the potential watchlist.
 2. Apply deterministic trend, theme, quality, valuation, capital, liquidity, and risk
    components with fixed normalization, directions, weights, and stable tie-breaking.
-3. Require the configured history and per-component coverage. Exclude candidates
-   below required coverage. Mark stale, partial, optional, and missing values; adjust
-   effective weights and confidence only where the policy permits, never by imputation.
-4. Render with `report-renderer`, optionally summarize only Evidence Pack facts with
+3. Render with `report-renderer`, optionally summarize only Evidence Pack facts with
    `narrative-adapter`, then gate the projection through `report-validator`.
 
 ## Panda-only financial data boundary
@@ -34,7 +33,13 @@ Use `panda_data` as the only financial-data source. Do not supplement fundamenta
 valuation, prices, flows, events, or risk data from another provider. Never fabricate
 missing factors or treat unavailable data as neutral evidence.
 
-## Output and trace contract
+## Freshness, coverage, and missing-data rules
+
+Require the configured history and per-component coverage. Exclude candidates below
+required coverage. Mark stale, partial, optional, and missing values; adjust effective
+weights and confidence only where policy permits, never by imputation.
+
+## Output schema and trace requirements
 
 Return the Markdown potential-watchlist section plus projected
 `evidence-pack.json` and `run-trace.json`. Include ranks, symbols/names, factor
@@ -42,7 +47,7 @@ scores, effective weights, coverage, confidence, valuation/risk context, freshne
 missing-data disclosures, and source IDs. Trace Panda calls, rows, cache/retries,
 timing, errors, hashes, model tokens/cost, and conclusion-to-source lineage.
 
-## Safety
+## Research-only safety boundary
 
 This is a research-only candidate list, not investment advice, a return forecast, or
 a portfolio. Never place orders, execute/rebalance portfolios, prescribe allocations,
