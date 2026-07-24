@@ -160,13 +160,21 @@ test -f "$nginx_template"
 nginx_live=/etc/nginx/sites-available/agent-review
 nginx_stage="/etc/nginx/sites-available/agent-review.next.$$"
 nginx_backup="/etc/nginx/sites-available/agent-review.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+environment_live=/etc/agent-review/agent-review.env
+environment_backup="/etc/agent-review/agent-review.env.release-backup.$(date -u +%Y%m%dT%H%M%SZ).$$"
 nginx_rendered="$(mktemp)"
 sed 's/__PUBLIC_IP__/14.103.143.171/g' "$nginx_template" > "$nginx_rendered"
 test -s "$nginx_rendered"
 sudo test -f "$nginx_live"
 sudo cp -p "$nginx_live" "$nginx_backup"
+sudo test -f "$environment_live"
+sudo cp -p "$environment_live" "$environment_backup"
+sudo chown root:root "$environment_backup"
+sudo chmod 0600 "$environment_backup"
 previous_dir="$(readlink -f /opt/agent-review/app)"
 test -d "$previous_dir"
+printf 'Record rollback inputs: previous_release=%s nginx_backup=%s environment_backup=%s\n' \
+  "$previous_dir" "$nginx_backup" "$environment_backup"
 stage_link="/opt/agent-review/app.next.$$"
 recovery_link="/opt/agent-review/app.recovery.$$"
 release_switched=0
@@ -206,9 +214,9 @@ rm -f -- "$nginx_rendered"
 trap - EXIT
 ```
 
-The rendered Nginx configuration is installed only after the existing file is backed up. Any failure after promotion restores that backup, validates it with `nginx -t`, reloads Nginx, and restores the previous application symlink if it had already moved. Keep the timestamped Nginx backup with the release record.
+The rendered Nginx configuration is installed only after the existing file is backed up. Any failure after promotion restores that backup, validates it with `nginx -t`, reloads Nginx, and restores the previous application symlink if it had already moved. Record the printed previous release, Nginx backup, and root-only environment backup paths with the release. The environment backup preserves the pre-rotation `AGENT_DIAGNOSTICS_ACCESS_KEY` and must survive until the release is accepted.
 
-If validation fails, switch only to a known retained directory. The documented active SHA is a rollback target while it remains present:
+If post-deployment acceptance fails, use the three exact paths recorded by the release command. Do not guess a SHA or select the newest backup:
 
 ```bash
 set -euo pipefail
@@ -223,42 +231,48 @@ wait_for_health() {
   done
   return 1
 }
-rollback_sha='29324596a665206ff273bdba94e9a98f0a131acd'
-[[ "$rollback_sha" =~ ^[0-9a-fA-F]{40}$ ]]
-expected_rollback_dir="/opt/agent-review/releases/$rollback_sha"
-rollback_dir="$(readlink -f "$expected_rollback_dir")"
-test "$rollback_dir" = "$expected_rollback_dir"
-test -d "$rollback_dir"
-test -f "$rollback_dir/package.json"
-previous_dir="$(readlink -f /opt/agent-review/app)"
-test -d "$previous_dir"
-stage_link="/opt/agent-review/app.next.$$"
-recovery_link="/opt/agent-review/app.recovery.$$"
-rollback_switched=0
+previous_release='<recorded previous release directory>'
+nginx_backup='<recorded nginx backup>'
+environment_backup='<recorded environment backup>'
+app_live=/opt/agent-review/app
+app_stage="/opt/agent-review/app.rollback.$$"
+nginx_live=/etc/nginx/sites-available/agent-review
+nginx_stage="/etc/nginx/sites-available/agent-review.rollback.$$"
+environment_live=/etc/agent-review/agent-review.env
+environment_stage="/etc/agent-review/agent-review.env.rollback.$$"
+
+test "$(readlink -f "$previous_release")" = "$previous_release"
+test -d "$previous_release"
+test -f "$previous_release/package.json"
+sudo test -f "$nginx_backup"
+sudo test -f "$environment_backup"
+sudo ln -s "$previous_release" "$app_stage"
+test "$(readlink -f "$app_stage")" = "$previous_release"
+
 rollback_cleanup() {
   status=$?
-  sudo rm -f -- "$stage_link" "$recovery_link" || true
-  if [ "$rollback_switched" -eq 1 ]; then
-    sudo ln -s "$previous_dir" "$recovery_link" || true
-    if [ "$(readlink -f "$recovery_link" 2>/dev/null || true)" = "$previous_dir" ]; then
-      sudo mv -Tf "$recovery_link" /opt/agent-review/app || true
-      sudo systemctl restart agent-review || true
-      wait_for_health || true
-    fi
-  fi
+  sudo rm -f -- "$app_stage" "$nginx_stage" "$environment_stage" || true
+  if [ "$status" -ne 0 ]; then sudo systemctl start agent-review || true; fi
   exit "$status"
 }
 trap rollback_cleanup EXIT
-sudo ln -s "$rollback_dir" "$stage_link"
-test "$(readlink -f "$stage_link")" = "$rollback_dir"
-sudo mv -Tf "$stage_link" /opt/agent-review/app
-rollback_switched=1
+
+sudo systemctl stop agent-review
+sudo mv -Tf "$app_stage" "$app_live"
+sudo cp -p "$nginx_backup" "$nginx_stage"
+sudo mv -Tf "$nginx_stage" "$nginx_live"
+sudo nginx -t
+sudo systemctl reload nginx
+sudo install -o root -g root -m 0600 "$environment_backup" "$environment_stage"
+sudo mv -Tf "$environment_stage" "$environment_live"
+sudo chown root:root "$environment_live"
+sudo chmod 0600 "$environment_live"
 sudo systemctl restart agent-review
 wait_for_health
 trap - EXIT
 ```
 
-If a switch is interrupted, inspect the explicit `app` and uniquely named `app.next.<PID>` paths before acting. Do not remove release directories during an incident.
+This restores the application release, public routing, and the pre-rotation diagnostics key as one rollback procedure. If a switch is interrupted, inspect only the explicit live and `.rollback.<PID>` paths before acting. Do not remove release directories or backups during an incident.
 
 ## Backup and restore
 

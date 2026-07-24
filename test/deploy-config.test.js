@@ -106,6 +106,10 @@ test('standard release renders, validates, installs, and can roll back nginx', a
     /nginx_template="\$release_dir\/deploy\/nginx-production\.conf"/,
     /sed ['"]s\/__PUBLIC_IP__\/14\.103\.143\.171\/g['"]/,
     /nginx_backup=/,
+    /environment_backup=/,
+    /sudo cp -p "\$environment_live" "\$environment_backup"/,
+    /sudo chmod 0600 "\$environment_backup"/,
+    /Record rollback inputs/,
     /sudo install -o root -g root -m 0644/,
     /sudo nginx -t/,
     /sudo systemctl reload nginx/,
@@ -121,4 +125,45 @@ test('standard release renders, validates, installs, and can roll back nginx', a
   const validate = operations.indexOf('sudo nginx -t', install);
   const reload = operations.indexOf('sudo systemctl reload nginx', validate);
   assert.ok(render < backup && backup < install && install < validate && validate < reload);
+});
+
+test('explicit rollback restores the recorded release, nginx, and environment in order', async () => {
+  const operations = await readDoc('PRODUCTION_OPERATIONS.md');
+  const start = operations.indexOf('If post-deployment acceptance fails');
+  const end = operations.indexOf('If a switch is interrupted', start);
+  assert.ok(start >= 0 && end > start);
+  const rollback = operations.slice(start, end);
+  for (const expected of [
+    /previous_release='<recorded previous release directory>'/,
+    /nginx_backup='<recorded nginx backup>'/,
+    /environment_backup='<recorded environment backup>'/,
+    /sudo ln -s "\$previous_release" "\$app_stage"/,
+    /sudo mv -Tf "\$app_stage" "\$app_live"/,
+    /sudo cp -p "\$nginx_backup" "\$nginx_stage"/,
+    /sudo mv -Tf "\$nginx_stage" "\$nginx_live"/,
+    /sudo nginx -t/,
+    /sudo systemctl reload nginx/,
+    /sudo install -o root -g root -m 0600 "\$environment_backup" "\$environment_stage"/,
+    /sudo mv -Tf "\$environment_stage" "\$environment_live"/,
+    /sudo chown root:root "\$environment_live"/,
+    /sudo chmod 0600 "\$environment_live"/,
+    /sudo systemctl restart agent-review/,
+    /wait_for_health/
+  ]) {
+    assert.match(rollback, expected);
+  }
+  const orderedCommands = [
+    'sudo mv -Tf "$app_stage" "$app_live"',
+    'sudo cp -p "$nginx_backup" "$nginx_stage"',
+    'sudo mv -Tf "$nginx_stage" "$nginx_live"',
+    'sudo nginx -t',
+    'sudo systemctl reload nginx',
+    'sudo install -o root -g root -m 0600 "$environment_backup" "$environment_stage"',
+    'sudo mv -Tf "$environment_stage" "$environment_live"',
+    'sudo chmod 0600 "$environment_live"',
+    'sudo systemctl restart agent-review'
+  ].map((step) => rollback.indexOf(step));
+  const steps = [...orderedCommands, rollback.lastIndexOf('wait_for_health')];
+  assert.ok(steps.every((index) => index >= 0));
+  assert.deepEqual([...steps].sort((left, right) => left - right), steps);
 });
