@@ -415,6 +415,15 @@ test('builds versioned GetTask requests for JSON-RPC and HTTP+JSON', () => {
   );
 });
 
+test('builds private HTTP+JSON requests when an explicit policy allows them', () => {
+  const request = buildA2ARequest(
+    { url: 'http://127.0.0.1:3000/a2a/v1', binding: 'HTTP+JSON', version: '1.0' },
+    'hello',
+    { allowPrivate: true, requestId: 'req-private', messageId: 'msg-private' }
+  );
+  assert.equal(request.url, 'http://127.0.0.1:3000/a2a/v1/message:send');
+});
+
 test('rejects JSON-RPC errors and mismatched response ids', () => {
   const target = { url: 'https://example.com/rpc', binding: 'JSONRPC', version: '1.0' };
   assert.throws(

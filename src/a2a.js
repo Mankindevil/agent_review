@@ -2,7 +2,7 @@ import { safeHttpRequest, validateSafeUrl } from './safe-http.js';
 
 const LEGACY_BINDINGS = { JSONRPC: 'JSONRPC', 'JSON-RPC': 'JSONRPC', HTTP_JSON: 'HTTP+JSON', 'HTTP+JSON': 'HTTP+JSON' };
 
-export function validateAgentCard(card) {
+export function validateAgentCard(card, options = {}) {
   const errors = [];
   if (!card || typeof card !== 'object' || Array.isArray(card)) errors.push('Agent Card 必须是 JSON 对象');
   if (!isNonEmptyString(card?.name)) errors.push('name 必须是非空字符串');
@@ -39,8 +39,8 @@ export function validateAgentCard(card) {
     ? '1.x'
     : '0.3';
   const interfaces = schemaVersion === '1.x'
-    ? validateV1Interfaces(card?.supportedInterfaces, errors)
-    : validateV03Interface(card, errors);
+    ? validateV1Interfaces(card?.supportedInterfaces, errors, options)
+    : validateV03Interface(card, errors, options);
   const selectedInterface = interfaces.find(isSupportedInterface) || null;
   if (!selectedInterface) errors.push('Agent Card must declare at least one supported interface');
   return {
@@ -83,7 +83,7 @@ export function selectInterface(card) {
 
 function isNonEmptyString(value) { return typeof value === 'string' && value.trim().length > 0; }
 
-function validateV1Interfaces(value, errors) {
+function validateV1Interfaces(value, errors, options) {
   if (!Array.isArray(value) || value.length === 0) {
     errors.push('supportedInterfaces 必须是非空数组');
     return [];
@@ -95,7 +95,7 @@ function validateV1Interfaces(value, errors) {
       errors.push(`${path} 必须是对象`);
       return;
     }
-    const url = validateDeclaredUrl(item.url, `${path}.url`, errors);
+    const url = validateDeclaredUrl(item.url, `${path}.url`, errors, options);
     const binding = validateRequiredString(item.protocolBinding, `${path}.protocolBinding`, errors);
     let version = validateRequiredString(item.protocolVersion, `${path}.protocolVersion`, errors);
     if (version && !/^1\./u.test(version)) {
@@ -118,8 +118,8 @@ function validateV1Interfaces(value, errors) {
   return interfaces;
 }
 
-function validateV03Interface(card, errors) {
-  const url = validateDeclaredUrl(card?.url, 'url', errors);
+function validateV03Interface(card, errors, options) {
+  const url = validateDeclaredUrl(card?.url, 'url', errors, options);
   let version = card?.protocolVersion === undefined
     ? '0.3'
     : validateRequiredString(card.protocolVersion, 'protocolVersion', errors);
@@ -138,14 +138,15 @@ function validateV03Interface(card, errors) {
   }];
 }
 
-function validateDeclaredUrl(value, path, errors) {
+function validateDeclaredUrl(value, path, errors, options = {}) {
   if (!isNonEmptyString(value)) {
     errors.push(`${path} 必须是非空 URL 字符串`);
     return null;
   }
   try {
     return validateSafeUrl(value, {
-      allowPrivate: process.env.ALLOW_PRIVATE_AGENT_URLS === 'true'
+      allowPrivate: options.allowPrivate ??
+        process.env.ALLOW_PRIVATE_AGENT_URLS === 'true'
     }).toString();
   } catch {
     errors.push(`${path} 必须是安全的 HTTP(S) URL`);
@@ -209,17 +210,22 @@ function isSupportedInterface(item) {
     (/^1\./u.test(String(item?.version)) || /^0\.3(?:\.|$)/u.test(String(item?.version)));
 }
 
-export function assertSafeAgentUrl(rawUrl) {
-  return validateSafeUrl(rawUrl, { allowPrivate: process.env.ALLOW_PRIVATE_AGENT_URLS === 'true' });
+export function assertSafeAgentUrl(rawUrl, options = {}) {
+  const allowPrivate = options.allowPrivate ??
+    process.env.ALLOW_PRIVATE_AGENT_URLS === 'true';
+  return validateSafeUrl(rawUrl, { allowPrivate });
 }
 
-export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000) {
+export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000, options = {}) {
   if (!['card-url', 'service-url'].includes(sourceType)) throw new Error('不支持的 Agent Card 发现方式');
-  const input = assertSafeAgentUrl(rawUrl);
+  const allowPrivate = options.allowPrivate ??
+    process.env.ALLOW_PRIVATE_AGENT_URLS === 'true';
+  const input = assertSafeAgentUrl(rawUrl, { allowPrivate });
   const target = sourceType === 'service-url'
     ? new URL('/.well-known/agent-card.json', input.origin)
     : input;
   const response = await safeHttpRequest(target.toString(), {
+    allowPrivate,
     headers: { accept: 'application/json, application/a2a+json' },
     timeoutMs,
     maxBytes: 1_000_000
@@ -267,7 +273,7 @@ export function buildA2ARequest(target, input, options = {}) {
   if (target.tenant) params.tenant = target.tenant;
   if (isJsonRpc) {
     return {
-      url: assertSafeAgentUrl(target.url).toString(),
+      url: assertSafeAgentUrl(target.url, { allowPrivate: options.allowPrivate }).toString(),
       headers: { 'content-type': 'application/json', 'a2a-version': protocolHeaderVersion(target.version) },
       body: {
         jsonrpc: '2.0',
@@ -278,7 +284,11 @@ export function buildA2ARequest(target, input, options = {}) {
       requestId
     };
   }
-  const endpoint = appendOperation(target.url, streaming ? 'message:stream' : 'message:send');
+  const endpoint = appendOperation(
+    target.url,
+    streaming ? 'message:stream' : 'message:send',
+    { allowPrivate: options.allowPrivate }
+  );
   const body = {
     message,
     configuration: { acceptedOutputModes: ['text/plain', 'application/json'] }
@@ -757,8 +767,8 @@ function protocolHeaderVersion(value) {
   return `${match[1]}.${match[2]}`;
 }
 
-function appendOperation(rawUrl, operation) {
-  const url = assertSafeAgentUrl(rawUrl);
+function appendOperation(rawUrl, operation, options = {}) {
+  const url = assertSafeAgentUrl(rawUrl, options);
   url.pathname = `${url.pathname.replace(/\/+$/, '')}/${operation}`;
   return url.toString();
 }

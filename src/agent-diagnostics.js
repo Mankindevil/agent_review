@@ -3,6 +3,7 @@ import {
   extractAgentText,
   parseA2AResponse,
   parseSseEvents,
+  resolveAgentCard,
   selectInterface,
   validateAgentCard,
   validateStreamResult
@@ -14,25 +15,44 @@ const MIN_TIMEOUT_MS = 60_000;
 const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 1_200_000;
 const MAX_CARD_BYTES = 1024 * 1024;
+const CARD_RESOLVE_TIMEOUT_MS = 12_000;
 
 export function validateDiagnosticsInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw clientError('请求体必须是 JSON 对象');
   }
   if (Object.hasOwn(input, 'url') || Object.hasOwn(input, 'sourceType')) {
-    throw clientError('请只提交 agentCard，不要同时提交旧地址字段 url 或 sourceType');
+    throw clientError('请提交 agentCard 或 cardSource，不要使用旧的顶层 url 或 sourceType 字段');
   }
-  if (!input.agentCard || typeof input.agentCard !== 'object' || Array.isArray(input.agentCard)) {
-    throw clientError('agentCard 必须是单个 JSON 对象');
+  const hasAgentCard = input.agentCard !== undefined;
+  const hasCardSource = input.cardSource !== undefined;
+  if (hasAgentCard === hasCardSource) {
+    throw clientError('Agent Card JSON 与 URL 来源只能选择一种，不能同时提交或同时缺少');
   }
 
-  let cardBytes;
-  try {
-    cardBytes = Buffer.byteLength(JSON.stringify(input.agentCard));
-  } catch {
-    throw clientError('agentCard 必须可以序列化为 JSON');
+  let agentCard = null;
+  let cardBytes = null;
+  let cardSource = null;
+  if (hasAgentCard) {
+    if (!input.agentCard || typeof input.agentCard !== 'object' || Array.isArray(input.agentCard)) {
+      throw clientError('agentCard 必须是单个 JSON 对象');
+    }
+    agentCard = input.agentCard;
+    cardBytes = serializedCardBytes(agentCard);
+  } else {
+    if (!input.cardSource || typeof input.cardSource !== 'object' || Array.isArray(input.cardSource)) {
+      throw clientError('cardSource 必须是包含 type 和 URL 的对象');
+    }
+    const type = input.cardSource.type;
+    if (!['card-url', 'service-url'].includes(type)) {
+      throw clientError('cardSource.type 必须是 card-url 或 service-url');
+    }
+    const url = typeof input.cardSource.url === 'string' ? input.cardSource.url.trim() : '';
+    if (!url || Buffer.byteLength(url) > 2048 || /[\r\n]/.test(url)) {
+      throw clientError('cardSource.url 必须是单行且不超过 2048 字节的 URL');
+    }
+    cardSource = { type, url };
   }
-  if (cardBytes > MAX_CARD_BYTES) throw clientError('agentCard 不能超过 1 MiB');
 
   const authMethod = input.authMethod;
   if (!['none', 'bearer'].includes(authMethod)) {
@@ -71,8 +91,9 @@ export function validateDiagnosticsInput(input) {
   }
 
   return {
-    agentCard: input.agentCard,
+    agentCard,
     cardBytes,
+    cardSource,
     authMethod,
     agentAuthorization: token,
     confirmAuthorizationTarget: authMethod === 'bearer',
@@ -88,26 +109,59 @@ export function validateDiagnosticsInput(input) {
 }
 
 export async function runAgentDiagnostics(rawInput, options = {}) {
-  const input = validateDiagnosticsInput(rawInput);
+  let input = validateDiagnosticsInput(rawInput);
   const request = options.request || safeHttpRequest;
+  const resolveCard = options.resolveCard || resolveAgentCard;
+  const allowPrivate = options.allowPrivate ??
+    (
+      process.env.ALLOW_PRIVATE_DIAGNOSTICS_URLS === 'true' ||
+      process.env.ALLOW_PRIVATE_AGENT_URLS === 'true'
+    );
   const startedAt = Date.now();
   const checks = CHECK_IDS.map((id) => emptyCheck(id));
   const secrets = [input.agentAuthorization, ...(options.secrets || [])].filter(Boolean);
   const requestOptions = (overrides = {}) => ({
+    allowPrivate,
     signal: options.signal,
     timeoutMs: input.timeoutMs,
     ...overrides
   });
 
   const inputStarted = Date.now();
-  checks[0] = passed('card-input', inputStarted, '已接收单个 Agent Card JSON', {
-    name: truncate(input.agentCard.name, 240),
-    sizeBytes: input.cardBytes
-  });
+  if (input.cardSource) {
+    try {
+      const resolved = await resolveCard(
+        input.cardSource.type,
+        input.cardSource.url,
+        CARD_RESOLVE_TIMEOUT_MS,
+        { allowPrivate }
+      );
+      const cardBytes = serializedCardBytes(resolved.card);
+      input = { ...input, agentCard: resolved.card, cardBytes };
+      checks[0] = passed('card-input', inputStarted, '已从 URL 获取 Agent Card JSON', {
+        sourceType: input.cardSource.type,
+        sourceUrl: input.cardSource.url,
+        resolvedUrl: resolved.resolvedUrl,
+        sourceScope: urlScopeLabel(resolved.resolvedUrl),
+        name: truncate(input.agentCard.name, 240),
+        sizeBytes: input.cardBytes
+      });
+    } catch (error) {
+      checks[0] = failed('card-input', inputStarted, error);
+      block(checks, 1, 'Agent Card 获取失败，无法校验或调用 Agent');
+      return redactReport(finalize(checks, input, startedAt), secrets);
+    }
+  } else {
+    checks[0] = passed('card-input', inputStarted, '已接收单个 Agent Card JSON', {
+      sourceType: 'json',
+      name: truncate(input.agentCard.name, 240),
+      sizeBytes: input.cardBytes
+    });
+  }
 
   const card = input.agentCard;
   const validationStarted = Date.now();
-  const validation = validateAgentCard(card);
+  const validation = validateAgentCard(card, { allowPrivate });
   const target = validation.valid ? selectInterface(card) : null;
   if (!validation.valid || !target) {
     const reason = !validation.valid
@@ -121,7 +175,7 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
   let targetUrl;
   try {
     targetUrl = validateSafeUrl(target.url, {
-      allowPrivate: process.env.ALLOW_PRIVATE_AGENT_URLS === 'true'
+      allowPrivate
     });
   } catch (error) {
     checks[1] = failed('card-validation', validationStarted, error);
@@ -132,6 +186,8 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
     version: validation.version,
     binding: target.binding,
     targetOrigin: targetUrl.origin,
+    networkPolicy: allowPrivate ? '允许内网/本机' : '仅公网',
+    targetScope: urlScopeLabel(targetUrl),
     streaming: card.capabilities?.streaming === true,
     tenant: target.tenant || null,
     skillsCount: card.skills.length
@@ -139,7 +195,7 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
 
   const callStarted = Date.now();
   try {
-    const normalRequest = buildA2ARequest(target, input.prompt);
+    const normalRequest = buildA2ARequest(target, input.prompt, { allowPrivate });
     const headers = withAgentAuthorization(normalRequest.headers, input.agentAuthorization);
     const response = await request(normalRequest.url, requestOptions({
       method: 'POST',
@@ -171,7 +227,10 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
   } else {
     const streamStarted = Date.now();
     try {
-      const streamRequest = buildA2ARequest(target, input.prompt, { streaming: true });
+      const streamRequest = buildA2ARequest(target, input.prompt, {
+        streaming: true,
+        allowPrivate
+      });
       const headers = withAgentAuthorization(streamRequest.headers, input.agentAuthorization);
       const response = await request(streamRequest.url, requestOptions({
         method: 'POST',
@@ -371,8 +430,8 @@ function safeErrorMessage(error, category) {
 
 function suggestionFor(category) {
   const suggestions = {
-    dns: '检查域名和 DNS 记录是否公开可解析。',
-    connection: '确认 Agent 服务已启动、防火墙允许公网访问。',
+    dns: '检查域名和平台服务器使用的 DNS 记录是否可解析。',
+    connection: '确认 Agent 服务已启动，且平台服务器到目标地址的网络与防火墙策略允许访问。',
     tls: '检查证书有效期、域名和完整证书链。',
     http: '检查接口路径、鉴权和服务端错误日志。',
     'content-type': '返回规范要求的 JSON 或 text/event-stream Content-Type。',
@@ -380,7 +439,7 @@ function suggestionFor(category) {
     protocol: '按 Agent Card 声明的 A2A 版本和 binding 修正响应结构。',
     timeout: '缩短 Agent 执行时间或适当提高诊断超时。',
     'response-too-large': '缩短 Agent 输出并限制流式事件数量。',
-    security: '使用公开可访问的 HTTP(S) 地址，不要指向内网或本机。',
+    security: '检查 URL 协议、内嵌凭据和当前部署的内网访问策略。',
     cancelled: '保持页面连接后重新诊断。',
     instrumentation: '检查 platform instrumentation timing hook 后重试。'
   };
@@ -416,4 +475,40 @@ function stageError(message, code) {
 
 function clientError(message) {
   return Object.assign(new Error(message), { statusCode: 400 });
+}
+
+function serializedCardBytes(card) {
+  let cardBytes;
+  try {
+    cardBytes = Buffer.byteLength(JSON.stringify(card));
+  } catch {
+    throw clientError('agentCard 必须可以序列化为 JSON');
+  }
+  if (cardBytes > MAX_CARD_BYTES) throw clientError('agentCard 不能超过 1 MiB');
+  return cardBytes;
+}
+
+function urlScopeLabel(rawUrl) {
+  let hostname;
+  try {
+    hostname = (rawUrl instanceof URL ? rawUrl : new URL(rawUrl)).hostname
+      .toLowerCase()
+      .replace(/^\[|\]$/g, '');
+  } catch {
+    return '地址格式待校验';
+  }
+  if (
+    hostname === 'localhost' ||
+    hostname.endsWith('.local') ||
+    hostname === '::1' ||
+    /^127\./.test(hostname) ||
+    /^10\./.test(hostname) ||
+    /^192\.168\./.test(hostname) ||
+    /^169\.254\./.test(hostname) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+    /^(fc|fd|fe8|fe9|fea|feb)/.test(hostname)
+  ) {
+    return '本机或非公网地址';
+  }
+  return '公网地址或待 DNS 解析';
 }

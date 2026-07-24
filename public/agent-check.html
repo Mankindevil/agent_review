@@ -3,17 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="上传单个 A2A Agent Card JSON，执行一次性参评技术预检。">
+  <meta name="description" content="上传、粘贴或通过 URL 获取单个 A2A Agent Card，执行一次性参评技术预检。">
   <title>Agent Card 技术预检台 · 锐评局</title>
-  <link rel="stylesheet" href="/agent-check.css?v=20260724">
+  <link rel="stylesheet" href="/agent-check.css?v=20260725-url2">
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/" aria-label="返回锐评局首页">
+    <div class="brand">
       <span class="brand-mark">锐</span>
       <span><b>Agent Card 技术预检台</b><small>A2A READINESS TRACE</small></span>
-    </a>
-    <a class="back-link" href="/">返回评测平台 <span aria-hidden="true">↗</span></a>
+    </div>
+    <a class="back-link" href="/agent-check">重新加载自测台 <span aria-hidden="true">↻</span></a>
   </header>
 
   <main>
@@ -21,7 +21,7 @@
       <div class="hero-copy">
         <p class="kicker">ONE CARD / ONE TECHNICAL TRACE</p>
         <h1 id="page-title">先交协议，<br>再进考场。</h1>
-        <p>上传一张 A2A Agent Card，核对公开能力并执行一次真实自然语言任务。结果只停留在当前页面，不创建正式投稿，也不写入评测历史。</p>
+        <p>上传、粘贴或通过 URL 获取一张 A2A Agent Card，核对公开能力并执行一次真实自然语言任务。结果只停留在当前页面，不创建正式投稿，也不写入评测历史。</p>
       </div>
       <aside class="truth-card">
         <b>一次只测试一张 Agent Card</b>
@@ -33,6 +33,10 @@
     <div class="scope-strip" role="note">
       <span>技术入口</span>
       <p>这里验证 Card、A2A 调用和响应时限。团队、作品说明、示例问答、Skills 清单与仓库地址在最终报名表填写。</p>
+    </div>
+    <div id="private-network-note" class="private-network-note" role="note">
+      <span>内网测试已允许</span>
+      <p>可以填写测试服务器可达的内网或本机地址。结果会明确标注；<code>127.0.0.1</code> 指测试平台服务器自身，不是当前浏览器所在电脑。</p>
     </div>
 
     <div class="workspace">
@@ -51,19 +55,33 @@
           </fieldset>
 
           <fieldset>
-            <legend>Agent Card JSON</legend>
-            <div id="card-drop-zone" class="card-drop-zone" tabindex="0">
-              <input id="agent-card-file" name="agentCardFile" type="file" accept=".json,application/json">
-              <span class="drop-glyph" aria-hidden="true">{ }</span>
-              <div>
-                <b>拖入 Card JSON</b>
-                <p>或选择不超过 1 MiB 的单个 `.json` 文件</p>
-              </div>
-              <label class="file-button" for="agent-card-file">选择文件</label>
+            <legend>Agent Card 来源</legend>
+            <div class="card-source-switch" role="group" aria-label="Agent Card 来源">
+              <button id="card-source-json" type="button" data-card-source="json" class="selected" aria-pressed="true">上传 / 粘贴 JSON</button>
+              <button id="card-source-card-url" type="button" data-card-source="card-url" aria-pressed="false">完整 Card URL</button>
+              <button id="card-source-service-url" type="button" data-card-source="service-url" aria-pressed="false">服务根地址</button>
             </div>
 
-            <label for="agent-card-json">也可以直接粘贴 JSON</label>
-            <textarea id="agent-card-json" name="agentCardJson" class="json-input" rows="10" spellcheck="false" required placeholder="{&#10;  &quot;name&quot;: &quot;Research Agent&quot;,&#10;  &quot;supportedInterfaces&quot;: [...]&#10;}"></textarea>
+            <div id="json-source-panel" class="card-source-panel">
+              <div id="card-drop-zone" class="card-drop-zone" tabindex="0">
+                <input id="agent-card-file" name="agentCardFile" type="file" accept=".json,application/json">
+                <span class="drop-glyph" aria-hidden="true">{ }</span>
+                <div>
+                  <b>拖入 Card JSON</b>
+                  <p>或选择不超过 1 MiB 的单个 `.json` 文件</p>
+                </div>
+                <label class="file-button" for="agent-card-file">选择文件</label>
+              </div>
+
+              <label for="agent-card-json">也可以直接粘贴 JSON</label>
+              <textarea id="agent-card-json" name="agentCardJson" class="json-input" rows="10" spellcheck="false" required placeholder="{&#10;  &quot;name&quot;: &quot;Research Agent&quot;,&#10;  &quot;supportedInterfaces&quot;: [...]&#10;}"></textarea>
+            </div>
+
+            <div id="url-source-panel" class="card-source-panel" hidden>
+              <label for="agent-card-url">Agent Card 地址</label>
+              <input id="agent-card-url" name="agentCardUrl" type="url" maxlength="2048" autocomplete="url" spellcheck="false" placeholder="https://example.com/.well-known/agent-card.json">
+              <small id="card-url-help">填写返回 Agent Card JSON 的完整 HTTP(S) URL。</small>
+            </div>
 
             <div id="card-summary" class="card-summary" data-state="empty" aria-live="polite">
               <span class="summary-mark">∅</span>
@@ -177,8 +195,8 @@
         <div class="signal-rail" aria-live="polite">
           <article id="check-card-input" class="check-card" data-status="idle">
             <i class="signal-node" aria-hidden="true"></i>
-            <header><span>01</span><h3>读取 JSON 样本</h3><b class="check-status">等待</b></header>
-            <p class="check-summary">确认上传内容是一张可处理的 Agent Card。</p>
+            <header><span>01</span><h3>读取 Agent Card</h3><b class="check-status">等待</b></header>
+            <p class="check-summary">确认上传内容或远程地址可以产生一张可处理的 Agent Card。</p>
             <small class="check-duration">—</small>
             <div class="check-details"></div>
           </article>
@@ -213,6 +231,6 @@
     </div>
   </main>
 
-  <script type="module" src="/agent-check.js?v=20260724"></script>
+  <script type="module" src="/agent-check.js?v=20260725-url2"></script>
 </body>
 </html>

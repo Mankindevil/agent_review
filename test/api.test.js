@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { constants as fsConstants } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import * as runtimeStatusModule from '../src/runtime-status.js';
@@ -23,6 +24,7 @@ process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-test-${process.pid}.jso
 process.env.AGENT_DIAGNOSTICS_ACCESS_KEY = 'test-diagnostics-key';
 process.env.AGENT_DIAGNOSTICS_RATE_LIMIT = '100';
 process.env.ALLOW_PRIVATE_AGENT_URLS = 'true';
+process.env.ALLOW_PRIVATE_DIAGNOSTICS_URLS = 'true';
 const API_UNSECURED_JWT = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ.';
 const apiEvidenceRecord = createEvidenceRecord({
   evidenceId: 'ev_api',
@@ -405,21 +407,28 @@ test('returns JSON 404 for unknown API routes instead of the SPA shell', async (
 });
 
 test('serves an Agent Card upload readiness console with isolated credentials and explicit streaming consent', async () => {
-  const [pageResponse, scriptResponse, styleResponse] = await Promise.all([
+  const [pageResponse, aliasResponse, scriptResponse, styleResponse] = await Promise.all([
     fetch(`${origin}/agent-check.html`),
+    fetch(`${origin}/agent-check`),
     fetch(`${origin}/agent-check.js`),
     fetch(`${origin}/agent-check.css`)
   ]);
-  const [html, script, css] = await Promise.all([
+  const [html, aliasHtml, script, css] = await Promise.all([
     pageResponse.text(),
+    aliasResponse.text(),
     scriptResponse.text(),
     styleResponse.text()
   ]);
   assert.equal(pageResponse.status, 200);
+  assert.equal(aliasResponse.status, 200);
+  assert.match(aliasHtml, /diagnostics-form/);
   assert.equal(scriptResponse.status, 200);
   assert.equal(styleResponse.status, 200);
   for (const id of [
     'diagnostics-form', 'platform-key', 'agent-card-file', 'agent-card-json',
+    'card-source-json', 'card-source-card-url', 'card-source-service-url',
+    'json-source-panel', 'url-source-panel', 'agent-card-url',
+    'private-network-note',
     'card-drop-zone', 'card-summary', 'auth-method', 'agent-token',
     'auth-target-origin', 'confirm-auth-target', 'diagnostic-prompt',
     'timeout-ms', 'attestation-deepseek', 'attestation-authorized',
@@ -435,15 +444,93 @@ test('serves an Agent Card upload readiness console with isolated credentials an
   assert.match(html, /内部多 Agent/);
   assert.match(html, /最终报名表/);
   assert.match(html, /再次真实执行 Prompt/);
+  assert.doesNotMatch(html, /href="\/"/);
+  assert.match(html, /<div class="brand"/);
+  assert.match(html, /<a class="back-link" href="\/agent-check"/);
   assert.match(script, /\/api\/agent-diagnostics/);
   assert.match(script, /agentCard/);
+  assert.match(script, /cardSource/);
+  assert.match(script, /card-url/);
+  assert.match(script, /service-url/);
   assert.match(script, /confirmAuthorizationTarget/);
   assert.match(script, /MAX_CARD_BYTES/);
   assert.doesNotMatch(script, /localStorage|sessionStorage/);
   assert.match(script, /pageshow/);
   assert.match(css, /\.card-drop-zone/);
+  assert.match(css, /\.card-source-switch/);
   assert.match(css, /\.signal-rail/);
   assert.match(css, /prefers-reduced-motion/);
+});
+
+test('resolves a service root and runs diagnostics through the protected API', async () => {
+  let agentOrigin = '';
+  const agentServer = createServer((request, response) => {
+    if (request.method === 'GET' && request.url === '/.well-known/agent-card.json') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({
+        name: 'URL Diagnostic Agent',
+        description: 'Exercises URL discovery.',
+        supportedInterfaces: [{
+          url: `${agentOrigin}/a2a`,
+          protocolBinding: 'JSONRPC',
+          protocolVersion: '1.0'
+        }],
+        skills: [{ id: 'status', name: 'Status', description: 'Return status.' }]
+      }));
+      return;
+    }
+    if (request.method === 'POST' && request.url === '/a2a') {
+      const chunks = [];
+      request.on('data', (chunk) => chunks.push(chunk));
+      request.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({
+          jsonrpc: '2.0',
+          id: body.id,
+          result: {
+            message: {
+              messageId: 'url-reply',
+              role: 'ROLE_AGENT',
+              parts: [{ text: 'discovery healthy' }]
+            }
+          }
+        }));
+      });
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise((resolve) => agentServer.listen(0, '127.0.0.1', resolve));
+  agentOrigin = `http://127.0.0.1:${agentServer.address().port}`;
+
+  try {
+    const response = await fetch(`${origin}/api/agent-diagnostics`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer test-diagnostics-key'
+      },
+      body: JSON.stringify({
+        cardSource: { type: 'service-url', url: agentOrigin },
+        authMethod: 'none',
+        prompt: 'status',
+        timeoutMs: 60_000,
+        attestations: { deepseekV4Pro: true, authorizedDataOnly: true }
+      })
+    });
+    const report = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(report.ok, true);
+    assert.equal(
+      report.checks[0].details.resolvedUrl,
+      `${agentOrigin}/.well-known/agent-card.json`
+    );
+    assert.equal(report.checks[1].details.targetOrigin, agentOrigin);
+    assert.match(report.checks[2].details.preview, /discovery healthy/);
+  } finally {
+    await new Promise((resolve) => agentServer.close(resolve));
+  }
 });
 
 test('documents diagnostics configuration, credential scopes, side effects, and troubleshooting', async () => {
@@ -454,8 +541,12 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
   ]);
   for (const term of [
     'AGENT_DIAGNOSTICS_ACCESS_KEY',
+    'ALLOW_PRIVATE_DIAGNOSTICS_URLS',
     '平台访问密钥',
     'Agent Card JSON',
+    '完整 Agent Card URL',
+    '服务根地址',
+    '/.well-known/agent-card.json',
     '一次只测试一张',
     '多 Agent',
     'tenant',
@@ -478,8 +569,10 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
   }
   assert.match(envExample, /AGENT_DIAGNOSTICS_RATE_LIMIT=6/);
   assert.match(envExample, /AGENT_DIAGNOSTICS_CONCURRENCY=4/);
+  assert.match(envExample, /ALLOW_PRIVATE_DIAGNOSTICS_URLS=false/);
   assert.match(readme, /AGENT_DIAGNOSTICS_GUIDE\.md/);
-  assert.match(readme, /agent-check\.html/);
+  assert.match(readme, /\/agent-check\b/);
+  assert.doesNotMatch(readme, /\/agent-check\.html/);
   assert.match(readme, /Agent Card JSON 技术预检/);
   assert.match(readme, /20 分钟/);
 });
