@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { getRuntimeStatus } from '../src/runtime-status.js';
 
 process.env.NODE_ENV = 'test';
 process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-test-${process.pid}.json`);
@@ -286,8 +287,42 @@ test('reports honest local runtime availability', async () => {
   const runtimes = await response.json();
   assert.equal(response.status, 200);
   assert.deepEqual(runtimes.map((runtime) => runtime.id), ['claude-code', 'cursor', 'doubao']);
-  assert.equal(runtimes.every((runtime) => typeof runtime.runtimeReady === 'boolean'), true);
+  for (const runtime of runtimes) {
+    assert.equal(typeof runtime.installed, 'boolean');
+    assert.equal(typeof runtime.authenticated, 'boolean');
+    assert.equal(typeof runtime.enabled, 'boolean');
+    assert.equal(typeof runtime.runtimeReady, 'boolean');
+  }
 });
+
+test('reports enablement independently from local installation', async () => {
+  const previousClaude = process.env.ENABLE_LOCAL_CLAUDE_CODE;
+  const previousCursor = process.env.ENABLE_LOCAL_CURSOR_AGENT;
+  const previousPath = process.env.PATH;
+  try {
+    process.env.ENABLE_LOCAL_CLAUDE_CODE = 'true';
+    process.env.ENABLE_LOCAL_CURSOR_AGENT = 'true';
+    process.env.PATH = '';
+    const runtimes = await getRuntimeStatus();
+    const claude = runtimes.find((item) => item.id === 'claude-code');
+    const cursor = runtimes.find((item) => item.id === 'cursor');
+    assert.equal(claude.enabled, true);
+    assert.equal(cursor.enabled, true);
+    assert.equal(claude.installed, false);
+    assert.equal(cursor.installed, false);
+    assert.equal(claude.runtimeReady, false);
+    assert.equal(cursor.runtimeReady, false);
+  } finally {
+    restoreEnv('ENABLE_LOCAL_CLAUDE_CODE', previousClaude);
+    restoreEnv('ENABLE_LOCAL_CURSOR_AGENT', previousCursor);
+    restoreEnv('PATH', previousPath);
+  }
+});
+
+function restoreEnv(name, value) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
 
 test('creates and completes a demo evaluation', async () => {
   const card = {
