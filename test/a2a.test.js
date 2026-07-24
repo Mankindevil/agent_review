@@ -73,6 +73,155 @@ test('does not assume required 1.0 interface metadata or an unsupported version'
   }), null);
 });
 
+test('validates all known nested Agent Card fields and reports every structural error', () => {
+  const result = validateAgentCard({
+    name: 'Broken Agent',
+    description: 'Contains several malformed declared fields.',
+    version: 7,
+    defaultInputModes: ['text/plain', 42],
+    defaultOutputModes: 'application/json',
+    capabilities: {
+      streaming: 'yes',
+      pushNotifications: false,
+      stateTransitionHistory: 1,
+      extendedAgentCard: 'available'
+    },
+    supportedInterfaces: [{
+      url: 'https://user:secret@example.com/a2a',
+      protocolBinding: 42,
+      protocolVersion: null,
+      tenant: false
+    }],
+    skills: [{
+      id: 'broken',
+      name: 'Broken',
+      description: 'Malformed optional fields.',
+      tags: ['finance', 42],
+      examples: 'not-an-array',
+      inputModes: ['text/plain', null],
+      outputModes: {}
+    }],
+    provider: [],
+    security: {},
+    signatures: {},
+    extensions: {}
+  });
+
+  assert.equal(result.valid, false);
+  for (const path of [
+    'version',
+    'defaultInputModes',
+    'defaultOutputModes',
+    'capabilities.streaming',
+    'capabilities.stateTransitionHistory',
+    'capabilities.extendedAgentCard',
+    'supportedInterfaces[0].url',
+    'supportedInterfaces[0].protocolBinding',
+    'supportedInterfaces[0].protocolVersion',
+    'supportedInterfaces[0].tenant',
+    'skills[0].tags',
+    'skills[0].examples',
+    'skills[0].inputModes',
+    'skills[0].outputModes',
+    'provider',
+    'security',
+    'signatures',
+    'extensions'
+  ]) {
+    assert.match(result.errors.join('\n'), new RegExp(path.replaceAll('[', '\\[').replaceAll(']', '\\]')));
+  }
+});
+
+test('rejects unsupported-only interfaces but selects a supported interface from a valid mixed declaration', () => {
+  const unsupported = validateAgentCard({
+    ...card,
+    supportedInterfaces: [{
+      url: 'https://example.com/custom',
+      protocolBinding: 'CUSTOM',
+      protocolVersion: '1.0'
+    }]
+  });
+  assert.equal(unsupported.valid, false);
+  assert.equal(unsupported.selectedInterface, null);
+  assert.match(unsupported.errors.join('\n'), /supported interface/i);
+
+  const mixed = validateAgentCard({
+    ...card,
+    supportedInterfaces: [
+      {
+        url: 'https://example.com/custom',
+        protocolBinding: 'CUSTOM',
+        protocolVersion: '1.0'
+      },
+      {
+        url: 'https://example.com/rpc',
+        protocolBinding: 'JSON-RPC',
+        protocolVersion: '1.1',
+        tenant: 'desk-7'
+      }
+    ]
+  });
+  assert.equal(mixed.valid, true);
+  assert.deepEqual(mixed.selectedInterface, {
+    url: 'https://example.com/rpc',
+    binding: 'JSONRPC',
+    version: '1.1',
+    tenant: 'desk-7'
+  });
+  assert.equal(mixed.schemaVersion, '1.x');
+});
+
+test('selects and validates the declared 0.3 Agent Card shape', () => {
+  const legacy = validateAgentCard({
+    name: 'Legacy Agent',
+    description: 'A legacy A2A Agent.',
+    url: 'https://example.com/a2a',
+    protocolVersion: '0.3',
+    capabilities: { streaming: false },
+    defaultInputModes: ['text/plain'],
+    defaultOutputModes: ['application/json'],
+    skills: [{
+      id: 'legacy',
+      name: 'Legacy',
+      description: 'Legacy skill.',
+      tags: ['compatibility'],
+      examples: ['Run the legacy workflow'],
+      inputModes: ['text/plain'],
+      outputModes: ['application/json']
+    }],
+    provider: { organization: 'Example' },
+    security: [],
+    signatures: [],
+    extensions: []
+  });
+
+  assert.equal(legacy.valid, true);
+  assert.equal(legacy.schemaVersion, '0.3');
+  assert.deepEqual(legacy.selectedInterface, {
+    url: 'https://example.com/a2a',
+    binding: 'JSONRPC',
+    version: '0.3'
+  });
+});
+
+test('does not let a valid legacy URL bypass an invalid declared 1.x shape', () => {
+  const result = validateAgentCard({
+    ...card,
+    url: 'https://example.com/legacy',
+    protocolVersion: '0.3',
+    preferredTransport: 'JSONRPC',
+    supportedInterfaces: [{
+      url: 'https://example.com/a2a',
+      protocolBinding: 'HTTP+JSON',
+      protocolVersion: 1
+    }]
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.schemaVersion, '1.x');
+  assert.match(result.errors.join('\n'), /supportedInterfaces\[0\]\.protocolVersion/);
+});
+
 test('builds versioned A2A requests with tenant and binding-specific endpoints', () => {
   const rpc = buildA2ARequest(
     { url: 'https://example.com/rpc', binding: 'JSONRPC', version: '1.0', tenant: 'desk-7' },

@@ -7,6 +7,10 @@ export function validateAgentCard(card) {
   if (!card || typeof card !== 'object' || Array.isArray(card)) errors.push('Agent Card 必须是 JSON 对象');
   if (!isNonEmptyString(card?.name)) errors.push('name 必须是非空字符串');
   if (!isNonEmptyString(card?.description)) errors.push('description 必须是非空字符串');
+  validateOptionalString(card, 'version', 'version', errors);
+  validateOptionalStringArray(card, 'defaultInputModes', 'defaultInputModes', errors);
+  validateOptionalStringArray(card, 'defaultOutputModes', 'defaultOutputModes', errors);
+  validateCapabilities(card?.capabilities, errors);
   if (!Array.isArray(card?.skills) || card.skills.length === 0) {
     errors.push('至少声明一个 skill');
   } else {
@@ -18,10 +22,35 @@ export function validateAgentCard(card) {
       if (!isNonEmptyString(skill.id)) errors.push(`skills[${index}].id 必须是非空字符串`);
       if (!isNonEmptyString(skill.name)) errors.push(`skills[${index}].name 必须是非空字符串`);
       if (!isNonEmptyString(skill.description)) errors.push(`skills[${index}].description 必须是非空字符串`);
+      validateOptionalStringArray(skill, 'tags', `skills[${index}].tags`, errors);
+      validateOptionalStringArray(skill, 'examples', `skills[${index}].examples`, errors);
+      validateOptionalStringArray(skill, 'inputModes', `skills[${index}].inputModes`, errors);
+      validateOptionalStringArray(skill, 'outputModes', `skills[${index}].outputModes`, errors);
     });
   }
-  if (!getInterfaces(card).length) errors.push('缺少 supportedInterfaces 或旧版 url');
-  return { valid: errors.length === 0, errors, version: inferVersion(card), interfaces: getInterfaces(card) };
+  validateOptionalContainer(card, 'provider', 'object', errors);
+  validateOptionalContainer(card, 'securitySchemes', 'object', errors);
+  validateOptionalContainer(card, 'security', 'array', errors);
+  validateOptionalContainer(card, 'signatures', 'array', errors);
+  validateOptionalContainer(card, 'extensions', 'array', errors);
+
+  const schemaVersion = Array.isArray(card?.supportedInterfaces) ||
+    Object.hasOwn(card || {}, 'supportedInterfaces')
+    ? '1.x'
+    : '0.3';
+  const interfaces = schemaVersion === '1.x'
+    ? validateV1Interfaces(card?.supportedInterfaces, errors)
+    : validateV03Interface(card, errors);
+  const selectedInterface = interfaces.find(isSupportedInterface) || null;
+  if (!selectedInterface) errors.push('Agent Card must declare at least one supported interface');
+  return {
+    valid: errors.length === 0,
+    errors,
+    version: inferVersion(card),
+    schemaVersion,
+    interfaces,
+    selectedInterface
+  };
 }
 
 export function inferVersion(card) {
@@ -49,13 +78,126 @@ export function getInterfaces(card) {
 }
 
 export function selectInterface(card) {
-  return getInterfaces(card).find((item) =>
-    ['HTTP+JSON', 'JSONRPC'].includes(item.binding) &&
-    (/^1\./.test(String(item.version)) || /^0\.3(?:\.|$)/.test(String(item.version)))
-  ) || null;
+  return getInterfaces(card).find(isSupportedInterface) || null;
 }
 
 function isNonEmptyString(value) { return typeof value === 'string' && value.trim().length > 0; }
+
+function validateV1Interfaces(value, errors) {
+  if (!Array.isArray(value) || value.length === 0) {
+    errors.push('supportedInterfaces 必须是非空数组');
+    return [];
+  }
+  const interfaces = [];
+  value.forEach((item, index) => {
+    const path = `supportedInterfaces[${index}]`;
+    if (!isPlainObject(item)) {
+      errors.push(`${path} 必须是对象`);
+      return;
+    }
+    const url = validateDeclaredUrl(item.url, `${path}.url`, errors);
+    const binding = validateRequiredString(item.protocolBinding, `${path}.protocolBinding`, errors);
+    const version = validateRequiredString(item.protocolVersion, `${path}.protocolVersion`, errors);
+    if (item.tenant !== undefined && !isNonEmptyString(item.tenant)) {
+      errors.push(`${path}.tenant 必须是非空字符串`);
+    }
+    if (url && binding && version) {
+      const normalized = {
+        url,
+        binding: LEGACY_BINDINGS[binding] || binding,
+        version
+      };
+      if (isNonEmptyString(item.tenant)) normalized.tenant = item.tenant;
+      interfaces.push(normalized);
+    }
+  });
+  return interfaces;
+}
+
+function validateV03Interface(card, errors) {
+  const url = validateDeclaredUrl(card?.url, 'url', errors);
+  const version = validateRequiredString(card?.protocolVersion, 'protocolVersion', errors);
+  const transport = card?.preferredTransport === undefined
+    ? 'JSONRPC'
+    : validateRequiredString(card.preferredTransport, 'preferredTransport', errors);
+  if (!url || !version || !transport) return [];
+  return [{
+    url,
+    binding: LEGACY_BINDINGS[transport] || transport,
+    version
+  }];
+}
+
+function validateDeclaredUrl(value, path, errors) {
+  if (!isNonEmptyString(value)) {
+    errors.push(`${path} 必须是非空 URL 字符串`);
+    return null;
+  }
+  try {
+    return validateSafeUrl(value, {
+      allowPrivate: process.env.ALLOW_PRIVATE_AGENT_URLS === 'true'
+    }).toString();
+  } catch {
+    errors.push(`${path} 必须是安全的 HTTP(S) URL`);
+    return null;
+  }
+}
+
+function validateRequiredString(value, path, errors) {
+  if (!isNonEmptyString(value)) {
+    errors.push(`${path} 必须是非空字符串`);
+    return null;
+  }
+  return value;
+}
+
+function validateOptionalString(source, key, path, errors) {
+  if (source?.[key] !== undefined && !isNonEmptyString(source[key])) {
+    errors.push(`${path} 必须是非空字符串`);
+  }
+}
+
+function validateOptionalStringArray(source, key, path, errors) {
+  if (source?.[key] === undefined) return;
+  if (!Array.isArray(source[key])) {
+    errors.push(`${path} 必须是字符串数组`);
+    return;
+  }
+  source[key].forEach((value, index) => {
+    if (!isNonEmptyString(value)) errors.push(`${path}[${index}] 必须是非空字符串`);
+  });
+}
+
+function validateCapabilities(value, errors) {
+  if (value === undefined) return;
+  if (!isPlainObject(value)) {
+    errors.push('capabilities 必须是对象');
+    return;
+  }
+  for (const key of ['streaming', 'pushNotifications', 'stateTransitionHistory', 'extendedAgentCard']) {
+    if (value[key] !== undefined && typeof value[key] !== 'boolean') {
+      errors.push(`capabilities.${key} 必须是布尔值`);
+    }
+  }
+  if (value.extensions !== undefined && !Array.isArray(value.extensions)) {
+    errors.push('capabilities.extensions 必须是数组');
+  }
+}
+
+function validateOptionalContainer(source, key, type, errors) {
+  if (source?.[key] === undefined) return;
+  const valid = type === 'array' ? Array.isArray(source[key]) : isPlainObject(source[key]);
+  if (!valid) errors.push(`${key} 必须是${type === 'array' ? '数组' : '对象'}`);
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isSupportedInterface(item) {
+  return ['HTTP+JSON', 'JSONRPC'].includes(item?.binding) &&
+    (/^1\./u.test(String(item?.version)) || /^0\.3(?:\.|$)/u.test(String(item?.version)));
+}
 
 export function assertSafeAgentUrl(rawUrl) {
   return validateSafeUrl(rawUrl, { allowPrivate: process.env.ALLOW_PRIVATE_AGENT_URLS === 'true' });
