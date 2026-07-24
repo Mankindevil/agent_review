@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
@@ -364,6 +365,108 @@ test('does not replace valid persistence with a temporary symbolic link', async 
   }
 });
 
+test('rejects a replacement temporary cursor directory object', async () => {
+  const value = await fixture();
+  try {
+    const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
+    await writeFile(persistentAuth, '{"token":"valid"}');
+
+    await assert.rejects(
+      withCursorAuthSession(value.workspace, {
+        CURSOR_AUTH_CONFIG_HOME: value.authRoot
+      }, async (xdgHome) => {
+        const temporaryCursor = path.join(xdgHome, 'cursor');
+        await rename(temporaryCursor, path.join(xdgHome, 'original-cursor'));
+        await mkdir(temporaryCursor);
+        await writeFile(path.join(temporaryCursor, 'auth.json'), '{"token":"replacement"}');
+      }),
+      /temporary cursor directory changed/
+    );
+
+    assert.deepEqual(JSON.parse(await readFile(persistentAuth, 'utf8')), { token: 'valid' });
+  } finally {
+    await removeFixture(value);
+  }
+});
+
+test('rejects a temporary cursor parent symlink without reading or chmodding outside JSON', async (t) => {
+  const value = await fixture();
+  try {
+    const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
+    const outsideCursor = path.join(value.root, 'outside-cursor');
+    const outsideAuth = path.join(outsideCursor, 'auth.json');
+    await writeFile(persistentAuth, '{"token":"valid"}');
+    await mkdir(outsideCursor);
+    await writeFile(outsideAuth, '{"token":"outside"}');
+    const outsideMode = (await stat(outsideAuth)).mode & 0o777;
+    let symlinkCreated = false;
+    let completionError;
+
+    try {
+      await withCursorAuthSession(value.workspace, {
+        CURSOR_AUTH_CONFIG_HOME: value.authRoot
+      }, async (xdgHome) => {
+        const temporaryCursor = path.join(xdgHome, 'cursor');
+        await rename(temporaryCursor, path.join(xdgHome, 'original-cursor'));
+        symlinkCreated = await createSymlinkOrSkip(
+          t,
+          outsideCursor,
+          temporaryCursor,
+          'dir'
+        );
+        if (!symlinkCreated) {
+          await rename(path.join(xdgHome, 'original-cursor'), temporaryCursor);
+        }
+      });
+    } catch (error) {
+      completionError = error;
+    }
+
+    if (symlinkCreated) {
+      assert.match(completionError?.message, /temporary cursor directory.*symbolic link/);
+      assert.deepEqual(JSON.parse(await readFile(outsideAuth, 'utf8')), { token: 'outside' });
+      if (isPosix) assert.equal((await stat(outsideAuth)).mode & 0o777, outsideMode);
+      assert.deepEqual(JSON.parse(await readFile(persistentAuth, 'utf8')), { token: 'valid' });
+    } else {
+      assert.equal(completionError, undefined);
+    }
+  } finally {
+    await removeFixture(value);
+  }
+});
+
+test('rejects a replacement persistent cursor directory object', async () => {
+  const value = await fixture();
+  try {
+    const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
+    const originalCursor = path.join(value.authRoot, 'original-cursor');
+    await writeFile(persistentAuth, '{"token":"valid"}');
+
+    await assert.rejects(
+      withCursorAuthSession(value.workspace, {
+        CURSOR_AUTH_CONFIG_HOME: value.authRoot
+      }, async (xdgHome) => {
+        await writeFile(path.join(xdgHome, 'cursor', 'auth.json'), '{"token":"updated"}');
+        await rename(value.cursorDirectory, originalCursor);
+        await mkdir(value.cursorDirectory);
+        await writeFile(path.join(value.cursorDirectory, 'auth.json'), '{"token":"replacement"}');
+      }),
+      /persistent cursor directory changed/
+    );
+
+    assert.deepEqual(
+      JSON.parse(await readFile(path.join(originalCursor, 'auth.json'), 'utf8')),
+      { token: 'valid' }
+    );
+    assert.deepEqual(
+      JSON.parse(await readFile(path.join(value.cursorDirectory, 'auth.json'), 'utf8')),
+      { token: 'replacement' }
+    );
+  } finally {
+    await removeFixture(value);
+  }
+});
+
 test('preserves runtime and writeback failures together', async () => {
   const value = await fixture();
   try {
@@ -520,6 +623,68 @@ test('normalizes existing persistent directory and file modes on POSIX', {
     assert.equal((await lstat(value.cursorDirectory)).mode & 0o777, 0o700);
     assert.equal((await lstat(persistentAuth)).mode & 0o777, 0o600);
   } finally {
+    await removeFixture(value);
+  }
+});
+
+test('writes replacement files with exact private modes under a restrictive umask', {
+  skip: !isPosix && 'POSIX mode assertions'
+}, async () => {
+  const value = await fixture();
+  const originalUmask = process.umask(0o177);
+  try {
+    const persistentAuth = path.join(value.cursorDirectory, 'auth.json');
+    await writeFile(persistentAuth, '{"token":"old"}');
+
+    await withCursorAuthSession(value.workspace, {
+      CURSOR_AUTH_CONFIG_HOME: value.authRoot
+    }, async (xdgHome) => {
+      await writeFile(path.join(xdgHome, 'cursor', 'auth.json'), '{"token":"new"}');
+    });
+
+    assert.equal((await stat(persistentAuth)).mode & 0o777, 0o600);
+  } finally {
+    process.umask(originalUmask);
+    await removeFixture(value);
+  }
+});
+
+test('preserves runtime, writeback, and cleanup errors while scrubbing pinned credentials', {
+  skip: process.platform !== 'linux' && 'Linux directory-handle cleanup assertion'
+}, async () => {
+  const value = await fixture();
+  const runtimeError = new Error('runtime failed before cleanup');
+  let movedXdg;
+  try {
+    await writeFile(path.join(value.cursorDirectory, 'auth.json'), '{"token":"secret"}');
+
+    await assert.rejects(
+      withCursorAuthSession(value.workspace, {
+        CURSOR_AUTH_CONFIG_HOME: value.authRoot
+      }, async (xdgHome) => {
+        movedXdg = `${xdgHome}-moved`;
+        await rename(xdgHome, movedXdg);
+        await chmod(movedXdg, 0o000);
+        throw runtimeError;
+      }),
+      (error) => {
+        assert.ok(error instanceof AggregateError);
+        assert.ok(error.errors.includes(runtimeError));
+        assert.ok(error.errors.some((entry) => /temporary XDG directory changed/.test(entry.message)));
+        assert.ok(error.errors.some((entry) => ['EACCES', 'EPERM'].includes(entry.code)));
+        return true;
+      }
+    );
+
+    await assert.rejects(
+      readFile(path.join(movedXdg, 'cursor', 'auth.json')),
+      (error) => error?.code === 'ENOENT'
+    );
+  } finally {
+    if (movedXdg) {
+      await chmod(movedXdg, 0o700).catch(() => {});
+      await rm(movedXdg, { recursive: true, force: true });
+    }
     await removeFixture(value);
   }
 });

@@ -1,6 +1,5 @@
 import { constants } from 'node:fs';
 import {
-  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -17,6 +16,11 @@ import { cursorAuthConfigHome } from './runtime-environment.js';
 const CURSOR_DIRECTORY = 'cursor';
 const ALLOWED_FILES = new Set(['auth.json', 'cli-config.json']);
 const MAX_AUTH_FILE_BYTES = 1_048_576;
+const DIRECTORY_MODE = 0o700;
+const FILE_MODE = 0o600;
+const IS_LINUX = process.platform === 'linux';
+const CAN_OPEN_DIRECTORY = process.platform !== 'win32';
+const AUTH_SESSION_ERRORS = Symbol('cursorAuthSessionErrors');
 const authLocks = new Map();
 
 export async function withCursorAuthSession(
@@ -28,15 +32,38 @@ export async function withCursorAuthSession(
   const authRoot = cursorAuthConfigHome(env);
   if (!authRoot) throw new Error('CURSOR_AUTH_CONFIG_HOME must be an absolute path');
   return withAuthRootLock(lockKey(authRoot), signal, async () => {
-    const boundary = await ensurePersistentBoundary(authRoot);
-    await prunePersistentCursorState(boundary);
-    const temporaryXdg = await mkdtemp(path.join(workspace, '.cursor-xdg-'));
+    let boundary;
+    let temporary;
+    let result;
+    const errors = [];
+
     try {
-      await snapshotAllowedFiles(boundary.cursorDirectory, temporaryXdg);
-      return await runAndWriteBack(run, temporaryXdg, boundary);
-    } finally {
-      await rm(temporaryXdg, { recursive: true, force: true });
+      boundary = await ensurePersistentBoundary(authRoot);
+      await prunePersistentCursorState(boundary);
+      temporary = await createTemporaryBoundary(workspace);
+      await snapshotAllowedFiles(boundary, temporary);
+      result = await runAndWriteBack(run, temporary, boundary);
+    } catch (error) {
+      appendSessionErrors(errors, error);
     }
+
+    if (temporary) {
+      try {
+        await cleanupTemporaryBoundary(temporary);
+      } catch (error) {
+        appendSessionErrors(errors, error);
+      }
+    }
+    if (boundary) {
+      try {
+        await closePersistentBoundary(boundary);
+      } catch (error) {
+        appendSessionErrors(errors, error);
+      }
+    }
+
+    throwSessionErrors(errors, 'Cursor auth session lifecycle failed');
+    return result;
   });
 }
 
@@ -95,7 +122,7 @@ function acquireAuthRootLock(key, signal) {
 function grantLock(key, lock, waiter) {
   lock.active = true;
   waiter.granted = true;
-  waiter.onAbort && waiter.signal?.removeEventListener('abort', waiter.onAbort);
+  waiter.signal?.removeEventListener('abort', waiter.onAbort);
   let released = false;
   waiter.resolve(() => {
     if (released) return;
@@ -119,166 +146,338 @@ function abortReason(signal) {
 }
 
 async function ensurePersistentBoundary(authRoot) {
-  const realAuthRoot = await ensurePrivateDirectory(authRoot, 'CURSOR_AUTH_CONFIG_HOME');
-  const cursorDirectory = path.join(authRoot, CURSOR_DIRECTORY);
-  const realCursorDirectory = await ensurePrivateDirectory(
-    cursorDirectory,
-    'persistent cursor directory'
-  );
+  let authDirectory;
+  let cursorDirectory;
+  try {
+    await ensureDirectoryExists(authRoot, 'CURSOR_AUTH_CONFIG_HOME');
+    authDirectory = await openDirectoryAnchor(
+      authRoot,
+      authRoot,
+      'CURSOR_AUTH_CONFIG_HOME'
+    );
 
-  if (
-    path.dirname(realCursorDirectory) !== realAuthRoot
-    || path.basename(realCursorDirectory) !== CURSOR_DIRECTORY
-  ) {
-    throw new Error('persistent cursor directory must be the direct cursor child of the auth root');
+    const cursorAccessPath = directoryChild(authDirectory, CURSOR_DIRECTORY);
+    const cursorVisiblePath = path.join(authRoot, CURSOR_DIRECTORY);
+    await ensureDirectoryExists(cursorAccessPath, 'persistent cursor directory');
+    cursorDirectory = await openDirectoryAnchor(
+      cursorAccessPath,
+      cursorVisiblePath,
+      'persistent cursor directory'
+    );
+
+    if (
+      path.dirname(cursorDirectory.realDirectory) !== authDirectory.realDirectory
+      || path.basename(cursorDirectory.realDirectory) !== CURSOR_DIRECTORY
+    ) {
+      throw new Error(
+        'persistent cursor directory must be the direct cursor child of the auth root'
+      );
+    }
+
+    return {
+      authRoot,
+      authDirectory,
+      cursorDirectory
+    };
+  } catch (error) {
+    await closeAnchors([cursorDirectory, authDirectory], error);
   }
-
-  return {
-    authRoot,
-    cursorDirectory,
-    realAuthRoot,
-    realCursorDirectory
-  };
 }
 
-async function ensurePrivateDirectory(directory, label) {
+async function createTemporaryBoundary(workspace) {
+  const temporaryXdg = await mkdtemp(path.join(workspace, '.cursor-xdg-'));
+  let rootDirectory;
+  let cursorDirectory;
+  try {
+    rootDirectory = await openDirectoryAnchor(
+      temporaryXdg,
+      temporaryXdg,
+      'temporary XDG directory'
+    );
+    const cursorAccessPath = directoryChild(rootDirectory, CURSOR_DIRECTORY);
+    const cursorVisiblePath = path.join(temporaryXdg, CURSOR_DIRECTORY);
+    await mkdir(cursorAccessPath, { mode: DIRECTORY_MODE });
+    cursorDirectory = await openDirectoryAnchor(
+      cursorAccessPath,
+      cursorVisiblePath,
+      'temporary cursor directory'
+    );
+
+    if (
+      path.dirname(cursorDirectory.realDirectory) !== rootDirectory.realDirectory
+      || path.basename(cursorDirectory.realDirectory) !== CURSOR_DIRECTORY
+    ) {
+      throw new Error(
+        'temporary cursor directory must be the direct cursor child of the temporary XDG directory'
+      );
+    }
+
+    return {
+      temporaryXdg,
+      rootDirectory,
+      cursorDirectory
+    };
+  } catch (error) {
+    const errors = [];
+    appendSessionErrors(errors, error);
+    for (const anchor of [cursorDirectory, rootDirectory]) {
+      try {
+        await closeDirectoryAnchor(anchor);
+      } catch (closeError) {
+        appendSessionErrors(errors, closeError);
+      }
+    }
+    try {
+      await rm(temporaryXdg, { recursive: true, force: true });
+    } catch (cleanupError) {
+      appendSessionErrors(errors, cleanupError);
+    }
+    throwSessionErrors(errors, 'Temporary Cursor boundary creation failed');
+  }
+}
+
+async function ensureDirectoryExists(directory, label) {
   let info;
   try {
     info = await lstat(directory);
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
-    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await mkdir(directory, { recursive: true, mode: DIRECTORY_MODE });
     info = await lstat(directory);
   }
-
-  if (info.isSymbolicLink()) throw new Error(`${label} must not be a symbolic link`);
-  if (!info.isDirectory()) throw new Error(`${label} must be a directory`);
-  await chmod(directory, 0o700);
-  return realpath(directory);
+  validateDirectoryInfo(info, label);
 }
 
-async function revalidateBoundary(boundary) {
-  const current = await ensurePersistentBoundary(boundary.authRoot);
-  if (
-    current.realAuthRoot !== boundary.realAuthRoot
-    || current.realCursorDirectory !== boundary.realCursorDirectory
-  ) {
-    throw new Error('persistent cursor boundary changed during the auth session');
+async function openDirectoryAnchor(openPath, visiblePath, label) {
+  const initialInfo = await lstat(openPath);
+  validateDirectoryInfo(initialInfo, label);
+
+  if (CAN_OPEN_DIRECTORY) {
+    let handle;
+    try {
+      const flags = constants.O_RDONLY
+        | (constants.O_DIRECTORY ?? 0)
+        | (constants.O_NOFOLLOW ?? 0);
+      handle = await open(openPath, flags);
+      const openedInfo = await handle.stat();
+      validateDirectoryInfo(openedInfo, label);
+      if (!sameIdentity(fileIdentity(initialInfo), fileIdentity(openedInfo))) {
+        throw new Error(`${label} changed while it was being verified`);
+      }
+      await handle.chmod(DIRECTORY_MODE);
+      const accessPath = IS_LINUX
+        ? `/proc/self/fd/${handle.fd}`
+        : await realpath(openPath);
+      return {
+        accessPath,
+        handle,
+        identity: fileIdentity(openedInfo),
+        label,
+        realDirectory: await realpath(accessPath),
+        visiblePath
+      };
+    } catch (error) {
+      await handle?.close();
+      throw error;
+    }
   }
-  return current;
+
+  const finalInfo = await lstat(openPath);
+  validateDirectoryInfo(finalInfo, label);
+  if (!sameIdentity(fileIdentity(initialInfo), fileIdentity(finalInfo))) {
+    throw new Error(`${label} changed while it was being verified`);
+  }
+  const realDirectory = await realpath(openPath);
+  return {
+    accessPath: realDirectory,
+    handle: null,
+    identity: fileIdentity(finalInfo),
+    label,
+    realDirectory,
+    visiblePath
+  };
+}
+
+function validateDirectoryInfo(info, label) {
+  if (info.isSymbolicLink()) throw new Error(`${label} must not be a symbolic link`);
+  if (!info.isDirectory()) throw new Error(`${label} must be a directory`);
+}
+
+function fileIdentity(info) {
+  return {
+    dev: info.dev,
+    ino: info.ino
+  };
+}
+
+function sameIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function revalidateDirectoryAnchor(anchor) {
+  let visibleInfo;
+  try {
+    visibleInfo = await lstat(anchor.visiblePath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      throw new Error(`${anchor.label} changed during the auth session`);
+    }
+    throw error;
+  }
+  validateDirectoryInfo(visibleInfo, anchor.label);
+  if (!sameIdentity(anchor.identity, fileIdentity(visibleInfo))) {
+    throw new Error(`${anchor.label} changed during the auth session`);
+  }
+
+  if (anchor.handle) {
+    const openedInfo = await anchor.handle.stat();
+    validateDirectoryInfo(openedInfo, anchor.label);
+    if (!sameIdentity(anchor.identity, fileIdentity(openedInfo))) {
+      throw new Error(`${anchor.label} changed during the auth session`);
+    }
+    await anchor.handle.chmod(DIRECTORY_MODE);
+    return;
+  }
+
+  if (await realpath(anchor.visiblePath) !== anchor.realDirectory) {
+    throw new Error(`${anchor.label} changed during the auth session`);
+  }
+}
+
+async function revalidatePersistentBoundary(boundary) {
+  await revalidateDirectoryAnchor(boundary.authDirectory);
+  await revalidateDirectoryAnchor(boundary.cursorDirectory);
+}
+
+async function revalidateTemporaryBoundary(temporary) {
+  await revalidateDirectoryAnchor(temporary.rootDirectory);
+  await revalidateDirectoryAnchor(temporary.cursorDirectory);
+}
+
+function directoryChild(directory, childName) {
+  if (
+    typeof childName !== 'string'
+    || !childName
+    || path.basename(childName) !== childName
+    || childName === '.'
+    || childName === '..'
+  ) {
+    throw new Error('refusing to resolve a non-child directory entry');
+  }
+  const child = path.resolve(directory.accessPath, childName);
+  if (path.dirname(child) !== directory.accessPath) {
+    throw new Error(`refusing to access a path outside ${directory.label}`);
+  }
+  return child;
 }
 
 async function prunePersistentCursorState(boundary) {
-  const entries = await readdir(boundary.cursorDirectory);
+  const entries = await readdir(boundary.cursorDirectory.accessPath);
 
   for (const name of entries) {
     if (ALLOWED_FILES.has(name)) {
-      await readValidatedJsonFile(path.join(boundary.cursorDirectory, name), {
+      await readValidatedJsonFile(directoryChild(boundary.cursorDirectory, name), {
         label: `persistent ${name}`
       });
     }
   }
 
   for (const name of entries) {
-    if (!ALLOWED_FILES.has(name)) await removeVerifiedChild(boundary, name);
-  }
-}
-
-async function removeVerifiedChild(boundary, childName) {
-  const child = path.resolve(boundary.realCursorDirectory, childName);
-  if (path.dirname(child) !== boundary.realCursorDirectory) {
-    throw new Error('refusing to clean a path outside the persistent cursor directory');
-  }
-  await rm(child, { recursive: true, force: true });
-}
-
-async function snapshotAllowedFiles(cursorDirectory, temporaryXdg) {
-  const temporaryCursor = path.join(temporaryXdg, CURSOR_DIRECTORY);
-  await mkdir(temporaryCursor, { mode: 0o700 });
-
-  for (const name of ALLOWED_FILES) {
-    const bytes = await readValidatedJsonFile(path.join(cursorDirectory, name), {
-      allowMissing: true,
-      label: `persistent ${name}`
-    });
-    if (bytes === null) continue;
-    const destination = path.join(temporaryCursor, name);
-    const handle = await open(destination, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-    try {
-      await handle.writeFile(bytes);
-      await handle.sync();
-    } finally {
-      await handle.close();
+    if (!ALLOWED_FILES.has(name)) {
+      await removeDirectoryChild(boundary.cursorDirectory, name);
     }
-    await chmod(destination, 0o600);
   }
 }
 
-async function runAndWriteBack(run, temporaryXdg, boundary) {
-  let result;
-  let runtimeError;
-  try {
-    result = await run(temporaryXdg);
-  } catch (error) {
-    runtimeError = error;
-  }
+async function removeDirectoryChild(directory, childName) {
+  await rm(directoryChild(directory, childName), { recursive: true, force: true });
+}
 
-  let writebackError;
-  try {
-    await writeBackAllowedFiles(temporaryXdg, boundary);
-  } catch (error) {
-    writebackError = error;
-  }
-
-  if (runtimeError && writebackError) {
-    throw new AggregateError(
-      [runtimeError, writebackError],
-      'Cursor runtime and credential writeback both failed'
+async function snapshotAllowedFiles(boundary, temporary) {
+  for (const name of ALLOWED_FILES) {
+    const bytes = await readValidatedJsonFile(
+      directoryChild(boundary.cursorDirectory, name),
+      {
+        allowMissing: true,
+        label: `persistent ${name}`
+      }
     );
+    if (bytes === null) continue;
+    await writeNewFile(directoryChild(temporary.cursorDirectory, name), bytes);
   }
-  if (runtimeError) throw runtimeError;
-  if (writebackError) throw writebackError;
+}
+
+async function writeNewFile(destination, bytes) {
+  const handle = await open(
+    destination,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+    FILE_MODE
+  );
+  try {
+    await handle.writeFile(bytes);
+    await handle.chmod(FILE_MODE);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function runAndWriteBack(run, temporary, boundary) {
+  let result;
+  const errors = [];
+  try {
+    result = await run(temporary.temporaryXdg);
+  } catch (error) {
+    appendSessionErrors(errors, error);
+  }
+
+  try {
+    await writeBackAllowedFiles(temporary, boundary);
+  } catch (error) {
+    appendSessionErrors(errors, error);
+  }
+
+  throwSessionErrors(errors, 'Cursor runtime and credential writeback both failed');
   return result;
 }
 
-async function writeBackAllowedFiles(temporaryXdg, boundary) {
-  const temporaryCursor = path.join(temporaryXdg, CURSOR_DIRECTORY);
+async function writeBackAllowedFiles(temporary, boundary) {
+  await revalidateTemporaryBoundary(temporary);
   const updates = new Map();
 
   for (const name of ALLOWED_FILES) {
-    const bytes = await readValidatedJsonFile(path.join(temporaryCursor, name), {
-      allowMissing: true,
-      label: `temporary ${name}`
-    });
+    const bytes = await readValidatedJsonFile(
+      directoryChild(temporary.cursorDirectory, name),
+      {
+        allowMissing: true,
+        label: `temporary ${name}`
+      }
+    );
     if (bytes !== null) updates.set(name, bytes);
   }
 
-  let current = await revalidateBoundary(boundary);
+  await revalidatePersistentBoundary(boundary);
   for (const name of ALLOWED_FILES) {
-    await readValidatedJsonFile(path.join(current.cursorDirectory, name), {
+    await readValidatedJsonFile(directoryChild(boundary.cursorDirectory, name), {
       allowMissing: true,
       label: `persistent ${name}`
     });
   }
 
   for (const [name, bytes] of updates) {
-    await atomicWriteAllowedFile(current, name, bytes);
+    await atomicWriteAllowedFile(boundary.cursorDirectory, name, bytes);
   }
 
-  current = await revalidateBoundary(boundary);
-  await prunePersistentCursorState(current);
+  await revalidatePersistentBoundary(boundary);
+  await prunePersistentCursorState(boundary);
 }
 
-async function atomicWriteAllowedFile(boundary, name, bytes) {
+async function atomicWriteAllowedFile(cursorDirectory, name, bytes) {
   const temporaryName = `.${name}.${process.pid}.${randomUUID()}.tmp`;
-  const temporaryPath = path.resolve(boundary.realCursorDirectory, temporaryName);
-  const destination = path.resolve(boundary.realCursorDirectory, name);
-  if (
-    path.dirname(temporaryPath) !== boundary.realCursorDirectory
-    || path.dirname(destination) !== boundary.realCursorDirectory
-    || !ALLOWED_FILES.has(path.basename(destination))
-  ) {
-    throw new Error('refusing to write outside the persistent cursor directory');
+  const temporaryPath = directoryChild(cursorDirectory, temporaryName);
+  const destination = directoryChild(cursorDirectory, name);
+  if (!ALLOWED_FILES.has(name)) {
+    throw new Error('refusing to write a nonallowlisted persistent file');
   }
 
   let handle;
@@ -286,16 +485,17 @@ async function atomicWriteAllowedFile(boundary, name, bytes) {
     handle = await open(
       temporaryPath,
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
-      0o600
+      FILE_MODE
     );
     await handle.writeFile(bytes);
+    await handle.chmod(FILE_MODE);
     await handle.sync();
     await handle.close();
     handle = null;
     await rename(temporaryPath, destination);
   } finally {
     await handle?.close();
-    await removeVerifiedChild(boundary, temporaryName);
+    await removeDirectoryChild(cursorDirectory, temporaryName);
   }
 }
 
@@ -323,8 +523,8 @@ async function readValidatedJsonFile(file, { allowMissing = false, label }) {
     if (openedInfo.size > MAX_AUTH_FILE_BYTES) {
       throw new Error(`${label} must not exceed 1_048_576 bytes`);
     }
-    bytes = await handle.readFile();
-    await handle.chmod(0o600);
+    bytes = await readBounded(handle);
+    await handle.chmod(FILE_MODE);
   } finally {
     await handle.close();
   }
@@ -344,4 +544,97 @@ async function readValidatedJsonFile(file, { allowMissing = false, label }) {
   }
 
   return bytes;
+}
+
+async function readBounded(handle) {
+  const capacity = MAX_AUTH_FILE_BYTES + 1;
+  const buffer = Buffer.allocUnsafe(capacity);
+  let total = 0;
+  while (total < capacity) {
+    const { bytesRead } = await handle.read(buffer, total, capacity - total, total);
+    if (bytesRead === 0) break;
+    total += bytesRead;
+  }
+  return buffer.subarray(0, total);
+}
+
+async function cleanupTemporaryBoundary(temporary) {
+  const errors = [];
+
+  try {
+    await clearDirectory(temporary.cursorDirectory);
+  } catch (error) {
+    appendSessionErrors(errors, error);
+  }
+  try {
+    await closeDirectoryAnchor(temporary.cursorDirectory);
+  } catch (error) {
+    appendSessionErrors(errors, error);
+  }
+  try {
+    await clearDirectory(temporary.rootDirectory);
+  } catch (error) {
+    appendSessionErrors(errors, error);
+  }
+  try {
+    await closeDirectoryAnchor(temporary.rootDirectory);
+  } catch (error) {
+    appendSessionErrors(errors, error);
+  }
+  try {
+    await rm(temporary.temporaryXdg, { recursive: true, force: true });
+  } catch (error) {
+    appendSessionErrors(errors, error);
+  }
+
+  throwSessionErrors(errors, 'Temporary Cursor credential cleanup failed');
+}
+
+async function clearDirectory(directory) {
+  const entries = await readdir(directory.accessPath);
+  for (const name of entries) await removeDirectoryChild(directory, name);
+}
+
+async function closePersistentBoundary(boundary) {
+  await closeAnchors(
+    [boundary.cursorDirectory, boundary.authDirectory],
+    null,
+    'Persistent Cursor directory-handle cleanup failed'
+  );
+}
+
+async function closeAnchors(anchors, originalError, message = 'Directory-handle cleanup failed') {
+  const errors = [];
+  if (originalError) appendSessionErrors(errors, originalError);
+  for (const anchor of anchors) {
+    try {
+      await closeDirectoryAnchor(anchor);
+    } catch (error) {
+      appendSessionErrors(errors, error);
+    }
+  }
+  throwSessionErrors(errors, message);
+}
+
+async function closeDirectoryAnchor(anchor) {
+  if (!anchor?.handle) return;
+  const handle = anchor.handle;
+  anchor.handle = null;
+  await handle.close();
+}
+
+function appendSessionErrors(errors, error) {
+  if (error instanceof AggregateError && error[AUTH_SESSION_ERRORS]) {
+    errors.push(...error.errors);
+  } else {
+    errors.push(error);
+  }
+}
+
+function throwSessionErrors(errors, message) {
+  if (errors.length === 0) return;
+  if (errors.length === 1) throw errors[0];
+  const aggregate = new AggregateError(errors, message);
+  aggregate[AUTH_SESSION_ERRORS] = true;
+  throw aggregate;
 }
