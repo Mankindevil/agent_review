@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, localRuntimeTimeout, runSkill } from '../src/runtimes.js';
+import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, localRuntimeTimeout, runSkill, withRuntimeWorkspace } from '../src/runtimes.js';
 import { prepareRuntimeWorkspace } from '../src/runtime-sandbox.js';
 import { runtimeBuildSkillPrompt } from '../src/prompts.js';
 
@@ -39,11 +39,46 @@ test('writes deny-by-default Cursor permissions only inside the temporary worksp
     assert.deepEqual(payload.permissions.allow, []);
     assert.ok(payload.permissions.deny.includes('Shell(*)'));
     assert.ok(payload.permissions.deny.includes('Write(**)'));
+    assert.ok(payload.permissions.deny.includes('Read(**)'));
     assert.ok(payload.permissions.deny.includes('Read(**/.env*)'));
     assert.ok(payload.permissions.deny.includes('Read(**/*.key)'));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('cleans the temporary workspace when Cursor sandbox preparation fails', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'cursor-sandbox-failure-'));
+  let removed = false;
+
+  await assert.rejects(
+    withRuntimeWorkspace('cursor', async () => assert.fail('runtime must not start'), {
+      createWorkspace: async () => root,
+      prepareWorkspace: async () => { throw new Error('sandbox initialization failed'); },
+      removeWorkspace: async (workspace, options) => {
+        removed = true;
+        assert.equal(workspace, root);
+        await rm(workspace, options);
+      }
+    }),
+    /sandbox initialization failed/
+  );
+
+  assert.equal(removed, true);
+  await assert.rejects(access(root), { code: 'ENOENT' });
+});
+
+test('cleans the temporary workspace when Cursor runtime startup fails', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'cursor-startup-failure-'));
+
+  await assert.rejects(
+    withRuntimeWorkspace('cursor', async () => { throw new Error('cursor startup failed'); }, {
+      createWorkspace: async () => root
+    }),
+    /cursor startup failed/
+  );
+
+  await assert.rejects(access(root), { code: 'ENOENT' });
 });
 
 test('isolates Cursor Agent from host secrets and persistent user directories', () => {

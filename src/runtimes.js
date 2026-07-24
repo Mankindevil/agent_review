@@ -251,16 +251,29 @@ export function localRuntimeTimeout(value) {
   return Math.min(timeout, MAX_LOCAL_RUNTIME_TIMEOUT_MS);
 }
 
+export async function withRuntimeWorkspace(runtimeId, run, {
+  createWorkspace = mkdtemp,
+  prepareWorkspace = prepareRuntimeWorkspace,
+  removeWorkspace = rm
+} = {}) {
+  const workspace = await createWorkspace(path.join(tmpdir(), `agent-roast-${runtimeId}-`));
+  try {
+    await prepareWorkspace(runtimeId, workspace);
+    return await run(workspace);
+  } finally {
+    await removeWorkspace(workspace, { recursive: true, force: true });
+  }
+}
+
 async function callLocalCli(runtimeId, prompt, signal, sampling = {}) {
-  const workspace = await mkdtemp(path.join(tmpdir(), `agent-roast-${runtimeId}-`));
-  await prepareRuntimeWorkspace(runtimeId, workspace);
   let arkProxy;
   const startedAt = Date.now();
   const timeout = localRuntimeTimeout(process.env.LOCAL_RUNTIME_TIMEOUT_MS);
   const budget = process.env.CLAUDE_MAX_BUDGET_USD || '0.25';
   const command = runtimeId === 'claude-code' ? 'claude' : 'cursor-agent';
   const args = localCliArgs(runtimeId, prompt, { budget });
-  try {
+  return withRuntimeWorkspace(runtimeId, async (workspace) => {
+    try {
     const commandEnv = localCliEnv(runtimeId, workspace);
     if (runtimeId === 'claude-code' && shouldUseArkClaude(commandEnv)) {
       arkProxy = await startArkAnthropicProxy({ baseUrl: commandEnv.ARK_BASE_URL, apiKey: commandEnv.ARK_API_KEY, model: commandEnv.CLAUDE_ARK_MODEL || commandEnv.REVIEW_MODEL_DEEPSEEK, signal, ...sampling });
@@ -276,10 +289,10 @@ async function callLocalCli(runtimeId, prompt, signal, sampling = {}) {
     if (/not logged|login|auth|unauthorized|api key/i.test(detail)) throw new Error(`AUTH_REQUIRED: ${command} 尚未完成账号授权`);
     if (error.killed || error.signal) throw new Error(`${command} 超过 ${timeout}ms 执行时限`);
     throw new Error(`${command} 执行失败：${String(detail).slice(0, 800)}`);
-  } finally {
-    await arkProxy?.close();
-    await rm(workspace, { recursive: true, force: true });
-  }
+    } finally {
+      await arkProxy?.close();
+    }
+  });
 }
 
 async function callRuntimeModel(config, prompt, signal, sampling = {}) {

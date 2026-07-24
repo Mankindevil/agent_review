@@ -7,6 +7,7 @@ const CURSOR_PERMISSIONS = {
     deny: [
       'Shell(*)',
       'Write(**)',
+      'Read(**)',
       'Read(**/.env*)',
       'Read(**/*.key)',
       'Read(**/*.pem)',
