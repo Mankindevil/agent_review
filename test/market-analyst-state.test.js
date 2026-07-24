@@ -9,6 +9,7 @@ import path from 'node:path';
 import {
   createRunTrace,
   sanitizeTraceValue,
+  TRACE_SANITIZATION_LIMITS,
   TRACE_LIMITS
 } from '../agents/market-analyst/run-trace.js';
 import {
@@ -310,6 +311,58 @@ test('redaction removes quoted keys, spaced secrets, authorization variants, and
   });
   assert.equal(JSON.stringify(task).includes('alpha beta secret'), false);
   assert.equal((await readFile(path.join(stateDir, 'state.json'), 'utf8')).includes('url-password'), false);
+});
+
+test('sanitization bounds oversized object keys in memory and persisted state', async (t) => {
+  const oversizedKey = 'oversized-key-'.repeat(80_000);
+  const sanitized = sanitizeTraceValue({ [oversizedKey]: 'retained-value' });
+  const serialized = JSON.stringify(sanitized);
+
+  assert.ok(Buffer.byteLength(serialized) <= TRACE_SANITIZATION_LIMITS.maxTotalBytes);
+  assert.ok(
+    Object.keys(sanitized).every(
+      (key) => Buffer.byteLength(key) <= TRACE_SANITIZATION_LIMITS.maxObjectKeyBytes
+    )
+  );
+  assert.equal(serialized.includes(oversizedKey), false);
+  assert.match(serialized, /object-key-length|TRUNCATED/i);
+
+  const stateDir = await temporaryDirectory(t);
+  const store = new MarketTaskStore(stateDir);
+  await store.create({
+    id: 'task-oversized-key',
+    state: 'TASK_STATE_SUBMITTED',
+    [oversizedKey]: 'retained-value'
+  });
+  const persisted = await readFile(path.join(stateDir, 'state.json'), 'utf8');
+  assert.ok(Buffer.byteLength(persisted) <= TRACE_SANITIZATION_LIMITS.maxTotalBytes);
+  assert.equal(persisted.includes(oversizedKey), false);
+  assert.match(persisted, /object-key-length|TRUNCATED/i);
+});
+
+test('sanitization redacts object keys and resolves sanitized collisions deterministically', () => {
+  const sensitiveKeys = [
+    'contact jane.doe@example.com',
+    'api_key = first credential value',
+    'api_key = second credential value',
+    'https://url-user:url-password@example.com/private'
+  ];
+  const sanitized = sanitizeTraceValue(Object.fromEntries(
+    sensitiveKeys.map((key, index) => [key, `value-${index}`])
+  ));
+  const serialized = JSON.stringify(sanitized);
+
+  for (const sensitive of [
+    'jane.doe@example.com',
+    'first credential value',
+    'second credential value',
+    'url-user',
+    'url-password'
+  ]) {
+    assert.equal(serialized.includes(sensitive), false, `object key retained ${sensitive}`);
+  }
+  const apiKeys = Object.keys(sanitized).filter((key) => key.startsWith('api_key'));
+  assert.deepEqual(apiKeys, ['api_key = [REDACTED]', 'api_key = [REDACTED]~001']);
 });
 
 test('sanitization and RunTrace apply global depth, size, count, and lineage bounds', () => {

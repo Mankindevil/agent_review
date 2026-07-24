@@ -26,6 +26,12 @@ const MAX_OBJECT_KEYS = 500;
 const MAX_DEPTH = 16;
 const MAX_TOTAL_NODES = 4_096;
 const MAX_TOTAL_BYTES = 256 * 1024;
+const MAX_OBJECT_KEY_BYTES = 128;
+
+export const TRACE_SANITIZATION_LIMITS = Object.freeze({
+  maxTotalBytes: MAX_TOTAL_BYTES,
+  maxObjectKeyBytes: MAX_OBJECT_KEY_BYTES
+});
 
 export const TRACE_LIMITS = Object.freeze({
   steps: 128,
@@ -61,12 +67,28 @@ function consumeBudget(context, bytes = 0) {
   return true;
 }
 
-function sanitizeString(input) {
-  let value = String(input);
-  value = value.replace(
+function consumeBytes(context, bytes) {
+  if (context.bytes + bytes > MAX_TOTAL_BYTES) {
+    markTruncated(context, 'byte-budget');
+    return false;
+  }
+  context.bytes += bytes;
+  return true;
+}
+
+function redactUrlCredentials(input) {
+  return input.replace(
     /\b([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi,
     (_match, scheme) => `${scheme}${REDACTED}@`
   );
+}
+
+function redactEmails(input) {
+  return input.replace(EMAIL, (_match, first, _rest, domain) => `${first}***@${domain}`);
+}
+
+function sanitizeString(input) {
+  let value = redactUrlCredentials(String(input));
   value = value.replace(CREDENTIAL_ASSIGNMENT, (_match, prefix) => `${prefix}${REDACTED}`);
   value = value.replace(
     /\b(Bearer|Basic)\s+[a-z0-9._~+/=-]+/gi,
@@ -76,11 +98,61 @@ function sanitizeString(input) {
     /\beyJ[a-z0-9_-]{5,}\.[a-z0-9_-]+\.[a-z0-9_-]+\b/gi,
     REDACTED
   );
-  value = value.replace(EMAIL, (_match, first, _rest, domain) => `${first}***@${domain}`);
+  value = redactEmails(value);
   if (value.length > MAX_STRING_LENGTH) {
     value = `${value.slice(0, MAX_STRING_LENGTH)}…[TRUNCATED]`;
   }
   return value;
+}
+
+function truncateUtf8(input, maxBytes, suffix = '') {
+  if (Buffer.byteLength(input) <= maxBytes) return input;
+  const suffixBytes = Buffer.byteLength(suffix);
+  const contentLimit = Math.max(0, maxBytes - suffixBytes);
+  let result = '';
+  let bytes = 0;
+  for (const character of input) {
+    const characterBytes = Buffer.byteLength(character);
+    if (bytes + characterBytes > contentLimit) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return `${result}${suffix}`;
+}
+
+function sanitizePropertyKey(property, context) {
+  let relevant = String(property);
+  if (relevant.includes('@')) {
+    relevant = redactEmails(redactUrlCredentials(relevant));
+  }
+  if (Buffer.byteLength(relevant) > MAX_STRING_LENGTH) {
+    relevant = truncateUtf8(relevant, MAX_STRING_LENGTH);
+  }
+  const sanitized = sanitizeString(relevant);
+  if (
+    Buffer.byteLength(property) <= MAX_OBJECT_KEY_BYTES
+    && Buffer.byteLength(sanitized) <= MAX_OBJECT_KEY_BYTES
+  ) {
+    return sanitized;
+  }
+  markTruncated(context, 'object-key-length');
+  return truncateUtf8(sanitized, MAX_OBJECT_KEY_BYTES, '[TRUNCATED]');
+}
+
+function uniquePropertyKey(property, result, context) {
+  if (!Object.hasOwn(result, property)) return property;
+  markTruncated(context, 'object-key-collision');
+  for (let collision = 1; collision <= MAX_OBJECT_KEYS; collision += 1) {
+    const suffix = `~${String(collision).padStart(3, '0')}`;
+    const prefix = truncateUtf8(
+      property,
+      MAX_OBJECT_KEY_BYTES - Buffer.byteLength(suffix)
+    );
+    const candidate = `${prefix}${suffix}`;
+    if (!Object.hasOwn(result, candidate)) return candidate;
+  }
+  markTruncated(context, 'object-key-collision-limit');
+  return null;
 }
 
 function sanitize(value, context, depth, key) {
@@ -151,10 +223,13 @@ function sanitize(value, context, depth, key) {
   const result = {};
   const keys = Object.keys(value);
   const entries = keys.slice(0, MAX_OBJECT_KEYS);
-  for (const property of entries) {
+  for (const rawProperty of entries) {
     if (context.nodes >= MAX_TOTAL_NODES || context.bytes >= MAX_TOTAL_BYTES) break;
-    context.bytes += Buffer.byteLength(property);
-    const item = value[property];
+    const sanitizedProperty = sanitizePropertyKey(rawProperty, context);
+    const property = uniquePropertyKey(sanitizedProperty, result, context);
+    if (property === null) break;
+    if (!consumeBytes(context, Buffer.byteLength(property))) break;
+    const item = value[rawProperty];
     const safeUsageMetric = TOKEN_USAGE_KEY.test(property)
       && (item === null || typeof item === 'number');
     result[property] = SECRET_KEY.test(property) && !safeUsageMetric
