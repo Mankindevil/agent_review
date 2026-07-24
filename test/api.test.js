@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import {
+  createEvidenceManifestItem,
+  createEvidenceRecord
+} from '../src/evidence.js';
 
 process.env.NODE_ENV = 'test';
 process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-test-${process.pid}.json`);
@@ -10,6 +14,21 @@ process.env.AGENT_DIAGNOSTICS_ACCESS_KEY = 'test-diagnostics-key';
 process.env.AGENT_DIAGNOSTICS_RATE_LIMIT = '100';
 process.env.ALLOW_PRIVATE_AGENT_URLS = 'true';
 const API_UNSECURED_JWT = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ.';
+const apiEvidenceRecord = createEvidenceRecord({
+  evidenceId: 'ev_api',
+  runId: 'run_api',
+  grade: 'A',
+  kind: 'platform-timing',
+  testId: 'test_api',
+  turnIndex: 0,
+  repeatIndex: 0,
+  capturedAt: '2026-07-24T09:00:30.000Z',
+  payload: { durationMs: 30 }
+});
+const apiEvidenceManifestItem = createEvidenceManifestItem(apiEvidenceRecord, {
+  summary: 'Completed',
+  visibility: 'public'
+});
 const v2Fixture = {
   schemaVersion: 2,
   id: 'eval_v2_projection',
@@ -26,22 +45,7 @@ const v2Fixture = {
   qualification: { status: 'passed', attemptRunIds: ['run_api'], hiddenInput: 'api-hidden-secret' },
   evidenceManifest: {
     version: '1.0',
-    items: [{
-      evidenceId: 'ev_api',
-      runId: 'run_api',
-      grade: 'A',
-      kind: 'timing',
-      testId: 'test_api',
-      turnIndex: 0,
-      repeatIndex: 0,
-      occurredAt: '2026-07-24T09:00:30.000Z',
-      summary: 'Completed',
-      payloadHash: 'd'.repeat(64),
-      recordHash: 'e'.repeat(64),
-      visibility: 'public',
-      redaction: { status: 'applied', count: 1 },
-      payload: { value: 'api-raw-secret' }
-    }]
+    items: [apiEvidenceManifestItem]
   },
   objectiveCapability: { status: 'pending', score: null },
   absoluteReview: { status: 'pending-model-review' },
@@ -85,7 +89,7 @@ test('health endpoint responds', async () => {
 
 test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes', async () => {
   const forbidden = [
-    'api-auth-secret', 'api-mapping-secret', 'api-hidden-secret', 'api-raw-secret',
+    'api-auth-secret', 'api-mapping-secret', 'api-hidden-secret',
     'api-seal-secret', 'api-card-secret', 'api-skill-secret', 'api-audit-secret',
     'api-raw-top-secret', 'api-sensitive-log-secret', 'api-flat-password',
     'api-flat-key', 'api-flat-session', 'api-flat-credentials', API_UNSECURED_JWT
@@ -102,7 +106,7 @@ test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes'
   assert.equal(listResponse.status, 200);
   assert.equal(listed.schemaVersion, 2);
   assert.equal(listed.evidenceManifest.items[0].summary, 'Completed');
-  assert.equal(listed.evidenceManifest.items[0].recordHash, 'e'.repeat(64));
+  assert.equal(listed.evidenceManifest.items[0].recordHash, apiEvidenceRecord.recordHash);
 
   const detailResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
   const detailText = await detailResponse.text();

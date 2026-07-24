@@ -187,11 +187,25 @@ test('rejects V2 schema downgrades and changes to frozen record identity', async
       submission: {
         submissionVersion: '1.0',
         frozenAt: '2026-07-20T00:00:00.000Z',
-        agentCard: { sha256: 'a'.repeat(64) }
+        agentCard: {
+          sha256: 'a'.repeat(64),
+          value: { supportedInterfaces: [{ binding: 'HTTP+JSON' }] }
+        }
       },
+      evaluationWindow: { firstRunAt: null, lastRunAt: null },
       rawEvidence: { secret: 'original-secret' }
     };
     await store.set(original);
+
+    const started = await store.mutate(original.id, 0, (current) => {
+      current.evaluationWindow.firstRunAt = '2026-07-20T00:05:00.000Z';
+      current.evaluationWindow.lastRunAt = '2026-07-20T00:06:00.000Z';
+      return current;
+    });
+    assert.deepEqual(started.evaluationWindow, {
+      firstRunAt: '2026-07-20T00:05:00.000Z',
+      lastRunAt: '2026-07-20T00:06:00.000Z'
+    });
 
     let retainedDowngrade;
     const mutations = [
@@ -209,12 +223,16 @@ test('rejects V2 schema downgrades and changes to frozen record identity', async
       (current) => ({
         ...current,
         submission: { ...current.submission, frozenAt: '2026-07-21T00:00:00.000Z' }
-      })
+      }),
+      (current) => {
+        current.submission.agentCard.value.supportedInterfaces[0].binding = 'JSONRPC';
+        return current;
+      }
     ];
 
     for (const mutate of mutations) {
       await assert.rejects(
-        () => store.mutate(original.id, 0, mutate),
+        () => store.mutate(original.id, 1, mutate),
         /V2|schemaVersion|identity|frozen/i
       );
     }
@@ -224,8 +242,9 @@ test('rejects V2 schema downgrades and changes to frozen record identity', async
     assert.equal(stored.schemaVersion, 2);
     assert.equal(stored.createdAt, original.createdAt);
     assert.deepEqual(stored.submission, original.submission);
+    assert.deepEqual(stored.evaluationWindow, started.evaluationWindow);
     assert.equal(stored.rawEvidence.secret, 'original-secret');
-    assert.equal(stored.revision, 0);
+    assert.equal(stored.revision, 1);
   } finally {
     await rm(file, { force: true });
     await rm(`${file}.tmp`, { force: true });

@@ -258,10 +258,10 @@ assert.equal(snapshot.submissionVersion, '1.0');
 assert.match(snapshot.agentCard.sha256, /^[a-f0-9]{64}$/);
 assert.match(snapshot.agentExamples.sha256, /^[a-f0-9]{64}$/);
 assert.equal(snapshot.selectedInterface.binding, 'HTTP+JSON');
-assert.equal(snapshot.evaluationWindow.firstRunAt, null);
+assert.equal(Object.hasOwn(snapshot, 'evaluationWindow'), false);
 ```
 
-The canonical serializer must recursively sort object keys while preserving array order. Hash the canonical UTF-8 bytes and store the canonical object snapshot, not credentials or request headers.
+The canonical serializer must recursively sort object keys while preserving array order. Hash the canonical UTF-8 bytes and store the canonical object snapshot, not credentials or request headers. Runtime state such as the evaluation window belongs on the V2 evaluation record, never inside the deeply immutable submission.
 
 - [ ] **Step 6: Implement the versioned record**
 
@@ -285,6 +285,7 @@ export function createEvaluationRecord(snapshot, options) {
     execution: { status: 'queued', stage: 'qualification', progress: 0 },
     governance: { phase: 'waiting_model' },
     submission: snapshot,
+    evaluationWindow: { firstRunAt: null, lastRunAt: null },
     qualification: { status: 'pending', attemptRunIds: [] },
     evidenceManifest: { version: '1.0', items: [] },
     objectiveCapability: { status: 'pending' },
@@ -297,7 +298,7 @@ export function createEvaluationRecord(snapshot, options) {
 }
 ```
 
-`migrateStoredEvaluation(raw)` must return legacy array entries as `schemaVersion: 1` without inventing evidence or scores.
+`evaluationWindow` is mutable top-level runtime state. Public and admin projections allow-list only `firstRunAt` and `lastRunAt`; the Store continues to reject any deep change to `submission`. `migrateStoredEvaluation(raw)` must return legacy array entries as `schemaVersion: 1` without inventing evidence or scores.
 
 - [ ] **Step 7: Run contract/model tests**
 
@@ -330,8 +331,10 @@ git commit -m "feat: define versioned agent example submissions"
 
 **Interfaces:**
 - Produces: `createEvidenceRecord(input)`.
+- Produces: `createEvidenceManifestItem(record, { summary, visibility, secrets })`.
+- Produces: `validateEvidenceManifestItem(item)`.
 - Produces: `redactEvidence(value, secrets)`.
-- Produces: `EvidenceVault.put(record)` and `EvidenceVault.get(evidenceId)`.
+- Produces: `EvidenceVault.put(record)` and `EvidenceVault.get(evidenceId, expectedRecordHash)`.
 - Produces: `projectEvaluation(evaluation, { audience })`.
 - Produces: `EvaluationStore.mutate(id, expectedRevision, updater)`.
 
@@ -380,7 +383,8 @@ export function createEvidenceRecord({
 }) {
   if (!['A', 'B', 'C', 'D'].includes(grade)) throw new TypeError('invalid evidence grade');
   const canonicalPayload = canonicalJson(payload);
-  return Object.freeze({
+  const payloadHash = sha256(canonicalPayload);
+  const record = {
     evidenceId,
     evidenceVersion: '1.0',
     runId,
@@ -390,13 +394,28 @@ export function createEvidenceRecord({
     turnIndex,
     repeatIndex,
     capturedAt,
-    payloadHash: sha256(canonicalPayload),
+    payloadHash,
     payload
+  };
+  return deepFreeze({
+    ...record,
+    recordHash: sha256(canonicalJson({
+      evidenceId,
+      evidenceVersion: '1.0',
+      runId,
+      grade,
+      kind,
+      testId,
+      ...(turnIndex === undefined ? {} : { turnIndex }),
+      ...(repeatIndex === undefined ? {} : { repeatIndex }),
+      capturedAt,
+      payloadHash
+    }))
   });
 }
 ```
 
-Grade platform timing and transport facts as A, protocol objects as B, Card/Agent claims as C, and reviewer inferences as D.
+Grade platform timing and transport facts as A, protocol objects as B, Agent-authored output and Card/Agent claims as C, and reviewer inferences as D. Enforce this as a closed kind-to-grade contract. `recordHash` commits the evidence version, all identity and coordinate fields, grade/kind, capture timestamp, and `payloadHash`.
 
 - [ ] **Step 4: Implement AES-256-GCM append-only storage**
 
@@ -411,11 +430,12 @@ Envelope:
   iv: iv.toString('base64'),
   tag: cipher.getAuthTag().toString('base64'),
   ciphertext: encrypted.toString('base64'),
-  payloadHash
+  payloadHash,
+  recordHash
 }
 ```
 
-Use `evaluationId:evidenceId` as authenticated additional data. `put` must fail on duplicate IDs. `get` must verify both the authentication tag and `payloadHash`.
+Use `evaluationId:evidenceId:recordHash` as authenticated additional data. `put` must fail on duplicate IDs. `get(evidenceId, expectedRecordHash)` requires the independent expected commitment and verifies it against the envelope precheck, AAD, decrypted record, canonical reconstruction, and `payloadHash`.
 
 - [ ] **Step 5: Add a public manifest and allow-list projections**
 
@@ -433,12 +453,15 @@ The evaluation record stores only:
   occurredAt,
   summary,
   payloadHash,
+  recordHash,
   visibility,
   redaction: { status: 'applied', count }
 }
 ```
 
-`projectEvaluation` must be an allow-list constructor, not a clone followed by deletions. Before later governance exists, support `public` and `admin`; `public` omits raw payloads, hidden inputs, authorization, replica seals, anonymous mappings, and sensitive logs.
+Create every item through `createEvidenceManifestItem(record, options)`. It must canonicalize the `EvidenceRecord`, set `occurredAt = capturedAt`, copy both hashes and all record identity/coordinate metadata, defense-redact the summary, and generate the redaction status/count. Coordinates remain required manifest keys and use `null` when absent from the record.
+
+`validateEvidenceManifestItem` is a closed-shape validator. It enforces safe IDs, non-negative integer-or-null coordinates, canonical ISO timestamps, SHA-256 hashes, visibility/redaction enums, the closed kind-to-grade contract, and recomputes the record commitment from manifest metadata. `projectEvaluation` must be an allow-list constructor, not a clone followed by deletions, and must omit invalid items rather than projecting arbitrary fixtures. Before later governance exists, support `public` and `admin`; `public` omits raw payloads, hidden inputs, authorization, replica seals, anonymous mappings, and sensitive logs.
 
 - [ ] **Step 6: Version the store without breaking legacy callers**
 
@@ -890,6 +913,7 @@ git commit -m "feat: calculate objective capability and confidence"
 - Produces: `EphemeralCredentialVault.put/get/delete`.
 - Produces: `createParticipantAccess()` and `verifyParticipantAccess(token, storedHash)`.
 - Produces: `runBlackBoxFoundation(evaluation, services)`.
+- Consumes: `createEvidenceManifestItem(record, options)` and `EvidenceVault.get(evidenceId, expectedRecordHash)`.
 - Routes: V2 `POST /api/evaluations` only when the flag is enabled.
 
 - [ ] **Step 1: Write failing flag and credential tests**
@@ -954,8 +978,9 @@ For every normalized example:
 - reuse returned `contextId`/`taskId` only for turns in that example;
 - lock per-test target `T` and timeout `B` before execution;
 - evaluate required executable criteria after each turn;
-- append raw encrypted evidence and redacted manifest items immediately;
-- set `evaluationWindow.firstRunAt`, `lastRunAt`, endpoint hash, Agent version/build ID when returned, and response fingerprints.
+- append each canonical record to the encrypted Vault, then append its redacted manifest item only through `createEvidenceManifestItem(record, options)`;
+- when reading evidence, pass the independently projected `manifestItem.recordHash` to `EvidenceVault.get(manifestItem.evidenceId, manifestItem.recordHash)`;
+- set top-level `evaluation.evaluationWindow.firstRunAt` and `lastRunAt`; never mutate `evaluation.submission`. Record endpoint hash, Agent version/build ID when returned, and response fingerprints in their dedicated top-level runtime state.
 
 Use `repeatCount: 3`. Hidden variants are intentionally absent in this phase.
 

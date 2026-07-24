@@ -15,6 +15,7 @@ export function createEvaluationRecord(snapshot, options) {
     execution: { status: 'queued', stage: 'qualification', progress: 0 },
     governance: { phase: 'waiting_model' },
     submission: snapshot,
+    evaluationWindow: { firstRunAt: null, lastRunAt: null },
     qualification: { status: 'pending', attemptRunIds: [] },
     evidenceManifest: { version: '1.0', items: [] },
     objectiveCapability: { status: 'pending' },

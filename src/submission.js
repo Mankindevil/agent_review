@@ -92,11 +92,7 @@ export function freezeSubmission({
       sha256: hashCanonical(canonicalExamples)
     },
     selectedInterface: canonicalClone(selectedInterface, 'selectedInterface'),
-    config: normalizedConfig,
-    evaluationWindow: {
-      firstRunAt: null,
-      lastRunAt: null
-    }
+    config: normalizedConfig
   };
   return deepFreeze(snapshot);
 }

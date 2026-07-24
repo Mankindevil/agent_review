@@ -320,7 +320,7 @@ test('freezes canonical snapshots with hashes, selected interface, and version m
   assert.match(snapshot.agentCard.sha256, /^[a-f0-9]{64}$/);
   assert.match(snapshot.agentExamples.sha256, /^[a-f0-9]{64}$/);
   assert.equal(snapshot.selectedInterface.binding, 'HTTP+JSON');
-  assert.equal(snapshot.evaluationWindow.firstRunAt, null);
+  assert.equal(Object.hasOwn(snapshot, 'evaluationWindow'), false);
   assert.equal(snapshot.frozenAt, '2026-07-24T10:00:00.000Z');
   assert.equal(Object.isFrozen(snapshot), true);
 });

@@ -9,6 +9,15 @@ const CREATE_FIELDS = new Set([
 const RECORD_FIELDS = new Set([
   ...CREATE_FIELDS, 'evidenceVersion', 'payloadHash', 'recordHash'
 ]);
+const MANIFEST_FIELDS = new Set([
+  'evidenceId', 'runId', 'grade', 'kind', 'testId', 'turnIndex', 'repeatIndex',
+  'occurredAt', 'summary', 'payloadHash', 'recordHash', 'visibility', 'redaction'
+]);
+const MANIFEST_OPTION_FIELDS = new Set(['summary', 'visibility', 'secrets']);
+const REDACTION_FIELDS = new Set(['status', 'count']);
+const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const MANIFEST_VISIBILITIES = new Set(['public', 'admin']);
+const REDACTION_MARKER_PATTERN = /\[(?:SECRET|AUTHORIZATION|BEARER|JWT|COOKIE|SENSITIVE|EMAIL|PHONE|URL)_REDACTED\]|\[REDACTED\]|%5BREDACTED%5D/giu;
 export const EVIDENCE_KIND_GRADES = Object.freeze({
   'platform-timing': 'A',
   'transport-fact': 'A',
@@ -114,6 +123,94 @@ export function canonicalizeEvidenceRecord(record) {
   return canonical;
 }
 
+export function createEvidenceManifestItem(record, options = {}) {
+  const canonicalRecord = canonicalizeEvidenceRecord(record);
+  const values = readEvidenceFields(
+    options,
+    MANIFEST_OPTION_FIELDS,
+    'evidence manifest options'
+  );
+  assertSummary(values.summary);
+  assertManifestVisibility(values.visibility);
+  const summary = redactEvidence(values.summary, values.secrets ?? []);
+  const count = countInsertedRedactions(values.summary, summary);
+  return validateEvidenceManifestItem({
+    evidenceId: canonicalRecord.evidenceId,
+    runId: canonicalRecord.runId,
+    grade: canonicalRecord.grade,
+    kind: canonicalRecord.kind,
+    testId: canonicalRecord.testId,
+    turnIndex: canonicalRecord.turnIndex ?? null,
+    repeatIndex: canonicalRecord.repeatIndex ?? null,
+    occurredAt: canonicalRecord.capturedAt,
+    summary,
+    payloadHash: canonicalRecord.payloadHash,
+    recordHash: canonicalRecord.recordHash,
+    visibility: values.visibility,
+    redaction: {
+      status: count > 0 ? 'applied' : 'not-required',
+      count
+    }
+  });
+}
+
+export function validateEvidenceManifestItem(item) {
+  const values = readEvidenceFields(item, MANIFEST_FIELDS, 'evidence manifest item');
+  for (const field of MANIFEST_FIELDS) {
+    if (!Object.hasOwn(values, field)) {
+      throw new TypeError(`evidence manifest item requires ${field}`);
+    }
+  }
+  assertSafeId(values.evidenceId, 'evidenceId');
+  assertSafeId(values.runId, 'runId');
+  assertSafeId(values.testId, 'testId');
+  if (!EVIDENCE_GRADES.has(values.grade)) throw new TypeError('invalid evidence manifest grade');
+  if (!Object.hasOwn(EVIDENCE_KIND_GRADES, values.kind)) {
+    throw new TypeError('invalid evidence manifest kind');
+  }
+  if (EVIDENCE_KIND_GRADES[values.kind] !== values.grade) {
+    throw new TypeError('evidence manifest grade does not match kind');
+  }
+  assertManifestIndex(values.turnIndex, 'turnIndex');
+  assertManifestIndex(values.repeatIndex, 'repeatIndex');
+  assertIsoTimestamp(values.occurredAt, 'occurredAt');
+  assertSummary(values.summary);
+  assertHash(values.payloadHash, 'payloadHash');
+  assertHash(values.recordHash, 'recordHash');
+  assertManifestVisibility(values.visibility);
+  const redaction = validateManifestRedaction(values.redaction);
+  const expectedRecordHash = hashRecordCommitment({
+    evidenceId: values.evidenceId,
+    evidenceVersion: '1.0',
+    runId: values.runId,
+    grade: values.grade,
+    kind: values.kind,
+    testId: values.testId,
+    turnIndex: values.turnIndex ?? undefined,
+    repeatIndex: values.repeatIndex ?? undefined,
+    capturedAt: values.occurredAt,
+    payloadHash: values.payloadHash
+  });
+  if (values.recordHash !== expectedRecordHash) {
+    throw new TypeError('evidence manifest record hash commitment mismatch');
+  }
+  return deepFreeze({
+    evidenceId: values.evidenceId,
+    runId: values.runId,
+    grade: values.grade,
+    kind: values.kind,
+    testId: values.testId,
+    turnIndex: values.turnIndex,
+    repeatIndex: values.repeatIndex,
+    occurredAt: values.occurredAt,
+    summary: values.summary,
+    payloadHash: values.payloadHash,
+    recordHash: values.recordHash,
+    visibility: values.visibility,
+    redaction
+  });
+}
+
 function hashRecordCommitment(record) {
   const commitment = {
     evidenceId: record.evidenceId,
@@ -149,6 +246,58 @@ export function hashEvidencePayload(payload) {
 
 export function deepFreezeEvidence(value) {
   return deepFreeze(value);
+}
+
+function countInsertedRedactions(original, redacted) {
+  if (original === redacted) return 0;
+  return Math.max(1, countRedactionMarkers(redacted) - countRedactionMarkers(original));
+}
+
+function countRedactionMarkers(value) {
+  return value.match(REDACTION_MARKER_PATTERN)?.length ?? 0;
+}
+
+function assertSummary(value) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new TypeError('evidence manifest summary must be a non-empty string');
+  }
+}
+
+function assertManifestVisibility(value) {
+  if (!MANIFEST_VISIBILITIES.has(value)) {
+    throw new TypeError('invalid evidence manifest visibility');
+  }
+}
+
+function assertManifestIndex(value, field) {
+  if (value !== null && (!Number.isSafeInteger(value) || value < 0)) {
+    throw new TypeError(`evidence manifest ${field} must be null or a non-negative integer`);
+  }
+}
+
+function assertHash(value, field) {
+  if (typeof value !== 'string' || !HASH_PATTERN.test(value)) {
+    throw new TypeError(`evidence manifest ${field} must be a SHA-256 hash`);
+  }
+}
+
+function validateManifestRedaction(value) {
+  const redaction = readEvidenceFields(value, REDACTION_FIELDS, 'evidence manifest redaction');
+  for (const field of REDACTION_FIELDS) {
+    if (!Object.hasOwn(redaction, field)) {
+      throw new TypeError(`evidence manifest redaction requires ${field}`);
+    }
+  }
+  if (
+    !Number.isSafeInteger(redaction.count) ||
+    redaction.count < 0 ||
+    (redaction.status === 'applied' && redaction.count === 0) ||
+    (redaction.status === 'not-required' && redaction.count !== 0) ||
+    !['applied', 'not-required'].includes(redaction.status)
+  ) {
+    throw new TypeError('invalid evidence manifest redaction status or count');
+  }
+  return { status: redaction.status, count: redaction.count };
 }
 
 function redactValue(value, secrets, ancestors) {

@@ -1,4 +1,7 @@
-import { redactEvidence } from './evidence.js';
+import {
+  redactEvidence,
+  validateEvidenceManifestItem
+} from './evidence.js';
 
 const COMMON_RESULT_FIELDS = [
   'id', 'status', 'stage', 'progress', 'score', 'confidence', 'coverage',
@@ -23,6 +26,9 @@ export function projectEvaluation(evaluation, { audience = 'public', secrets = [
     createdAt: projectPrimitive(evaluation.createdAt, secrets),
     updatedAt: projectPrimitive(evaluation.updatedAt, secrets),
     revision: projectPrimitive(evaluation.revision, secrets),
+    evaluationWindow: pick(evaluation.evaluationWindow, [
+      'firstRunAt', 'lastRunAt'
+    ], {}, secrets),
     execution: pickResult(evaluation.execution, [
       'status', 'stage', 'progress', 'startedAt', 'completedAt', 'failedAt',
       'cancelledAt', 'interruptedAt'
@@ -58,8 +64,15 @@ function projectManifest(manifest, audience, secrets) {
   return {
     version: projectPrimitive(manifest?.version, secrets),
     items: items
-      .filter((item) => audience === 'admin' || item?.visibility === 'public')
-      .map((item) => projectManifestItem(item, secrets))
+      .flatMap((item) => {
+        try {
+          const canonical = validateEvidenceManifestItem(item);
+          if (audience !== 'admin' && canonical.visibility !== 'public') return [];
+          return [projectManifestItem(canonical, secrets)];
+        } catch {
+          return [];
+        }
+      })
   };
 }
 

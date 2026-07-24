@@ -2,12 +2,29 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   EVIDENCE_KIND_GRADES,
+  createEvidenceManifestItem,
   createEvidenceRecord,
-  redactEvidence
+  redactEvidence,
+  validateEvidenceManifestItem
 } from '../src/evidence.js';
 
 const VALID_JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjMifQ.signature';
 const UNSECURED_JWT = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ.';
+
+function manifestRecord(overrides = {}) {
+  return createEvidenceRecord({
+    evidenceId: 'ev_manifest',
+    runId: 'run_manifest',
+    grade: 'A',
+    kind: 'platform-timing',
+    testId: 'test_manifest',
+    turnIndex: 1,
+    repeatIndex: 2,
+    capturedAt: '2026-07-24T10:00:00.000Z',
+    payload: { durationMs: 30 },
+    ...overrides
+  });
+}
 
 test('creates deterministic deeply immutable evidence records without retaining mutable payload input', () => {
   const payload = { z: [1, { ok: true }], a: 'value' };
@@ -73,6 +90,73 @@ test('recordHash commits every evidence identity and metadata field', () => {
     const changed = createEvidenceRecord({ ...base, ...patch });
     assert.equal(changed.payloadHash, original.payloadHash);
     assert.notEqual(changed.recordHash, original.recordHash, JSON.stringify(patch));
+  }
+});
+
+test('builds a strict redacted manifest item from one canonical evidence record', () => {
+  const record = manifestRecord();
+  const manifest = createEvidenceManifestItem(record, {
+    summary: 'Completed using manifest-secret',
+    visibility: 'public',
+    secrets: ['manifest-secret']
+  });
+
+  assert.deepEqual(manifest, {
+    evidenceId: record.evidenceId,
+    runId: record.runId,
+    grade: record.grade,
+    kind: record.kind,
+    testId: record.testId,
+    turnIndex: record.turnIndex,
+    repeatIndex: record.repeatIndex,
+    occurredAt: record.capturedAt,
+    summary: 'Completed using [SECRET_REDACTED]',
+    payloadHash: record.payloadHash,
+    recordHash: record.recordHash,
+    visibility: 'public',
+    redaction: { status: 'applied', count: 1 }
+  });
+  assert.equal(Object.isFrozen(manifest), true);
+  assert.equal(Object.isFrozen(manifest.redaction), true);
+  assert.deepEqual(validateEvidenceManifestItem(manifest), manifest);
+
+  const withoutCoordinates = createEvidenceManifestItem(manifestRecord({
+    evidenceId: 'ev_manifest_without_coordinates',
+    turnIndex: undefined,
+    repeatIndex: undefined
+  }), {
+    summary: 'No sensitive data',
+    visibility: 'admin'
+  });
+  assert.equal(withoutCoordinates.turnIndex, null);
+  assert.equal(withoutCoordinates.repeatIndex, null);
+  assert.deepEqual(withoutCoordinates.redaction, { status: 'not-required', count: 0 });
+});
+
+test('rejects manifest fields that are missing, malformed, or detached from the record commitment', () => {
+  const manifest = createEvidenceManifestItem(manifestRecord(), {
+    summary: 'Completed',
+    visibility: 'public'
+  });
+  const { recordHash: _recordHash, ...withoutRecordHash } = manifest;
+  const invalidItems = [
+    withoutRecordHash,
+    { ...manifest, recordHash: '0'.repeat(64) },
+    { ...manifest, payloadHash: '0'.repeat(64) },
+    { ...manifest, grade: 'B', kind: 'protocol-object' },
+    { ...manifest, kind: 'timing' },
+    { ...manifest, occurredAt: '2026-07-24T10:00:01.000Z' },
+    { ...manifest, turnIndex: 3 },
+    { ...manifest, visibility: 'private' },
+    { ...manifest, redaction: { status: 'applied', count: -1 } },
+    { ...manifest, unknownField: true }
+  ];
+
+  for (const item of invalidItems) {
+    assert.throws(
+      () => validateEvidenceManifestItem(item),
+      /manifest|record hash|commitment|grade|kind|timestamp|visibility|redaction|unknown/i
+    );
   }
 });
 

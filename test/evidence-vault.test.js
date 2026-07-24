@@ -12,8 +12,12 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createEvidenceRecord } from '../src/evidence.js';
+import {
+  createEvidenceManifestItem,
+  createEvidenceRecord
+} from '../src/evidence.js';
 import { EvidenceVault } from '../src/evidence-vault.js';
+import { projectEvaluation } from '../src/evaluation-projection.js';
 
 function fixtureRecord(evidenceId = 'ev_vault') {
   return createEvidenceRecord({
@@ -53,6 +57,41 @@ test('stores authenticated AES-256-GCM envelopes append-only and round-trips imm
       assert.equal((await stat(file)).mode & 0o777, 0o600);
     }
     await assert.rejects(() => vault.put(record), (error) => error.code === 'EEXIST');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('round-trips a projected canonical manifest commitment through the Vault', async () => {
+  const root = path.join(tmpdir(), `agent-review-vault-manifest-${process.pid}-${Date.now()}`);
+  const vault = new EvidenceVault({
+    root,
+    evaluationId: 'eval_manifest_flow',
+    key: randomBytes(32).toString('base64')
+  });
+  const record = fixtureRecord('ev_manifest_flow');
+  const manifest = createEvidenceManifestItem(record, {
+    summary: 'Completed with vault-secret',
+    visibility: 'public',
+    secrets: ['vault-secret']
+  });
+  const evaluation = {
+    schemaVersion: 2,
+    id: 'eval_manifest_flow',
+    evidenceManifest: { version: '1.0', items: [manifest] }
+  };
+
+  try {
+    await vault.put(record);
+    for (const audience of ['public', 'admin']) {
+      const projectedManifest = projectEvaluation(evaluation, { audience })
+        .evidenceManifest.items[0];
+      assert.equal(projectedManifest.recordHash, record.recordHash);
+      assert.deepEqual(
+        await vault.get(projectedManifest.evidenceId, projectedManifest.recordHash),
+        record
+      );
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { projectEvaluation } from '../src/evaluation-projection.js';
+import {
+  createEvidenceManifestItem,
+  createEvidenceRecord
+} from '../src/evidence.js';
 
 const UNSECURED_JWT = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ.';
 const FLAT_ASSIGNMENTS = [
@@ -10,6 +14,21 @@ const FLAT_ASSIGNMENTS = [
   'credentials=projection-credential-secret',
   `jwt=${UNSECURED_JWT}`
 ].join('; ');
+const PUBLIC_RECORD = createEvidenceRecord({
+  evidenceId: 'ev_public',
+  runId: 'run_1',
+  grade: 'A',
+  kind: 'platform-timing',
+  testId: 'test_1',
+  turnIndex: 0,
+  repeatIndex: 0,
+  capturedAt: '2026-07-24T10:00:30.000Z',
+  payload: { durationMs: 30 }
+});
+const PUBLIC_MANIFEST = createEvidenceManifestItem(PUBLIC_RECORD, {
+  summary: 'Completed in 30ms',
+  visibility: 'public'
+});
 
 function unsafeEvaluation() {
   return {
@@ -18,6 +37,11 @@ function unsafeEvaluation() {
     createdAt: '2026-07-24T10:00:00.000Z',
     updatedAt: '2026-07-24T10:01:00.000Z',
     revision: 3,
+    evaluationWindow: {
+      firstRunAt: '2026-07-24T10:00:15.000Z',
+      lastRunAt: null,
+      endpointHash: 'must-not-project'
+    },
     execution: {
       status: 'running',
       stage: 'qualification',
@@ -35,22 +59,7 @@ function unsafeEvaluation() {
     qualification: { status: 'passed', attemptRunIds: ['run_1'], hiddenInput: 'hidden-secret' },
     evidenceManifest: {
       version: '1.0',
-      items: [{
-        evidenceId: 'ev_public',
-        runId: 'run_1',
-        grade: 'A',
-        kind: 'timing',
-        testId: 'test_1',
-        turnIndex: 0,
-        repeatIndex: 0,
-        occurredAt: '2026-07-24T10:00:30.000Z',
-        summary: 'Completed in 30ms',
-        payloadHash: 'c'.repeat(64),
-        recordHash: 'd'.repeat(64),
-        visibility: 'public',
-        redaction: { status: 'applied', count: 2 },
-        payload: { raw: 'raw-payload-secret' }
-      }]
+      items: [structuredClone(PUBLIC_MANIFEST)]
     },
     objectiveCapability: { status: 'pending', score: null, hiddenTests: ['hidden-secret'] },
     absoluteReview: { status: 'pending-model-review', authorization: 'review-secret' },
@@ -79,10 +88,14 @@ test('constructs a public V2 projection from explicit allow-listed fields', () =
   const serialized = JSON.stringify(projection);
 
   assert.deepEqual(Object.keys(projection), [
-    'schemaVersion', 'id', 'createdAt', 'updatedAt', 'revision', 'execution',
-    'governance', 'qualification', 'evidenceManifest', 'objectiveCapability',
-    'absoluteReview', 'resultV2'
+    'schemaVersion', 'id', 'createdAt', 'updatedAt', 'revision',
+    'evaluationWindow', 'execution', 'governance', 'qualification',
+    'evidenceManifest', 'objectiveCapability', 'absoluteReview', 'resultV2'
   ]);
+  assert.deepEqual(projection.evaluationWindow, {
+    firstRunAt: '2026-07-24T10:00:15.000Z',
+    lastRunAt: null
+  });
   assert.deepEqual(projection.execution, {
     status: 'running',
     stage: 'qualification',
@@ -92,19 +105,19 @@ test('constructs a public V2 projection from explicit allow-listed fields', () =
     evidenceId: 'ev_public',
     runId: 'run_1',
     grade: 'A',
-    kind: 'timing',
+    kind: 'platform-timing',
     testId: 'test_1',
     turnIndex: 0,
     repeatIndex: 0,
     occurredAt: '2026-07-24T10:00:30.000Z',
     summary: 'Completed in 30ms',
-    payloadHash: 'c'.repeat(64),
-    recordHash: 'd'.repeat(64),
+    payloadHash: PUBLIC_RECORD.payloadHash,
+    recordHash: PUBLIC_RECORD.recordHash,
     visibility: 'public',
-    redaction: { status: 'applied', count: 2 }
+    redaction: { status: 'not-required', count: 0 }
   });
   for (const secret of [
-    'projection-secret', 'card-secret', 'hidden-secret', 'raw-payload-secret',
+    'projection-secret', 'card-secret', 'hidden-secret',
     'review-secret', 'replica-seal-secret', 'replica-secret',
     'sensitive-log-secret', 'result-secret', 'raw-top-level-secret'
   ]) {
@@ -144,18 +157,19 @@ test('type-checks and redacts every projected leaf, including allowed summaries 
   source.execution.stage = 'Bearer stage.secret.token';
   source.qualification.failureCode = 'Cookie: session=qualification-secret';
   source.evidenceManifest.items[0].summary = 'Cookie: sid=manifest-secret';
-  source.evidenceManifest.items.push({
+  const hiddenRecord = createEvidenceRecord({
     evidenceId: 'ev_hidden',
     runId: 'run_hidden',
     grade: 'B',
     kind: 'protocol-object',
     testId: 'test_hidden',
-    occurredAt: '2026-07-24T10:00:31.000Z',
-    summary: 'hidden input = hidden-manifest-secret',
-    payloadHash: 'e'.repeat(64),
-    visibility: 'admin',
-    redaction: { status: 'applied', count: 1 }
+    capturedAt: '2026-07-24T10:00:31.000Z',
+    payload: { hidden: true }
   });
+  source.evidenceManifest.items.push(structuredClone(createEvidenceManifestItem(hiddenRecord, {
+    summary: 'hidden input = hidden-manifest-secret',
+    visibility: 'admin'
+  })));
   source.objectiveCapability.reason = 'raw authorization: objective-secret';
   source.absoluteReview.findings = ['hidden input = finding-secret'];
   source.resultV2.repairSuggestion = 'fetch https://example.test/?token=repair-secret';
@@ -190,4 +204,23 @@ test('type-checks and redacts every projected leaf, including allowed summaries 
   const hidden = admin.evidenceManifest.items.find((item) => item.evidenceId === 'ev_hidden');
   assert.ok(hidden);
   assert.equal(Object.hasOwn(hidden, 'summary'), false);
+});
+
+test('fails closed instead of projecting malformed or commitment-mismatched manifest items', () => {
+  const source = unsafeEvaluation();
+  const valid = structuredClone(PUBLIC_MANIFEST);
+  const { recordHash: _recordHash, ...missingRecordHash } = valid;
+  source.evidenceManifest.items = [
+    valid,
+    missingRecordHash,
+    { ...valid, recordHash: '0'.repeat(64) },
+    { ...valid, grade: 'B', kind: 'protocol-object' },
+    { ...valid, kind: 'timing' },
+    { ...valid, occurredAt: '2026-07-24T10:00:31.000Z' }
+  ];
+
+  for (const audience of ['public', 'admin']) {
+    const projection = projectEvaluation(source, { audience });
+    assert.deepEqual(projection.evidenceManifest.items, [PUBLIC_MANIFEST]);
+  }
 });
