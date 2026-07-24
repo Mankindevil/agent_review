@@ -24,6 +24,7 @@ PUBLIC_REQUEST_FIELDS = {
 }
 HOT_WEIGHTS = {"ret1": .25, "ret5": .20, "breadth5": .20, "turnover_heat": .15,
                "acceleration": .15, "lhb_activity": .05}
+HOT_REQUIRED_COMPONENTS = ("ret1", "ret5", "breadth5", "turnover_heat", "acceleration")
 SELL_WEIGHTS = {"downside_volume": .25, "lhb_net_sell": .25, "northbound_reduction": .20,
                 "margin_contraction": .15, "discount_event": .15}
 POTENTIAL_WEIGHTS = {"trend": .25, "theme": .15, "quality": .20, "valuation": .15,
@@ -428,7 +429,12 @@ def compute_hot_topics(groups, lhb_available=True):
         values = {key: row.get(key) for key in HOT_WEIGHTS}
         if not lhb_available:
             values["lhb_activity"] = None
-        score, coverage, used = effective_weights(values, HOT_WEIGHTS, 5)
+        if all(_is_finite(values.get(key)) for key in HOT_REQUIRED_COMPONENTS):
+            score, coverage, used = effective_weights(values, HOT_WEIGHTS, 5)
+        else:
+            used = [key for key in HOT_WEIGHTS if _is_finite(values.get(key))]
+            coverage = sum(HOT_WEIGHTS[key] for key in used)
+            score = None
         ranked.append({**row, "score": score, "weightCoverage": coverage, "componentsUsed": used})
     ranked.sort(key=lambda item: (-(item["score"] if item["score"] is not None else -1), _identity(item)))
     return {"ranked": ranked, "excluded": excluded}

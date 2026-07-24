@@ -1330,6 +1330,15 @@ class MarketWorkerTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in result["ranked"]], ["eligible"])
         self.assertEqual(result["excluded"][0]["reason"], "MIN_CONSTITUENTS")
 
+    def test_hot_topic_optional_lhb_cannot_replace_a_required_component(self):
+        result = worker.compute_hot_topics([
+            {"id": "missing-ret1", "constituent_count": 10, "coverage": .9,
+             "ret1": None, "ret5": 5, "breadth5": .8, "turnover_heat": 1.7,
+             "acceleration": .03, "lhb_activity": 4},
+        ])
+
+        self.assertIsNone(result["ranked"][0]["score"])
+
     def test_sell_pressure_requires_three_independent_components(self):
         result = worker.compute_sell_pressure([
             {"symbol": "000001.SZ", "downside_volume": 90, "lhb_net_sell": 80,
