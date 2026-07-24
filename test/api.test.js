@@ -45,11 +45,13 @@ const v2Fixture = {
     runtimeId: 'legacy-runtime',
     skill: { name: 'leak', description: 'api-skill-secret', instructions: [], tools: [] }
   }],
+  auditEvents: [{ payload: 'api-audit-secret' }],
   rawEvidence: { value: 'api-raw-top-secret' },
   logs: [{ message: 'api-sensitive-log-secret' }]
 };
 await writeFile(process.env.DATA_FILE, JSON.stringify({ schemaVersion: '1.0', items: [v2Fixture] }));
-const { server } = await import('../server.js');
+const serverModule = await import('../server.js');
+const { server, serializeEvaluationForResponse } = serverModule;
 
 let origin;
 test.before(async () => {
@@ -77,7 +79,8 @@ test('health endpoint responds', async () => {
 test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes', async () => {
   const forbidden = [
     'api-auth-secret', 'api-mapping-secret', 'api-hidden-secret', 'api-raw-secret',
-    'api-seal-secret', 'api-raw-top-secret', 'api-sensitive-log-secret'
+    'api-seal-secret', 'api-card-secret', 'api-skill-secret', 'api-audit-secret',
+    'api-raw-top-secret', 'api-sensitive-log-secret'
   ];
   const listResponse = await fetch(`${origin}/api/evaluations`);
   const listed = (await listResponse.json()).find((item) => item.id === v2Fixture.id);
@@ -90,11 +93,26 @@ test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes'
   assert.equal(detailResponse.status, 200);
   for (const secret of forbidden) assert.equal(detailText.includes(secret), false, `detail: ${secret}`);
 
+  const createProjection = serializeEvaluationForResponse(v2Fixture);
+  const createProjectionText = JSON.stringify(createProjection);
+  assert.equal(createProjection.schemaVersion, 2);
+  for (const secret of forbidden) assert.equal(createProjectionText.includes(secret), false, `create: ${secret}`);
+
+  for (const action of ['cancel', 'retry']) {
+    const response = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/${action}`, {
+      method: 'POST',
+      headers: action === 'retry' ? { 'content-type': 'application/json' } : undefined,
+      body: action === 'retry' ? JSON.stringify({ type: 'review', key: 'gpt' }) : undefined
+    });
+    const text = await response.text();
+    assert.equal(response.status, 409, action);
+    for (const secret of forbidden) assert.equal(text.includes(secret), false, `${action}: ${secret}`);
+  }
+
   const streamResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/events`);
   assert.equal(streamResponse.status, 200);
   const reader = streamResponse.body.getReader();
   const firstEvent = new TextDecoder().decode((await reader.read()).value);
-  await reader.cancel();
   assert.match(firstEvent, /^data: /);
   for (const secret of forbidden) assert.equal(firstEvent.includes(secret), false, `SSE: ${secret}`);
 
@@ -110,6 +128,15 @@ test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes'
   assert.equal(deleted.id, v2Fixture.id);
   assert.equal(deleted.archived, true);
   assert.equal(deleted.deleted, false);
+
+  const nextEvent = await Promise.race([
+    reader.read(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('missing subsequent SSE event')), 500))
+  ]);
+  const nextEventText = new TextDecoder().decode(nextEvent.value);
+  await reader.cancel();
+  assert.match(nextEventText, /^data: /);
+  for (const secret of forbidden) assert.equal(nextEventText.includes(secret), false, `subsequent SSE: ${secret}`);
 
   const archivedResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
   const archived = await archivedResponse.json();

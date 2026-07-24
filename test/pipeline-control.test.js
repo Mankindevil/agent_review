@@ -39,6 +39,34 @@ test('cancels an active evaluation and aborts its controller', async () => {
   assert.match(cancelled.logs.at(-1).detail, /保留/);
 });
 
+test('rejects V2 cancel and retry before they can enter the legacy mutation path', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v2-guard-${process.pid}.json`));
+  const pipeline = new EvaluationPipeline(store, new EventEmitter());
+  const item = {
+    schemaVersion: 2,
+    id: 'eval_v2_guard',
+    revision: 0,
+    createdAt: '2026-07-24T10:00:00.000Z',
+    updatedAt: '2026-07-24T10:00:00.000Z',
+    execution: { status: 'running', stage: 'qualification', progress: 10 },
+    rawEvidence: { secret: 'pipeline-v2-secret' },
+    logs: []
+  };
+  await store.set(item);
+
+  await assert.rejects(
+    () => pipeline.cancel(item.id),
+    (error) => error.statusCode === 409 && /V2/i.test(error.message)
+  );
+  await assert.rejects(
+    () => pipeline.retry(item.id, { type: 'review', key: 'gpt' }),
+    (error) => error.statusCode === 409 && /V2/i.test(error.message)
+  );
+  assert.equal(Object.hasOwn(store.get(item.id), 'status'), false);
+  assert.equal(store.get(item.id).execution.status, 'running');
+  assert.equal(store.get(item.id).rawEvidence.secret, 'pipeline-v2-secret');
+});
+
 test('marks persisted running evaluations as interrupted after a restart', async () => {
   const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-recover-${process.pid}.json`));
   const pipeline = new EvaluationPipeline(store, new EventEmitter());

@@ -81,17 +81,24 @@ export const server = createServer(async (request, response) => {
     }
     if (request.method === 'POST' && url.pathname === '/api/evaluations') {
       const item = await pipeline.create(await readJsonBody(request));
-      return json(response, 202, item);
+      return json(response, 202, serializeEvaluationForResponse(item));
     }
     const cancelMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/cancel$/);
     if (request.method === 'POST' && cancelMatch) {
       const item = await pipeline.cancel(cancelMatch[1]);
-      return item ? json(response, 200, item) : json(response, 404, { error: '评测不存在' });
+      return item
+        ? json(response, 200, serializeEvaluationForResponse(item))
+        : json(response, 404, { error: '评测不存在' });
     }
     const retryMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/retry$/);
     if (request.method === 'POST' && retryMatch) {
+      if (store.get(retryMatch[1])?.schemaVersion === 2) {
+        return json(response, 409, { error: 'V2 retry service is not enabled' });
+      }
       const item = await pipeline.retry(retryMatch[1], await readJsonBody(request));
-      return item ? json(response, 202, item) : json(response, 404, { error: '评测不存在' });
+      return item
+        ? json(response, 202, serializeEvaluationForResponse(item))
+        : json(response, 404, { error: '评测不存在' });
     }
     const skillMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/builds\/([^/]+)\/skill$/);
     if (request.method === 'GET' && skillMatch) {
@@ -123,6 +130,7 @@ export const server = createServer(async (request, response) => {
           ...current,
           archivedAt: new Date().toISOString()
         }));
+        events.emit(match[1], archived);
         return json(response, 200, {
           id: match[1],
           archived: true,
@@ -198,6 +206,12 @@ function authorizedDataRequest(request, expected) {
 }
 function json(response, status, payload) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); response.end(JSON.stringify(payload)); }
 function summary(item) { return { id: item.id, name: item.agentCard.name, createdAt: item.createdAt, status: item.status, progress: item.progress, tier: item.roast?.tier, score: item.averages?.submitted }; }
+
+export function serializeEvaluationForResponse(item) {
+  return item?.schemaVersion === 2
+    ? projectEvaluation(item, { audience: 'public' })
+    : item;
+}
 
 if (process.env.NODE_ENV !== 'test') {
   const { host, port } = resolveServerAddress();

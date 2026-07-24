@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createEvidenceRecord, redactEvidence } from '../src/evidence.js';
+import {
+  EVIDENCE_KIND_GRADES,
+  createEvidenceRecord,
+  redactEvidence
+} from '../src/evidence.js';
+
+const VALID_JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjMifQ.signature';
 
 test('creates deterministic deeply immutable evidence records without retaining mutable payload input', () => {
   const payload = { z: [1, { ok: true }], a: 'value' };
@@ -8,7 +14,7 @@ test('creates deterministic deeply immutable evidence records without retaining 
     evidenceId: 'ev_immutable',
     runId: 'run_1',
     grade: 'A',
-    kind: 'transport',
+    kind: 'transport-fact',
     testId: 'test_1',
     turnIndex: 0,
     repeatIndex: 0,
@@ -19,7 +25,8 @@ test('creates deterministic deeply immutable evidence records without retaining 
     evidenceId: 'ev_same_payload',
     runId: 'run_1',
     grade: 'B',
-    kind: 'protocol',
+    testId: 'test_same_payload',
+    kind: 'protocol-object',
     capturedAt: '2026-07-24T10:00:01.000Z',
     payload: { a: 'value', z: [1, { ok: true }] }
   });
@@ -37,19 +44,176 @@ test('creates deterministic deeply immutable evidence records without retaining 
 });
 
 test('rejects invalid evidence grades and non-JSON payloads', () => {
-  assert.throws(() => createEvidenceRecord({ grade: 'E', payload: {} }), /invalid evidence grade/i);
-  assert.throws(() => createEvidenceRecord({ grade: 'A', payload: { value: undefined } }), /JSON/i);
+  const valid = {
+    evidenceId: 'ev_validation',
+    runId: 'run_validation',
+    testId: 'test_validation',
+    grade: 'A',
+    kind: 'transport-fact',
+    capturedAt: '2026-07-24T10:00:00.000Z',
+    payload: {}
+  };
+  assert.throws(() => createEvidenceRecord({ ...valid, grade: 'E' }), /grade/i);
+  assert.throws(() => createEvidenceRecord({ ...valid, payload: { value: undefined } }), /JSON/i);
+});
+
+test('exports and enforces the closed evidence kind-to-grade contract', () => {
+  assert.deepEqual(EVIDENCE_KIND_GRADES, {
+    'platform-timing': 'A',
+    'transport-fact': 'A',
+    'protocol-object': 'B',
+    'protocol-request': 'B',
+    'protocol-response': 'B',
+    'protocol-event': 'B',
+    'agent-output': 'B',
+    'agent-card-claim': 'C',
+    'agent-example-claim': 'C',
+    'agent-claim': 'C',
+    'reviewer-inference': 'D'
+  });
+  assert.equal(Object.isFrozen(EVIDENCE_KIND_GRADES), true);
+
+  for (const [kind, grade] of Object.entries(EVIDENCE_KIND_GRADES)) {
+    const record = createEvidenceRecord({
+      evidenceId: `ev_${kind.replaceAll('-', '_')}`,
+      runId: 'run_kind_contract',
+      testId: 'test_kind_contract',
+      grade,
+      kind,
+      capturedAt: '2026-07-24T10:00:00.000Z',
+      payload: {}
+    });
+    assert.equal(record.grade, grade);
+    assert.equal(record.kind, kind);
+  }
+
+  assert.throws(() => createEvidenceRecord({
+    evidenceId: 'ev_grade_escalation',
+    runId: 'run_grade_escalation',
+    testId: 'test_grade_escalation',
+    grade: 'A',
+    kind: 'reviewer-inference',
+    capturedAt: '2026-07-24T10:00:00.000Z',
+    payload: {}
+  }), /grade.*kind|kind.*grade/i);
+});
+
+test('validates evidence identifiers, timestamp, coordinates, and unknown fields', () => {
+  const valid = {
+    evidenceId: 'ev_fields',
+    runId: 'run_fields',
+    testId: 'test_fields',
+    grade: 'B',
+    kind: 'protocol-object',
+    capturedAt: '2026-07-24T10:00:00.000Z',
+    turnIndex: 0,
+    repeatIndex: 0,
+    payload: {}
+  };
+  for (const patch of [
+    { evidenceId: '../escape' },
+    { runId: '' },
+    { testId: 42 },
+    { kind: 'unknown-kind' },
+    { capturedAt: 'not-a-timestamp' },
+    { turnIndex: -1 },
+    { repeatIndex: 1.5 },
+    { unknownField: 'not-allowed' }
+  ]) {
+    assert.throws(() => createEvidenceRecord({ ...valid, ...patch }), /evidence|runId|testId|kind|capturedAt|index|unknown/i);
+  }
+});
+
+test('preserves and freezes prototype-named JSON keys in canonical evidence', () => {
+  const payload = JSON.parse(
+    '{"__proto__":{"claim":"grade-A-looking"},"constructor":{"safe":1},"prototype":{"safe":2}}'
+  );
+  const record = createEvidenceRecord({
+    evidenceId: 'ev_prototype_keys',
+    runId: 'run_prototype_keys',
+    testId: 'test_prototype_keys',
+    grade: 'B',
+    kind: 'protocol-object',
+    capturedAt: '2026-07-24T10:00:00.000Z',
+    payload
+  });
+  const empty = createEvidenceRecord({
+    evidenceId: 'ev_empty',
+    runId: 'run_empty',
+    testId: 'test_empty',
+    grade: 'B',
+    kind: 'protocol-object',
+    capturedAt: '2026-07-24T10:00:00.000Z',
+    payload: {}
+  });
+
+  assert.deepEqual(Object.keys(record.payload).sort(), ['__proto__', 'constructor', 'prototype']);
+  assert.equal(Object.hasOwn(record.payload, '__proto__'), true);
+  assert.equal(record.payload.__proto__.claim, 'grade-A-looking');
+  assert.equal(Object.isFrozen(record.payload.__proto__), true);
+  assert.notEqual(record.payloadHash, empty.payloadHash);
+  assert.match(JSON.stringify(record.payload), /"__proto__"/);
+  assert.throws(() => { record.payload.__proto__.claim = 'mutated'; }, TypeError);
+
+  const nullPrototype = Object.create(null);
+  Object.defineProperty(nullPrototype, '__proto__', {
+    value: { preserved: true },
+    enumerable: true,
+    writable: true,
+    configurable: true
+  });
+  const nullRecord = createEvidenceRecord({
+    evidenceId: 'ev_null_prototype',
+    runId: 'run_null_prototype',
+    testId: 'test_null_prototype',
+    grade: 'B',
+    kind: 'protocol-object',
+    capturedAt: '2026-07-24T10:00:00.000Z',
+    payload: nullPrototype
+  });
+  assert.equal(Object.hasOwn(nullRecord.payload, '__proto__'), true);
+  assert.equal(nullRecord.payload.__proto__.preserved, true);
+});
+
+test('rejects accessors, symbols, and non-enumerable properties without invoking getters', () => {
+  let getterReads = 0;
+  const accessor = {};
+  Object.defineProperty(accessor, 'value', {
+    get() { getterReads += 1; return 'secret'; },
+    enumerable: true
+  });
+  const symbol = { value: 'safe' };
+  symbol[Symbol('hidden')] = 'secret';
+  const nonEnumerable = { value: 'safe' };
+  Object.defineProperty(nonEnumerable, 'hidden', { value: 'secret', enumerable: false });
+
+  for (const value of [accessor, symbol, nonEnumerable]) {
+    assert.throws(
+      () => createEvidenceRecord({
+        evidenceId: 'ev_invalid_descriptor',
+        runId: 'run_invalid_descriptor',
+        testId: 'test_invalid_descriptor',
+        grade: 'B',
+        kind: 'protocol-object',
+        capturedAt: '2026-07-24T10:00:00.000Z',
+        payload: value
+      }),
+      /JSON|accessor|symbol|enumerable/i
+    );
+    assert.throws(() => redactEvidence(value), /JSON|accessor|symbol|enumerable/i);
+  }
+  assert.equal(getterReads, 0);
 });
 
 test('recursively redacts credentials, URL secrets, PII, JWTs, cookies, and explicit run secrets', () => {
   const input = {
     headers: {
-      authorization: 'Bearer aaa.bbb.ccc',
+      authorization: `Bearer ${VALID_JWT}`,
       cookie: 'sid=cookie-value',
       harmless: 'keep-me'
     },
     url: 'https://agent-user:agent-pass@agent.example/file?signature=url-secret&plain=also-secret',
-    message: 'mail analyst@example.com or call 13800138000; token aaa.bbb.ccc',
+    message: `mail analyst@example.com or call 13800138000; token ${VALID_JWT}`,
     nested: {
       token: 'run-secret',
       agentAuthorization: 'agent-auth-secret',
@@ -64,7 +228,7 @@ test('recursively redacts credentials, URL secrets, PII, JWTs, cookies, and expl
   const serialized = JSON.stringify(redacted);
 
   for (const secret of [
-    'aaa.bbb.ccc', 'cookie-value', 'agent-user', 'agent-pass',
+    VALID_JWT, 'cookie-value', 'agent-user', 'agent-pass',
     'url-secret', 'also-secret', 'run-secret', 'api-secret',
     'agent-auth-secret', 'refresh-secret', 'cookie-header-secret',
     'analyst@example.com', '13800138000'
@@ -79,4 +243,59 @@ test('recursively redacts credentials, URL secrets, PII, JWTs, cookies, and expl
   assert.deepEqual(input, original);
   assert.notEqual(redacted, input);
   assert.notEqual(redacted.nested, input.nested);
+});
+
+test('redacts secret-bearing keys, auth schemes, and cookie headers with stable collision keys', () => {
+  const input = JSON.parse(`{
+    "[REDACTED_KEY]": "kept",
+    "run-secret": "first",
+    "other run-secret": "second",
+    "analyst@example.com": "third",
+    "authentication": "opaque-authentication-value",
+    "authenticate": "opaque-authenticate-value",
+    "jwt": "opaque-jwt-value",
+    "basic": "Basic dXNlcjpwYXNzd29yZA==",
+    "headersText": "Authorization: Basic dXNlcjpwYXNzd29yZA==\\nSet-Cookie: prefs=\\"private-value\\"; Path=/\\nCookie: theme=dark; arbitrary=\\"quoted-value\\"",
+    "flatHeaderText": "upstream response Set-Cookie: session=flat-cookie-secret",
+    "claim": "${VALID_JWT}",
+    "ordinary": "build 10.20.30; monkey=banana; aaa.bbb.ccc"
+  }`);
+
+  const redacted = redactEvidence(input, ['run-secret']);
+  const serialized = JSON.stringify(redacted);
+
+  for (const secret of [
+    'run-secret', 'analyst@example.com', 'opaque-authentication-value',
+    'opaque-authenticate-value', 'opaque-jwt-value', 'dXNlcjpwYXNzd29yZA==',
+    'private-value', 'quoted-value', 'flat-cookie-secret', VALID_JWT
+  ]) {
+    assert.equal(serialized.includes(secret), false, secret);
+  }
+  assert.deepEqual(
+    Object.keys(redacted).filter((key) => key.startsWith('[REDACTED_KEY')).sort(),
+    ['[REDACTED_KEY]', '[REDACTED_KEY_2]', '[REDACTED_KEY_3]', '[REDACTED_KEY_4]']
+  );
+  assert.equal(redacted.authentication, '[REDACTED]');
+  assert.equal(redacted.authenticate, '[REDACTED]');
+  assert.equal(redacted.jwt, '[REDACTED]');
+  assert.equal(redacted.ordinary, 'build 10.20.30; monkey=banana; aaa.bbb.ccc');
+  assert.match(redacted.claim, /\[JWT_REDACTED\]/);
+  assert.match(redacted.headersText, /Set-Cookie: \[COOKIE_REDACTED\]/);
+  assert.match(redacted.headersText, /Cookie: \[COOKIE_REDACTED\]/);
+  assert.match(redacted.flatHeaderText, /Set-Cookie: \[COOKIE_REDACTED\]/);
+});
+
+test('redacts prototype-named JSON keys as own properties without prototype mutation', () => {
+  const input = JSON.parse(
+    '{"__proto__":{"authorization":"proto-secret"},"constructor":"safe","prototype":"safe"}'
+  );
+  const redacted = redactEvidence(input);
+
+  assert.equal(Object.getPrototypeOf(redacted), Object.prototype);
+  assert.equal(Object.hasOwn(redacted, '__proto__'), true);
+  assert.equal(redacted.__proto__.authorization, '[REDACTED]');
+  assert.equal(Object.hasOwn(redacted, 'constructor'), true);
+  assert.equal(redacted.constructor, 'safe');
+  assert.equal(redacted.prototype, 'safe');
+  assert.equal(JSON.stringify(redacted).includes('proto-secret'), false);
 });

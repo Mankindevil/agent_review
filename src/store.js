@@ -20,22 +20,42 @@ export class EvaluationStore {
     }
   }
 
-  list() { return [...this.items.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)); }
-  get(id) { return this.items.get(id); }
+  list() {
+    return sortedValues(this.items).map((item) =>
+      item.schemaVersion === 2 ? structuredClone(item) : item
+    );
+  }
+
+  get(id) {
+    const item = this.items.get(id);
+    return item?.schemaVersion === 2 ? structuredClone(item) : item;
+  }
 
   async set(item) {
     return this.enqueueMutation(async () => {
-      this.items.set(item.id, item);
-      await this.persistUnlocked();
-      return item;
+      const existing = this.items.get(item.id);
+      if (existing?.schemaVersion === 2 || (item.schemaVersion === 2 && existing)) {
+        throw Object.assign(
+          new Error('existing V2 evaluations must be updated with mutate'),
+          { statusCode: 409 }
+        );
+      }
+      const committed = item.schemaVersion === 2 ? structuredClone(item) : item;
+      const nextItems = new Map(this.items);
+      nextItems.set(item.id, committed);
+      await this.persistUnlocked(nextItems);
+      this.items = nextItems;
+      return item.schemaVersion === 2 ? structuredClone(committed) : item;
     });
   }
 
   async delete(id) {
     return this.enqueueMutation(async () => {
-      const deleted = this.items.delete(id);
-      if (!deleted) return false;
-      await this.persistUnlocked();
+      if (!this.items.has(id)) return false;
+      const nextItems = new Map(this.items);
+      nextItems.delete(id);
+      await this.persistUnlocked(nextItems);
+      this.items = nextItems;
       return true;
     });
   }
@@ -55,9 +75,12 @@ export class EvaluationStore {
       }
       next.revision = currentRevision + 1;
       next.updatedAt = new Date().toISOString();
-      this.items.set(id, next);
-      await this.persistUnlocked();
-      return structuredClone(next);
+      const committed = structuredClone(next);
+      const nextItems = new Map(this.items);
+      nextItems.set(id, committed);
+      await this.persistUnlocked(nextItems);
+      this.items = nextItems;
+      return structuredClone(committed);
     });
   }
 
@@ -71,16 +94,20 @@ export class EvaluationStore {
     return queued;
   }
 
-  async persistUnlocked() {
+  async persistUnlocked(items = this.items) {
     const snapshot = JSON.stringify({
       schemaVersion: '1.0',
-      items: this.list()
+      items: sortedValues(items)
     }, null, 2);
     await mkdir(path.dirname(this.file), { recursive: true });
     const temporary = `${this.file}.tmp`;
     await writeFile(temporary, snapshot);
     await rename(temporary, this.file);
   }
+}
+
+function sortedValues(items) {
+  return [...items.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 function readStoredItems(stored) {

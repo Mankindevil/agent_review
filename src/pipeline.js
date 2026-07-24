@@ -45,6 +45,9 @@ export class EvaluationPipeline {
   async cancel(evaluationId) {
     const item = this.store.get(evaluationId);
     if (!item) return null;
+    if (item.schemaVersion === 2) {
+      throw Object.assign(new Error('V2 cancellation service is not enabled'), { statusCode: 409 });
+    }
     if (isTerminal(item.status)) return item;
     const reason = new Error('用户停止了本次评测');
     reason.name = 'AbortError';
@@ -58,6 +61,9 @@ export class EvaluationPipeline {
   async retry(evaluationId, input) {
     const item = this.store.get(evaluationId);
     if (!item) return null;
+    if (item.schemaVersion === 2) {
+      throw Object.assign(new Error('V2 retry service is not enabled'), { statusCode: 409 });
+    }
     if (!isTerminal(item.status)) throw Object.assign(new Error('主评测仍在执行，请结束后再单独重试步骤'), { statusCode: 409 });
     const step = resolveRetryStep(item, input);
     const previous = retryTargetSummary(item, step);

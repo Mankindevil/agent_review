@@ -1,11 +1,15 @@
+import { redactEvidence } from './evidence.js';
+
 const COMMON_RESULT_FIELDS = [
-  'status', 'stage', 'progress', 'score', 'confidence', 'coverage', 'provisional',
-  'reason', 'startedAt', 'completedAt', 'failedAt', 'cancelledAt', 'interruptedAt',
+  'id', 'status', 'stage', 'progress', 'score', 'confidence', 'coverage',
+  'provisional', 'applicable', 'weight', 'numerator', 'denominator', 'reason',
+  'startedAt', 'completedAt', 'failedAt', 'cancelledAt', 'interruptedAt',
   'attemptRunIds', 'evidenceIds', 'gaps', 'dimensions', 'metrics', 'checks',
   'findings', 'uncertainties', 'repairSuggestion'
 ];
+const DIMENSION_FIELDS = new Set(['scenarioValue', 'professionalism', 'agentCapability']);
 
-export function projectEvaluation(evaluation, { audience = 'public' } = {}) {
+export function projectEvaluation(evaluation, { audience = 'public', secrets = [] } = {}) {
   if (audience !== 'public' && audience !== 'admin') {
     throw new TypeError('unsupported evaluation projection audience');
   }
@@ -14,74 +18,81 @@ export function projectEvaluation(evaluation, { audience = 'public' } = {}) {
   }
 
   const projection = {
-    schemaVersion: evaluation.schemaVersion,
-    id: evaluation.id,
-    createdAt: evaluation.createdAt,
-    updatedAt: evaluation.updatedAt,
-    revision: evaluation.revision,
+    schemaVersion: projectPrimitive(evaluation.schemaVersion, secrets),
+    id: projectPrimitive(evaluation.id, secrets),
+    createdAt: projectPrimitive(evaluation.createdAt, secrets),
+    updatedAt: projectPrimitive(evaluation.updatedAt, secrets),
+    revision: projectPrimitive(evaluation.revision, secrets),
     execution: pickResult(evaluation.execution, [
       'status', 'stage', 'progress', 'startedAt', 'completedAt', 'failedAt',
       'cancelledAt', 'interruptedAt'
-    ]),
+    ], secrets),
     governance: pickResult(evaluation.governance, [
       'phase', 'modelLockedAt', 'humanLockedAt', 'absoluteLockedAt',
       'replicaReleasedAt'
-    ]),
+    ], secrets),
     qualification: pickResult(evaluation.qualification, [
       'status', 'attemptRunIds', 'completedAt', 'failureCode'
-    ]),
-    evidenceManifest: projectManifest(evaluation.evidenceManifest, audience),
-    objectiveCapability: pickResult(evaluation.objectiveCapability),
-    absoluteReview: pickResult(evaluation.absoluteReview),
-    resultV2: evaluation.resultV2 === null ? null : pickResult(evaluation.resultV2)
+    ], secrets),
+    evidenceManifest: projectManifest(evaluation.evidenceManifest, audience, secrets),
+    objectiveCapability: pickResult(evaluation.objectiveCapability, COMMON_RESULT_FIELDS, secrets),
+    absoluteReview: pickResult(evaluation.absoluteReview, COMMON_RESULT_FIELDS, secrets),
+    resultV2: evaluation.resultV2 === null
+      ? null
+      : pickResult(evaluation.resultV2, COMMON_RESULT_FIELDS, secrets)
   };
-  if (evaluation.archivedAt !== undefined) projection.archivedAt = evaluation.archivedAt;
+  if (evaluation.archivedAt !== undefined) {
+    projection.archivedAt = projectPrimitive(evaluation.archivedAt, secrets);
+  }
 
   if (audience === 'admin') {
-    projection.submission = projectSubmissionMetadata(evaluation.submission);
+    projection.submission = projectSubmissionMetadata(evaluation.submission, secrets);
     projection.auditEvents = (Array.isArray(evaluation.auditEvents) ? evaluation.auditEvents : [])
-      .map(projectAuditEvent);
+      .map((event) => projectAuditEvent(event, secrets));
   }
   return projection;
 }
 
-function projectManifest(manifest, audience) {
+function projectManifest(manifest, audience, secrets) {
   const items = Array.isArray(manifest?.items) ? manifest.items : [];
   return {
-    version: manifest?.version,
+    version: projectPrimitive(manifest?.version, secrets),
     items: items
       .filter((item) => audience === 'admin' || item?.visibility === 'public')
-      .map(projectManifestItem)
+      .map((item) => projectManifestItem(item, secrets))
   };
 }
 
-function projectManifestItem(item) {
-  return pick(item, [
+function projectManifestItem(item, secrets) {
+  const fields = [
     'evidenceId', 'runId', 'grade', 'kind', 'testId', 'turnIndex', 'repeatIndex',
-    'occurredAt', 'summary', 'payloadHash', 'visibility', 'redaction'
-  ], {
-    redaction: (value) => pick(value, ['status', 'count'])
-  });
+    'occurredAt'
+  ];
+  if (item?.visibility === 'public') fields.push('summary');
+  fields.push('payloadHash', 'visibility', 'redaction');
+  return pick(item, fields, {
+    redaction: (value, nestedSecrets) => pick(value, ['status', 'count'], {}, nestedSecrets)
+  }, secrets);
 }
 
-function projectSubmissionMetadata(submission) {
+function projectSubmissionMetadata(submission, secrets) {
   if (!submission || typeof submission !== 'object') return undefined;
   return {
-    submissionVersion: submission.submissionVersion,
-    frozenAt: submission.frozenAt,
-    agentCard: pick(submission.agentCard, ['sha256']),
-    agentExamples: pick(submission.agentExamples, ['sha256']),
+    submissionVersion: projectPrimitive(submission.submissionVersion, secrets),
+    frozenAt: projectPrimitive(submission.frozenAt, secrets),
+    agentCard: pick(submission.agentCard, ['sha256'], {}, secrets),
+    agentExamples: pick(submission.agentExamples, ['sha256'], {}, secrets),
     config: pick(submission.config, [
       'rubricVersion', 'modelConfigVersion', 'runtimeConfigVersion'
-    ])
+    ], {}, secrets)
   };
 }
 
-function projectAuditEvent(event) {
-  return pick(event, ['id', 'type', 'occurredAt', 'summary']);
+function projectAuditEvent(event, secrets) {
+  return pick(event, ['id', 'type', 'occurredAt', 'summary'], {}, secrets);
 }
 
-function pickResult(value, fields = COMMON_RESULT_FIELDS) {
+function pickResult(value, fields = COMMON_RESULT_FIELDS, secrets = []) {
   return pick(value, fields, {
     attemptRunIds: projectPrimitiveArray,
     evidenceIds: projectPrimitiveArray,
@@ -92,40 +103,47 @@ function pickResult(value, fields = COMMON_RESULT_FIELDS) {
     findings: projectPrimitiveArray,
     uncertainties: projectPrimitiveArray,
     repairSuggestion: projectPrimitive
-  });
+  }, secrets);
 }
 
-function projectNamedResults(value) {
+function projectNamedResults(value, secrets) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const result = {};
   for (const [key, child] of Object.entries(value)) {
-    if (/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u.test(key)) result[key] = pickResult(child);
+    if (DIMENSION_FIELDS.has(key)) result[key] = pickResult(child, COMMON_RESULT_FIELDS, secrets);
   }
   return result;
 }
 
-function projectResultArray(value) {
+function projectResultArray(value, secrets) {
   if (!Array.isArray(value)) return undefined;
-  return value.map((item) => pickResult(item));
+  return value
+    .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => pickResult(item, COMMON_RESULT_FIELDS, secrets));
 }
 
-function projectPrimitiveArray(value) {
+function projectPrimitiveArray(value, secrets) {
   if (!Array.isArray(value)) return undefined;
-  return value.filter((item) => item === null || ['string', 'number', 'boolean'].includes(typeof item));
+  return value
+    .map((item) => projectPrimitive(item, secrets))
+    .filter((item) => item !== undefined);
 }
 
-function projectPrimitive(value) {
-  return value === null || ['string', 'number', 'boolean'].includes(typeof value)
-    ? value
-    : undefined;
+function projectPrimitive(value, secrets = []) {
+  if (value === null || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'string') return redactEvidence(value, secrets);
+  return undefined;
 }
 
-function pick(source, fields, transforms = {}) {
+function pick(source, fields, transforms = {}, secrets = []) {
   const result = {};
   if (!source || typeof source !== 'object' || Array.isArray(source)) return result;
   for (const field of fields) {
     if (!Object.hasOwn(source, field)) continue;
-    const value = transforms[field] ? transforms[field](source[field]) : projectPrimitive(source[field]);
+    const value = transforms[field]
+      ? transforms[field](source[field], secrets)
+      : projectPrimitive(source[field], secrets);
     if (value !== undefined) result[field] = value;
   }
   return result;

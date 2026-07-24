@@ -123,3 +123,55 @@ test('admin projection adds only safe submission metadata and audit summaries', 
   assert.equal(serialized.includes('sensitive-log-secret'), false);
   assert.throws(() => projectEvaluation(unsafeEvaluation(), { audience: 'judge' }), /audience/i);
 });
+
+test('type-checks and redacts every projected leaf, including allowed summaries and findings', () => {
+  const source = unsafeEvaluation();
+  source.schemaVersion = { nested: 'top-level-object-secret' };
+  source.id = 'run-explicit-secret';
+  source.revision = { nested: 'revision-object-secret' };
+  source.archivedAt = { nested: 'archive-object-secret' };
+  source.execution.stage = 'Bearer stage.secret.token';
+  source.qualification.failureCode = 'Cookie: session=qualification-secret';
+  source.evidenceManifest.items[0].summary = 'Cookie: sid=manifest-secret';
+  source.evidenceManifest.items.push({
+    evidenceId: 'ev_hidden',
+    runId: 'run_hidden',
+    grade: 'B',
+    kind: 'protocol-object',
+    testId: 'test_hidden',
+    occurredAt: '2026-07-24T10:00:31.000Z',
+    summary: 'hidden input = hidden-manifest-secret',
+    payloadHash: 'e'.repeat(64),
+    visibility: 'admin',
+    redaction: { status: 'applied', count: 1 }
+  });
+  source.objectiveCapability.reason = 'raw authorization: objective-secret';
+  source.absoluteReview.findings = ['hidden input = finding-secret'];
+  source.resultV2.repairSuggestion = 'fetch https://example.test/?token=repair-secret';
+  source.auditEvents[0].summary = 'Bearer audit.secret.token';
+
+  for (const audience of ['public', 'admin']) {
+    const projection = projectEvaluation(source, {
+      audience,
+      secrets: ['run-explicit-secret', 'objective-secret', 'finding-secret']
+    });
+    const serialized = JSON.stringify(projection);
+    for (const secret of [
+      'top-level-object-secret', 'revision-object-secret', 'archive-object-secret',
+      'run-explicit-secret', 'stage.secret.token', 'qualification-secret',
+      'manifest-secret', 'hidden-manifest-secret', 'objective-secret',
+      'finding-secret', 'repair-secret', 'audit.secret.token'
+    ]) {
+      assert.equal(serialized.includes(secret), false, `${audience}: ${secret}`);
+    }
+    assert.equal(projection.schemaVersion, undefined);
+    assert.equal(projection.revision, undefined);
+    assert.equal(projection.archivedAt, undefined);
+    assert.match(projection.id, /\[SECRET_REDACTED\]/);
+  }
+
+  const admin = projectEvaluation(source, { audience: 'admin' });
+  const hidden = admin.evidenceManifest.items.find((item) => item.evidenceId === 'ev_hidden');
+  assert.ok(hidden);
+  assert.equal(Object.hasOwn(hidden, 'summary'), false);
+});
