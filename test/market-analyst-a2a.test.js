@@ -1072,6 +1072,73 @@ test('inspect-run-trace is store-only and protected run routes return sanitized 
   assert.ok(JSON.parse(traceText).steps);
 });
 
+test('inspect-run-trace returns an authorized trace directly for analytical runs', async (t) => {
+  const runId = 'run-analytical-inspect';
+  const orchestrator = new FakeOrchestrator();
+  const artifacts = analyticalArtifacts(runId);
+  artifacts[2].data.authorization = 'Bearer inspect-secret';
+  const { origin } = await startHarness(t, {
+    orchestrator,
+    runLoader: async (loadedRunId, ownerScope) => ({
+      id: `orchestrator-${loadedRunId}`,
+      runId: loadedRunId,
+      ownerScope,
+      reportDate: '2026-07-23',
+      operation: 'daily-market-report',
+      requestedOperation: 'hot-topic-analysis',
+      status: { state: 'TASK_STATE_COMPLETED' },
+      artifacts
+    }),
+    artifactLoader: async () => artifacts
+  });
+  const inspectPart = {
+    data: { operation: 'inspect-run-trace', runId }
+  };
+
+  const sent = await json(await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(messageRequest('message-inspect-analytical-send', inspectPart))
+  }));
+  assert.equal(sent.task.status.state, 'TASK_STATE_COMPLETED');
+  assert.deepEqual(sent.task.artifacts.map(({ name }) => name), ['run-trace.json']);
+  const sentTrace = sent.task.artifacts[0].parts[0].data;
+  assert.deepEqual(
+    sentTrace.workerEvents,
+    [{ marker: 'UNRELATED-WORKER-EVENT' }]
+  );
+  assert.equal(JSON.stringify(sentTrace).includes('inspect-secret'), false);
+
+  const taskDetail = await json(await a2aFetch(
+    origin,
+    `/a2a/v1/tasks/${sent.task.id}`
+  ));
+  assert.deepEqual(taskDetail.artifacts.map(({ name }) => name), ['run-trace.json']);
+  assert.deepEqual(
+    taskDetail.artifacts[0].parts[0].data.workerEvents,
+    sentTrace.workerEvents
+  );
+
+  const streamed = await a2aFetch(origin, '/a2a/v1/message:stream', {
+    method: 'POST',
+    body: JSON.stringify(messageRequest('message-inspect-analytical-stream', inspectPart))
+  });
+  assert.equal(streamed.status, 200);
+  const events = parseSseEvents(await streamed.text());
+  const streamTrace = events.find(({ artifactUpdate }) =>
+    artifactUpdate?.artifact?.name === 'run-trace.json'
+  )?.artifactUpdate?.artifact;
+  assert.ok(streamTrace);
+  assert.deepEqual(
+    streamTrace.parts[0].data.workerEvents,
+    sentTrace.workerEvents
+  );
+  assert.equal(
+    events.at(-1).statusUpdate.status.state,
+    'TASK_STATE_COMPLETED'
+  );
+  assert.equal(orchestrator.calls.length, 0);
+});
+
 test('custom run loaders must attest the exact owner instead of failing open', async (t) => {
   const { origin } = await startHarness(t, {
     runLoader: async (runId) => ({
@@ -1560,6 +1627,101 @@ test('same-task messageId replay wins after exact context and even after complet
     status: 'INVALID_ARGUMENT',
     reason: 'INVALID_REQUEST'
   });
+});
+
+test('supplied contextId must be a nonempty bounded string and is preserved exactly', async (t) => {
+  const { origin } = await startHarness(t);
+  const validContext = 'c'.repeat(200);
+  const validRequest = messageRequest(
+    'message-context-valid',
+    { data: { operation: 'daily-market-report', date: '2026-07-23' } }
+  );
+  validRequest.message.contextId = validContext;
+  const validResponse = await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(validRequest)
+  });
+  assert.equal(validResponse.status, 200);
+  assert.equal((await json(validResponse)).task.contextId, validContext);
+
+  for (const [index, contextId] of [
+    '',
+    42,
+    null,
+    { invalid: true },
+    'x'.repeat(201)
+  ].entries()) {
+    const request = messageRequest(
+      `message-context-invalid-${index}`,
+      { data: { operation: 'daily-market-report', date: '2026-07-23' } }
+    );
+    request.message.contextId = contextId;
+    const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      body: JSON.stringify(request)
+    });
+    assert.equal(response.status, 400, `contextId case ${index}`);
+    assertError(await json(response), {
+      code: 400,
+      status: 'INVALID_ARGUMENT',
+      reason: 'INVALID_REQUEST'
+    });
+  }
+});
+
+test('task duplicate contextId comparison cannot be bypassed by truncation or type loss', async (t) => {
+  const { origin } = await startHarness(t);
+  const contextId = 'shared-context-prefix'.padEnd(200, 'x');
+  const request = messageRequest(
+    'message-context-duplicate-root',
+    { data: { operation: 'daily-market-report', date: '2026-07-23' } }
+  );
+  request.message.contextId = contextId;
+  const original = await json(await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(request)
+  }));
+  assert.equal(original.task.contextId, contextId);
+
+  for (const [index, invalidContextId] of [
+    `${contextId}attacker-suffix`,
+    '',
+    7
+  ].entries()) {
+    const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      body: JSON.stringify({
+        message: {
+          messageId: request.message.messageId,
+          taskId: original.task.id,
+          contextId: invalidContextId,
+          role: 'ROLE_USER',
+          parts: [{ text: 'Duplicate request with an invalid context' }]
+        }
+      })
+    });
+    assert.equal(response.status, 400, `duplicate contextId case ${index}`);
+    assertError(await json(response), {
+      code: 400,
+      status: 'INVALID_ARGUMENT',
+      reason: 'INVALID_REQUEST'
+    });
+  }
+
+  const exactResponse = await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify({
+      message: {
+        messageId: request.message.messageId,
+        taskId: original.task.id,
+        contextId,
+        role: 'ROLE_USER',
+        parts: [{ text: 'Exact duplicate context' }]
+      }
+    })
+  });
+  assert.equal(exactResponse.status, 200);
+  assert.equal((await json(exactResponse)).task.id, original.task.id);
 });
 
 test('message.taskId hides inaccessible tasks and rejects terminal continuations', async (t) => {

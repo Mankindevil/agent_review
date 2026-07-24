@@ -260,6 +260,18 @@ function parseSendRequest(body) {
     });
   }
   if (
+    message.contextId !== undefined
+    && (
+      typeof message.contextId !== 'string'
+      || !message.contextId
+      || message.contextId.length > 200
+    )
+  ) {
+    throw invalidRequest('message.contextId must be a nonempty bounded string', {
+      field: 'message.contextId'
+    });
+  }
+  if (
     !Array.isArray(message.parts)
     || message.parts.length < 1
     || message.parts.length > 32
@@ -315,8 +327,8 @@ function parseSendRequest(body) {
     taskId: message.taskId,
     operation: parsed.operation,
     runId: parsed.runId,
-    contextId: typeof message.contextId === 'string' && message.contextId
-      ? message.contextId.slice(0, 200)
+    contextId: message.contextId !== undefined
+      ? message.contextId
       : message.taskId
         ? undefined
         : randomUUID(),
@@ -1038,12 +1050,13 @@ export class MarketTaskService {
       if (record.settled || record.controller.signal.aborted) return;
       if (record.operation.operation === 'inspect-run-trace') {
         artifacts = artifacts.filter((artifact) => artifact.name === 'run-trace.json');
+      } else {
+        artifacts = projectAnalyticalArtifacts(
+          requestedOperation,
+          artifacts,
+          summary?.runId
+        );
       }
-      artifacts = projectAnalyticalArtifacts(
-        requestedOperation,
-        artifacts,
-        summary?.runId
-      );
       artifacts = artifacts.filter((artifact) =>
         A2A_ARTIFACT_MEDIA_TYPES[artifact.name]
         && artifact.parts?.length
