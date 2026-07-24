@@ -349,6 +349,78 @@ test('confirmed scheduled delivery is not duplicated and force delivery reuses a
   assert.equal(fixture.calls.mailer.length, 2);
 });
 
+test('report reuse requires an exact persisted owner scope', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const fixture = dependencies(stateDir);
+  const orchestrator = new MarketOrchestrator(fixture.config, fixture.deps);
+
+  const ownerA = await orchestrator.run(request({
+    owner: 'tenant-owner-a',
+    trigger: 'a2a',
+    deliverEmail: false
+  }));
+  const ownerB = await orchestrator.run(request({
+    owner: 'tenant-owner-b',
+    trigger: 'a2a',
+    deliverEmail: false
+  }));
+
+  assert.notEqual(ownerA.runId, ownerB.runId);
+  assert.equal(fixture.calls.worker, 2);
+  const persisted = await fixture.deps.store.list();
+  assert.equal(persisted.length, 2);
+  assert.match(persisted[0].ownerScope, /^owner-sha256:[a-f0-9]{64}$/);
+  assert.match(persisted[1].ownerScope, /^owner-sha256:[a-f0-9]{64}$/);
+  assert.notEqual(persisted[0].ownerScope, persisted[1].ownerScope);
+});
+
+test('advertised analytical operations map only the trusted worker boundary to daily collection', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const workerRequests = [];
+  const fixture = dependencies(stateDir, {
+    async worker({ request: workerRequest }) {
+      fixture.calls.worker += 1;
+      workerRequests.push(workerRequest);
+      return evidence({
+        runId: workerRequest.runId,
+        reportDate: workerRequest.date,
+        leaderboards: {
+          hotIndustries: [],
+          hotConcepts: [],
+          sellPressure: [],
+          potentialWatchlist: []
+        }
+      });
+    }
+  });
+  const orchestrator = new MarketOrchestrator(fixture.config, fixture.deps);
+  const operations = [
+    'hot-topic-analysis',
+    'sell-pressure-scan',
+    'potential-watchlist'
+  ];
+
+  for (const operation of operations) {
+    const result = await orchestrator.run(request({
+      operation: { operation, date },
+      trigger: 'a2a',
+      owner: `owner-${operation}`,
+      deliverEmail: false
+    }));
+    assert.equal(result.outcome, 'complete', operation);
+  }
+
+  assert.deepEqual(
+    workerRequests.map(({ operation }) => operation),
+    ['daily-market-report', 'daily-market-report', 'daily-market-report']
+  );
+  const persisted = await fixture.deps.store.list();
+  assert.deepEqual(
+    persisted.map(({ operation }) => operation),
+    operations
+  );
+});
+
 test('accepted attempt without a final receipt suppresses automatic crash-window resend', async (t) => {
   const stateDir = await temporaryDirectory(t);
   const fixture = dependencies(stateDir);

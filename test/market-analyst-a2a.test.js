@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,6 +20,18 @@ function messageRequest(messageId, part, configuration = {}) {
       messageId,
       role: 'ROLE_USER',
       parts: [part]
+    },
+    configuration
+  };
+}
+
+function continuationRequest(messageId, taskId, text, configuration = {}) {
+  return {
+    message: {
+      messageId,
+      taskId,
+      role: 'ROLE_USER',
+      parts: [{ text }]
     },
     configuration
   };
@@ -49,6 +62,73 @@ function completedArtifacts(runId = 'run-fake') {
         runId,
         authorization: 'Bearer must-never-escape',
         steps: [{ tool: 'panda-market-worker', status: 'ok' }]
+      }
+    }
+  ];
+}
+
+function analyticalArtifacts(runId = 'run-analytical') {
+  return [
+    {
+      name: 'market-report.md',
+      mediaType: 'text/markdown',
+      size: 10_001,
+      sha256: 'a'.repeat(64),
+      content: '# Full report\n\nHOT-MARKER\n\nSELL-MARKER\n\nPOTENTIAL-MARKER'
+    },
+    {
+      name: 'evidence-pack.json',
+      mediaType: 'application/json',
+      size: 10_002,
+      sha256: 'b'.repeat(64),
+      data: {
+        schemaVersion: '1.0',
+        runId,
+        reportDate: '2026-07-23',
+        status: 'complete',
+        markets: { unrelated: 'UNRELATED-MARKET' },
+        conclusions: [
+          { id: 'hot', sectionId: 'hot-topics', sourceIds: ['source-hot'] },
+          { id: 'sell', sectionId: 'sell-pressure', sourceIds: ['source-sell'] },
+          {
+            id: 'potential',
+            sectionId: 'potential-watchlist',
+            sourceIds: ['source-potential']
+          }
+        ],
+        leaderboards: {
+          hotIndustries: [{ symbol: 'HOT-MARKER' }],
+          hotConcepts: [{ symbol: 'CONCEPT-MARKER' }],
+          sellPressure: [{ symbol: 'SELL-MARKER' }],
+          potentialWatchlist: [{ symbol: 'POTENTIAL-MARKER' }]
+        },
+        sources: [
+          { id: 'source-hot', marker: 'HOT-SOURCE' },
+          { id: 'source-sell', marker: 'SELL-SOURCE' },
+          { id: 'source-potential', marker: 'POTENTIAL-SOURCE' }
+        ],
+        missingData: [
+          { section: 'hotIndustries', marker: 'HOT-MISSING' },
+          { section: 'sellPressure', marker: 'SELL-MISSING' },
+          { section: 'potentialWatchlist', marker: 'POTENTIAL-MISSING' }
+        ]
+      }
+    },
+    {
+      name: 'run-trace.json',
+      mediaType: 'application/json',
+      size: 10_003,
+      sha256: 'c'.repeat(64),
+      data: {
+        runId,
+        steps: [
+          { skillId: 'hot-topic-analysis', status: 'ok' },
+          { skillId: 'sell-pressure-scan', status: 'ok' },
+          { skillId: 'potential-watchlist', status: 'ok' }
+        ],
+        workerEvents: [{ marker: 'UNRELATED-WORKER-EVENT' }],
+        modelUsage: [{ marker: 'UNRELATED-MODEL-USAGE' }],
+        emailAttempts: [{ marker: 'UNRELATED-EMAIL-ATTEMPT' }]
       }
     }
   ];
@@ -90,14 +170,17 @@ class FakeOrchestrator {
 async function startHarness(t, overrides = {}) {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), 'market-a2a-'));
   const orchestrator = overrides.orchestrator || new FakeOrchestrator();
-  const runLoader = overrides.runLoader || (async (runId, owner) => ({
+  const defaultRunLoader = async (runId, owner) => ({
     id: `orchestrator-${runId}`,
     runId,
-    owner,
+    ownerScope: owner,
     reportDate: '2026-07-23',
     status: { state: 'TASK_STATE_COMPLETED' },
     artifacts: completedArtifacts(runId)
-  }));
+  });
+  const runLoader = Object.hasOwn(overrides, 'runLoader')
+    ? overrides.runLoader
+    : defaultRunLoader;
   const server = createMarketAgentServer({
     config: {
       stateDir,
@@ -119,6 +202,10 @@ async function startHarness(t, overrides = {}) {
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const origin = `http://127.0.0.1:${server.address().port}`;
   return { server, origin, orchestrator };
+}
+
+function expectedOwnerScope(principal) {
+  return `owner-sha256:${createHash('sha256').update(principal).digest('hex')}`;
 }
 
 async function a2aFetch(origin, pathname, options = {}) {
@@ -311,7 +398,7 @@ test('message:send returns a completed Task and deduplicates messageId per owner
     trigger: orchestrator.calls[0].trigger,
     deliverEmail: orchestrator.calls[0].deliverEmail
   }, {
-    owner: 'owner-a',
+    owner: expectedOwnerScope('owner-a'),
     operation: {
       operation: 'daily-market-report',
       date: '2026-07-23',
@@ -366,6 +453,7 @@ test('message:stream emits Task, working status, artifacts, and terminal status 
 
 test('stream artifact events stay within the evaluator 64 KB event limit', async (t) => {
   const artifactLoader = async () => [{
+    artifactId: 'oversized-artifact-id-'.padEnd(70_000, 'i'),
     name: 'market-report.md',
     mediaType: 'text/markdown',
     content: `# Large report\n\n${'x'.repeat(100_000)}`
@@ -382,8 +470,8 @@ test('stream artifact events stay within the evaluator 64 KB event limit', async
   const events = parseSseEvents(raw);
   const artifacts = events.filter((event) => event.artifactUpdate);
   assert.ok(artifacts.length >= 1);
-  for (const event of artifacts) {
-    assert.ok(Buffer.byteLength(JSON.stringify(event)) <= 64 * 1024);
+  for (const frame of raw.split('\n\n').filter(Boolean)) {
+    assert.ok(Buffer.byteLength(`${frame}\n\n`) <= 64 * 1024);
   }
 });
 
@@ -459,7 +547,7 @@ test('completed tasks expose Markdown, Evidence Pack, and Run Trace artifacts', 
     artifact.name,
     artifact
   ]));
-  assert.match(byName['market-report.md'].parts[0].text, /^# Market report/);
+  assert.match(byName['market-report.md'].parts[0].text, /^# hot-topic-analysis/);
   assert.equal(byName['market-report.md'].parts[0].mediaType, 'text/markdown');
   assert.equal(byName['evidence-pack.json'].parts[0].data.schemaVersion, '1.0');
   assert.ok(Array.isArray(byName['run-trace.json'].parts[0].data.steps));
@@ -923,7 +1011,6 @@ test('structured operations are whitelisted and A2A never forwards caller overri
         operation: 'potential-watchlist',
         date: '2026-07-23',
         topN: 7,
-        sections: ['summary'],
         pandaMethod: 'get_arbitrary_method',
         deliverEmail: true,
         recipient: 'attacker@example.com',
@@ -935,7 +1022,7 @@ test('structured operations are whitelisted and A2A never forwards caller overri
   assert.deepEqual(call.operation, {
     operation: 'potential-watchlist',
     date: '2026-07-23',
-    sections: ['summary'],
+    sections: [],
     topN: 7
   });
   assert.equal(call.trigger, 'a2a');
@@ -998,4 +1085,804 @@ test('custom run loaders must attest the exact owner instead of failing open', a
   });
   assert.equal(response.status, 404);
   assert.equal((await json(response)).error.status, 'NOT_FOUND');
+
+  const mismatched = await startHarness(t, {
+    runLoader: async (_runId, owner) => ({
+      runId: 'run-different',
+      ownerScope: owner,
+      reportDate: '2026-07-23',
+      status: { state: 'TASK_STATE_COMPLETED' },
+      artifacts: completedArtifacts('run-different')
+    })
+  });
+  const mismatchedResponse = await fetch(`${mismatched.origin}/runs/run-requested`, {
+    headers: { authorization: 'Bearer owner-a' }
+  });
+  assert.equal(mismatchedResponse.status, 404);
+});
+
+test('persisted owner scope, not an in-memory task summary, authorizes every run route', async (t) => {
+  const runId = 'run-persisted-owner-a';
+  const persisted = {
+    id: 'orchestrator-owner-a',
+    runId,
+    ownerScope: expectedOwnerScope('owner-a'),
+    reportDate: '2026-07-23',
+    status: { state: 'TASK_STATE_COMPLETED' },
+    artifacts: completedArtifacts(runId)
+  };
+  const orchestrator = {
+    calls: [],
+    store: {
+      async list() {
+        return [persisted];
+      }
+    },
+    async run(input) {
+      this.calls.push(input);
+      return {
+        taskId: `orchestrator-${this.calls.length}`,
+        runId,
+        reportDate: '2026-07-23',
+        outcome: 'complete',
+        taskState: 'TASK_STATE_COMPLETED',
+        artifacts: completedArtifacts(runId)
+      };
+    }
+  };
+  const { origin } = await startHarness(t, {
+    orchestrator,
+    runLoader: undefined
+  });
+
+  for (const [token, messageId] of [
+    ['owner-a', 'message-owner-a-run'],
+    ['owner-b', 'message-owner-b-run']
+  ]) {
+    const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify(messageRequest(
+        messageId,
+        { text: 'Generate the daily market report for 2026-07-23' }
+      ))
+    });
+    assert.equal(response.status, 200);
+  }
+
+  for (const suffix of ['', '/report', '/evidence', '/trace']) {
+    const ownerA = await fetch(`${origin}/runs/${runId}${suffix}`, {
+      headers: { authorization: 'Bearer owner-a' }
+    });
+    assert.equal(ownerA.status, 200, `owner A ${suffix || '/detail'}`);
+
+    const ownerB = await fetch(`${origin}/runs/${runId}${suffix}`, {
+      headers: { authorization: 'Bearer owner-b' }
+    });
+    assert.equal(ownerB.status, 404, `owner B ${suffix || '/detail'}`);
+  }
+});
+
+test('custom principals with a shared 200-character prefix never collide', async (t) => {
+  const prefix = 'principal-prefix-'.padEnd(220, 'x');
+  const principals = {
+    'long-owner-a': `${prefix}A`,
+    'long-owner-b': `${prefix}B`
+  };
+  const { origin, orchestrator } = await startHarness(t, {
+    authenticate({ token }) {
+      return principals[token] ? { owner: principals[token] } : null;
+    }
+  });
+  const ids = [];
+  for (const token of Object.keys(principals)) {
+    const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify(messageRequest(
+        'same-message-id',
+        { text: 'Generate the daily market report for 2026-07-23' }
+      ))
+    });
+    assert.equal(response.status, 200);
+    ids.push((await json(response)).task.id);
+  }
+  assert.notEqual(ids[0], ids[1]);
+  assert.equal(orchestrator.calls.length, 2);
+  assert.notEqual(orchestrator.calls[0].owner, orchestrator.calls[1].owner);
+  assert.match(orchestrator.calls[0].owner, /^owner-sha256:[a-f0-9]{64}$/);
+  assert.match(orchestrator.calls[1].owner, /^owner-sha256:[a-f0-9]{64}$/);
+});
+
+test('a scope-shaped custom principal cannot impersonate the principal that hashes to it', async (t) => {
+  const victim = 'victim-principal';
+  const principals = {
+    victim,
+    attacker: expectedOwnerScope(victim)
+  };
+  const { origin, orchestrator } = await startHarness(t, {
+    authenticate({ token }) {
+      return principals[token] ? { owner: principals[token] } : null;
+    }
+  });
+  const ids = [];
+  for (const token of Object.keys(principals)) {
+    const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify(messageRequest(
+        'same-scope-shaped-message-id',
+        { text: 'Generate the daily market report for 2026-07-23' }
+      ))
+    });
+    assert.equal(response.status, 200);
+    ids.push((await json(response)).task.id);
+  }
+  assert.notEqual(ids[0], ids[1]);
+  assert.equal(orchestrator.calls.length, 2);
+  assert.notEqual(orchestrator.calls[0].owner, orchestrator.calls[1].owner);
+});
+
+test('all advertised analytical skills return only their requested report section', async (t) => {
+  const { origin } = await startHarness(t, {
+    artifactLoader: async (summary) => analyticalArtifacts(summary.runId)
+  });
+  const cases = [
+    {
+      operation: 'hot-topic-analysis',
+      leaderboardKeys: ['hotIndustries', 'hotConcepts'],
+      sourceId: 'source-hot',
+      missingSections: ['hotIndustries'],
+      marker: 'HOT-MARKER',
+      excluded: ['SELL-MARKER', 'POTENTIAL-MARKER']
+    },
+    {
+      operation: 'sell-pressure-scan',
+      leaderboardKeys: ['sellPressure'],
+      sourceId: 'source-sell',
+      missingSections: ['sellPressure'],
+      marker: 'SELL-MARKER',
+      excluded: ['HOT-MARKER', 'POTENTIAL-MARKER']
+    },
+    {
+      operation: 'potential-watchlist',
+      leaderboardKeys: ['potentialWatchlist'],
+      sourceId: 'source-potential',
+      missingSections: ['potentialWatchlist'],
+      marker: 'POTENTIAL-MARKER',
+      excluded: ['HOT-MARKER', 'SELL-MARKER']
+    }
+  ];
+
+  for (const item of cases) {
+    const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      body: JSON.stringify(messageRequest(
+        `message-${item.operation}`,
+        { data: { operation: item.operation, date: '2026-07-23', topN: 10 } }
+      ))
+    });
+    assert.equal(response.status, 200, item.operation);
+    const { task } = await json(response);
+    assert.equal(task.status.state, 'TASK_STATE_COMPLETED');
+    assert.equal(task.metadata.operation, item.operation);
+    assert.deepEqual(
+      task.artifacts.map(({ name }) => name),
+      ['market-report.md', 'evidence-pack.json', 'run-trace.json']
+    );
+    const byName = Object.fromEntries(task.artifacts.map((artifact) => [
+      artifact.name,
+      artifact.parts[0]
+    ]));
+    assert.ok(task.artifacts.every(({ metadata }) =>
+      !Object.hasOwn(metadata, 'size') && !Object.hasOwn(metadata, 'sha256')
+    ));
+    assert.match(byName['market-report.md'].text, new RegExp(item.marker));
+    for (const marker of item.excluded) {
+      assert.equal(byName['market-report.md'].text.includes(marker), false);
+    }
+    assert.deepEqual(
+      Object.keys(byName['evidence-pack.json'].data.leaderboards),
+      item.leaderboardKeys
+    );
+    assert.equal('markets' in byName['evidence-pack.json'].data, false);
+    assert.deepEqual(
+      byName['evidence-pack.json'].data.sources.map(({ id }) => id),
+      [item.sourceId]
+    );
+    assert.deepEqual(
+      byName['evidence-pack.json'].data.missingData.map(({ section }) => section),
+      item.missingSections
+    );
+    assert.equal(byName['run-trace.json'].data.requestedOperation, item.operation);
+    assert.ok(byName['run-trace.json'].data.steps.every(
+      ({ skillId }) => skillId === item.operation
+    ));
+    assert.equal('workerEvents' in byName['run-trace.json'].data, false);
+    assert.equal('modelUsage' in byName['run-trace.json'].data, false);
+    assert.equal('emailAttempts' in byName['run-trace.json'].data, false);
+  }
+});
+
+test('oversized analytical stream artifacts never link to an unprojected run artifact', async (t) => {
+  const artifactLoader = async (summary) => {
+    const artifacts = analyticalArtifacts(summary.runId);
+    artifacts[1].data.leaderboards.hotIndustries = Array.from(
+      { length: 500 },
+      (_, index) => ({
+        symbol: `HOT-${String(index).padStart(4, '0')}`,
+        detail: 'projected-evidence'.repeat(8)
+      })
+    );
+    return artifacts;
+  };
+  const { origin } = await startHarness(t, { artifactLoader });
+  const response = await a2aFetch(origin, '/a2a/v1/message:stream', {
+    method: 'POST',
+    body: JSON.stringify(messageRequest(
+      'message-large-analytical-projection',
+      { data: { operation: 'hot-topic-analysis', date: '2026-07-23' } }
+    ))
+  });
+  const raw = await response.text();
+  const evidence = parseSseEvents(raw)
+    .find(({ artifactUpdate }) =>
+      artifactUpdate?.artifact?.name === 'evidence-pack.json'
+    )?.artifactUpdate?.artifact;
+  assert.ok(evidence);
+  assert.equal(evidence.parts.some(({ url }) => url?.startsWith('/runs/')), false);
+  assert.equal(JSON.stringify(evidence).includes('SELL-MARKER'), false);
+  for (const frame of raw.split('\n\n').filter(Boolean)) {
+    assert.ok(Buffer.byteLength(`${frame}\n\n`) <= 64 * 1024);
+  }
+});
+
+test('analytical operations reject caller-selected arbitrary report sections', async (t) => {
+  const { origin } = await startHarness(t);
+  const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(messageRequest(
+      'message-arbitrary-sections',
+      {
+        data: {
+          operation: 'hot-topic-analysis',
+          date: '2026-07-23',
+          sections: ['../../private-artifact']
+        }
+      }
+    ))
+  });
+  assert.equal(response.status, 400);
+  assertError(await json(response), {
+    code: 400,
+    status: 'INVALID_ARGUMENT',
+    reason: 'INVALID_REQUEST'
+  });
+});
+
+test('message.taskId appends to one active owned task without starting another run', async (t) => {
+  const { origin, orchestrator } = await startHarness(t);
+  const active = await json(await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(messageRequest(
+      'message-continuation-root',
+      { data: { operation: 'daily-market-report', date: '2026-07-24' } },
+      { returnImmediately: true }
+    ))
+  }));
+  const taskId = active.task.id;
+  const continuation = await json(await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(continuationRequest(
+      'message-continuation-one',
+      taskId,
+      'Add a bounded research note',
+      { returnImmediately: true, historyLength: 2 }
+    ))
+  }));
+  assert.equal(continuation.task.id, taskId);
+  assert.equal(orchestrator.calls.length, 1);
+  assert.equal(continuation.task.history.length, 2);
+  assert.ok(continuation.task.history.every((message) => message.taskId === taskId));
+
+  const duplicate = await json(await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(continuationRequest(
+      'message-continuation-one',
+      taskId,
+      'Add a bounded research note',
+      { returnImmediately: true, historyLength: 32 }
+    ))
+  }));
+  assert.equal(duplicate.task.id, taskId);
+  assert.equal(duplicate.task.history.filter(
+    ({ messageId }) => messageId === 'message-continuation-one'
+  ).length, 1);
+
+  const streamResponse = await a2aFetch(origin, '/a2a/v1/message:stream', {
+    method: 'POST',
+    body: JSON.stringify(continuationRequest(
+      'message-continuation-stream',
+      taskId,
+      'Stream the same active task',
+      { historyLength: 3 }
+    ))
+  });
+  assert.equal(streamResponse.status, 200);
+  await a2aFetch(origin, `/a2a/v1/tasks/${taskId}:cancel`, {
+    method: 'POST',
+    body: '{}'
+  });
+  const events = parseSseEvents(await streamResponse.text());
+  assert.equal(events[0].task.id, taskId);
+  assert.equal(events[0].task.history.length, 3);
+  assert.equal(orchestrator.calls.length, 1);
+});
+
+test('continuation streams apply their own acceptedOutputModes to artifact events', async (t) => {
+  let resolveRun;
+  const orchestrator = {
+    calls: [],
+    run(input) {
+      this.calls.push(input);
+      return new Promise((resolve) => {
+        resolveRun = resolve;
+      });
+    }
+  };
+  const { origin } = await startHarness(t, { orchestrator });
+  const active = await json(await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(messageRequest(
+      'message-output-root',
+      { data: { operation: 'daily-market-report', date: '2026-07-23' } },
+      { returnImmediately: true }
+    ))
+  }));
+  const streamResponse = await a2aFetch(origin, '/a2a/v1/message:stream', {
+    method: 'POST',
+    body: JSON.stringify(continuationRequest(
+      'message-output-continuation',
+      active.task.id,
+      'Return JSON artifacts only',
+      { acceptedOutputModes: ['application/json'] }
+    ))
+  });
+  resolveRun({
+    taskId: 'orchestrator-output-task',
+    runId: 'run-output-continuation',
+    reportDate: '2026-07-23',
+    outcome: 'complete',
+    taskState: 'TASK_STATE_COMPLETED',
+    artifacts: completedArtifacts('run-output-continuation')
+  });
+  const events = parseSseEvents(await streamResponse.text());
+  const artifacts = events
+    .filter(({ artifactUpdate }) => artifactUpdate)
+    .map(({ artifactUpdate }) => artifactUpdate.artifact);
+  assert.deepEqual(
+    artifacts.map(({ name }) => name),
+    ['evidence-pack.json', 'run-trace.json']
+  );
+  assert.ok(artifacts.every(({ parts }) =>
+    parts.every(({ mediaType }) => mediaType === 'application/json')
+  ));
+});
+
+test('continuation send waits by default and bounds unique idempotency keys', async (t) => {
+  let resolveRun;
+  const orchestrator = {
+    run() {
+      return new Promise((resolve) => {
+        resolveRun = resolve;
+      });
+    }
+  };
+  const waitingHarness = await startHarness(t, { orchestrator });
+  const active = await json(await a2aFetch(
+    waitingHarness.origin,
+    '/a2a/v1/message:send',
+    {
+      method: 'POST',
+      body: JSON.stringify(messageRequest(
+        'message-wait-root',
+        { data: { operation: 'daily-market-report', date: '2026-07-23' } },
+        { returnImmediately: true }
+      ))
+    }
+  ));
+  let settled = false;
+  const waitingResponse = a2aFetch(waitingHarness.origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(continuationRequest(
+      'message-wait-continuation',
+      active.task.id,
+      'Wait for the active task'
+    ))
+  }).then((response) => {
+    settled = true;
+    return response;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(settled, false);
+  resolveRun({
+    taskId: 'orchestrator-wait-task',
+    runId: 'run-wait-continuation',
+    reportDate: '2026-07-23',
+    outcome: 'complete',
+    taskState: 'TASK_STATE_COMPLETED',
+    artifacts: completedArtifacts('run-wait-continuation')
+  });
+  const completed = await json(await waitingResponse);
+  assert.equal(completed.task.status.state, 'TASK_STATE_COMPLETED');
+
+  const boundedHarness = await startHarness(t);
+  const bounded = await json(await a2aFetch(
+    boundedHarness.origin,
+    '/a2a/v1/message:send',
+    {
+      method: 'POST',
+      body: JSON.stringify(messageRequest(
+        'message-bounded-root',
+        { data: { operation: 'daily-market-report', date: '2026-07-24' } },
+        { returnImmediately: true }
+      ))
+    }
+  ));
+  for (let index = 0; index < 32; index += 1) {
+    const response = await a2aFetch(boundedHarness.origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      body: JSON.stringify(continuationRequest(
+        `message-bounded-${index}`,
+        bounded.task.id,
+        `Bounded continuation ${index}`,
+        { returnImmediately: true }
+      ))
+    });
+    assert.equal(response.status, 200);
+  }
+  const overflow = await a2aFetch(boundedHarness.origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(continuationRequest(
+      'message-bounded-overflow',
+      bounded.task.id,
+      'This continuation exceeds the per-task bound',
+      { returnImmediately: true }
+    ))
+  });
+  assert.equal(overflow.status, 429);
+  assertError(await json(overflow), {
+    code: 429,
+    status: 'RESOURCE_EXHAUSTED',
+    reason: 'RESOURCE_EXHAUSTED'
+  });
+  await a2aFetch(
+    boundedHarness.origin,
+    `/a2a/v1/tasks/${bounded.task.id}:cancel`,
+    { method: 'POST', body: '{}' }
+  );
+});
+
+test('message.taskId hides inaccessible tasks and rejects terminal continuations', async (t) => {
+  const { origin } = await startHarness(t);
+  const active = await json(await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(messageRequest(
+      'message-continuation-private-root',
+      { data: { operation: 'daily-market-report', date: '2026-07-24' } },
+      { returnImmediately: true }
+    ))
+  }));
+  for (const [taskId, token] of [
+    ['task-does-not-exist', 'owner-a'],
+    [active.task.id, 'owner-b']
+  ]) {
+    const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify(continuationRequest(
+        `message-hidden-${token}`,
+        taskId,
+        'Continue hidden task',
+        { returnImmediately: true }
+      ))
+    });
+    assert.equal(response.status, 404);
+    assertError(await json(response), {
+      code: 404,
+      status: 'NOT_FOUND',
+      reason: 'TASK_NOT_FOUND'
+    });
+  }
+
+  const terminal = await json(await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(messageRequest(
+      'message-continuation-terminal-root',
+      { text: 'Generate the daily market report for 2026-07-23' }
+    ))
+  }));
+  const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(continuationRequest(
+      'message-continuation-terminal',
+      terminal.task.id,
+      'Continue a completed task',
+      { returnImmediately: true }
+    ))
+  });
+  assert.equal(response.status, 400);
+  assertError(await json(response), {
+    code: 400,
+    status: 'FAILED_PRECONDITION',
+    reason: 'UNSUPPORTED_OPERATION'
+  });
+  await a2aFetch(origin, `/a2a/v1/tasks/${active.task.id}:cancel`, {
+    method: 'POST',
+    body: '{}'
+  });
+});
+
+test('historyLength is exact on send, get, and list and rejects invalid values', async (t) => {
+  const { origin } = await startHarness(t);
+  const noHistory = await json(await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(messageRequest(
+      'message-history-zero',
+      { text: 'Generate the daily market report for 2026-07-23' },
+      { historyLength: 0 }
+    ))
+  }));
+  assert.deepEqual(noHistory.task.history, []);
+
+  const oneHistory = await json(await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(messageRequest(
+      'message-history-one',
+      { text: 'Generate the daily market report for 2026-07-23' },
+      { historyLength: 1 }
+    ))
+  }));
+  assert.equal(oneHistory.task.history.length, 1);
+
+  const get = await json(await a2aFetch(
+    origin,
+    `/a2a/v1/tasks/${oneHistory.task.id}?historyLength=0`
+  ));
+  assert.deepEqual(get.history, []);
+  const list = await json(await a2aFetch(
+    origin,
+    '/a2a/v1/tasks?historyLength=1&includeArtifacts=true'
+  ));
+  assert.ok(list.tasks.every(({ history }) => history.length <= 1));
+  const immediate = await json(await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(messageRequest(
+      'message-history-immediate-zero',
+      { data: { operation: 'daily-market-report', date: '2026-07-24' } },
+      { returnImmediately: true, historyLength: 0 }
+    ))
+  }));
+  assert.deepEqual(immediate.task.history, []);
+  await a2aFetch(origin, `/a2a/v1/tasks/${immediate.task.id}:cancel`, {
+    method: 'POST',
+    body: '{}'
+  });
+
+  for (const value of [-1, 1.5, 'one', 33]) {
+    const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      body: JSON.stringify(messageRequest(
+        `message-history-invalid-${value}`,
+        { text: 'Generate the daily market report for 2026-07-23' },
+        { historyLength: value }
+      ))
+    });
+    assert.equal(response.status, 400, `configuration ${value}`);
+    assertError(await json(response), {
+      code: 400,
+      status: 'INVALID_ARGUMENT',
+      reason: 'INVALID_REQUEST'
+    });
+  }
+  for (const pathname of [
+    `/a2a/v1/tasks/${oneHistory.task.id}?historyLength=-1`,
+    `/a2a/v1/tasks/${oneHistory.task.id}?historyLength=1.5`,
+    '/a2a/v1/tasks?historyLength=one',
+    '/a2a/v1/tasks?historyLength=33'
+  ]) {
+    const response = await a2aFetch(origin, pathname);
+    assert.equal(response.status, 400, pathname);
+    assertError(await json(response), {
+      code: 400,
+      status: 'INVALID_ARGUMENT',
+      reason: 'INVALID_REQUEST'
+    });
+  }
+});
+
+test('acceptedOutputModes filters A2A artifacts and never exposes HTML or plain text', async (t) => {
+  const artifactLoader = async (summary) => [
+    ...completedArtifacts(summary.runId),
+    {
+      name: 'market-report.html',
+      mediaType: 'text/html',
+      content: '<h1>private email rendering</h1>'
+    },
+    {
+      name: 'market-report.txt',
+      mediaType: 'text/plain',
+      content: 'private email rendering'
+    }
+  ];
+  const { origin } = await startHarness(t, { artifactLoader });
+  const cases = [
+    {
+      modes: ['text/markdown'],
+      names: ['market-report.md']
+    },
+    {
+      modes: ['application/json'],
+      names: ['evidence-pack.json', 'run-trace.json']
+    },
+    {
+      modes: ['text/markdown', 'application/json'],
+      names: ['market-report.md', 'evidence-pack.json', 'run-trace.json']
+    }
+  ];
+  for (const [index, item] of cases.entries()) {
+    const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      body: JSON.stringify(messageRequest(
+        `message-output-modes-${index}`,
+        { text: 'Generate the daily market report for 2026-07-23' },
+        { acceptedOutputModes: item.modes }
+      ))
+    });
+    assert.equal(response.status, 200);
+    const { task } = await json(response);
+    assert.equal(task.status.state, 'TASK_STATE_COMPLETED');
+    assert.deepEqual(task.artifacts.map(({ name }) => name), item.names);
+  }
+
+  const defaultResponse = await json(await a2aFetch(origin, '/a2a/v1/message:send', {
+    method: 'POST',
+    body: JSON.stringify(messageRequest(
+      'message-output-modes-default',
+      { text: 'Generate the daily market report for 2026-07-23' }
+    ))
+  }));
+  assert.deepEqual(
+    defaultResponse.task.artifacts.map(({ name }) => name),
+    ['market-report.md', 'evidence-pack.json', 'run-trace.json']
+  );
+
+  for (const modes of [[], ['text/html'], ['text/plain'], 'application/json']) {
+    const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      body: JSON.stringify(messageRequest(
+        `message-output-modes-invalid-${JSON.stringify(modes)}`,
+        { text: 'Generate the daily market report for 2026-07-23' },
+        { acceptedOutputModes: modes }
+      ))
+    });
+    assert.equal(response.status, 400);
+    assertError(await json(response), {
+      code: 400,
+      status: 'INVALID_ARGUMENT',
+      reason: 'INVALID_REQUEST'
+    });
+  }
+});
+
+test('message part mediaType must match the supported text or data representation', async (t) => {
+  const { origin } = await startHarness(t);
+  for (const [messageId, part] of [
+    [
+      'message-media-text-json',
+      { text: 'Generate the daily market report', mediaType: 'application/json' }
+    ],
+    [
+      'message-media-data-text',
+      {
+        data: { operation: 'daily-market-report', date: '2026-07-23' },
+        mediaType: 'text/plain'
+      }
+    ],
+    [
+      'message-media-html',
+      { text: 'Generate the daily market report', mediaType: 'text/html' }
+    ]
+  ]) {
+    const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      body: JSON.stringify(messageRequest(messageId, part))
+    });
+    assert.equal(response.status, 400, messageId);
+    assertError(await json(response), {
+      code: 400,
+      status: 'INVALID_ARGUMENT',
+      reason: 'INVALID_REQUEST'
+    });
+  }
+  for (const [messageId, part] of [
+    [
+      'message-media-text-valid',
+      { text: 'Generate the daily market report', mediaType: 'text/plain' }
+    ],
+    [
+      'message-media-data-valid',
+      {
+        data: { operation: 'daily-market-report', date: '2026-07-23' },
+        mediaType: 'application/json'
+      }
+    ]
+  ]) {
+    const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      body: JSON.stringify(messageRequest(messageId, part))
+    });
+    assert.equal(response.status, 200, messageId);
+  }
+});
+
+test('list rejects invalid status and includeArtifacts query values', async (t) => {
+  const { origin } = await startHarness(t);
+  for (const pathname of [
+    '/a2a/v1/tasks?status=TASK_STATE_UNKNOWN',
+    '/a2a/v1/tasks?includeArtifacts=1',
+    '/a2a/v1/tasks?includeArtifacts=TRUE',
+    '/a2a/v1/tasks?includeArtifacts='
+  ]) {
+    const response = await a2aFetch(origin, pathname);
+    assert.equal(response.status, 400, pathname);
+    assertError(await json(response), {
+      code: 400,
+      status: 'INVALID_ARGUMENT',
+      reason: 'INVALID_REQUEST'
+    });
+  }
+  const valid = await a2aFetch(
+    origin,
+    '/a2a/v1/tasks?status=TASK_STATE_COMPLETED&includeArtifacts=false'
+  );
+  assert.equal(valid.status, 200);
+});
+
+test('SSE event bounds include the data prefix and terminating newlines', async (t) => {
+  const frameSizeFor = async (padding, suffix) => {
+    const artifactLoader = async () => [{
+      name: 'market-report.md',
+      mediaType: 'text/markdown',
+      content: `# Frame calibration\n\n${'x'.repeat(padding)}`
+    }];
+    const { origin } = await startHarness(t, { artifactLoader });
+    const request = messageRequest(
+      `message-frame-${suffix}`,
+      { data: { operation: 'daily-market-report', date: '2026-07-23' } }
+    );
+    const completed = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      body: JSON.stringify(request)
+    });
+    assert.equal(completed.status, 200);
+    const stream = await a2aFetch(origin, '/a2a/v1/message:stream', {
+      method: 'POST',
+      body: JSON.stringify(request)
+    });
+    const raw = await stream.text();
+    const firstFrame = raw.match(/^data: .*\n\n/)?.[0];
+    assert.ok(firstFrame);
+    return Buffer.byteLength(firstFrame);
+  };
+
+  const basePadding = 50_000;
+  const baseSize = await frameSizeFor(basePadding, 'base');
+  const targetPadding = basePadding + (64 * 1024 - baseSize) + 1;
+  assert.ok(
+    targetPadding > basePadding && targetPadding < 70_000,
+    `base frame was ${baseSize} bytes; target padding was ${targetPadding}`
+  );
+  const framedSize = await frameSizeFor(targetPadding, 'target');
+  assert.ok(framedSize <= 64 * 1024, `framed SSE event was ${framedSize} bytes`);
 });

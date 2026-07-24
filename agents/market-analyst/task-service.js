@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
 
+import { normalizeOwnerScope } from './owner-scope.js';
 import { readVerifiedArtifact } from './orchestrator.js';
 import { sanitizeTraceValue } from './run-trace.js';
 import { validateOperation } from './schemas.js';
@@ -13,6 +14,7 @@ const TERMINAL_STATES = new Set([
   'TASK_STATE_REJECTED'
 ]);
 const MAX_HISTORY = 32;
+const MAX_CONTINUATIONS = 32;
 const MAX_ARTIFACTS = 16;
 const MAX_SUBSCRIBERS = 64;
 const MAX_STREAM_ARTIFACT_BYTES = 48 * 1024;
@@ -23,6 +25,29 @@ const DEFAULT_MAX_TASKS = 128;
 const DEFAULT_MAX_ACTIVE_TASKS = 32;
 const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const RUN_ID_PATTERN = /^[a-z0-9._-]{1,128}$/i;
+const A2A_ARTIFACT_MEDIA_TYPES = Object.freeze({
+  'market-report.md': 'text/markdown',
+  'evidence-pack.json': 'application/json',
+  'run-trace.json': 'application/json'
+});
+const SUPPORTED_OUTPUT_MODES = Object.freeze([
+  'text/markdown',
+  'application/json'
+]);
+const ANALYTICAL_PROJECTIONS = Object.freeze({
+  'hot-topic-analysis': {
+    sectionId: 'hot-topics',
+    leaderboardKeys: ['hotIndustries', 'hotConcepts']
+  },
+  'sell-pressure-scan': {
+    sectionId: 'sell-pressure',
+    leaderboardKeys: ['sellPressure']
+  },
+  'potential-watchlist': {
+    sectionId: 'potential-watchlist',
+    leaderboardKeys: ['potentialWatchlist']
+  }
+});
 
 const KEYWORD_ROUTES = [
   ['inspect-run-trace', /(?:运行溯源|运行追踪|调用链|run[\s_-]*trace|trace)/i],
@@ -62,6 +87,37 @@ function unsupportedOperation(message = 'The requested operation is not supporte
   });
 }
 
+function resourceExhausted(message) {
+  return marketA2AError('RESOURCE_EXHAUSTED', message, {
+    statusCode: 429,
+    status: 'RESOURCE_EXHAUSTED'
+  });
+}
+
+function parseHistoryLength(value, field = 'historyLength') {
+  if (value === undefined) return MAX_HISTORY;
+  if (!Number.isSafeInteger(value) || value < 0 || value > MAX_HISTORY) {
+    throw invalidRequest(`${field} must be an integer from 0 to ${MAX_HISTORY}`, { field });
+  }
+  return value;
+}
+
+function parseAcceptedOutputModes(value) {
+  if (value === undefined) return [...SUPPORTED_OUTPUT_MODES];
+  if (
+    !Array.isArray(value)
+    || value.length < 1
+    || value.length > SUPPORTED_OUTPUT_MODES.length
+    || value.some((mode) => !SUPPORTED_OUTPUT_MODES.includes(mode))
+  ) {
+    throw invalidRequest(
+      'configuration.acceptedOutputModes must contain only text/markdown or application/json',
+      { field: 'configuration.acceptedOutputModes' }
+    );
+  }
+  return [...new Set(value)];
+}
+
 function taskNotFound(id) {
   return marketA2AError('TASK_NOT_FOUND', 'The specified task does not exist or is not accessible', {
     statusCode: 404,
@@ -79,8 +135,7 @@ function taskNotCancelable(id) {
 }
 
 function cleanOwner(value) {
-  const owner = String(value || 'anonymous');
-  return owner.slice(0, 200);
+  return normalizeOwnerScope(value);
 }
 
 function boundedMessage(message) {
@@ -163,6 +218,10 @@ function parseSendRequest(body) {
       { statusCode: 400, status: 'FAILED_PRECONDITION' }
     );
   }
+  const configuration = body.configuration === undefined ? {} : body.configuration;
+  if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration)) {
+    throw invalidRequest('configuration must be an object', { field: 'configuration' });
+  }
   const message = body.message;
   if (!message || typeof message !== 'object' || Array.isArray(message)) {
     throw invalidRequest('message is required', { field: 'message' });
@@ -178,6 +237,18 @@ function parseSendRequest(body) {
   }
   if (message.role !== 'ROLE_USER') {
     throw invalidRequest('message.role must be ROLE_USER', { field: 'message.role' });
+  }
+  if (
+    message.taskId !== undefined
+    && (
+      typeof message.taskId !== 'string'
+      || !message.taskId
+      || message.taskId.length > 200
+    )
+  ) {
+    throw invalidRequest('message.taskId must be a nonempty bounded string', {
+      field: 'message.taskId'
+    });
   }
   if (
     !Array.isArray(message.parts)
@@ -214,16 +285,33 @@ function parseSendRequest(body) {
         field: `message.parts[${index}].text`
       });
     }
+    const expectedMediaType = contentKeys[0] === 'text'
+      ? 'text/plain'
+      : 'application/json';
+    if (part.mediaType !== undefined && part.mediaType !== expectedMediaType) {
+      throw invalidRequest(
+        `${contentKeys[0]} parts must use ${expectedMediaType}`,
+        { field: `message.parts[${index}].mediaType` }
+      );
+    }
   }
-  const parsed = parseOperation(message.parts);
+  const parsed = message.taskId ? {} : parseOperation(message.parts);
   return {
     message: boundedMessage(message),
+    taskId: message.taskId,
     operation: parsed.operation,
     runId: parsed.runId,
     contextId: typeof message.contextId === 'string' && message.contextId
       ? message.contextId.slice(0, 200)
       : randomUUID(),
-    returnImmediately: body.configuration?.returnImmediately === true
+    returnImmediately: configuration.returnImmediately === true,
+    responseOptions: {
+      historyLength: parseHistoryLength(
+        configuration.historyLength,
+        'configuration.historyLength'
+      ),
+      acceptedOutputModes: parseAcceptedOutputModes(configuration.acceptedOutputModes)
+    }
   };
 }
 
@@ -300,12 +388,28 @@ function protectedArtifactUrl(runId, name) {
   return suffix ? `/runs/${encodeURIComponent(runId)}/${suffix}` : null;
 }
 
-function streamArtifact(artifact, runId) {
+function streamArtifact(artifact, runId, taskId) {
   if (Buffer.byteLength(JSON.stringify(artifact)) <= MAX_STREAM_ARTIFACT_BYTES) {
     return artifact;
   }
   const url = protectedArtifactUrl(runId, artifact.name);
   const mediaType = artifact.parts?.[0]?.mediaType || mediaTypeFor(artifact.name);
+  if (artifact.metadata?.projected === true) {
+    const message = `Fetch /a2a/v1/tasks/${encodeURIComponent(taskId)} for the complete projected artifact`;
+    return {
+      ...artifact,
+      parts: mediaType === 'text/markdown'
+        ? [{ text: `# Projected artifact truncated for stream\n\n${message}`, mediaType }]
+        : [{
+            data: { truncated: true, name: artifact.name, message },
+            mediaType
+          }],
+      metadata: {
+        ...(artifact.metadata || {}),
+        truncatedForStream: true
+      }
+    };
+  }
   return {
     ...artifact,
     parts: url
@@ -323,6 +427,127 @@ function streamArtifact(artifact, runId) {
       truncatedForStream: true
     }
   };
+}
+
+function partData(artifact) {
+  return artifact?.parts?.find((part) => part && typeof part === 'object')?.data;
+}
+
+function projectedMarkdown(operation, evidence, keys) {
+  const lines = [
+    `# ${operation}`,
+    '',
+    `Report date: ${String(evidence?.reportDate || 'unavailable')}`
+  ];
+  for (const key of keys) {
+    lines.push(
+      '',
+      `## ${key}`,
+      '',
+      '```json',
+      JSON.stringify(evidence?.leaderboards?.[key] || [], null, 2),
+      '```'
+    );
+  }
+  return lines.join('\n');
+}
+
+function projectedMetadata(artifact) {
+  const {
+    size: _sourceSize,
+    sha256: _sourceSha256,
+    ...metadata
+  } = artifact.metadata || {};
+  return { ...metadata, projected: true };
+}
+
+function projectAnalyticalArtifacts(operation, artifacts) {
+  const projection = ANALYTICAL_PROJECTIONS[operation];
+  if (!projection) return artifacts;
+  const evidenceArtifact = artifacts.find(({ name }) => name === 'evidence-pack.json');
+  const sourceEvidence = partData(evidenceArtifact) || {};
+  const conclusions = Array.isArray(sourceEvidence.conclusions)
+    ? sourceEvidence.conclusions.filter((item) => {
+        const leaderboards = String(item?.leaderboard || '')
+          .split(',')
+          .map((value) => value.trim())
+          .filter(Boolean);
+        return item?.sectionId === projection.sectionId
+          || item?.skillId === operation
+          || projection.leaderboardKeys.some((key) => leaderboards.includes(key));
+      })
+    : [];
+  const sourceIds = new Set(conclusions.flatMap((item) =>
+    Array.isArray(item?.sourceIds) ? item.sourceIds : []
+  ));
+  const evidence = {
+    schemaVersion: sourceEvidence.schemaVersion,
+    runId: sourceEvidence.runId,
+    reportDate: sourceEvidence.reportDate,
+    status: sourceEvidence.status,
+    ...(sourceEvidence.skipReason === undefined
+      ? {}
+      : { skipReason: clone(sourceEvidence.skipReason) }),
+    ...(sourceEvidence.metricVersion === undefined
+      ? {}
+      : { metricVersion: clone(sourceEvidence.metricVersion) }),
+    requestedOperation: operation,
+    conclusions: clone(conclusions),
+    leaderboards: Object.fromEntries(projection.leaderboardKeys.map((key) => [
+      key,
+      clone(sourceEvidence.leaderboards?.[key] || [])
+    ])),
+    excluded: Object.fromEntries(projection.leaderboardKeys
+      .filter((key) => sourceEvidence.excluded?.[key] !== undefined)
+      .map((key) => [key, clone(sourceEvidence.excluded[key])])),
+    sources: Array.isArray(sourceEvidence.sources)
+      ? clone(sourceEvidence.sources.filter(({ id }) => sourceIds.has(id)))
+      : [],
+    missingData: Array.isArray(sourceEvidence.missingData)
+      ? clone(sourceEvidence.missingData.filter(({ section }) =>
+          projection.leaderboardKeys.includes(section)
+        ))
+      : []
+  };
+  return artifacts.map((artifact) => {
+    if (artifact.name === 'market-report.md') {
+      return {
+        ...artifact,
+        parts: [{
+          text: projectedMarkdown(operation, evidence, projection.leaderboardKeys),
+          mediaType: 'text/markdown'
+        }],
+        metadata: projectedMetadata(artifact)
+      };
+    }
+    if (artifact.name === 'evidence-pack.json') {
+      return {
+        ...artifact,
+        parts: [{ data: evidence, mediaType: 'application/json' }],
+        metadata: projectedMetadata(artifact)
+      };
+    }
+    if (artifact.name === 'run-trace.json') {
+      const sourceTrace = partData(artifact) || {};
+      const trace = {
+        schemaVersion: sourceTrace.schemaVersion,
+        runId: sourceTrace.runId,
+        startedAt: sourceTrace.startedAt,
+        endedAt: sourceTrace.endedAt,
+        durationMs: sourceTrace.durationMs,
+        requestedOperation: operation,
+        steps: Array.isArray(sourceTrace.steps)
+          ? clone(sourceTrace.steps.filter((step) => step?.skillId === operation))
+          : []
+      };
+      return {
+        ...artifact,
+        parts: [{ data: trace, mediaType: 'application/json' }],
+        metadata: projectedMetadata(artifact)
+      };
+    }
+    return artifact;
+  });
 }
 
 function encodePageToken(record) {
@@ -403,13 +628,48 @@ export class MarketTaskService {
     const key = `${safeOwner}\u0000${parsed.message.messageId}`;
     const now = timestamp(this.clock);
     this.#prune(Date.parse(now));
+    if (parsed.taskId) {
+      const record = this.#visibleRecord(parsed.taskId, safeOwner);
+      if (TERMINAL_STATES.has(record.status.state)) {
+        throw unsupportedOperation('A terminal task cannot accept a continuation message');
+      }
+      const duplicateId = this.idempotency.get(key);
+      if (duplicateId && duplicateId !== record.id) {
+        throw invalidRequest('message.messageId is already associated with another task', {
+          field: 'message.messageId'
+        });
+      }
+      if (!duplicateId) {
+        if (record.idempotencyKeys.length - 1 >= MAX_CONTINUATIONS) {
+          throw resourceExhausted(
+            `The task has reached its limit of ${MAX_CONTINUATIONS} continuation messages`
+          );
+        }
+        const continuation = {
+          ...parsed.message,
+          taskId: record.id,
+          contextId: record.contextId
+        };
+        record.history = [...record.history, continuation].slice(-MAX_HISTORY);
+        record.idempotencyKeys.push(key);
+        this.idempotency.set(key, record.id);
+        this.#touch(record);
+      }
+      return {
+        task: this.#publicTask(record, parsed.responseOptions),
+        duplicate: Boolean(duplicateId),
+        returnImmediately: parsed.returnImmediately,
+        responseOptions: parsed.responseOptions
+      };
+    }
     const duplicateId = this.idempotency.get(key);
     if (duplicateId) {
       const duplicate = this.tasks.get(duplicateId);
       return {
-        task: this.#publicTask(duplicate),
+        task: this.#publicTask(duplicate, parsed.responseOptions),
         duplicate: true,
-        returnImmediately: parsed.returnImmediately
+        returnImmediately: parsed.returnImmediately,
+        responseOptions: parsed.responseOptions
       };
     }
     const activeCount = [...this.tasks.values()].filter(
@@ -438,6 +698,7 @@ export class MarketTaskService {
       },
       history: [parsed.message].slice(-MAX_HISTORY),
       artifacts: [],
+      acceptedOutputModes: parsed.responseOptions.acceptedOutputModes,
       createdAt: now,
       lastModified: now,
       emitter: new EventEmitter(),
@@ -445,6 +706,12 @@ export class MarketTaskService {
       settled: false,
       summary: null
     };
+    record.history = [{
+      ...parsed.message,
+      taskId: record.id,
+      contextId: record.contextId
+    }];
+    record.idempotencyKeys = [key];
     record.emitter.setMaxListeners(100);
     record.done = new Promise((resolve) => {
       record.resolveDone = resolve;
@@ -453,16 +720,17 @@ export class MarketTaskService {
     this.idempotency.set(key, id);
     queueMicrotask(() => this.#execute(record));
     return {
-      task: this.#publicTask(record),
+      task: this.#publicTask(record, parsed.responseOptions),
       duplicate: false,
-      returnImmediately: parsed.returnImmediately
+      returnImmediately: parsed.returnImmediately,
+      responseOptions: parsed.responseOptions
     };
   }
 
-  async wait(id, owner) {
+  async wait(id, owner, options = {}) {
     const record = this.#visibleRecord(id, owner);
     if (!TERMINAL_STATES.has(record.status.state)) await record.done;
-    return this.#publicTask(record);
+    return this.#publicTask(record, options);
   }
 
   get(id, owner, options = {}) {
@@ -540,7 +808,7 @@ export class MarketTaskService {
     return TERMINAL_STATES.has(this.#visibleRecord(id, owner).status.state);
   }
 
-  subscribe(id, owner, listener) {
+  subscribe(id, owner, listener, options = {}) {
     const record = this.#visibleRecord(id, owner);
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
     if (record.emitter.listenerCount('event') >= MAX_SUBSCRIBERS) {
@@ -550,8 +818,19 @@ export class MarketTaskService {
         { statusCode: 429, status: 'RESOURCE_EXHAUSTED', metadata: { taskId: id } }
       );
     }
-    record.emitter.on('event', listener);
-    return () => record.emitter.off('event', listener);
+    const outputModes = options.acceptedOutputModes || record.acceptedOutputModes;
+    const filteredListener = (event) => {
+      const artifact = event?.artifactUpdate?.artifact;
+      if (
+        artifact
+        && !outputModes.includes(artifact.parts?.[0]?.mediaType)
+      ) {
+        return;
+      }
+      listener(event);
+    };
+    record.emitter.on('event', filteredListener);
+    return () => record.emitter.off('event', filteredListener);
   }
 
   async loadRun(runId, owner) {
@@ -561,19 +840,12 @@ export class MarketTaskService {
     let ownerAttested = false;
     if (typeof this.runLoader === 'function') {
       run = await this.runLoader(runId, safeOwner);
-      ownerAttested = run?.owner === safeOwner;
+      ownerAttested = run?.runId === runId && run?.ownerScope === safeOwner;
     } else {
-      const inMemory = [...this.tasks.values()].find((record) =>
-        record.owner === safeOwner && record.summary?.runId === runId
-      );
-      if (inMemory) {
-        run = inMemory.summary;
-        ownerAttested = true;
-      }
-      if (!run && this.orchestrator.store?.list) {
-        const stored = await this.orchestrator.store.list({ owner: safeOwner });
+      if (this.orchestrator.store?.list) {
+        const stored = await this.orchestrator.store.list({ ownerScope: safeOwner });
         run = stored.find((candidate) => candidate.runId === runId);
-        ownerAttested = run?.owner === safeOwner;
+        ownerAttested = run?.ownerScope === safeOwner;
       }
     }
     if (!run || !ownerAttested) {
@@ -599,7 +871,9 @@ export class MarketTaskService {
   #deleteRecord(record) {
     record.emitter.removeAllListeners();
     this.tasks.delete(record.id);
-    this.idempotency.delete(record.idempotencyKey);
+    for (const key of record.idempotencyKeys || [record.idempotencyKey]) {
+      this.idempotency.delete(key);
+    }
   }
 
   #prune(nowMs) {
@@ -623,14 +897,13 @@ export class MarketTaskService {
   }
 
   #publicTask(record, options = {}) {
-    const historyLength = Number.isSafeInteger(Number(options.historyLength))
-      ? Math.min(Math.max(Number(options.historyLength), 0), MAX_HISTORY)
-      : MAX_HISTORY;
+    const historyLength = parseHistoryLength(options.historyLength);
+    const outputModes = options.acceptedOutputModes || record.acceptedOutputModes;
     const task = {
       id: record.id,
       contextId: record.contextId,
       status: clone(record.status),
-      history: clone(record.history.slice(-historyLength)),
+      history: clone(historyLength === 0 ? [] : record.history.slice(-historyLength)),
       metadata: sanitizeTraceValue({
         operation: record.operation.operation,
         createdAt: record.createdAt,
@@ -639,7 +912,9 @@ export class MarketTaskService {
       })
     };
     if (options.includeArtifacts !== false) {
-      task.artifacts = clone(record.artifacts.slice(0, MAX_ARTIFACTS));
+      task.artifacts = clone(record.artifacts
+        .filter((artifact) => outputModes.includes(artifact.parts[0].mediaType))
+        .slice(0, MAX_ARTIFACTS));
     }
     return task;
   }
@@ -647,7 +922,7 @@ export class MarketTaskService {
   #publicRun(run) {
     const safe = sanitizeTraceValue(run);
     if (!safe || typeof safe !== 'object') throw taskNotFound(run?.runId);
-    const { owner, email, ...visible } = safe;
+    const { owner, ownerScope: _ownerScope, email, ...visible } = safe;
     return visible;
   }
 
@@ -694,6 +969,7 @@ export class MarketTaskService {
       } else {
         summary = await this.orchestrator.run({
           owner: record.owner,
+          ownerScope: record.owner,
           operation: record.operation,
           trigger: 'a2a',
           deliverEmail: false,
@@ -707,6 +983,14 @@ export class MarketTaskService {
       if (record.operation.operation === 'inspect-run-trace') {
         artifacts = artifacts.filter((artifact) => artifact.name === 'run-trace.json');
       }
+      artifacts = projectAnalyticalArtifacts(record.operation.operation, artifacts);
+      artifacts = artifacts.filter((artifact) =>
+        A2A_ARTIFACT_MEDIA_TYPES[artifact.name]
+        && artifact.parts?.length
+        && artifact.parts.every((part) =>
+          part?.mediaType === A2A_ARTIFACT_MEDIA_TYPES[artifact.name]
+        )
+      );
       const state = outputState(summary);
       if (
         state === 'TASK_STATE_COMPLETED'
@@ -729,7 +1013,11 @@ export class MarketTaskService {
           artifactUpdate: {
             taskId: record.id,
             contextId: record.contextId,
-            artifact: clone(streamArtifact(artifact, record.summary?.runId)),
+            artifact: clone(streamArtifact(
+              artifact,
+              record.summary?.runId,
+              record.id
+            )),
             append: false,
             lastChunk: true
           }
@@ -838,8 +1126,11 @@ export class MarketTaskService {
       }
     }
     if (!Array.isArray(parts) || !parts.length) return null;
+    const suppliedArtifactId = typeof descriptor.artifactId === 'string'
+      ? descriptor.artifactId.slice(0, 200)
+      : '';
     return {
-      artifactId: descriptor.artifactId || artifactId(record.id, name, index),
+      artifactId: suppliedArtifactId || artifactId(record.id, name, index),
       name,
       parts,
       metadata: sanitizeTraceValue({

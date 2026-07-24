@@ -99,12 +99,18 @@ export class MarketTaskStore {
     return task ? clone(task) : null;
   }
 
-  async list({ owner } = {}) {
+  async list({ owner, ownerScope } = {}) {
     await this.writeQueue;
     await this.#loadFromDisk();
     const safeOwner = owner === undefined ? undefined : sanitizeTraceValue(owner);
+    const safeOwnerScope = ownerScope === undefined
+      ? undefined
+      : sanitizeTraceValue(ownerScope);
     return this.state.tasks
-      .filter((task) => safeOwner === undefined || task.owner === safeOwner)
+      .filter((task) =>
+        (safeOwner === undefined || task.owner === safeOwner)
+        && (safeOwnerScope === undefined || task.ownerScope === safeOwnerScope)
+      )
       .map(clone);
   }
 

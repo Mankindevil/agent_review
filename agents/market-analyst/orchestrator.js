@@ -6,6 +6,7 @@ import path from 'node:path';
 import { acquireRunLock } from './run-lock.js';
 import { createRunTrace, sanitizeTraceValue, TRACE_LIMITS } from './run-trace.js';
 import { MarketTaskStore } from './task-store.js';
+import { ownerScope, requireOwnerScope } from './owner-scope.js';
 import { runMarketWorker } from './worker-runner.js';
 import { generateNarrative } from './narrative-adapter.js';
 import { renderReport } from './report-renderer.js';
@@ -15,6 +16,11 @@ import { deliveryKey } from './smtp-mailer.js';
 
 const REPORT_VERSION = 'market-report-v1';
 const ALLOWED_TRIGGERS = new Set(['scheduled', 'manual', 'a2a']);
+const DAILY_COLLECTION_OPERATIONS = new Set([
+  'hot-topic-analysis',
+  'sell-pressure-scan',
+  'potential-watchlist'
+]);
 const MAX_REPORT_BYTES = 2 * 1024 * 1024;
 const MAX_JSON_BYTES = 20 * 1024 * 1024;
 const FORBIDDEN_CALLER_KEY =
@@ -245,6 +251,7 @@ function taskSummary(task, emailStatus) {
   return sanitizeTraceValue({
     taskId: task.id,
     runId: task.runId,
+    ownerScope: task.ownerScope,
     reportDate: task.reportDate,
     outcome: task.outcome,
     taskState: task.status?.state || task.state,
@@ -317,8 +324,9 @@ export class MarketOrchestrator {
     const runId = String(this.createId());
     const taskId = `task-${runId}`;
     const fallbackDate = dateInTimezone(this.clock(), this.config.timezone || 'Asia/Shanghai');
-    let owner = typeof input.owner === 'string' && input.owner ? input.owner : 'system';
-    if (owner.length > 200) owner = owner.slice(0, 200);
+    const scopedOwner = input.ownerScope === undefined
+      ? ownerScope(input.owner ?? 'system')
+      : requireOwnerScope(input.ownerScope);
     let operation;
     let reportDate = fallbackDate;
     let trigger;
@@ -349,7 +357,8 @@ export class MarketOrchestrator {
       const rejected = {
         id: taskId,
         runId,
-        owner,
+        owner: scopedOwner,
+        ownerScope: scopedOwner,
         reportDate,
         trigger: typeof input.trigger === 'string' ? input.trigger : 'unknown',
         outcome: 'rejected',
@@ -371,7 +380,11 @@ export class MarketOrchestrator {
     });
     try {
       throwIfAborted(input.signal);
-      const prior = await this.#findReusableReport(operation.operation, reportDate);
+      const prior = await this.#findReusableReport(
+        operation.operation,
+        reportDate,
+        scopedOwner
+      );
       throwIfAborted(input.signal);
       if (prior) {
         if (prior.outcome === 'skipped' || !deliverEmail) {
@@ -392,7 +405,8 @@ export class MarketOrchestrator {
       let task = await this.store.create({
         id: taskId,
         runId,
-        owner,
+        owner: scopedOwner,
+        ownerScope: scopedOwner,
         reportDate,
         operation: operation.operation,
         trigger,
@@ -421,8 +435,11 @@ export class MarketOrchestrator {
           tool: 'panda-market-worker',
           detail: { reportDate }
         });
+        const workerOperation = DAILY_COLLECTION_OPERATIONS.has(operation.operation)
+          ? { ...operation, operation: 'daily-market-report', sections: [] }
+          : operation;
         let evidence = await this.worker({
-          request: { ...operation, date: reportDate, runId },
+          request: { ...workerOperation, date: reportDate, runId },
           config: this.config,
           signal: input.signal,
           onTrace: (event) => trace.addWorkerEvent(event)
@@ -588,11 +605,12 @@ export class MarketOrchestrator {
     }
   }
 
-  async #findReusableReport(operation, reportDate) {
-    const tasks = await this.store.list();
+  async #findReusableReport(operation, reportDate, scopedOwner) {
+    const tasks = await this.store.list({ ownerScope: scopedOwner });
     return tasks
       .filter((task) =>
-        task.operation === operation
+        task.ownerScope === scopedOwner
+        && task.operation === operation
         && task.reportDate === reportDate
         && task.artifactsReady === true
         && ['complete', 'degraded', 'skipped'].includes(task.outcome)

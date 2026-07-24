@@ -1,8 +1,9 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 
 import { readJsonBody } from '../../src/utils.js';
 import { buildMarketAgentCard } from './agent-card.js';
+import { ownerScope } from './owner-scope.js';
 import {
   MarketA2AError,
   MarketTaskService,
@@ -18,6 +19,11 @@ const TERMINAL_STATES = new Set([
   'TASK_STATE_FAILED',
   'TASK_STATE_CANCELED',
   'TASK_STATE_REJECTED'
+]);
+const TASK_STATES = new Set([
+  'TASK_STATE_SUBMITTED',
+  'TASK_STATE_WORKING',
+  ...TERMINAL_STATES
 ]);
 
 const HTTP_STATUS_TEXT = {
@@ -155,7 +161,7 @@ function constantTimeEqual(left, right) {
 }
 
 function tokenOwner(token) {
-  return `bearer:${createHash('sha256').update(token).digest('hex').slice(0, 24)}`;
+  return ownerScope(`bearer:${token}`);
 }
 
 function isLoopbackHost(value) {
@@ -176,12 +182,16 @@ async function authenticateRequest(request, options) {
     if (!identity || typeof identity.owner !== 'string' || !identity.owner) {
       throw authenticationError();
     }
-    return { owner: identity.owner.slice(0, 200) };
+    try {
+      return { owner: ownerScope(identity.owner) };
+    } catch {
+      throw authenticationError();
+    }
   }
   const expected = String(options.config?.accessToken || '');
   if (!expected) {
     if (!isLoopbackAddress(request.socket?.remoteAddress)) throw authenticationError();
-    return { owner: 'anonymous' };
+    return { owner: ownerScope('loopback:anonymous') };
   }
   if (!token || !constantTimeEqual(token, expected)) throw authenticationError();
   return { owner: tokenOwner(token) };
@@ -237,13 +247,17 @@ function terminalTask(task) {
 }
 
 function writeSse(response, event) {
-  response.write(`data: ${JSON.stringify(event)}\n\n`);
+  response.write(sseFrame(event));
+}
+
+function sseFrame(event) {
+  return `data: ${JSON.stringify(event)}\n\n`;
 }
 
 function streamTaskSnapshot(task) {
   const snapshot = structuredClone(task);
   const fits = (value) =>
-    Buffer.byteLength(JSON.stringify({ task: value })) <= MAX_SSE_EVENT_BYTES;
+    Buffer.byteLength(sseFrame({ task: value })) <= MAX_SSE_EVENT_BYTES;
   if (fits(snapshot)) {
     return snapshot;
   }
@@ -287,7 +301,7 @@ function streamTaskSnapshot(task) {
   };
 }
 
-function streamTask(request, response, service, task, owner) {
+function streamTask(request, response, service, task, owner, options = {}) {
   let unsubscribe = () => {};
   let closed = false;
   const close = () => {
@@ -301,7 +315,7 @@ function streamTask(request, response, service, task, owner) {
     writeSse(response, event);
     if (terminalTask({ status: event.statusUpdate?.status })) close();
   };
-  unsubscribe = service.subscribe(task.id, owner, listener);
+  unsubscribe = service.subscribe(task.id, owner, listener, options);
   try {
     response.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -329,15 +343,37 @@ function streamTask(request, response, service, task, owner) {
 
 function queryOptions(url) {
   const pageSize = url.searchParams.get('pageSize');
-  const historyLength = url.searchParams.get('historyLength');
+  const historyValue = url.searchParams.get('historyLength');
+  const status = url.searchParams.get('status');
+  const includeArtifactsValue = url.searchParams.get('includeArtifacts');
+  let historyLength;
+  if (historyValue !== null) {
+    if (!/^(?:0|[1-9]\d*)$/.test(historyValue)) {
+      throw invalidRequestError('historyLength must be an integer from 0 to 32');
+    }
+    historyLength = Number(historyValue);
+    if (historyLength > 32) {
+      throw invalidRequestError('historyLength must be an integer from 0 to 32');
+    }
+  }
+  if (status !== null && !TASK_STATES.has(status)) {
+    throw invalidRequestError('status must be a supported task state');
+  }
+  if (
+    includeArtifactsValue !== null
+    && includeArtifactsValue !== 'true'
+    && includeArtifactsValue !== 'false'
+  ) {
+    throw invalidRequestError('includeArtifacts must be true or false');
+  }
   return {
     contextId: url.searchParams.get('contextId') || undefined,
-    status: url.searchParams.get('status') || undefined,
+    status: status || undefined,
     statusTimestampAfter: url.searchParams.get('statusTimestampAfter') || undefined,
     pageToken: url.searchParams.get('pageToken') || undefined,
     pageSize: pageSize === null ? undefined : Number(pageSize),
-    historyLength: historyLength === null ? undefined : Number(historyLength),
-    includeArtifacts: url.searchParams.get('includeArtifacts') === 'true'
+    historyLength,
+    includeArtifacts: includeArtifactsValue === 'true'
   };
 }
 
@@ -404,7 +440,11 @@ async function handleA2A(request, response, url, identity, service) {
     });
     const task = submission.returnImmediately
       ? submission.task
-      : await service.wait(submission.task.id, identity.owner);
+      : await service.wait(
+          submission.task.id,
+          identity.owner,
+          submission.responseOptions
+        );
     return a2aJson(response, 200, { task });
   }
   if (request.method === 'POST' && url.pathname === '/a2a/v1/message:stream') {
@@ -412,7 +452,14 @@ async function handleA2A(request, response, url, identity, service) {
       owner: identity.owner,
       request: await body(request)
     });
-    return streamTask(request, response, service, submission.task, identity.owner);
+    return streamTask(
+      request,
+      response,
+      service,
+      submission.task,
+      identity.owner,
+      submission.responseOptions
+    );
   }
   if (request.method === 'GET' && url.pathname === '/a2a/v1/tasks') {
     return a2aJson(response, 200, service.list(identity.owner, queryOptions(url)));

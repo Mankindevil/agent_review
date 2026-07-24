@@ -6,6 +6,25 @@ const OPERATIONS = new Set([
   'inspect-run-trace'
 ]);
 const EVIDENCE_STATUSES = new Set(['complete', 'degraded', 'skipped', 'failed']);
+const REPORT_SECTION_IDS = new Set([
+  'run-overview',
+  'executive-summary',
+  'a-share-market',
+  'hot-topics',
+  'sell-pressure',
+  'potential-watchlist',
+  'capital-transactions',
+  'cross-market',
+  'event-crowding-risks',
+  'data-methodology',
+  'trace-artifacts',
+  'disclaimer'
+]);
+const ANALYTICAL_SECTION = Object.freeze({
+  'hot-topic-analysis': 'hot-topics',
+  'sell-pressure-scan': 'sell-pressure',
+  'potential-watchlist': 'potential-watchlist'
+});
 const MAX_EVIDENCE_DEPTH = 24;
 const MAX_EVIDENCE_NODES = 100_000;
 const MAX_EVIDENCE_ARRAY = 10_000;
@@ -79,6 +98,13 @@ export function validateOperation(value) {
   const sections = value.sections === undefined ? [] : value.sections;
   if (!Array.isArray(sections) || sections.some((item) => typeof item !== 'string')) {
     throw new TypeError('sections must be an array of strings');
+  }
+  if (sections.some((item) => !REPORT_SECTION_IDS.has(item))) {
+    throw new RangeError('sections contains an unsupported report section');
+  }
+  const analyticalSection = ANALYTICAL_SECTION[value.operation];
+  if (analyticalSection && sections.some((item) => item !== analyticalSection)) {
+    throw new RangeError(`sections for ${value.operation} may contain only ${analyticalSection}`);
   }
   return {
     operation: value.operation,
