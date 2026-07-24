@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
 
-import { validateNarrative } from './report-validator.js';
+import { buildCompactEvidence, validateNarrative } from './report-validator.js';
 import { validateEvidencePack } from './schemas.js';
 
 const MAX_PROMPT_BYTES = 512 * 1024;
 const MAX_RESPONSE_BYTES = 128 * 1024;
 const MAX_RESPONSE_ENVELOPE_BYTES = 256 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const MAX_REQUEST_TIMEOUT_MS = 120_000;
 
 function isoNow() {
   return new Date().toISOString();
@@ -69,12 +71,21 @@ function calculatePricing(config, tokens) {
     };
   }
   const cachedRate = Number(table.cachedInputPerMillion);
+  const hasCachedRate = Object.hasOwn(table, 'cachedInputPerMillion');
+  if (hasCachedRate && (!Number.isFinite(cachedRate) || cachedRate < 0)) {
+    return {
+      pricingVersion,
+      cost: null,
+      currency: table.currency || null,
+      pricingUnavailableReason: 'versioned pricing rates or token usage are unavailable'
+    };
+  }
   const cachedTokens = tokens.cachedTokens ?? 0;
-  const regularInput = Number.isFinite(cachedRate)
+  const regularInput = hasCachedRate
     ? Math.max(0, tokens.inputTokens - cachedTokens)
     : tokens.inputTokens;
   const inputCost = regularInput * inputRate / 1_000_000;
-  const cachedCost = Number.isFinite(cachedRate) ? cachedTokens * cachedRate / 1_000_000 : 0;
+  const cachedCost = hasCachedRate ? cachedTokens * cachedRate / 1_000_000 : 0;
   const outputCost = tokens.outputTokens * outputRate / 1_000_000;
   return {
     pricingVersion,
@@ -115,34 +126,6 @@ async function readBoundedResponseJson(response) {
   return JSON.parse(text);
 }
 
-function compactEvidence(evidence) {
-  const sources = evidence.sources.map((source) => ({
-    id: source.id,
-    method: source.method,
-    dataAsOf: source.dataAsOf,
-    window: source.window || source.dataWindow || null,
-    coverage: source.coverage ?? null,
-    rowCount: source.rowCount ?? null,
-    traceSequence: source.traceSequence ?? source.sequence ?? null,
-    status: source.status
-  }));
-  return {
-    schemaVersion: evidence.schemaVersion,
-    runId: evidence.runId,
-    reportDate: evidence.reportDate,
-    status: evidence.status,
-    markets: evidence.markets,
-    universe: evidence.universe,
-    coverage: evidence.coverage,
-    missingData: evidence.missingData || [],
-    metricVersion: evidence.metricVersion,
-    leaderboards: evidence.leaderboards,
-    conclusions: evidence.conclusions,
-    sources,
-    conventions: evidence.conventions || []
-  };
-}
-
 function contentText(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
@@ -154,6 +137,45 @@ function contentText(content) {
 function completionUrl(baseUrl) {
   const base = String(baseUrl || '').replace(/\/$/, '');
   return base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
+}
+
+function requestTimeoutMs(config) {
+  return Number.isSafeInteger(config.timeoutMs) && config.timeoutMs > 0
+    ? Math.min(config.timeoutMs, MAX_REQUEST_TIMEOUT_MS)
+    : DEFAULT_REQUEST_TIMEOUT_MS;
+}
+
+async function withRequestDeadline(operation, callerSignal, timeoutMs) {
+  const controller = new AbortController();
+  let timer;
+  let callerAbort;
+  const cancelled = new Promise((_resolve, reject) => {
+    const cancel = (error) => {
+      controller.abort(error);
+      reject(error);
+    };
+    timer = setTimeout(() => {
+      const error = new Error(`model request timeout after ${timeoutMs}ms`);
+      error.name = 'TimeoutError';
+      cancel(error);
+    }, timeoutMs);
+    if (callerSignal) {
+      callerAbort = () => {
+        const error = callerSignal.reason instanceof Error
+          ? callerSignal.reason
+          : new Error('model request aborted by caller');
+        cancel(error);
+      };
+      if (callerSignal.aborted) callerAbort();
+      else callerSignal.addEventListener('abort', callerAbort, { once: true });
+    }
+  });
+  try {
+    return await Promise.race([operation(controller.signal), cancelled]);
+  } finally {
+    clearTimeout(timer);
+    if (callerSignal && callerAbort) callerSignal.removeEventListener('abort', callerAbort);
+  }
 }
 
 function parseContent(content) {
@@ -257,7 +279,7 @@ export async function generateNarrative(
     };
   }
 
-  const compact = compactEvidence(evidence);
+  const compact = buildCompactEvidence(evidence);
   const evidenceJson = JSON.stringify(compact);
   if (Buffer.byteLength(evidenceJson) > MAX_PROMPT_BYTES) {
     const fallbackReason = 'compact Evidence Pack exceeds model prompt bounds';
@@ -271,36 +293,38 @@ export async function generateNarrative(
   let responseJson;
   let content = '';
   try {
-    const response = await fetchImpl(completionUrl(config.baseUrl), {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${config.apiKey}`
-      },
-      body: JSON.stringify({
-        model: config.name,
-        temperature: 0,
-        max_tokens: Number.isSafeInteger(config.maxTokens) && config.maxTokens > 0
-          ? Math.min(config.maxTokens, 4_096)
-          : 1_200,
-        response_format: { type: 'json_object' },
-        messages: [{
-          role: 'system',
-          content: [
-            '你是只负责润色的市场报告叙述适配器。',
-            '只能使用用户给出的 Evidence Pack；不得使用外部知识、工具或数据源。',
-            '不得新增或修改数字、排名、日期、置信度、否决、结论、证券或因果关系。',
-            '只返回 JSON：{"sections":[{"id":"executive-summary","conclusionIds":["..."],"text":"..."}]}。'
-          ].join('\n')
-        }, {
-          role: 'user',
-          content: evidenceJson
-        }]
-      }),
-      signal
-    });
-    if (!response?.ok) throw new Error(`model returned HTTP ${response?.status ?? 'unknown'}`);
-    responseJson = await readBoundedResponseJson(response);
+    responseJson = await withRequestDeadline(async (requestSignal) => {
+      const response = await fetchImpl(completionUrl(config.baseUrl), {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${config.apiKey}`
+        },
+        body: JSON.stringify({
+          model: config.name,
+          temperature: 0,
+          max_tokens: Number.isSafeInteger(config.maxTokens) && config.maxTokens > 0
+            ? Math.min(config.maxTokens, 4_096)
+            : 1_200,
+          response_format: { type: 'json_object' },
+          messages: [{
+            role: 'system',
+            content: [
+              '你是只负责润色的市场报告叙述适配器。',
+              '只能使用用户给出的 Evidence Pack；不得使用外部知识、工具或数据源。',
+              '不得新增或修改数字、排名、日期、置信度、否决、结论、证券或因果关系。',
+              '只返回 JSON：{"sections":[{"id":"executive-summary","conclusionIds":["..."],"text":"..."}]}。'
+            ].join('\n')
+          }, {
+            role: 'user',
+            content: evidenceJson
+          }]
+        }),
+        signal: requestSignal
+      });
+      if (!response?.ok) throw new Error(`model returned HTTP ${response?.status ?? 'unknown'}`);
+      return readBoundedResponseJson(response);
+    }, signal, requestTimeoutMs(config));
     content = contentText(responseJson?.choices?.[0]?.message?.content);
     if (!content) throw new Error('model response has no content');
   } catch (error) {
@@ -323,7 +347,7 @@ export async function generateNarrative(
   });
   try {
     const parsed = parseContent(content);
-    validateNarrative(evidence, parsed);
+    validateNarrative(evidence, parsed, { compactEvidence: compact });
     return { sections: parsed.sections, usage };
   } catch (error) {
     return {

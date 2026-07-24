@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-
 import { sanitizeTraceValue } from './run-trace.js';
 import { validateEvidencePack } from './schemas.js';
 
@@ -18,11 +16,23 @@ export const REPORT_SECTIONS = Object.freeze([
   { id: 'disclaimer', title: '免责声明' }
 ]);
 
-const MAX_DETAIL_ROWS = 200;
-const MAX_REPORT_ROWS = 50;
-const MAX_REPORT_SOURCES = 200;
-const MAX_REPORT_CONCLUSIONS = 128;
-const MAX_DISPLAY_TEXT = 4_000;
+export const REPORT_DISPLAY_CAPS = Object.freeze({
+  detailRows: 200,
+  leaderboardRows: 50,
+  sources: 200,
+  conclusions: 128,
+  missingData: 200,
+  artifacts: 50,
+  conventions: 100,
+  riskRows: 200,
+  displayText: 4_000
+});
+export const DATA_DATE_UNAVAILABLE = '数据日期不可用';
+export const NOT_RECORDED = '未记录';
+
+export function truncationMarker(label, omitted) {
+  return `TRUNCATED:${label}:${omitted}`;
+}
 
 export function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -32,8 +42,8 @@ export function escapeHtml(value) {
 
 function boundedDisplay(value) {
   const text = String(value);
-  return text.length > MAX_DISPLAY_TEXT
-    ? `${text.slice(0, MAX_DISPLAY_TEXT)}…[TRUNCATED]`
+  return text.length > REPORT_DISPLAY_CAPS.displayText
+    ? `${text.slice(0, REPORT_DISPLAY_CAPS.displayText)}…[TRUNCATED]`
     : text;
 }
 
@@ -61,8 +71,13 @@ function valueText(value) {
   return boundedDisplay(value);
 }
 
-function artifactHash(evidence) {
-  return createHash('sha256').update(JSON.stringify(evidence)).digest('hex');
+function cappedTableRows(items, limit, label, project, width) {
+  const values = Array.isArray(items) ? items : [];
+  const rows = values.slice(0, limit).map(project);
+  if (values.length > limit) {
+    rows.push([truncationMarker(label, values.length - limit), ...Array(width - 1).fill('—')]);
+  }
+  return rows;
 }
 
 function narrativeFor(narrative, id) {
@@ -74,7 +89,7 @@ function narrativeFor(narrative, id) {
 
 function dataCutoffs(markets) {
   return Object.entries(markets || {})
-    .map(([market, value]) => `${market}: ${value?.dataDate || '—'}`)
+    .map(([market, value]) => `${market}: ${value?.dataDate || DATA_DATE_UNAVAILABLE}`)
     .join('；') || '—';
 }
 
@@ -92,30 +107,30 @@ function contributions(row) {
   return `score:${valueText(row?.score)}`;
 }
 
-function leaderboardRows(rows, evidence) {
-  return (Array.isArray(rows) ? rows.slice(0, MAX_REPORT_ROWS) : []).map((row, index) => [
+function leaderboardRows(rows) {
+  return cappedTableRows(rows, REPORT_DISPLAY_CAPS.leaderboardRows, 'leaderboard', (row, index) => [
     row.rank ?? index + 1,
     row.symbol || row.id || '—',
     row.name || '—',
-    row.dataDate || evidence.markets?.aShare?.dataDate || evidence.reportDate,
+    row.dataDate || DATA_DATE_UNAVAILABLE,
     row.score,
     contributions(row),
     row.confidence,
     row.status || 'RANKED',
     valueText(row.vetoes)
-  ]);
+  ], 9);
 }
 
 function sourceRows(sources) {
-  return (Array.isArray(sources) ? sources.slice(0, MAX_REPORT_SOURCES) : []).map((source) => [
+  return cappedTableRows(sources, REPORT_DISPLAY_CAPS.sources, 'sources', (source) => [
     source.method,
-    source.dataAsOf,
+    source.dataAsOf || DATA_DATE_UNAVAILABLE,
     source.window || source.dataWindow,
     source.coverage,
     source.rowCount,
     source.traceSequence ?? source.sequence ?? source.id,
     source.status
-  ]);
+  ], 7);
 }
 
 function markdownTable(headers, rows) {
@@ -140,7 +155,7 @@ function htmlTable(headers, rows) {
 function marketRows(markets) {
   return Object.entries(markets || {}).slice(0, 32).map(([market, details]) => [
     market,
-    details?.dataDate,
+    details?.dataDate || DATA_DATE_UNAVAILABLE,
     details?.rowCount,
     Object.entries(details || {})
       .filter(([key]) => !['dataDate', 'rowCount'].includes(key))
@@ -150,28 +165,27 @@ function marketRows(markets) {
 }
 
 function conclusionRows(conclusions) {
-  return (Array.isArray(conclusions) ? conclusions.slice(0, MAX_REPORT_CONCLUSIONS) : []).map((item) => [
+  return cappedTableRows(conclusions, REPORT_DISPLAY_CAPS.conclusions, 'conclusions', (item) => [
     item.conclusion_id,
     item.formula,
     item.confidence,
     valueText(item.limitations)
-  ]);
+  ], 4);
 }
 
 function missingRows(missingData) {
-  return (Array.isArray(missingData) ? missingData.slice(0, MAX_REPORT_SOURCES) : []).map((item) => [
+  return cappedTableRows(missingData, REPORT_DISPLAY_CAPS.missingData, 'missing-data', (item) => [
     item.section,
     item.method,
     item.status,
     item.coverage,
     item.error
-  ]);
+  ], 5);
 }
 
 function htmlConclusionTable(conclusions) {
-  const rows = Array.isArray(conclusions)
-    ? conclusions.slice(0, MAX_REPORT_CONCLUSIONS)
-    : [];
+  const items = Array.isArray(conclusions) ? conclusions : [];
+  const rows = items.slice(0, REPORT_DISPLAY_CAPS.conclusions);
   if (!rows.length) return '<p class="empty">无可用数据</p>';
   return `<div class="table-wrap"><table><thead><tr>${
     ['结论 ID', '公式版本', '置信度', '限制']
@@ -185,6 +199,12 @@ function htmlConclusionTable(conclusions) {
         valueText(item.limitations)
       ].map((value) => `<td>${escapeHtml(valueText(value))}</td>`).join('')
     }</tr>`).join('')
+  }${items.length > REPORT_DISPLAY_CAPS.conclusions
+    ? `<tr><td>${escapeHtml(truncationMarker(
+      'conclusions',
+      items.length - REPORT_DISPLAY_CAPS.conclusions
+    ))}</td><td>—</td><td>—</td><td>—</td></tr>`
+    : ''
   }</tbody></table></div>`;
 }
 
@@ -206,13 +226,26 @@ function sectionContent(evidence, narrative) {
   const otherMarkets = Object.fromEntries(
     Object.entries(evidence.markets || {}).filter(([market]) => market !== 'aShare')
   );
-  const vetoRows = Object.entries(evidence.leaderboards || {}).flatMap(([board, rows]) =>
+  const allVetoRows = Object.entries(evidence.leaderboards || {}).flatMap(([board, rows]) =>
     (rows || []).filter((row) => Array.isArray(row.vetoes) && row.vetoes.length)
-      .map((row) => [board, row.symbol || row.id, valueText(row.vetoes), row.dataDate || evidence.reportDate])
+      .map((row) => [board, row.symbol || row.id, valueText(row.vetoes), row.dataDate || DATA_DATE_UNAVAILABLE])
+  );
+  const vetoRows = cappedTableRows(
+    allVetoRows,
+    REPORT_DISPLAY_CAPS.riskRows,
+    'risk-rows',
+    (row) => row,
+    4
   );
   const artifacts = Array.isArray(evidence.artifacts) && evidence.artifacts.length
-    ? evidence.artifacts.slice(0, 50).map((item) => [item.name, item.sha256 || item.hash])
-    : [['evidence-pack.json', artifactHash(evidence)]];
+    ? cappedTableRows(
+      evidence.artifacts,
+      REPORT_DISPLAY_CAPS.artifacts,
+      'artifacts',
+      (item) => [item.name, item.sha256 || item.hash || NOT_RECORDED],
+      2
+    )
+    : [['evidence-pack.json', NOT_RECORDED]];
   const degraded = evidence.status === 'degraded';
   const overview = [
     ['报告日', evidence.reportDate],
@@ -247,44 +280,44 @@ function sectionContent(evidence, narrative) {
         '### 热门行业',
         markdownTable(
           ['排名', '标识', '名称', '数据日', '总分', '分数贡献', '置信度', '状态', '否决'],
-          leaderboardRows(evidence.leaderboards?.hotIndustries, evidence)
+          leaderboardRows(evidence.leaderboards?.hotIndustries)
         ),
         '### 热门概念',
         markdownTable(
           ['排名', '标识', '名称', '数据日', '总分', '分数贡献', '置信度', '状态', '否决'],
-          leaderboardRows(evidence.leaderboards?.hotConcepts, evidence)
+          leaderboardRows(evidence.leaderboards?.hotConcepts)
         )
       ].join('\n\n'),
       html: `<h3>热门行业</h3>${
         htmlTable(
           ['排名', '标识', '名称', '数据日', '总分', '分数贡献', '置信度', '状态', '否决'],
-          leaderboardRows(evidence.leaderboards?.hotIndustries, evidence)
+          leaderboardRows(evidence.leaderboards?.hotIndustries)
         )
       }<h3>热门概念</h3>${
         htmlTable(
           ['排名', '标识', '名称', '数据日', '总分', '分数贡献', '置信度', '状态', '否决'],
-          leaderboardRows(evidence.leaderboards?.hotConcepts, evidence)
+          leaderboardRows(evidence.leaderboards?.hotConcepts)
         )
       }`
     },
     'sell-pressure': {
       markdown: markdownTable(
         ['排名', '标识', '名称', '数据日', '总分', '分数贡献', '置信度', '状态', '否决'],
-        leaderboardRows(evidence.leaderboards?.sellPressure, evidence)
+        leaderboardRows(evidence.leaderboards?.sellPressure)
       ),
       html: htmlTable(
         ['排名', '标识', '名称', '数据日', '总分', '分数贡献', '置信度', '状态', '否决'],
-        leaderboardRows(evidence.leaderboards?.sellPressure, evidence)
+        leaderboardRows(evidence.leaderboards?.sellPressure)
       )
     },
     'potential-watchlist': {
       markdown: markdownTable(
         ['排名', '标识', '名称', '数据日', '总分', '分数贡献', '置信度', '状态', '否决'],
-        leaderboardRows(evidence.leaderboards?.potentialWatchlist, evidence)
+        leaderboardRows(evidence.leaderboards?.potentialWatchlist)
       ),
       html: htmlTable(
         ['排名', '标识', '名称', '数据日', '总分', '分数贡献', '置信度', '状态', '否决'],
-        leaderboardRows(evidence.leaderboards?.potentialWatchlist, evidence)
+        leaderboardRows(evidence.leaderboards?.potentialWatchlist)
       )
     },
     'capital-transactions': {
@@ -316,7 +349,14 @@ function sectionContent(evidence, narrative) {
           allSources
         ),
         '### 计算约定',
-        ...(evidence.conventions || []).slice(0, 100).map((item) => `- ${markdownText(item)}`)
+        ...(evidence.conventions || []).slice(0, REPORT_DISPLAY_CAPS.conventions)
+          .map((item) => `- ${markdownText(item)}`),
+        ...(evidence.conventions || []).length > REPORT_DISPLAY_CAPS.conventions
+          ? [`- ${truncationMarker(
+            'conventions',
+            evidence.conventions.length - REPORT_DISPLAY_CAPS.conventions
+          )}`]
+          : []
       ].filter(Boolean).join('\n\n'),
       html: `${methodologyNarrative ? `<p>${escapeHtml(methodologyNarrative)}</p>` : ''
       }<h3>缺失接口</h3>${
@@ -327,8 +367,14 @@ function sectionContent(evidence, narrative) {
           allSources
         )
       }<h3>计算约定</h3><ul>${
-        (evidence.conventions || []).slice(0, 100)
+        (evidence.conventions || []).slice(0, REPORT_DISPLAY_CAPS.conventions)
           .map((item) => `<li>${escapeHtml(valueText(item))}</li>`).join('')
+      }${(evidence.conventions || []).length > REPORT_DISPLAY_CAPS.conventions
+        ? `<li>${escapeHtml(truncationMarker(
+          'conventions',
+          evidence.conventions.length - REPORT_DISPLAY_CAPS.conventions
+        ))}</li>`
+        : ''
       }</ul>`
     },
     'trace-artifacts': {
@@ -394,7 +440,10 @@ export function renderReport(evidence, narrative) {
 }
 
 function detailTable(headers, rows) {
-  return htmlTable(headers, rows.slice(0, MAX_DETAIL_ROWS));
+  return htmlTable(
+    headers,
+    cappedTableRows(rows, REPORT_DISPLAY_CAPS.detailRows, 'detail', (row) => row, headers.length)
+  );
 }
 
 export function renderRunDetail({ run = {}, evidence = {}, trace = {} } = {}) {

@@ -226,6 +226,100 @@ test('report renders every producer-bounded leaderboard row', () => {
   assert.deepEqual(validateReport({ evidence: pack, markdown: report.markdown }), { valid: true });
 });
 
+test('report caps large valid collections with explicit validated truncation markers', () => {
+  const rows = Array.from({ length: 55 }, (_, index) => ({
+    rank: index + 1,
+    symbol: `${String(index + 1).padStart(6, '0')}.SZ`,
+    name: `证券${index + 1}`,
+    dataDate: '2026-07-23',
+    score: 100 - index,
+    confidence: 0.8,
+    scoreContributions: { final: 100 - index },
+    status: 'RANKED'
+  }));
+  const sources = Array.from({ length: 205 }, (_, index) => ({
+    id: `panda-call-${String(index + 1).padStart(3, '0')}`,
+    method: `get_dataset_${index + 1}`,
+    dataAsOf: '2026-07-23',
+    rowCount: index + 1,
+    status: 'ok'
+  }));
+  const conclusions = Array.from({ length: 130 }, (_, index) => ({
+    conclusion_id: `conclusion_${index + 1}`,
+    formula: 'bounded-v1',
+    confidence: 0.8,
+    sourceIds: [sources[index].id],
+    limitations: []
+  }));
+  const missingData = Array.from({ length: 205 }, (_, index) => ({
+    section: 'data-methodology',
+    method: `missing_method_${index + 1}`,
+    status: 'missing',
+    error: 'unavailable'
+  }));
+  const pack = evidence({
+    status: 'degraded',
+    leaderboards: { ...evidence().leaderboards, sellPressure: rows },
+    sources,
+    conclusions,
+    missingData,
+    artifacts: Array.from({ length: 55 }, (_, index) => ({
+      name: `artifact-${index + 1}.json`,
+      sha256: `hash-${index + 1}`
+    })),
+    conventions: Array.from({ length: 105 }, (_, index) => `convention-${index + 1}`)
+  });
+  const report = renderReport(pack);
+  assert.match(report.markdown, /TRUNCATED:leaderboard:5/);
+  assert.match(report.markdown, /TRUNCATED:sources:5/);
+  assert.match(report.markdown, /TRUNCATED:conclusions:2/);
+  assert.match(report.markdown, /TRUNCATED:missing-data:5/);
+  assert.match(report.markdown, /TRUNCATED:artifacts:5/);
+  assert.match(report.markdown, /TRUNCATED:conventions:5/);
+  assert.doesNotMatch(report.markdown, /000051\.SZ/);
+  assert.deepEqual(validateReport({ evidence: pack, markdown: report.markdown }), { valid: true });
+  assert.throws(
+    () => validateReport({
+      evidence: pack,
+      markdown: report.markdown.replace('TRUNCATED:missing-data:5', 'marker-removed')
+    }),
+    /truncation marker/i
+  );
+  assert.throws(
+    () => validateReport({
+      evidence: pack,
+      markdown: report.markdown.replace('TRUNCATED:conventions:5', 'marker-removed')
+    }),
+    /truncation marker/i
+  );
+});
+
+test('missing row and source dates remain explicitly unavailable', () => {
+  const { dataDate: _rowDate, ...rowWithoutDate } = evidence().leaderboards.sellPressure[0];
+  const { dataAsOf: _sourceDate, ...sourceWithoutDate } = evidence().sources[0];
+  const pack = evidence({
+    leaderboards: {
+      ...evidence().leaderboards,
+      sellPressure: [rowWithoutDate]
+    },
+    sources: [sourceWithoutDate]
+  });
+  const report = renderReport(pack);
+  const rowLine = report.markdown.split('\n').find((line) => line.includes('000001.SZ'));
+  const sourceLine = report.markdown.split('\n').find((line) => line.includes('get_stock_daily'));
+  assert.match(rowLine, /数据日期不可用/);
+  assert.match(sourceLine, /数据日期不可用/);
+  assert.deepEqual(validateReport({ evidence: pack, markdown: report.markdown }), { valid: true });
+});
+
+test('missing artifact metadata is reported without synthesizing a hash', () => {
+  const pack = evidence();
+  delete pack.artifacts;
+  const report = renderReport(pack);
+  assert.match(report.markdown, /evidence-pack\.json.*未记录/);
+  assert.doesNotMatch(report.markdown, /evidence-pack\.json.*[a-f0-9]{64}/);
+});
+
 test('report validation rejects unsupported narrative numbers and stock symbols', () => {
   const pack = evidence();
   assert.throws(
@@ -268,7 +362,7 @@ test('report validation rejects unsupported narrative numbers and stock symbols'
         }]
       }
     }),
-    /rank claim/
+    /rank claim|scope/
   );
 });
 
@@ -351,6 +445,169 @@ test('narrative adapter sends only compact evidence and normalizes model usage',
   assert.match(result.usage.responseSha256, /^[a-f0-9]{64}$/);
 });
 
+test('narrative compact projection removes nested private fields and sanitizes values', async () => {
+  const pack = evidence({
+    markets: {
+      ...evidence().markets,
+      aShare: {
+        ...evidence().markets.aShare,
+        privateCredential: 'nested-market-secret',
+        macro: {
+          valuation: 18.2,
+          internalNote: 'deep-market-secret'
+        },
+        indices: [{
+          symbol: '000001.SH',
+          name: '上证指数',
+          close: 3582.3,
+          contact: 'alice.private@example.com',
+          sourceUrl: 'https://user:pass@example.com/private'
+        }]
+      }
+    },
+    universe: {
+      ...evidence().universe,
+      password: 'nested-universe-secret'
+    },
+    coverage: {
+      ...evidence().coverage,
+      privateToken: 'nested-coverage-secret'
+    },
+    leaderboards: {
+      ...evidence().leaderboards,
+      sellPressure: evidence().leaderboards.sellPressure.map((row) => ({
+        ...row,
+        apiKey: 'nested-row-secret'
+      }))
+    },
+    conclusions: evidence().conclusions.map((item) => ({
+      ...item,
+      authorization: 'Bearer nested-conclusion-secret'
+    })),
+    conventions: [
+      '联系人 alice.private@example.com',
+      'authorization=Bearer nested-convention-secret'
+    ]
+  });
+  let requestBody;
+  const result = await generateNarrative(pack, {
+    enabled: true,
+    baseUrl: 'https://model.example.test/v1',
+    apiKey: 'model-key',
+    name: 'narrator-1'
+  }, {
+    fetchImpl: async (_url, options) => {
+      requestBody = JSON.parse(options.body);
+      return successfulModelResponse({
+        sections: [{
+          id: 'executive-summary',
+          conclusionIds: ['conclusion_market_regime'],
+          text: '报告日为 2026-07-23，置信度为 0.91。'
+        }]
+      }, { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+    }
+  });
+
+  assert.equal(result.sections.length, 1);
+  const serialized = JSON.stringify(requestBody);
+  for (const secret of [
+    'nested-market-secret',
+    'deep-market-secret',
+    'nested-universe-secret',
+    'nested-coverage-secret',
+    'nested-row-secret',
+    'nested-conclusion-secret',
+    'nested-convention-secret',
+    'alice.private@example.com',
+    'user:pass@'
+  ]) {
+    assert.doesNotMatch(serialized, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+  const compact = JSON.parse(requestBody.messages[1].content);
+  assert.equal(compact.markets.aShare.privateCredential, undefined);
+  assert.equal(compact.universe.password, undefined);
+  assert.equal(compact.coverage.privateToken, undefined);
+  assert.equal(compact.leaderboards.sellPressure[0].apiKey, undefined);
+  assert.equal(compact.conclusions[0].authorization, undefined);
+});
+
+test('narrative facts use exact compact evidence with exponent and case-insensitive symbols', async () => {
+  const pack = evidence({
+    leaderboards: {
+      ...evidence().leaderboards,
+      sellPressure: [{
+        rank: 1,
+        symbol: 'X',
+        name: '样本证券',
+        dataDate: '2026-07-23',
+        score: 72.4,
+        confidence: 0.81,
+        scoreContributions: { final: 72.4 },
+        status: 'RANKED'
+      }, {
+        rank: 2,
+        symbol: 'F',
+        name: '单字母证券',
+        dataDate: '2026-07-23',
+        score: 71,
+        confidence: 0.8,
+        scoreContributions: { final: 71 },
+        status: 'RANKED'
+      }, {
+        rank: 3,
+        symbol: '0700.HK',
+        name: '港股样本',
+        dataDate: '2026-07-23',
+        score: 70,
+        confidence: 0.79,
+        scoreContributions: { final: 70 },
+        status: 'RANKED'
+      }]
+    },
+    conclusions: evidence().conclusions.map((item) =>
+      item.conclusion_id === 'conclusion_watchlists'
+        ? { ...item, leaderboard: 'sellPressure' }
+        : item
+    )
+  });
+  const config = {
+    enabled: true, baseUrl: 'https://model.test/v1', apiKey: 'key', name: 'narrator-1'
+  };
+  const call = (text, conclusionIds = ['conclusion_watchlists']) =>
+    generateNarrative(pack, config, {
+      fetchImpl: async () => successfulModelResponse({
+        sections: [{ id: 'executive-summary', conclusionIds, text }]
+      }, { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 })
+    });
+
+  const equivalent = await call('x 得分为 7.24e1。');
+  assert.equal(equivalent.sections.length, 1);
+  assert.equal((await call('f 得分为 +71.0。')).sections.length, 1);
+  assert.equal((await call('0700.hk 得分为 7e1。')).sections.length, 1);
+
+  const unknownLowercase = await call('aapl 得分为 72.4。');
+  assert.deepEqual(unknownLowercase.sections, []);
+  assert.match(unknownLowercase.fallbackReason, /symbol/i);
+
+  const scientificFabrication = await call('X 上涨 1e99。');
+  assert.deepEqual(scientificFabrication.sections, []);
+  assert.match(scientificFabrication.fallbackReason, /numeric/i);
+
+  const outsideConclusion = await call(
+    '600000.SH 得分为 76.2。',
+    ['conclusion_market_regime']
+  );
+  assert.deepEqual(outsideConclusion.sections, []);
+  assert.match(outsideConclusion.fallbackReason, /referenced conclusion|scope/i);
+
+  const outsideMarketScope = await call(
+    '000001.SH 收于 3582.3。',
+    ['conclusion_watchlists']
+  );
+  assert.deepEqual(outsideMarketScope.sections, []);
+  assert.match(outsideMarketScope.fallbackReason, /referenced conclusion|scope/i);
+});
+
 test('narrative pricing produces exact cost only with a versioned pricing table', async () => {
   const pack = evidence();
   const fetchImpl = async () => successfulModelResponse({
@@ -379,6 +636,31 @@ test('narrative pricing produces exact cost only with a versioned pricing table'
   assert.equal(versioned.usage.pricingVersion, 'prices-2026-07-01');
   assert.equal(versioned.usage.cost, 6);
   assert.equal(versioned.usage.currency, 'USD');
+
+  const invalidCachedRate = await generateNarrative(pack, {
+    enabled: true, baseUrl: 'https://model.test/v1', apiKey: 'key', name: 'narrator-1',
+    pricing: {
+      version: 'prices-2026-07-01',
+      inputPerMillion: 2,
+      outputPerMillion: 8,
+      cachedInputPerMillion: -5,
+      currency: 'USD'
+    }
+  }, { fetchImpl });
+  assert.equal(invalidCachedRate.usage.cost, null);
+  assert.match(invalidCachedRate.usage.pricingUnavailableReason, /rate|pricing/i);
+
+  const nonFiniteCachedRate = await generateNarrative(pack, {
+    enabled: true, baseUrl: 'https://model.test/v1', apiKey: 'key', name: 'narrator-1',
+    pricing: {
+      version: 'prices-2026-07-01',
+      inputPerMillion: 2,
+      outputPerMillion: 8,
+      cachedInputPerMillion: 'Infinity',
+      currency: 'USD'
+    }
+  }, { fetchImpl });
+  assert.equal(nonFiniteCachedRate.usage.cost, null);
 });
 
 test('invalid model claims fall back without changing deterministic conclusions', async () => {
@@ -436,6 +718,58 @@ test('narrative adapter rejects an oversized response before JSON parsing', asyn
   assert.equal(jsonCalled, false);
   assert.deepEqual(result.sections, []);
   assert.match(result.fallbackReason, /safe bounds|too large/i);
+});
+
+test('narrative adapter applies and clears its own request deadline', async () => {
+  const started = Date.now();
+  const result = await generateNarrative(evidence(), {
+    enabled: true,
+    baseUrl: 'https://model.test/v1',
+    apiKey: 'key',
+    name: 'narrator-1',
+    timeoutMs: 20
+  }, {
+    fetchImpl: async () => new Promise((resolve) => {
+      setTimeout(() => resolve(successfulModelResponse({
+        sections: [{
+          id: 'executive-summary',
+          conclusionIds: ['conclusion_market_regime'],
+          text: '报告日为 2026-07-23，置信度为 0.91。'
+        }]
+      }, { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 })), 100);
+    })
+  });
+  assert.deepEqual(result.sections, []);
+  assert.match(result.fallbackReason, /timeout|deadline/i);
+  assert.ok(Date.now() - started < 80);
+});
+
+test('narrative adapter combines caller cancellation with its own deadline', async () => {
+  const caller = new AbortController();
+  let requestSignal;
+  const pending = generateNarrative(evidence(), {
+    enabled: true,
+    baseUrl: 'https://model.test/v1',
+    apiKey: 'key',
+    name: 'narrator-1',
+    timeoutMs: 5_000
+  }, {
+    signal: caller.signal,
+    fetchImpl: async (_url, options) => {
+      requestSignal = options.signal;
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(options.signal.reason), {
+          once: true
+        });
+      });
+    }
+  });
+  caller.abort(new Error('caller cancelled'));
+  const result = await pending;
+  assert.notEqual(requestSignal, caller.signal);
+  assert.equal(requestSignal.aborted, true);
+  assert.deepEqual(result.sections, []);
+  assert.match(result.fallbackReason, /caller cancelled/);
 });
 
 test('report and run detail escape Panda and model text while preserving lineage', () => {
@@ -507,4 +841,23 @@ test('browser detail UI requests all protected artifacts with one in-memory bear
   assert.match(script, /\/trace/);
   assert.match(script, /Authorization.*Bearer/s);
   assert.doesNotMatch(`${page}\n${script}`, /localStorage|sessionStorage/);
+});
+
+test('browser detail UI bounds and validates each artifact while preserving partial results', async () => {
+  const script = await readFile(
+    new URL('../agents/market-analyst/public/run-detail.js', import.meta.url),
+    'utf8'
+  );
+  assert.match(script, /headers\.get\(['"]content-length['"]\)/);
+  assert.match(script, /\.getReader\(\)/);
+  assert.match(script, /\.arrayBuffer\(\)/);
+  assert.match(script, /validateArtifactShape/);
+  assert.match(script, /Promise\.allSettled/);
+  assert.match(script, /加载失败/);
+  assert.match(script, /\.slice\(0,\s*MAX_DETAIL_ROWS\)\.map/);
+  assert.match(script, /token\s*=\s*['"]/);
+  assert.doesNotMatch(
+    script,
+    /decodeURIComponent\(\s*new URLSearchParams/
+  );
 });

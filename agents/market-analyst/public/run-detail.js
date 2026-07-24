@@ -3,11 +3,22 @@ const tokenInput = document.querySelector('#access-token');
 const statusNode = document.querySelector('#status');
 const detailNode = document.querySelector('#detail');
 
-const runId = decodeURIComponent(
-  location.pathname.match(/\/runs\/([^/]+)/)?.[1]
-    || new URLSearchParams(location.search).get('runId')
-    || ''
-);
+const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024;
+const MAX_DETAIL_ROWS = 200;
+
+function resolveRunId() {
+  const pathValue = location.pathname.match(/\/runs\/([^/]+)/)?.[1];
+  if (pathValue) {
+    try {
+      return decodeURIComponent(pathValue);
+    } catch {
+      return '';
+    }
+  }
+  return new URLSearchParams(location.search).get('runId') || '';
+}
+
+const runId = resolveRunId();
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -42,7 +53,7 @@ function card(title, headers, rows) {
   for (const header of headers) headerRow.append(element('th', header));
   head.append(headerRow);
   const body = element('tbody');
-  for (const row of rows.slice(0, 200)) {
+  for (const row of rows) {
     const tr = element('tr');
     for (const item of row) tr.append(element('td', valueText(item)));
     body.append(tr);
@@ -53,23 +64,138 @@ function card(title, headers, rows) {
   return section;
 }
 
-async function fetchProtected(path, token) {
+function errorCard(title, error) {
+  const section = element('section', undefined, 'card error-card');
+  section.append(
+    element('h2', `${title}加载失败`),
+    element('p', valueText(error?.message || error), 'error')
+  );
+  return section;
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validateArrayFields(value, fields, kind) {
+  for (const field of fields) {
+    if (value[field] !== undefined && !Array.isArray(value[field])) {
+      throw new TypeError(`${kind}.${field} 必须是数组`);
+    }
+    if (Array.isArray(value[field]) && value[field].some((item) => !isObject(item))) {
+      throw new TypeError(`${kind}.${field} 数组成员必须是对象`);
+    }
+  }
+}
+
+function validateArtifactShape(kind, value) {
+  if (kind === 'report') {
+    if (
+      typeof value !== 'string'
+      && (!isObject(value)
+        || !['markdown', 'text', 'html'].some((field) => typeof value[field] === 'string'))
+    ) {
+      throw new TypeError('report 响应结构无效');
+    }
+    return value;
+  }
+  if (!isObject(value)) throw new TypeError(`${kind} 响应必须是对象`);
+  if (kind === 'run') validateArrayFields(value, ['artifacts'], kind);
+  if (kind === 'evidence') {
+    validateArrayFields(value, ['artifacts', 'conclusions'], kind);
+  }
+  if (kind === 'trace') {
+    validateArrayFields(value, ['steps', 'workerEvents', 'modelUsage', 'emailAttempts'], kind);
+    if (
+      value.conclusionLineage !== undefined
+      && !Array.isArray(value.conclusionLineage)
+      && !isObject(value.conclusionLineage)
+    ) {
+      throw new TypeError('trace.conclusionLineage 必须是数组或对象');
+    }
+    if (
+      Array.isArray(value.conclusionLineage)
+      && value.conclusionLineage.some((item) => !isObject(item))
+    ) {
+      throw new TypeError('trace.conclusionLineage 数组成员必须是对象');
+    }
+  }
+  return value;
+}
+
+async function readBoundedBody(response, path) {
+  const declaredLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_ARTIFACT_BYTES) {
+    throw new RangeError(`${path} 响应超过 ${MAX_ARTIFACT_BYTES} 字节上限`);
+  }
+
+  if (response.body?.getReader) {
+    const reader = response.body.getReader();
+    const chunks = [];
+    let length = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        length += value.byteLength;
+        if (length > MAX_ARTIFACT_BYTES) {
+          try {
+            await reader.cancel();
+          } catch {
+            // Preserve the size-limit error even if cancellation itself fails.
+          }
+          throw new RangeError(`${path} 响应超过 ${MAX_ARTIFACT_BYTES} 字节上限`);
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(bytes);
+  }
+
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength > MAX_ARTIFACT_BYTES) {
+    throw new RangeError(`${path} 响应超过 ${MAX_ARTIFACT_BYTES} 字节上限`);
+  }
+  return new TextDecoder().decode(buffer);
+}
+
+async function fetchProtected(path, token, kind) {
   const response = await fetch(path, {
     headers: { Authorization: `Bearer ${token}` }
   });
   if (!response.ok) throw new Error(`${path} 返回 HTTP ${response.status}`);
   const type = response.headers.get('content-type') || '';
-  return type.includes('json') ? response.json() : response.text();
+  const text = await readBoundedBody(response, path);
+  let value = text;
+  if (type.includes('json')) {
+    try {
+      value = JSON.parse(text);
+    } catch {
+      throw new TypeError(`${path} 返回无效 JSON`);
+    }
+  }
+  return validateArtifactShape(kind, value);
 }
 
-function render({ run, report, evidence, trace }) {
+function render({ run = {}, report = '', evidence = {}, trace = {} }, failures = []) {
   const rawTraceLineage = Array.isArray(trace?.conclusionLineage)
-    ? trace.conclusionLineage
+    ? trace.conclusionLineage.slice(0, MAX_DETAIL_ROWS)
     : (trace?.conclusionLineage && typeof trace.conclusionLineage === 'object'
       ? [trace.conclusionLineage]
       : []);
   const lineage = new Map();
-  for (const item of [...(evidence?.conclusions || []), ...rawTraceLineage]) {
+  for (const item of [
+    ...(evidence?.conclusions || []).slice(0, MAX_DETAIL_ROWS),
+    ...rawTraceLineage
+  ].slice(0, MAX_DETAIL_ROWS)) {
     const id = item.conclusion_id || item.conclusionId;
     if (id) lineage.set(id, { ...(lineage.get(id) || {}), ...item });
   }
@@ -83,11 +209,11 @@ function render({ run, report, evidence, trace }) {
       ['结束时间', run?.endedAt || trace?.endedAt]
     ]),
     card('技能与工具调用', ['序号', '技能', '工具', '状态', '耗时(ms)'],
-      (trace?.steps || []).map((item) => [
+      (trace?.steps || []).slice(0, MAX_DETAIL_ROWS).map((item) => [
         item.sequence, item.skillId, item.tool, item.status, item.durationMs
       ])),
     card('Panda 调用', ['序号', '方法', '耗时(ms)', '行数', '缓存', '重试', '状态'],
-      (trace?.workerEvents || []).map((item) => [
+      (trace?.workerEvents || []).slice(0, MAX_DETAIL_ROWS).map((item) => [
         item.sequence,
         item.method || item.detail?.method,
         item.durationMs ?? item.detail?.durationMs,
@@ -97,20 +223,21 @@ function render({ run, report, evidence, trace }) {
         item.status
       ])),
     card('模型用量', ['提供方', '模型', '输入', '输出', '推理', '缓存', '总计', '成本', '币种'],
-      (trace?.modelUsage || []).map((item) => [
+      (trace?.modelUsage || []).slice(0, MAX_DETAIL_ROWS).map((item) => [
         item.provider, item.model, item.inputTokens, item.outputTokens,
         item.reasoningTokens, item.cachedTokens, item.totalTokens, item.cost, item.currency
       ])),
     card('邮件尝试', ['状态', '时间', '收件方摘要', '错误'],
-      (trace?.emailAttempts || []).map((item) => [
+      (trace?.emailAttempts || []).slice(0, MAX_DETAIL_ROWS).map((item) => [
         item.status, item.attemptedAt || item.startedAt, item.recipients, item.error
       ])),
     card('产物', ['名称', 'SHA-256', '类型'],
-      [...(run?.artifacts || []), ...(evidence?.artifacts || [])].map((item) => [
+      [...(run?.artifacts || []), ...(evidence?.artifacts || [])]
+        .slice(0, MAX_DETAIL_ROWS).map((item) => [
         item.name, item.sha256 || item.hash, item.mediaType || item.type
       ])),
     card('结论链路', ['结论 ID', '公式', '置信度', '来源', '指标/证据', '数据日/窗口', '限制'],
-      [...lineage.entries()].map(([id, item]) => [
+      [...lineage.entries()].slice(0, MAX_DETAIL_ROWS).map(([id, item]) => [
         id, item.formula, item.confidence,
         item.sourceIds || item.pandaCalls, item.metricIds || item.evidenceIds,
         item.dataDate || item.window || item.dataWindow, item.limitations
@@ -120,6 +247,9 @@ function render({ run, report, evidence, trace }) {
       typeof report === 'string' ? report : report?.markdown || report?.text || report
     ]])
   );
+  for (const failure of failures) {
+    detailNode.append(errorCard(failure.title, failure.error));
+  }
   detailNode.hidden = false;
 }
 
@@ -129,22 +259,33 @@ form.addEventListener('submit', async (event) => {
     statusNode.textContent = 'URL 中缺少运行 ID。';
     return;
   }
-  const token = tokenInput.value;
+  let token = tokenInput.value;
   tokenInput.value = '';
   statusNode.textContent = '正在加载受保护产物…';
   detailNode.hidden = true;
   try {
     const base = `/runs/${encodeURIComponent(runId)}`;
-    const [run, report, evidence, trace] = await Promise.all([
-      fetchProtected(base, token),
-      fetchProtected(`${base}/report`, token),
-      fetchProtected(`${base}/evidence`, token),
-      fetchProtected(`${base}/trace`, token)
-    ]);
-    render({ run, report, evidence, trace });
-    statusNode.textContent = '已加载。';
-  } catch (error) {
-    detailNode.replaceChildren();
-    statusNode.textContent = `加载失败：${error.message}`;
+    const specs = [
+      { kind: 'run', title: '运行摘要', path: base },
+      { kind: 'report', title: '报告产物', path: `${base}/report` },
+      { kind: 'evidence', title: '证据包', path: `${base}/evidence` },
+      { kind: 'trace', title: '运行追踪', path: `${base}/trace` }
+    ];
+    const results = await Promise.allSettled(
+      specs.map((item) => fetchProtected(item.path, token, item.kind))
+    );
+    const loaded = {};
+    const failures = [];
+    results.forEach((result, index) => {
+      const spec = specs[index];
+      if (result.status === 'fulfilled') loaded[spec.kind] = result.value;
+      else failures.push({ title: spec.title, error: result.reason });
+    });
+    render(loaded, failures);
+    statusNode.textContent = failures.length
+      ? `部分加载完成，${failures.length} 项加载失败。`
+      : '已加载。';
+  } finally {
+    token = '';
   }
 });
