@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -9,6 +9,46 @@ process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-test-${process.pid}.jso
 process.env.AGENT_DIAGNOSTICS_ACCESS_KEY = 'test-diagnostics-key';
 process.env.AGENT_DIAGNOSTICS_RATE_LIMIT = '100';
 process.env.ALLOW_PRIVATE_AGENT_URLS = 'true';
+const v2Fixture = {
+  schemaVersion: 2,
+  id: 'eval_v2_projection',
+  createdAt: '2026-07-24T09:00:00.000Z',
+  updatedAt: '2026-07-24T09:01:00.000Z',
+  revision: 0,
+  execution: { status: 'completed', stage: 'complete', progress: 100, authorization: 'api-auth-secret' },
+  governance: { phase: 'waiting_model', anonymousMapping: { A: 'api-mapping-secret' } },
+  qualification: { status: 'passed', attemptRunIds: ['run_api'], hiddenInput: 'api-hidden-secret' },
+  evidenceManifest: {
+    version: '1.0',
+    items: [{
+      evidenceId: 'ev_api',
+      runId: 'run_api',
+      grade: 'A',
+      kind: 'timing',
+      testId: 'test_api',
+      turnIndex: 0,
+      repeatIndex: 0,
+      occurredAt: '2026-07-24T09:00:30.000Z',
+      summary: 'Completed',
+      payloadHash: 'd'.repeat(64),
+      visibility: 'public',
+      redaction: { status: 'applied', count: 1 },
+      payload: { value: 'api-raw-secret' }
+    }]
+  },
+  objectiveCapability: { status: 'pending', score: null },
+  absoluteReview: { status: 'pending-model-review' },
+  replicaArena: { status: 'sealed', seal: 'api-seal-secret' },
+  resultV2: { status: 'pending', score: null },
+  agentCard: { description: 'api-card-secret' },
+  builds: [{
+    runtimeId: 'legacy-runtime',
+    skill: { name: 'leak', description: 'api-skill-secret', instructions: [], tools: [] }
+  }],
+  rawEvidence: { value: 'api-raw-top-secret' },
+  logs: [{ message: 'api-sensitive-log-secret' }]
+};
+await writeFile(process.env.DATA_FILE, JSON.stringify({ schemaVersion: '1.0', items: [v2Fixture] }));
 const { server } = await import('../server.js');
 
 let origin;
@@ -16,7 +56,11 @@ test.before(async () => {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   origin = `http://127.0.0.1:${server.address().port}`;
 });
-test.after(async () => new Promise((resolve) => server.close(resolve)));
+test.after(async () => {
+  await new Promise((resolve) => server.close(resolve));
+  await rm(process.env.DATA_FILE, { force: true });
+  await rm(`${process.env.DATA_FILE}.tmp`, { force: true });
+});
 
 test('health endpoint responds', async () => {
   const response = await fetch(`${origin}/api/health`);
@@ -28,6 +72,50 @@ test('health endpoint responds', async () => {
   assert.equal(health.dataSource.provider, 'pandaai');
   assert.equal(typeof health.dataSource.configured, 'boolean');
   assert.equal(typeof health.dataSource.autoVerify, 'boolean');
+});
+
+test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes', async () => {
+  const forbidden = [
+    'api-auth-secret', 'api-mapping-secret', 'api-hidden-secret', 'api-raw-secret',
+    'api-seal-secret', 'api-raw-top-secret', 'api-sensitive-log-secret'
+  ];
+  const listResponse = await fetch(`${origin}/api/evaluations`);
+  const listed = (await listResponse.json()).find((item) => item.id === v2Fixture.id);
+  assert.equal(listResponse.status, 200);
+  assert.equal(listed.schemaVersion, 2);
+  assert.equal(listed.evidenceManifest.items[0].summary, 'Completed');
+
+  const detailResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
+  const detailText = await detailResponse.text();
+  assert.equal(detailResponse.status, 200);
+  for (const secret of forbidden) assert.equal(detailText.includes(secret), false, `detail: ${secret}`);
+
+  const streamResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/events`);
+  assert.equal(streamResponse.status, 200);
+  const reader = streamResponse.body.getReader();
+  const firstEvent = new TextDecoder().decode((await reader.read()).value);
+  await reader.cancel();
+  assert.match(firstEvent, /^data: /);
+  for (const secret of forbidden) assert.equal(firstEvent.includes(secret), false, `SSE: ${secret}`);
+
+  const skillResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/builds/legacy-runtime/skill`);
+  const skillText = await skillResponse.text();
+  assert.equal(skillResponse.status, 404);
+  assert.equal(skillText.includes('api-skill-secret'), false);
+  assert.equal(skillText.includes('api-card-secret'), false);
+
+  const deleteResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`, { method: 'DELETE' });
+  const deleted = await deleteResponse.json();
+  assert.equal(deleteResponse.status, 200);
+  assert.equal(deleted.id, v2Fixture.id);
+  assert.equal(deleted.archived, true);
+  assert.equal(deleted.deleted, false);
+
+  const archivedResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
+  const archived = await archivedResponse.json();
+  assert.equal(archivedResponse.status, 200);
+  assert.equal(typeof archived.archivedAt, 'string');
+  assert.equal(archived.revision, 1);
 });
 
 test('reports PandaAI data source status without credentials', async () => {

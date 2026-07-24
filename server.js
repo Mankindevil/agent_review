@@ -16,6 +16,7 @@ import { getRuntimeStatus } from './src/runtime-status.js';
 import { createSkillBundle } from './src/runtimes.js';
 import { getPandaDataStatus, pandaDataConfig, queryPandaData } from './src/panda-data.js';
 import { resolveServerAddress } from './src/server-address.js';
+import { projectEvaluation } from './src/evaluation-projection.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.join(root, 'public');
@@ -73,7 +74,11 @@ export const server = createServer(async (request, response) => {
         throw error;
       }
     }
-    if (request.method === 'GET' && url.pathname === '/api/evaluations') return json(response, 200, store.list().map(summary));
+    if (request.method === 'GET' && url.pathname === '/api/evaluations') {
+      return json(response, 200, store.list().map((item) =>
+        item.schemaVersion === 2 ? projectEvaluation(item, { audience: 'public' }) : summary(item)
+      ));
+    }
     if (request.method === 'POST' && url.pathname === '/api/evaluations') {
       const item = await pipeline.create(await readJsonBody(request));
       return json(response, 202, item);
@@ -91,6 +96,9 @@ export const server = createServer(async (request, response) => {
     const skillMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/builds\/([^/]+)\/skill$/);
     if (request.method === 'GET' && skillMatch) {
       const item = store.get(skillMatch[1]);
+      if (item?.schemaVersion === 2) {
+        return json(response, 404, { error: 'V2 evaluation build artifacts are not public' });
+      }
       if (!item) return json(response, 404, { error: '评测不存在' });
       const runtimeId = decodeURIComponent(skillMatch[2]);
       const build = item.builds?.find((candidate) => candidate.runtimeId === runtimeId);
@@ -106,14 +114,30 @@ export const server = createServer(async (request, response) => {
     if (request.method === 'DELETE' && match) {
       const item = store.get(match[1]);
       if (!item) return json(response, 404, { error: '评测不存在' });
-      if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(item.status)) {
+      const status = item.schemaVersion === 2 ? item.execution?.status : item.status;
+      if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(status)) {
         return json(response, 409, { error: '运行中的评测不能删除，请先停止本次评测' });
+      }
+      if (item.schemaVersion === 2) {
+        const archived = await store.mutate(match[1], item.revision, (current) => ({
+          ...current,
+          archivedAt: new Date().toISOString()
+        }));
+        return json(response, 200, {
+          id: match[1],
+          archived: true,
+          deleted: false,
+          revision: archived.revision
+        });
       }
       await store.delete(match[1]);
       return json(response, 200, { id: match[1], deleted: true });
     }
     if (request.method === 'GET' && match) {
       const item = store.get(match[1]);
+      if (item?.schemaVersion === 2) {
+        return json(response, 200, projectEvaluation(item, { audience: 'public' }));
+      }
       return item ? json(response, 200, item) : json(response, 404, { error: '评测不存在' });
     }
     const eventMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/events$/);
@@ -132,7 +156,12 @@ function streamEvents(request, response, evaluationId) {
   const item = store.get(evaluationId);
   if (!item) return json(response, 404, { error: '评测不存在' });
   response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
-  const send = (value) => response.write(`data: ${JSON.stringify(value)}\n\n`);
+  const send = (value) => {
+    const body = item.schemaVersion === 2 || value?.schemaVersion === 2
+      ? projectEvaluation(value, { audience: 'public' })
+      : value;
+    response.write(`data: ${JSON.stringify(body)}\n\n`);
+  };
   send(item);
   const listener = (value) => send(value);
   events.on(evaluationId, listener);
