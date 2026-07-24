@@ -8,6 +8,7 @@ const MAX_RESPONSE_BYTES = 128 * 1024;
 const MAX_RESPONSE_ENVELOPE_BYTES = 256 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_REQUEST_TIMEOUT_MS = 120_000;
+const STRICT_NUMERIC_RATE = /^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$/;
 
 function isoNow() {
   return new Date().toISOString();
@@ -31,6 +32,25 @@ function parsePricing(value) {
   }
 }
 
+function parsePricingRate(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value >= 0
+      ? { valid: true, value }
+      : { valid: false, value: null };
+  }
+  if (
+    typeof value === 'string'
+    && value.length > 0
+    && STRICT_NUMERIC_RATE.test(value)
+  ) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0
+      ? { valid: true, value: parsed }
+      : { valid: false, value: null };
+  }
+  return { valid: false, value: null };
+}
+
 function calculatePricing(config, tokens) {
   const { table, reason } = parsePricing(config.pricing);
   if (!table) {
@@ -52,15 +72,13 @@ function calculatePricing(config, tokens) {
       pricingUnavailableReason: 'pricing version is required'
     };
   }
-  const inputRate = Number(table.inputPerMillion);
-  const outputRate = Number(table.outputPerMillion);
+  const inputRate = parsePricingRate(table.inputPerMillion);
+  const outputRate = parsePricingRate(table.outputPerMillion);
   if (
     tokens.inputTokens === null
     || tokens.outputTokens === null
-    || !Number.isFinite(inputRate)
-    || !Number.isFinite(outputRate)
-    || inputRate < 0
-    || outputRate < 0
+    || !inputRate.valid
+    || !outputRate.valid
     || (tokens.cachedTokens !== null && tokens.cachedTokens > tokens.inputTokens)
   ) {
     return {
@@ -70,9 +88,11 @@ function calculatePricing(config, tokens) {
       pricingUnavailableReason: 'versioned pricing rates or token usage are unavailable'
     };
   }
-  const cachedRate = Number(table.cachedInputPerMillion);
   const hasCachedRate = Object.hasOwn(table, 'cachedInputPerMillion');
-  if (hasCachedRate && (!Number.isFinite(cachedRate) || cachedRate < 0)) {
+  const cachedRate = hasCachedRate
+    ? parsePricingRate(table.cachedInputPerMillion)
+    : { valid: false, value: null };
+  if (hasCachedRate && !cachedRate.valid) {
     return {
       pricingVersion,
       cost: null,
@@ -84,9 +104,9 @@ function calculatePricing(config, tokens) {
   const regularInput = hasCachedRate
     ? Math.max(0, tokens.inputTokens - cachedTokens)
     : tokens.inputTokens;
-  const inputCost = regularInput * inputRate / 1_000_000;
-  const cachedCost = hasCachedRate ? cachedTokens * cachedRate / 1_000_000 : 0;
-  const outputCost = tokens.outputTokens * outputRate / 1_000_000;
+  const inputCost = regularInput * inputRate.value / 1_000_000;
+  const cachedCost = hasCachedRate ? cachedTokens * cachedRate.value / 1_000_000 : 0;
+  const outputCost = tokens.outputTokens * outputRate.value / 1_000_000;
   return {
     pricingVersion,
     cost: Number((inputCost + cachedCost + outputCost).toFixed(12)),

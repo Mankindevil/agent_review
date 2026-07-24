@@ -439,11 +439,45 @@ export function renderReport(evidence, narrative) {
   return { markdown, html, text };
 }
 
-function detailTable(headers, rows) {
-  return htmlTable(
-    headers,
-    cappedTableRows(rows, REPORT_DISPLAY_CAPS.detailRows, 'detail', (row) => row, headers.length)
-  );
+function detailCollection(items) {
+  const values = Array.isArray(items) ? items : [];
+  const sentinel = values.at(-1);
+  if (sentinel?._truncated === true) {
+    const omitted = Number.isSafeInteger(sentinel.detail?.omitted)
+      && sentinel.detail.omitted >= 0
+      ? sentinel.detail.omitted
+      : 1;
+    return {
+      values: values.slice(0, -1),
+      total: Math.max(0, values.length - 1 + omitted),
+      truncated: true
+    };
+  }
+  return { values, total: values.length, truncated: false };
+}
+
+function mergeDetailCollections(...items) {
+  const collections = items.map(detailCollection);
+  return {
+    values: collections.flatMap((collection) => collection.values),
+    total: collections.reduce((sum, collection) => sum + collection.total, 0),
+    truncated: collections.some((collection) => collection.truncated)
+  };
+}
+
+function detailTable(headers, items, section, project = (item) => item) {
+  const collection = Array.isArray(items) ? detailCollection(items) : items;
+  const values = collection?.values || [];
+  const shown = values.slice(0, REPORT_DISPLAY_CAPS.detailRows);
+  const rows = shown.map(project);
+  if (collection?.truncated || collection?.total > REPORT_DISPLAY_CAPS.detailRows) {
+    rows.push([
+      `TRUNCATED:detail:${section}`,
+      `shown=${shown.length}; total=${collection.total}; omitted=${collection.total - shown.length}`,
+      ...Array(Math.max(0, headers.length - 2)).fill('—')
+    ]);
+  }
+  return htmlTable(headers, rows);
 }
 
 export function renderRunDetail({ run = {}, evidence = {}, trace = {} } = {}) {
@@ -454,38 +488,38 @@ export function renderRunDetail({ run = {}, evidence = {}, trace = {} } = {}) {
   const workerEvents = Array.isArray(trace.workerEvents) ? trace.workerEvents : [];
   const modelUsage = Array.isArray(trace.modelUsage) ? trace.modelUsage : [];
   const emailAttempts = Array.isArray(trace.emailAttempts) ? trace.emailAttempts : [];
-  const artifacts = [
-    ...(Array.isArray(run.artifacts) ? run.artifacts : []),
-    ...(Array.isArray(evidence.artifacts) ? evidence.artifacts : [])
-  ];
+  const artifacts = mergeDetailCollections(run.artifacts, evidence.artifacts);
   const conclusions = Array.isArray(evidence.conclusions) ? evidence.conclusions : [];
   const traceLineage = Array.isArray(trace.conclusionLineage)
     ? trace.conclusionLineage
     : (trace.conclusionLineage && typeof trace.conclusionLineage === 'object'
       ? [trace.conclusionLineage]
       : []);
+  const lineageItems = mergeDetailCollections(conclusions, traceLineage);
   const lineage = new Map();
-  for (const item of [...conclusions, ...traceLineage]) {
+  for (const item of lineageItems.values.slice(0, REPORT_DISPLAY_CAPS.detailRows)) {
     const id = item.conclusion_id || item.conclusionId;
     if (!id) continue;
     lineage.set(id, { ...(lineage.get(id) || {}), ...item });
   }
   return `<main class="run-detail"><h1>运行详情 ${escapeHtml(run.id || evidence.runId || '—')}</h1>${
     '<section><h2>运行摘要</h2>'
-  }${detailTable(['字段', '值'], [
+  }${htmlTable(['字段', '值'], [
     ['运行 ID', run.id || evidence.runId],
     ['状态', run.status || evidence.status],
     ['报告日', evidence.reportDate],
     ['开始时间', run.startedAt || trace.startedAt],
     ['结束时间', run.endedAt || trace.endedAt]
   ])}</section><section><h2>技能与工具调用</h2>${
-    detailTable(['序号', '技能', '工具', '状态', '耗时(ms)'], steps.map((item) => [
+    detailTable(['序号', '技能', '工具', '状态', '耗时(ms)'], steps, 'steps', (item) => [
       item.sequence, item.skillId, item.tool, item.status, item.durationMs
-    ]))
+    ])
   }</section><section><h2>Panda 调用</h2>${
     detailTable(
       ['序号', '方法', '耗时(ms)', '行数', '缓存', '重试', '状态'],
-      workerEvents.map((item) => [
+      workerEvents,
+      'worker-events',
+      (item) => [
         item.sequence,
         item.method || item.detail?.method,
         item.durationMs ?? item.detail?.durationMs,
@@ -493,28 +527,36 @@ export function renderRunDetail({ run = {}, evidence = {}, trace = {} } = {}) {
         item.cache ?? item.cacheStatus ?? item.detail?.cache,
         item.retries ?? item.retryCount ?? item.detail?.retries,
         item.status
-      ])
+      ]
     )
   }</section><section><h2>模型用量</h2>${
     detailTable(
       ['提供方', '模型', '输入', '输出', '推理', '缓存', '总计', '成本', '币种'],
-      modelUsage.map((item) => [
+      modelUsage,
+      'model-usage',
+      (item) => [
         item.provider, item.model, item.inputTokens, item.outputTokens, item.reasoningTokens,
         item.cachedTokens, item.totalTokens, item.cost, item.currency
-      ])
+      ]
     )
   }</section><section><h2>邮件尝试</h2>${
-    detailTable(['状态', '时间', '收件方摘要', '错误'], emailAttempts.map((item) => [
+    detailTable(['状态', '时间', '收件方摘要', '错误'], emailAttempts, 'email-attempts', (item) => [
       item.status, item.attemptedAt || item.startedAt, valueText(item.recipients), item.error
-    ]))
+    ])
   }</section><section><h2>产物</h2>${
-    detailTable(['名称', 'SHA-256', '类型'], artifacts.map((item) => [
+    detailTable(['名称', 'SHA-256', '类型'], artifacts, 'artifacts', (item) => [
       item.name, item.sha256 || item.hash, item.mediaType || item.type
-    ]))
+    ])
   }</section><section><h2>结论链路</h2>${
     detailTable(
       ['结论 ID', '公式', '置信度', '来源', '指标/证据', '数据日/窗口', '限制'],
-      [...lineage.entries()].map(([id, item]) => [
+      {
+        values: [...lineage.entries()],
+        total: lineageItems.total,
+        truncated: lineageItems.truncated
+      },
+      'lineage',
+      ([id, item]) => [
         id,
         item.formula,
         item.confidence,
@@ -522,7 +564,7 @@ export function renderRunDetail({ run = {}, evidence = {}, trace = {} } = {}) {
         valueText(item.metricIds || item.evidenceIds),
         valueText(item.dataDate || item.window || item.dataWindow),
         valueText(item.limitations)
-      ])
+      ]
     )
   }</section></main>`;
 }

@@ -64,6 +64,47 @@ function card(title, headers, rows) {
   return section;
 }
 
+function detailCollection(items) {
+  const values = Array.isArray(items) ? items : [];
+  const sentinel = values.at(-1);
+  if (sentinel?._truncated === true) {
+    const omitted = Number.isSafeInteger(sentinel.detail?.omitted)
+      && sentinel.detail.omitted >= 0
+      ? sentinel.detail.omitted
+      : 1;
+    return {
+      values: values.slice(0, -1),
+      total: Math.max(0, values.length - 1 + omitted),
+      truncated: true
+    };
+  }
+  return { values, total: values.length, truncated: false };
+}
+
+function mergeDetailCollections(...items) {
+  const collections = items.map(detailCollection);
+  return {
+    values: collections.flatMap((collection) => collection.values),
+    total: collections.reduce((sum, collection) => sum + collection.total, 0),
+    truncated: collections.some((collection) => collection.truncated)
+  };
+}
+
+function detailRows(items, section, width, project) {
+  const collection = Array.isArray(items) ? detailCollection(items) : items;
+  const values = collection?.values || [];
+  const shown = values.slice(0, MAX_DETAIL_ROWS);
+  const rows = shown.map(project);
+  if (collection?.truncated || collection?.total > MAX_DETAIL_ROWS) {
+    rows.push([
+      `TRUNCATED:detail:${section}`,
+      `shown=${shown.length}; total=${collection.total}; omitted=${collection.total - shown.length}`,
+      ...Array(Math.max(0, width - 2)).fill('—')
+    ]);
+  }
+  return rows;
+}
+
 function errorCard(title, error) {
   const section = element('section', undefined, 'card error-card');
   section.append(
@@ -187,15 +228,13 @@ async function fetchProtected(path, token, kind) {
 
 function render({ run = {}, report = '', evidence = {}, trace = {} }, failures = []) {
   const rawTraceLineage = Array.isArray(trace?.conclusionLineage)
-    ? trace.conclusionLineage.slice(0, MAX_DETAIL_ROWS)
+    ? trace.conclusionLineage
     : (trace?.conclusionLineage && typeof trace.conclusionLineage === 'object'
       ? [trace.conclusionLineage]
       : []);
+  const lineageItems = mergeDetailCollections(evidence?.conclusions, rawTraceLineage);
   const lineage = new Map();
-  for (const item of [
-    ...(evidence?.conclusions || []).slice(0, MAX_DETAIL_ROWS),
-    ...rawTraceLineage
-  ].slice(0, MAX_DETAIL_ROWS)) {
+  for (const item of lineageItems.values.slice(0, MAX_DETAIL_ROWS)) {
     const id = item.conclusion_id || item.conclusionId;
     if (id) lineage.set(id, { ...(lineage.get(id) || {}), ...item });
   }
@@ -209,11 +248,11 @@ function render({ run = {}, report = '', evidence = {}, trace = {} }, failures =
       ['结束时间', run?.endedAt || trace?.endedAt]
     ]),
     card('技能与工具调用', ['序号', '技能', '工具', '状态', '耗时(ms)'],
-      (trace?.steps || []).slice(0, MAX_DETAIL_ROWS).map((item) => [
+      detailRows(trace?.steps, 'steps', 5, (item) => [
         item.sequence, item.skillId, item.tool, item.status, item.durationMs
       ])),
     card('Panda 调用', ['序号', '方法', '耗时(ms)', '行数', '缓存', '重试', '状态'],
-      (trace?.workerEvents || []).slice(0, MAX_DETAIL_ROWS).map((item) => [
+      detailRows(trace?.workerEvents, 'worker-events', 7, (item) => [
         item.sequence,
         item.method || item.detail?.method,
         item.durationMs ?? item.detail?.durationMs,
@@ -223,21 +262,29 @@ function render({ run = {}, report = '', evidence = {}, trace = {} }, failures =
         item.status
       ])),
     card('模型用量', ['提供方', '模型', '输入', '输出', '推理', '缓存', '总计', '成本', '币种'],
-      (trace?.modelUsage || []).slice(0, MAX_DETAIL_ROWS).map((item) => [
+      detailRows(trace?.modelUsage, 'model-usage', 9, (item) => [
         item.provider, item.model, item.inputTokens, item.outputTokens,
         item.reasoningTokens, item.cachedTokens, item.totalTokens, item.cost, item.currency
       ])),
     card('邮件尝试', ['状态', '时间', '收件方摘要', '错误'],
-      (trace?.emailAttempts || []).slice(0, MAX_DETAIL_ROWS).map((item) => [
+      detailRows(trace?.emailAttempts, 'email-attempts', 4, (item) => [
         item.status, item.attemptedAt || item.startedAt, item.recipients, item.error
       ])),
     card('产物', ['名称', 'SHA-256', '类型'],
-      [...(run?.artifacts || []), ...(evidence?.artifacts || [])]
-        .slice(0, MAX_DETAIL_ROWS).map((item) => [
+      detailRows(
+        mergeDetailCollections(run?.artifacts, evidence?.artifacts),
+        'artifacts',
+        3,
+        (item) => [
         item.name, item.sha256 || item.hash, item.mediaType || item.type
-      ])),
+        ]
+      )),
     card('结论链路', ['结论 ID', '公式', '置信度', '来源', '指标/证据', '数据日/窗口', '限制'],
-      [...lineage.entries()].slice(0, MAX_DETAIL_ROWS).map(([id, item]) => [
+      detailRows({
+        values: [...lineage.entries()],
+        total: lineageItems.total,
+        truncated: lineageItems.truncated
+      }, 'lineage', 7, ([id, item]) => [
         id, item.formula, item.confidence,
         item.sourceIds || item.pandaCalls, item.metricIds || item.evidenceIds,
         item.dataDate || item.window || item.dataWindow, item.limitations

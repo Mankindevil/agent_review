@@ -661,6 +661,71 @@ test('narrative pricing produces exact cost only with a versioned pricing table'
     }
   }, { fetchImpl });
   assert.equal(nonFiniteCachedRate.usage.cost, null);
+
+  for (const invalidRate of [
+    null,
+    undefined,
+    '',
+    '   ',
+    false,
+    true,
+    [],
+    {},
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    -1,
+    '-1',
+    ' 2',
+    '2 ',
+    '0x10',
+    'Infinity'
+  ]) {
+    const invalidInput = await generateNarrative(pack, {
+      enabled: true, baseUrl: 'https://model.test/v1', apiKey: 'key', name: 'narrator-1',
+      pricing: {
+        version: 'prices-2026-07-01',
+        inputPerMillion: invalidRate,
+        outputPerMillion: 8,
+        currency: 'USD'
+      }
+    }, { fetchImpl });
+    assert.equal(invalidInput.usage.cost, null, `invalid input rate: ${String(invalidRate)}`);
+
+    const invalidOutput = await generateNarrative(pack, {
+      enabled: true, baseUrl: 'https://model.test/v1', apiKey: 'key', name: 'narrator-1',
+      pricing: {
+        version: 'prices-2026-07-01',
+        inputPerMillion: 2,
+        outputPerMillion: invalidRate,
+        currency: 'USD'
+      }
+    }, { fetchImpl });
+    assert.equal(invalidOutput.usage.cost, null, `invalid output rate: ${String(invalidRate)}`);
+
+    const invalidCached = await generateNarrative(pack, {
+      enabled: true, baseUrl: 'https://model.test/v1', apiKey: 'key', name: 'narrator-1',
+      pricing: {
+        version: 'prices-2026-07-01',
+        inputPerMillion: 2,
+        outputPerMillion: 8,
+        cachedInputPerMillion: invalidRate,
+        currency: 'USD'
+      }
+    }, { fetchImpl });
+    assert.equal(invalidCached.usage.cost, null, `invalid cached rate: ${String(invalidRate)}`);
+  }
+
+  const numericStrings = await generateNarrative(pack, {
+    enabled: true, baseUrl: 'https://model.test/v1', apiKey: 'key', name: 'narrator-1',
+    pricing: {
+      version: 'prices-2026-07-01',
+      inputPerMillion: '2',
+      outputPerMillion: '8.0',
+      cachedInputPerMillion: '1e0',
+      currency: 'USD'
+    }
+  }, { fetchImpl });
+  assert.equal(numericStrings.usage.cost, 6);
 });
 
 test('invalid model claims fall back without changing deterministic conclusions', async () => {
@@ -826,6 +891,30 @@ test('report and run detail escape Panda and model text while preserving lineage
   assert.match(detail, /market-report\.html/);
 });
 
+test('run detail exposes section-specific truncation totals beyond a terminal sentinel', () => {
+  const steps = Array.from({ length: 499 }, (_, index) => ({
+    sequence: index + 1,
+    skillId: `skill-${index + 1}`,
+    tool: `tool-${index + 1}`,
+    status: 'ok'
+  }));
+  steps.push({
+    _truncated: true,
+    reason: 'array-limit',
+    detail: { omitted: 501 }
+  });
+  const detail = renderRunDetail({
+    run: { id: 'run-truncated' },
+    evidence: evidence(),
+    trace: { steps }
+  });
+  assert.match(detail, /TRUNCATED:detail:steps/);
+  assert.match(detail, /shown=200/);
+  assert.match(detail, /total=1000/);
+  assert.match(detail, /omitted=800/);
+  assert.doesNotMatch(detail, /array-limit/);
+});
+
 test('browser detail UI requests all protected artifacts with one in-memory bearer token', async () => {
   const script = await readFile(
     new URL('../agents/market-analyst/public/run-detail.js', import.meta.url),
@@ -848,13 +937,33 @@ test('browser detail UI bounds and validates each artifact while preserving part
     new URL('../agents/market-analyst/public/run-detail.js', import.meta.url),
     'utf8'
   );
+  const renderer = await readFile(
+    new URL('../agents/market-analyst/report-renderer.js', import.meta.url),
+    'utf8'
+  );
   assert.match(script, /headers\.get\(['"]content-length['"]\)/);
   assert.match(script, /\.getReader\(\)/);
   assert.match(script, /\.arrayBuffer\(\)/);
   assert.match(script, /validateArtifactShape/);
   assert.match(script, /Promise\.allSettled/);
   assert.match(script, /加载失败/);
-  assert.match(script, /\.slice\(0,\s*MAX_DETAIL_ROWS\)\.map/);
+  assert.match(
+    script,
+    /const shown = values\.slice\(0,\s*MAX_DETAIL_ROWS\);\s*const rows = shown\.map/
+  );
+  assert.match(script, /TRUNCATED:detail:/);
+  assert.match(script, /shown=.*total=.*omitted=/s);
+  for (const section of [
+    'steps',
+    'worker-events',
+    'model-usage',
+    'email-attempts',
+    'artifacts',
+    'lineage'
+  ]) {
+    assert.match(script, new RegExp(`detailRows\\([\\s\\S]{0,180}?['"]${section}['"]`));
+    assert.match(renderer, new RegExp(`detailTable\\([\\s\\S]{0,240}?['"]${section}['"]`));
+  }
   assert.match(script, /token\s*=\s*['"]/);
   assert.doesNotMatch(
     script,
