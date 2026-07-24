@@ -1,5 +1,29 @@
 # 锐评局：金融 A2A Agent 公开评测系统
 
+## Panda Market Analyst production agent
+
+This repository also ships a production-oriented, A2A 1.0 market analyst whose
+only financial data source is `panda_data`. It creates a daily close report with
+hot-topic, sell-pressure, and potential-watchlist sections, plus an Evidence
+Pack and Run Trace for conclusion-level audit.
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-data.txt
+npm install
+cp .env.example .env
+npm run market-agent
+npm run market-report -- --no-email
+npm run market:smoke
+```
+
+Fill credentials only in a protected local environment file. The smoke command
+fails closed unless Panda is explicitly enabled and real Panda credentials are
+present. It sends mail only when `MARKET_SMOKE_EMAIL_TO` is explicitly set.
+Production systemd units are in `deploy/`; the operator runbook is
+`docs/PRODUCTION_OPERATIONS.md`, and the full agent contract is
+`docs/MARKET_ANALYST_AGENT.md`.
+
 一个面向 A2A 金融智能体黑客松的全栈评测系统。用户提交 Agent Card 和真实投研任务后，平台依次判断 Agent 必要性，按研究严谨性、数据纪律、回测可信度、风险合规、可复现性进行四模型审稿，让不同 runtime 只凭 description 现场直出 Skill，再把所有选手放进同题研究压测，最终给出“夯 / 人上人 / NPC / 拉”的证据化锐评。
 
 未接入主办方 Data / Research Skills 时，平台只审查研究设计与输出纪律，不验证金融数字真伪，也不会把模拟结果包装成真实回测。接入数据能力后可在现有同题执行层增加 point-in-time 数据复算、回测结果校验和结构化验收断言。

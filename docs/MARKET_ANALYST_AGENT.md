@@ -199,3 +199,26 @@ live smoke 需要真实 Panda 与 SMTP 凭据，不能用 mock 结果冒充：
 5. 执行一次邮件投递，核对确定性 Message-ID、SMTP receipt、纯文本/HTML 正文和测试收件箱。
 6. 再跑同一日期，确认复用与幂等；模拟一次可恢复失败，确认 trace、锁清理和重试状态。
 7. 删除 live-smoke 凭据前保存脱敏验收记录。若任一外部调用未真实完成，结论必须标为“未完成 live smoke”。
+
+## Verification Record
+
+Recorded on 2026-07-25. Automated evidence is distinct from credential-gated
+external acceptance; fixture or fake-SMTP coverage is never represented as a
+real Panda or mailbox result.
+
+| # | Acceptance criterion | Evidence and status |
+|---:|---|---|
+| 1 | Real Panda run creates Markdown, HTML, Evidence Pack, and Run Trace | **Conditional — not run.** `npm run market:smoke` performs bounded real collection and validates all five artifact names, sizes, SHA-256 values, JSON schemas, and run identity. Real credentials were not available during this record. |
+| 2 | SMTP receives exactly one message per delivery key | **Conditional — not run.** Fake-SMTP integration tests verify deterministic delivery key/Message-ID, accepted receipt persistence, and retry reconciliation. Real SMTP receipt/inbox confirmation requires `MARKET_SMOKE_EMAIL_TO`. |
+| 3 | Repeated non-forced run does not duplicate email | **Automated fixture verified; external conditional.** Email/integration tests cover same-date reuse, already-sent suppression, and explicit force-delivery. Real mailbox acceptance was not run. |
+| 4 | Email contains the three analyses, dates, confidence, and disclaimer | **Automated fixture verified; external conditional.** Report and email tests inspect the exact text/HTML artifacts used for delivery. Real mailbox rendering was not run. |
+| 5 | Conclusions resolve to evidence and Panda call traces | **Automated verified.** Evidence schema, report validation, lineage, artifact-integrity, and integration tests reject orphaned claims. Real Panda evidence remains conditional under item 1. |
+| 6 | Trace exposes durations, tools, Skills, rows, dates, cache/retry, and model usage | **Automated verified.** Trace/state/report tests cover bounded sanitized call timing, rows, hashes, cache/retries, Skill/tool steps, and optional model token/cost fields. |
+| 7 | No secret appears in artifacts, logs, HTTP, or email | **Automated verified; external inspection conditional.** Redaction, bounded trace, A2A authorization, SMTP masking, and smoke-summary tests pass. A real external smoke still requires operator log/artifact inspection. |
+| 8 | A2A 1.0 Card is discoverable and valid | **Automated verified.** Card discovery and protocol metadata conformance tests pass; live smoke fetches the ephemeral loopback Card. |
+| 9 | A2A send, stream, get, list, cancel, subscribe conform | **Automated verified.** Full A2A lifecycle, media type/version, SSE ordering, owner isolation, idempotency, projection, and error-shape tests pass. |
+| 10 | Model absence still renders and emails deterministically | **Automated fixture verified; external SMTP conditional.** Integration tests exercise model-disabled/fallback rendering with fake SMTP. |
+| 11 | Optional data loss produces a marked degraded report | **Automated verified.** Worker and integration degradation fixtures assert explicit missing-data/confidence treatment. |
+| 12 | Core data loss emits no conclusions and only optional failure notice | **Automated verified.** Worker/orchestrator/integration failure fixtures assert fail-closed conclusions and the configured alert boundary. |
+| 13 | 18:30 Shanghai automation skips exchange holidays | **Automated verified.** The systemd contract test pins `Mon..Fri *-*-* 18:30:00 Asia/Shanghai`, persistence, and 30-second jitter; worker/CLI tests keep Panda’s calendar authoritative. |
+| 14 | Full test and syntax commands pass | **Verified 2026-07-25.** `npm run check` validated 71 JavaScript files; the exact absolute-Python `npm test` command passed 240 Node tests and 62 Python tests; `git diff --check` passed. |

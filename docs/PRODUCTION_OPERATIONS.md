@@ -2,6 +2,109 @@
 
 Run these commands on the production host as an authorized administrator. Never put credentials in a terminal transcript, ticket, chat, shell history, or this document.
 
+## Panda Market Analyst deployment
+
+Install the application at `/opt/agent-review/app`, install the pinned Python
+dependencies in a virtual environment, and put all Panda, A2A, and SMTP
+credentials in `/etc/agent-review/agent-review.env` with `root:root` ownership
+and mode `0600`. The committed environment example contains placeholders only.
+
+```bash
+cd /opt/agent-review/app
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-data.txt
+npm install
+sudo install -o root -g root -m 0644 deploy/market-analyst.service /etc/systemd/system/
+sudo install -o root -g root -m 0644 deploy/market-report.service /etc/systemd/system/
+sudo install -o root -g root -m 0644 deploy/market-report.timer /etc/systemd/system/
+sudo install -d -o agent-review -g agent-review -m 0700 /var/lib/agent-review/market-analyst
+sudo systemctl daemon-reload
+sudo systemctl enable --now market-analyst.service
+sudo systemctl enable --now market-report.timer
+```
+
+The timer runs Monday through Friday at `18:30:00 Asia/Shanghai`, is persistent,
+and adds at most 30 seconds of randomized delay. This weekday schedule is only a
+wakeup mechanism: the CLI checks Panda's China exchange calendar and is the
+authoritative holiday gate.
+
+Verify the timer, service, loopback endpoint, and bounded recent logs:
+
+```bash
+systemctl list-timers market-report.timer --all
+sudo systemctl status market-analyst.service market-report.timer --no-pager
+curl --fail --silent --show-error http://127.0.0.1:4190/health
+sudo journalctl -u market-analyst.service -u market-report.service -n 200 --no-pager
+```
+
+Run the credential-gated acceptance smoke from the protected service
+environment. `MARKET_SMOKE_REPORT_DATE` may name a completed historical trading
+date. Leave `MARKET_SMOKE_EMAIL_TO` empty for Panda/A2A-only acceptance; set it
+to a dedicated test inbox only when an actual SMTP delivery is intended.
+
+```bash
+sudo sh -c \
+  'set -a; . /etc/agent-review/agent-review.env; set +a; cd /opt/agent-review/app; exec runuser -u agent-review -- npm run market:smoke'
+```
+
+The command prints only bounded, sanitized JSON. A missing Panda enable flag or
+credential is a failure, never a mock success. Preserve that sanitized summary
+in the approved change record. Confirm the SMTP receipt and inbox out of band;
+never copy credentials or raw environment output into the record.
+
+### Credential rotation and SMTP testing
+
+Stage a new root-only environment file, validate that required variable names
+occur exactly once without printing values, atomically replace the file, and
+restart `market-analyst.service`. The next oneshot reads the new file. Retain
+the prior root-only file until health, Panda smoke, and—when explicitly
+approved—SMTP smoke succeed; then securely retire it under the organization's
+credential policy. Rotate Panda, A2A, model, and SMTP credentials independently
+where possible.
+
+For SMTP testing, set `MARKET_SMOKE_EMAIL_TO` to one controlled test inbox and
+run `npm run market:smoke` once. Check the deterministic Message-ID and receipt
+in the persisted task state and mail-server logs. A `delivery-unknown` or
+`reconciliation-needed` state must be reconciled before any manual resend.
+
+### Market artifact backup, restore, and retention
+
+All mutable market state and cache live below
+`/var/lib/agent-review/market-analyst`. Stop both writers before a consistent
+backup or restore:
+
+```bash
+sudo systemctl stop market-report.timer market-report.service market-analyst.service
+sudo install -d -o root -g root -m 0700 /var/backups/agent-review
+sudo tar --create --gzip \
+  --file /var/backups/agent-review/market-analyst-state.tgz \
+  --directory /var/lib/agent-review market-analyst
+sudo sha256sum /var/backups/agent-review/market-analyst-state.tgz
+sudo systemctl start market-analyst.service market-report.timer
+```
+
+Restore only an explicitly named, hash-verified archive into a separately
+staged directory. Keep the services stopped, preserve the current directory,
+set `agent-review:agent-review` ownership and restrictive permissions, then
+atomically rename the staged directory into place. Start the A2A service first,
+validate `/health` and protected run access, then start the timer. Roll back to
+the preserved directory if validation fails.
+
+`MARKET_REPORT_RETENTION_DAYS` is currently parsed but automatic artifact
+deletion is not implemented. `MARKET_REPORT_CACHE_DAYS` governs worker cache
+retention. Operators must not claim artifact retention enforcement or perform
+broad deletion; archive or quarantine explicit dated run directories under an
+approved retention procedure.
+
+### Market agent rollback
+
+Before switching `/opt/agent-review/app` to a previous immutable release, stop
+the timer and both market services, back up market state, run `npm test` and
+`npm run check` in the rollback release, switch the symlink atomically, run
+`systemctl daemon-reload`, and restart the A2A service and timer. Validate the
+Card and one no-email historical report before re-enabling routine delivery.
+Do not downgrade or rewrite persisted state in place.
+
 ## Service inventory
 
 - Public application: <https://14.103.143.171/>

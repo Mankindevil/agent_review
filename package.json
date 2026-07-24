@@ -14,6 +14,7 @@
     "data:probe": ".venv/bin/python scripts/panda-data-bridge.py --probe",
     "market-agent": "node agents/market-analyst/server.js",
     "market-report": "node agents/market-analyst/cli.js",
+    "market:smoke": "node scripts/market-agent-live-smoke.js",
     "test": "node scripts/run-tests.js && node scripts/run-market-worker-tests.js",
     "test:node": "node scripts/run-tests.js",
     "test:market-worker": "node scripts/run-market-worker-tests.js",

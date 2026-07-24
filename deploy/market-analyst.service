@@ -1,0 +1,31 @@
+[Unit]
+Description=Panda Market Analyst A2A service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent-review
+Group=agent-review
+WorkingDirectory=/opt/agent-review/app
+EnvironmentFile=/etc/agent-review/agent-review.env
+Environment=MARKET_REPORT_STATE_DIR=/var/lib/agent-review/market-analyst
+ExecStart=/usr/bin/npm run market-agent
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/agent-review
+
+[Install]
+WantedBy=multi-user.target
