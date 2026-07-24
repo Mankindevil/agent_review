@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, localRuntimeTimeout, runSkill } from '../src/runtimes.js';
+import { prepareRuntimeWorkspace } from '../src/runtime-sandbox.js';
 import { runtimeBuildSkillPrompt } from '../src/prompts.js';
 
 test('uses supported read-only Claude Code arguments', () => {
@@ -25,6 +29,21 @@ test('uses documented Cursor Agent print arguments', () => {
     '-p', 'build a skill',
     '--output-format', 'json'
   ]);
+});
+
+test('writes deny-by-default Cursor permissions only inside the temporary workspace', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'cursor-sandbox-'));
+  try {
+    await prepareRuntimeWorkspace('cursor', root);
+    const payload = JSON.parse(await readFile(path.join(root, '.cursor', 'cli.json'), 'utf8'));
+    assert.deepEqual(payload.permissions.allow, []);
+    assert.ok(payload.permissions.deny.includes('Shell(*)'));
+    assert.ok(payload.permissions.deny.includes('Write(**)'));
+    assert.ok(payload.permissions.deny.includes('Read(**/.env*)'));
+    assert.ok(payload.permissions.deny.includes('Read(**/*.key)'));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('isolates Cursor Agent from host secrets and persistent user directories', () => {

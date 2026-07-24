@@ -2,6 +2,7 @@ import { stableNumber, safeJson, withTimeout } from './utils.js';
 import { runtimeBuildSkillPrompt, runtimeRunSkillPrompt } from './prompts.js';
 import { applyArkClaudeEnv, applyDeepSeekClaudeEnv, shouldUseArkClaude } from './claude-env.js';
 import { startArkAnthropicProxy } from './ark-anthropic-proxy.js';
+import { prepareRuntimeWorkspace } from './runtime-sandbox.js';
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -252,6 +253,7 @@ export function localRuntimeTimeout(value) {
 
 async function callLocalCli(runtimeId, prompt, signal, sampling = {}) {
   const workspace = await mkdtemp(path.join(tmpdir(), `agent-roast-${runtimeId}-`));
+  await prepareRuntimeWorkspace(runtimeId, workspace);
   let arkProxy;
   const startedAt = Date.now();
   const timeout = localRuntimeTimeout(process.env.LOCAL_RUNTIME_TIMEOUT_MS);
