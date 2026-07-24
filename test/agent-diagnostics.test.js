@@ -27,31 +27,25 @@ const baseInput = {
   }
 };
 
-test('protects diagnostics with configuration, access key, rate, and concurrency limits', () => {
-  const missing = createDiagnosticsGuard({ accessKey: '' });
-  assert.throws(() => missing.enter('Bearer any'), (error) => error.statusCode === 503);
-
+test('protects public diagnostics with rate and concurrency limits without an access key', () => {
   let now = 1000;
   const guard = createDiagnosticsGuard({
-    accessKey: 'platform-secret',
     rateLimit: 2,
     concurrency: 1,
     windowMs: 60_000,
     now: () => now
   });
-  assert.throws(() => guard.enter(''), (error) => error.statusCode === 401);
-  assert.throws(() => guard.enter('Bearer wrong'), (error) => error.statusCode === 401);
 
-  const release = guard.enter('Bearer platform-secret');
-  assert.throws(() => guard.enter('Bearer platform-secret'), (error) => error.statusCode === 503);
+  const release = guard.enter();
+  assert.throws(() => guard.enter(), (error) => error.statusCode === 503);
   release();
-  guard.enter('Bearer platform-secret')();
+  guard.enter()();
   assert.throws(
-    () => guard.enter('Bearer platform-secret'),
+    () => guard.enter(),
     (error) => error.statusCode === 429 && error.retryAfter > 0
   );
   now += 60_001;
-  assert.doesNotThrow(() => guard.enter('Bearer platform-secret')());
+  assert.doesNotThrow(() => guard.enter()());
 });
 
 test('accepts one bounded Agent Card and rejects legacy, array, timeout, prompt, and attestation input', () => {

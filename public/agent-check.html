@@ -48,13 +48,6 @@
 
         <form id="diagnostics-form" autocomplete="off">
           <fieldset>
-            <legend>平台门禁</legend>
-            <label for="platform-key">平台访问密钥</label>
-            <input id="platform-key" name="platformKey" type="password" required autocomplete="off" spellcheck="false" placeholder="AGENT_DIAGNOSTICS_ACCESS_KEY">
-            <small>只用于访问本平台 API，绝不会发送给被测 Agent。</small>
-          </fieldset>
-
-          <fieldset>
             <legend>Agent Card 来源</legend>
             <div class="card-source-switch" role="group" aria-label="Agent Card 来源">
               <button id="card-source-json" type="button" data-card-source="json" class="selected" aria-pressed="true">上传 / 粘贴 JSON</button>
@@ -225,7 +218,7 @@
 
         <footer class="result-foot">
           <span>结果不保存</span>
-          <p>刷新页面后，访问密钥、Agent Token、Card JSON 和预检结果都会消失。</p>
+          <p>刷新页面后，Agent Token、Card JSON 和预检结果都会消失。</p>
         </footer>
       </section>
     </div>

@@ -64,10 +64,7 @@ http://localhost:4173/agent-check
 cp .env.example .env
 ```
 
-设置一个足够长、不可猜测的平台访问密钥：
-
 ```dotenv
-AGENT_DIAGNOSTICS_ACCESS_KEY=替换为随机生成的长密钥
 AGENT_DIAGNOSTICS_RATE_LIMIT=6
 AGENT_DIAGNOSTICS_CONCURRENCY=4
 ALLOW_PRIVATE_DIAGNOSTICS_URLS=false
@@ -80,24 +77,16 @@ ALLOW_PRIVATE_AGENT_URLS=false
 npm start
 ```
 
-PowerShell 临时配置示例：
-
-```powershell
-$env:AGENT_DIAGNOSTICS_ACCESS_KEY = "替换为随机生成的长密钥"
-npm start
-```
-
 变量说明：
 
 | 变量 | 默认值 | 作用 |
 | --- | ---: | --- |
-| `AGENT_DIAGNOSTICS_ACCESS_KEY` | 无 | 保护 `/api/agent-diagnostics`；未配置时返回 503 |
-| `AGENT_DIAGNOSTICS_RATE_LIMIT` | 6 | 每个访问密钥每分钟最多执行的预检次数 |
+| `AGENT_DIAGNOSTICS_RATE_LIMIT` | 6 | 全局每分钟最多执行的预检次数 |
 | `AGENT_DIAGNOSTICS_CONCURRENCY` | 4 | 全局同时运行的预检数量 |
 | `ALLOW_PRIVATE_DIAGNOSTICS_URLS` | false | 仅为 `/agent-check` 的 Card 获取和 A2A 调用允许内网/本机地址 |
 | `ALLOW_PRIVATE_AGENT_URLS` | false | 为测试入口、Card 发现和正式测评 A2A 请求统一允许内网/本机地址 |
 
-生产环境必须通过 HTTPS 提供页面和 API，否则平台访问密钥与 Agent Bearer Token 可能在传输过程中泄露。
+生产环境必须通过 HTTPS 提供页面和 API，否则 Agent Bearer Token 可能在传输过程中泄露。
 
 ## 4. 准备 Agent Card 来源
 
@@ -160,12 +149,11 @@ URL 获取仅用于得到 Agent Card。平台不会把 Card 来源地址当作 A
 ## 5. 页面操作步骤
 
 1. 打开 `/agent-check`。
-2. 输入管理员提供的平台访问密钥。
-3. 选择一种 Card 来源：
+2. 选择一种 Card 来源：
    - 把 `.json` 文件拖到上传区、点击“选择文件”，或直接粘贴 Agent Card JSON；
    - 填写完整 Agent Card URL；
    - 填写服务根地址，由平台自动发现 `/.well-known/agent-card.json`。
-4. 检查页面生成的摘要：
+3. 检查页面生成的摘要：
    - Agent 名称和简介；
    - 协议版本与 binding；
    - 调用目标；
@@ -173,28 +161,16 @@ URL 获取仅用于得到 Agent Card。平台不会把 Card 来源地址当作 A
    - Skills 数量；
    - streaming 能力；
    - Card 大小。
-5. 选择 Agent 鉴权方式。
-6. 输入无外部副作用的自然语言测试任务。
-7. 选择 1、5、10 或 20 分钟的单次响应上限。
-8. 确认“底座模型使用 DeepSeek V4 Pro”和“仅访问授权数据”两项声明。
-9. 如需测试流式调用，打开流式开关并确认第二次真实执行。
-10. 点击“开始技术预检”。
+4. 选择 Agent 鉴权方式。
+5. 输入无外部副作用的自然语言测试任务。
+6. 选择 1、5、10 或 20 分钟的单次响应上限。
+7. 确认“底座模型使用 DeepSeek V4 Pro”和“仅访问授权数据”两项声明。
+8. 如需测试流式调用，打开流式开关并确认第二次真实执行。
+9. 点击“开始技术预检”。
 
 JSON 模式会即时生成 Card 摘要；URL 模式先显示待解析地址，在开始预检后由服务端获取并校验。服务端始终重新执行全部类型、大小、协议和安全校验。
 
-## 6. 两类密钥不要混用
-
-### 平台访问密钥
-
-平台访问密钥对应 `AGENT_DIAGNOSTICS_ACCESS_KEY`，浏览器把它放入请求本平台的 HTTP 头：
-
-```http
-Authorization: Bearer <AGENT_DIAGNOSTICS_ACCESS_KEY>
-```
-
-它只用于本平台门禁，绝不会发送给 Agent。
-
-### Agent Bearer Token
+## 6. Agent Bearer Token
 
 Agent Bearer Token 用于 Card 选定的 A2A 接口。页面只填写 Token 值，不要手工添加 `Bearer ` 前缀。
 
@@ -355,10 +331,9 @@ Bearer 模式额外提交：
 | ---: | --- | --- |
 | 200 | 预检已受理；Agent 自身失败也使用 200 | 查看 `ok`、`technicalReadinessOk` 和各阶段状态 |
 | 400 | Card、鉴权、Prompt、超时、声明或流式确认无效 | 根据错误信息修正输入 |
-| 401 | 平台访问密钥缺失或错误 | 核对管理员提供的密钥 |
 | 413 | 整个请求体超过 1.25 MiB | 缩小 Card 或其他输入 |
 | 429 | 一分钟内请求过多 | 按 `Retry-After` 等待 |
-| 503 | 未配置访问密钥或并发已满 | 检查服务配置或稍后重试 |
+| 503 | 并发已满 | 稍后重试 |
 
 ## 11. 常见错误
 
@@ -385,7 +360,7 @@ Bearer 模式额外提交：
 - Agent 普通与流式响应分别限制为 2 MiB。
 - SSE 最多处理 256 个事件，单事件最大 64 KiB。
 - Agent 输出只展示截断预览。
-- 平台访问密钥与 Agent Token 使用不同作用域，并在报告生成前脱敏。
+- Agent Token 仅发送到用户确认的 Agent origin，并在报告生成前脱敏。
 - 页面不使用 Cookie、Local Storage 或 Session Storage 保存凭据。
 - 服务端不把技术预检写入 `EvaluationStore`。
 - 浏览器交互登录、OAuth 跳转、gRPC 和自定义 binding 不在支持范围内。

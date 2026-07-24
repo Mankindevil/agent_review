@@ -1,7 +1,6 @@
 const MAX_CARD_BYTES = 1024 * 1024;
 
 const form = document.querySelector('#diagnostics-form');
-const platformKey = document.querySelector('#platform-key');
 const cardSourceButtons = [...document.querySelectorAll('[data-card-source]')];
 const jsonSourcePanel = document.querySelector('#json-source-panel');
 const urlSourcePanel = document.querySelector('#url-source-panel');
@@ -124,8 +123,7 @@ form.addEventListener('submit', async (event) => {
     const response = await fetch('/api/agent-diagnostics', {
       method: 'POST',
       headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${platformKey.value}`
+        'content-type': 'application/json'
       },
       body: JSON.stringify({
         ...cardInput,
@@ -594,7 +592,6 @@ function detailLabel(key) {
 
 function clearSensitiveState() {
   form.reset();
-  platformKey.value = '';
   agentToken.value = '';
   cardFile.value = '';
   cardJson.value = '';

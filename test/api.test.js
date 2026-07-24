@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -21,11 +22,11 @@ const {
 
 process.env.NODE_ENV = 'test';
 process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-test-${process.pid}.json`);
-process.env.AGENT_DIAGNOSTICS_ACCESS_KEY = 'test-diagnostics-key';
 process.env.AGENT_DIAGNOSTICS_RATE_LIMIT = '100';
 process.env.ALLOW_PRIVATE_AGENT_URLS = 'true';
 process.env.ALLOW_PRIVATE_DIAGNOSTICS_URLS = 'true';
 const API_UNSECURED_JWT = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ.';
+const V2_FIXTURE_PARTICIPANT_TOKEN = 'T'.repeat(43);
 const apiEvidenceRecord = createEvidenceRecord({
   evidenceId: 'ev_api',
   runId: 'run_api',
@@ -47,6 +48,12 @@ const v2Fixture = {
   createdAt: '2026-07-24T09:00:00.000Z',
   updatedAt: '2026-07-24T09:01:00.000Z',
   revision: 0,
+  participantAccess: {
+    tokenHash: createHash('sha256')
+      .update(V2_FIXTURE_PARTICIPANT_TOKEN, 'utf8')
+      .digest('hex'),
+    createdAt: '2026-07-24T09:00:00.000Z'
+  },
   execution: {
     status: 'completed',
     stage: `password=api-flat-password; apiKey=api-flat-key; session=api-flat-session; credentials=api-flat-credentials; jwt=${API_UNSECURED_JWT}`,
@@ -158,7 +165,7 @@ test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes'
   assert.equal(createProjection.schemaVersion, 2);
   for (const secret of forbidden) assert.equal(createProjectionText.includes(secret), false, `create: ${secret}`);
 
-  const participantAccessToken = 'T'.repeat(43);
+  const participantAccessToken = V2_FIXTURE_PARTICIPANT_TOKEN;
   const createResponse = serializeEvaluationForResponse({
     evaluation: v2Fixture,
     participantAccessToken
@@ -193,7 +200,15 @@ test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes'
   assert.equal(skillText.includes('api-skill-secret'), false);
   assert.equal(skillText.includes('api-card-secret'), false);
 
-  const deleteResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`, { method: 'DELETE' });
+  const deleteResponse = await fetch(
+    `${origin}/api/evaluations/${v2Fixture.id}`,
+    {
+      method: 'DELETE',
+      headers: {
+        authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}`
+      }
+    }
+  );
   const deleted = await deleteResponse.json();
   assert.equal(deleteResponse.status, 200);
   assert.equal(deleted.id, v2Fixture.id);
@@ -372,11 +387,19 @@ test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
 });
 
 test('keeps V2 browser secrets memory-only and renders nested projections safely', async () => {
-  const response = await fetch(`${origin}/app.js`);
-  const script = await response.text();
+  const [response, actionsResponse] = await Promise.all([
+    fetch(`${origin}/app.js`),
+    fetch(`${origin}/evaluation-actions.js`)
+  ]);
+  const [script, actions] = await Promise.all([
+    response.text(),
+    actionsResponse.text()
+  ]);
   assert.equal(response.status, 200);
+  assert.equal(actionsResponse.status, 200);
 
   assert.match(script, /participantTokens:\s*new Map\(\)/);
+  assert.match(script, /from '.\/evaluation-actions\.js/);
   assert.match(script, /function statusOf\(item\)/);
   assert.match(script, /function stageOf\(item\)/);
   assert.match(script, /function progressOf\(item\)/);
@@ -388,7 +411,10 @@ test('keeps V2 browser secrets memory-only and renders nested projections safely
   assert.match(script, /agent-authorization'\)\.value = ''/);
   assert.match(script, /authorization:\s*`Bearer \$\{participantToken\}`/);
   assert.match(script, /'idempotency-key':\s*crypto\.randomUUID\(\)/);
-  assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB|document\.cookie|console\./);
+  assert.doesNotMatch(
+    `${script}\n${actions}`,
+    /localStorage|sessionStorage|indexedDB|document\.cookie|console\./
+  );
 });
 
 test('lets the final verdict use the available desktop width', async () => {
@@ -425,7 +451,7 @@ test('serves an Agent Card upload readiness console with isolated credentials an
   assert.equal(scriptResponse.status, 200);
   assert.equal(styleResponse.status, 200);
   for (const id of [
-    'diagnostics-form', 'platform-key', 'agent-card-file', 'agent-card-json',
+    'diagnostics-form', 'agent-card-file', 'agent-card-json',
     'card-source-json', 'card-source-card-url', 'card-source-service-url',
     'json-source-panel', 'url-source-panel', 'agent-card-url',
     'private-network-note',
@@ -447,6 +473,7 @@ test('serves an Agent Card upload readiness console with isolated credentials an
   assert.doesNotMatch(html, /href="\/"/);
   assert.match(html, /<div class="brand"/);
   assert.match(html, /<a class="back-link" href="\/agent-check"/);
+  assert.doesNotMatch(html, /平台访问密钥|platform-key|AGENT_DIAGNOSTICS_ACCESS_KEY/);
   assert.match(script, /\/api\/agent-diagnostics/);
   assert.match(script, /agentCard/);
   assert.match(script, /cardSource/);
@@ -454,6 +481,7 @@ test('serves an Agent Card upload readiness console with isolated credentials an
   assert.match(script, /service-url/);
   assert.match(script, /confirmAuthorizationTarget/);
   assert.match(script, /MAX_CARD_BYTES/);
+  assert.doesNotMatch(script, /platformKey|platform-key/);
   assert.doesNotMatch(script, /localStorage|sessionStorage/);
   assert.match(script, /pageshow/);
   assert.match(css, /\.card-drop-zone/);
@@ -462,7 +490,7 @@ test('serves an Agent Card upload readiness console with isolated credentials an
   assert.match(css, /prefers-reduced-motion/);
 });
 
-test('resolves a service root and runs diagnostics through the protected API', async () => {
+test('resolves a service root and runs diagnostics through the public API', async () => {
   let agentOrigin = '';
   const agentServer = createServer((request, response) => {
     if (request.method === 'GET' && request.url === '/.well-known/agent-card.json') {
@@ -507,10 +535,7 @@ test('resolves a service root and runs diagnostics through the protected API', a
   try {
     const response = await fetch(`${origin}/api/agent-diagnostics`, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: 'Bearer test-diagnostics-key'
-      },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         cardSource: { type: 'service-url', url: agentOrigin },
         authMethod: 'none',
@@ -540,9 +565,7 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
     readFile(new URL('../README.md', import.meta.url), 'utf8')
   ]);
   for (const term of [
-    'AGENT_DIAGNOSTICS_ACCESS_KEY',
     'ALLOW_PRIVATE_DIAGNOSTICS_URLS',
-    '平台访问密钥',
     'Agent Card JSON',
     '完整 Agent Card URL',
     '服务根地址',
@@ -570,6 +593,7 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
   assert.match(envExample, /AGENT_DIAGNOSTICS_RATE_LIMIT=6/);
   assert.match(envExample, /AGENT_DIAGNOSTICS_CONCURRENCY=4/);
   assert.match(envExample, /ALLOW_PRIVATE_DIAGNOSTICS_URLS=false/);
+  assert.doesNotMatch(`${guide}\n${envExample}\n${readme}`, /AGENT_DIAGNOSTICS_ACCESS_KEY|平台访问密钥/);
   assert.match(readme, /AGENT_DIAGNOSTICS_GUIDE\.md/);
   assert.match(readme, /\/agent-check\b/);
   assert.doesNotMatch(readme, /\/agent-check\.html/);
@@ -617,24 +641,17 @@ test('documents production runtime tool configuration and independent model resp
   assert.doesNotMatch(`${design}\n${plan}`, /Cursor Agent 使用独立 Cursor API Key|Cursor API key requirements|Cursor's independent API key|independently supplied Cursor API Key|Cursor ready only when.*API key/i);
 });
 
-test('protects diagnostics before parsing its request body', async () => {
-  const missing = await fetch(`${origin}/api/agent-diagnostics`, {
+test('validates public diagnostics request bodies without an access key', async () => {
+  const malformed = await fetch(`${origin}/api/agent-diagnostics`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: '{not-json'
   });
-  assert.equal(missing.status, 401);
-
-  const wrong = await fetch(`${origin}/api/agent-diagnostics`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: 'Bearer wrong' },
-    body: '{}'
-  });
-  assert.equal(wrong.status, 401);
+  assert.equal(malformed.status, 400);
 
   const tooLarge = await fetch(`${origin}/api/agent-diagnostics`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: 'Bearer test-diagnostics-key' },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ padding: 'x'.repeat(Math.floor(1.25 * 1024 * 1024) + 1) })
   });
   assert.equal(tooLarge.status, 413);
@@ -650,7 +667,7 @@ test('returns API input errors but keeps upstream diagnostics failures in HTTP 2
   };
   const invalid = await fetch(`${origin}/api/agent-diagnostics`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: 'Bearer test-diagnostics-key' },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       agentCard: [localCard],
       authMethod: 'none',
@@ -664,7 +681,7 @@ test('returns API input errors but keeps upstream diagnostics failures in HTTP 2
   const before = await (await fetch(`${origin}/api/evaluations`)).json();
   const response = await fetch(`${origin}/api/agent-diagnostics`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: 'Bearer test-diagnostics-key' },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       agentCard: {
         ...localCard,

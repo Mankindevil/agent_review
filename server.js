@@ -95,7 +95,7 @@ export const server = createServer(async (request, response) => {
     }
     if (request.method === 'POST' && url.pathname === '/api/agent-diagnostics') {
       response.setHeader('cache-control', 'no-store');
-      const release = diagnosticsGuard.enter(request.headers.authorization);
+      const release = diagnosticsGuard.enter();
       const controller = new AbortController();
       const abort = () => controller.abort();
       request.once('aborted', abort);
@@ -103,8 +103,7 @@ export const server = createServer(async (request, response) => {
       try {
         const input = await readJsonBody(request, Math.floor(1.25 * 1024 * 1024));
         return json(response, 200, await runAgentDiagnostics(input, {
-          signal: controller.signal,
-          secrets: [process.env.AGENT_DIAGNOSTICS_ACCESS_KEY]
+          signal: controller.signal
         }));
       } finally {
         request.off('aborted', abort);
