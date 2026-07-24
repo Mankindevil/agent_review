@@ -135,6 +135,7 @@
         },
         "description": { "type": "string", "minLength": 1 },
         "required": { "type": "boolean", "default": true },
+        "caseSensitive": { "type": "boolean" },
         "expected": {},
         "schema": { "type": "object" },
         "path": { "type": "string", "minLength": 1 },
@@ -162,6 +163,7 @@
               "minItems": 1,
               "items": { "type": "string", "minLength": 1 }
             },
+            "caseSensitive": { "type": "boolean" },
             "description": { "type": "string", "minLength": 1 },
             "required": { "type": "boolean" }
           }

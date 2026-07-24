@@ -181,6 +181,12 @@ function normalizeCriterion(criterion, path) {
       throw new TypeError(`${path}.expected must be a non-empty string array`);
     }
     result.expected = normalizeStringArray(criterion.expected, `${path}.expected`);
+    if (criterion.caseSensitive !== undefined) {
+      result.caseSensitive = requireBoolean(
+        criterion.caseSensitive,
+        `${path}.caseSensitive`
+      );
+    }
   } else if (criterion.type === 'exact') {
     result.expected = requireString(criterion.expected, `${path}.expected`);
   } else if (criterion.type === 'json-schema') {
@@ -189,10 +195,10 @@ function normalizeCriterion(criterion, path) {
   } else if (criterion.type === 'numeric') {
     result.path = requireString(criterion.path, `${path}.path`);
     result.expected = requireFiniteNumber(criterion.expected, `${path}.expected`);
-    if (criterion.tolerance !== undefined) {
-      result.tolerance = requireFiniteNumber(criterion.tolerance, `${path}.tolerance`);
-      if (result.tolerance < 0) throw new RangeError(`${path}.tolerance cannot be negative`);
-    }
+    result.tolerance = criterion.tolerance === undefined
+      ? 0
+      : requireFiniteNumber(criterion.tolerance, `${path}.tolerance`);
+    if (result.tolerance < 0) throw new RangeError(`${path}.tolerance cannot be negative`);
   }
   return result;
 }

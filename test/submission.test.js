@@ -62,6 +62,10 @@ test('ships a closed JSON Schema for the normalized example contract', async () 
   assert.equal(schema.items.additionalProperties, false);
   assert.deepEqual(schema.$defs.part.properties.type.enum, [...PART_TYPES]);
   assert.deepEqual(schema.$defs.criterion.properties.type.enum, [...CRITERION_TYPES]);
+  const contains = schema.$defs.criterion.oneOf.find(
+    (entry) => entry.properties.type.const === 'contains'
+  );
+  assert.deepEqual(contains.properties.caseSensitive, { type: 'boolean' });
 });
 
 test('keeps schema base64 and URL-userinfo constraints aligned with runtime normalization', async () => {
@@ -202,6 +206,39 @@ test('normalizes every declared part and criterion contract', () => {
   assert.equal(turn.acceptanceCriteria[0].required, true);
   assert.equal(turn.acceptanceCriteria[3].tolerance, 0.01);
   assert.equal(turn.acceptanceCriteria[4].required, false);
+});
+
+test('preserves case-insensitive contains criteria in the frozen contract', () => {
+  const raw = clone();
+  raw[0].turns[0].acceptanceCriteria = [{
+    id: 'case-insensitive',
+    type: 'contains',
+    expected: ['RISK'],
+    caseSensitive: false,
+    description: 'case-insensitive token'
+  }];
+
+  const normalized = normalizeAgentExamples(raw);
+
+  assert.equal(
+    normalized[0].turns[0].acceptanceCriteria[0].caseSensitive,
+    false
+  );
+});
+
+test('normalizes omitted numeric tolerance to exact comparison', () => {
+  const raw = clone();
+  raw[0].turns[0].acceptanceCriteria = [{
+    id: 'exact-number',
+    type: 'numeric',
+    path: 'metrics.count',
+    expected: 10,
+    description: 'exact numeric result'
+  }];
+
+  const normalized = normalizeAgentExamples(raw);
+
+  assert.equal(normalized[0].turns[0].acceptanceCriteria[0].tolerance, 0);
 });
 
 test('rejects duplicate example and criterion identifiers', () => {
