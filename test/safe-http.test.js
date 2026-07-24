@@ -113,3 +113,99 @@ test('enforces byte limits, timeout, and caller abort while reading', async () =
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('reports response headers and monotonic chunk arrival timing without exposing request internals', async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/plain', 'x-fixture': 'timed' });
+    setTimeout(() => {
+      response.write('first');
+      setTimeout(() => response.end('second'), 10);
+    }, 10);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    const lookup = async () => [{ address: '127.0.0.1', family: 4 }];
+    const headers = [];
+    const chunks = [];
+    const result = await safeHttpRequest(`http://agent.example:${port}/timed`, {
+      lookup,
+      allowPrivate: true,
+      headers: { authorization: 'Bearer never-observed' },
+      onHeaders: (event) => headers.push(event),
+      onChunk: (event) => chunks.push(event)
+    });
+
+    assert.equal(result.body.toString(), 'firstsecond');
+    assert.equal(headers.length, 1);
+    assert.deepEqual(Object.keys(headers[0]).sort(), ['at', 'headers', 'status']);
+    assert.equal(headers[0].status, 200);
+    assert.equal(headers[0].headers['x-fixture'], 'timed');
+    assert.equal(chunks.length, 2);
+    assert.deepEqual(Object.keys(chunks[0]).sort(), ['at', 'bytes', 'first']);
+    assert.deepEqual(chunks.map(({ bytes, first }) => ({ bytes: bytes.toString(), first })), [
+      { bytes: 'first', first: true },
+      { bytes: 'second', first: false }
+    ]);
+    assert.ok(headers[0].at <= chunks[0].at);
+    assert.ok(chunks[0].at <= chunks[1].at);
+    assert.doesNotMatch(JSON.stringify([...headers, ...chunks]), /authorization|never-observed|socket/i);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('aborts and classifies a synchronous timing hook failure as platform instrumentation', async () => {
+  const server = createServer((_request, response) => response.end('body'));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    await assert.rejects(
+      safeHttpRequest(`http://agent.example:${port}/instrumentation`, {
+        lookup: async () => [{ address: '127.0.0.1', family: 4 }],
+        allowPrivate: true,
+        onHeaders: () => { throw new Error('collector unavailable'); }
+      }),
+      (error) => error.code === 'instrumentation' && /instrumentation/i.test(error.message)
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('never exposes an overflow chunk to instrumentation and classifies onChunk failures', async () => {
+  const server = createServer((request, response) => {
+    if (request.url === '/overflow') {
+      response.write('1234');
+      return setTimeout(() => response.end('5'), 10);
+    }
+    response.end('body');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    const lookup = async () => [{ address: '127.0.0.1', family: 4 }];
+    const observed = [];
+    await assert.rejects(
+      safeHttpRequest(`http://agent.example:${port}/overflow`, {
+        lookup,
+        allowPrivate: true,
+        maxBytes: 4,
+        onChunk: ({ bytes }) => observed.push(bytes.toString())
+      }),
+      (error) => error.code === 'response-too-large'
+    );
+    assert.deepEqual(observed, ['1234']);
+
+    await assert.rejects(
+      safeHttpRequest(`http://agent.example:${port}/hook`, {
+        lookup,
+        allowPrivate: true,
+        onChunk: () => { throw new Error('collector unavailable'); }
+      }),
+      (error) => error.code === 'instrumentation'
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

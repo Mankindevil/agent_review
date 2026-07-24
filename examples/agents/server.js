@@ -76,8 +76,8 @@ function createAgentServer(definition, requestedPort) {
       const prompt = (message?.parts || []).map((part) => part.text || '').join('\n');
       const output = definition.handle(prompt);
       const result = definition.id === 'portfolio-risk-manager'
-        ? taskResult(output, message?.messageId)
-        : messageResult(output, message?.messageId, definition.protocolVersion);
+        ? taskResult(output, message?.contextId)
+        : messageResult(output, message?.contextId, definition.protocolVersion);
       return sendJson(response, 200, isRpc ? { jsonrpc: '2.0', id: body.id, result } : result);
     }
     if (request.method === 'GET' && url.pathname === '/health') return sendJson(response, 200, { ok: true, agent: definition.id });
@@ -107,7 +107,17 @@ function messageResult(text, contextId, version) {
 }
 
 function taskResult(text, contextId) {
-  return { task: { id: crypto.randomUUID(), contextId: contextId || crypto.randomUUID(), status: { state: 'completed' }, artifacts: [{ artifactId: crypto.randomUUID(), name: 'incident-action-board', parts: [{ kind: 'text', text }] }] } };
+  return {
+    kind: 'task',
+    id: crypto.randomUUID(),
+    contextId: contextId || crypto.randomUUID(),
+    status: { state: 'completed' },
+    artifacts: [{
+      artifactId: crypto.randomUUID(),
+      name: 'incident-action-board',
+      parts: [{ kind: 'text', text }]
+    }]
+  };
 }
 
 async function readBody(request) {

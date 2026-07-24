@@ -363,7 +363,8 @@ function safeErrorMessage(error, category) {
     timeout: '诊断请求超时',
     'response-too-large': '远程响应超过大小限制',
     security: '目标地址被安全策略阻止',
-    cancelled: '诊断已取消'
+    cancelled: '诊断已取消',
+    instrumentation: 'platform instrumentation error'
   };
   return labels[category] || '诊断阶段失败';
 }
@@ -380,7 +381,8 @@ function suggestionFor(category) {
     timeout: '缩短 Agent 执行时间或适当提高诊断超时。',
     'response-too-large': '缩短 Agent 输出并限制流式事件数量。',
     security: '使用公开可访问的 HTTP(S) 地址，不要指向内网或本机。',
-    cancelled: '保持页面连接后重新诊断。'
+    cancelled: '保持页面连接后重新诊断。',
+    instrumentation: '检查 platform instrumentation timing hook 后重试。'
   };
   return suggestions[category] || '检查 Agent 配置后重试。';
 }

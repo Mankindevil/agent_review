@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { callA2AAgent, resolveAgentCard } from '../src/a2a.js';
+import { executeA2AExample } from '../src/a2a-executor.js';
 import { startExampleAgents, stopExampleAgents } from '../examples/agents/server.js';
+import { EvidenceVault } from '../src/evidence-vault.js';
 import { EvaluationPipeline } from '../src/pipeline.js';
 import { EvaluationStore } from '../src/store.js';
 import { EventEmitter } from 'node:events';
@@ -36,6 +39,30 @@ test('calls the A2A 1.0 HTTP+JSON factor researcher', async () => {
   const result = await callA2AAgent(card, '检验经营现金流收益率因子的 Rank IC 与五分组表现');
   assert.match(result.text, /Rank IC/);
   assert.match(result.text, /不构成投资建议/);
+  assert.equal(result.run.outcome.status, 'succeeded');
+});
+
+test('returns and consumes a real context ID across turns without using message IDs', async () => {
+  const card = (await resolveAgentCard('service-url', agents[0].origin)).card;
+  const result = await executeA2AExample({
+    card,
+    example: {
+      id: 'factor-follow-up',
+      turns: [
+        { input: { parts: [{ type: 'text', text: 'start research' }] } },
+        { input: { parts: [{ type: 'text', text: 'continue research' }] } }
+      ]
+    },
+    repeatIndex: 0,
+    policy: { timeoutMs: 5_000 }
+  });
+
+  assert.equal(result.contextCheck.status, 'passed');
+  assert.equal(result.runs[0].response.normalized.contextId, result.runs[1].response.normalized.contextId);
+  assert.notEqual(
+    result.runs[0].response.normalized.contextId,
+    result.runs[0].response.normalized.messages[0].messageId
+  );
 });
 
 test('calls the A2A 1.0 JSON-RPC strategy backtester with SendMessage', async () => {
@@ -74,3 +101,368 @@ test('runs a complete live-mode platform evaluation against a real A2A agent', a
   assert.deepEqual(result.coverage, { agent: 'live', models: 'demo', runtimes: 'demo' });
   assert.equal(result.overallMode, 'mixed');
 });
+
+test('V2 fixture closes its API server even when worker settlement fails', async () => {
+  let aborted = false;
+  let closed = false;
+  const fixture = {
+    pipeline: {
+      activeRuns: new Map([[
+        'eval_fixture',
+        { abort: () => { aborted = true; } }
+      ]])
+    },
+    server: {
+      listening: true,
+      close(callback) {
+        closed = true;
+        callback();
+      }
+    }
+  };
+
+  await assert.rejects(
+    shutdownApiFixture(fixture, async () => {
+      throw new Error('worker settlement timed out');
+    }),
+    /worker settlement timed out/
+  );
+  assert.equal(aborted, true);
+  assert.equal(closed, true);
+});
+
+test('runs the complete V2 black-box evidence pipeline against a real A2A agent', async () => {
+  const privatePrompt = 'LIVE_V2_PRIVATE_PROMPT_SENTINEL';
+  const temporaryRoot = await mkdtemp(
+    path.join(tmpdir(), 'agent-roast-v2-live-')
+  );
+  const evidenceRoot = path.join(temporaryRoot, 'evidence');
+  const evidenceKey = Buffer.alloc(32, 17);
+  let liveAgents;
+  let apiModule;
+  let sseAbort;
+  const environment = captureEnvironment([
+    'NODE_ENV',
+    'DATA_FILE',
+    'A2A_BLACK_BOX_V1_ENABLED',
+    'EVIDENCE_ENCRYPTION_KEY',
+    'EVIDENCE_ROOT'
+  ]);
+
+  try {
+    liveAgents = await startExampleAgents({ ports: [0, 0, 0] });
+    const card = (
+      await resolveAgentCard('service-url', liveAgents[0].origin)
+    ).card;
+    Object.assign(process.env, {
+      NODE_ENV: 'test',
+      DATA_FILE: path.join(temporaryRoot, 'evaluations.json'),
+      A2A_BLACK_BOX_V1_ENABLED: 'true',
+      EVIDENCE_ENCRYPTION_KEY: evidenceKey.toString('base64'),
+      EVIDENCE_ROOT: evidenceRoot
+    });
+    apiModule = await import('../server.js');
+    await new Promise((resolve) =>
+      apiModule.server.listen(0, '127.0.0.1', resolve)
+    );
+    const apiOrigin =
+      `http://127.0.0.1:${apiModule.server.address().port}`;
+    const createResponse = await fetch(`${apiOrigin}/api/evaluations`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        schemaVersion: 2,
+        agentCard: card,
+        agentExamples: [
+          {
+            id: 'factor-multipart',
+            name: 'Multipart factor workflow',
+            turns: [
+              {
+                input: {
+                  parts: [
+                    {
+                      type: 'text',
+                      text: `${privatePrompt}: report Rank IC`
+                    },
+                    {
+                      type: 'data',
+                      data: {
+                        universe: 'CSI300',
+                        asOf: '2024-12-31'
+                      }
+                    }
+                  ]
+                },
+                expectedDeliverable: 'A research note including Rank IC',
+                acceptanceCriteria: [{
+                  id: 'rank-ic',
+                  type: 'contains',
+                  expected: ['Rank IC'],
+                  description: 'Includes Rank IC',
+                  required: true
+                }]
+              },
+              {
+                input: {
+                  parts: [{
+                    type: 'text',
+                    text: 'Continue the same research and summarize its risks'
+                  }]
+                }
+              }
+            ]
+          },
+          {
+            id: 'model-only',
+            name: 'Model-only qualitative review',
+            turns: [{
+              input: {
+                parts: [{
+                  type: 'text',
+                  text: 'Provide a qualitative factor-research memo'
+                }]
+              },
+              acceptanceCriteria: [{
+                id: 'qualitative-review',
+                type: 'model',
+                description: 'Review the qualitative research quality',
+                required: true
+              }]
+            }]
+          }
+        ]
+      })
+    });
+    const created = await createResponse.json();
+    assert.equal(createResponse.status, 202);
+    assert.match(created.participantAccessToken, /^[A-Za-z0-9_-]{43}$/u);
+
+    let completed;
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      completed = apiModule.evaluationStore.get(created.id);
+      if (
+        ['completed', 'cancelled', 'interrupted'].includes(
+          completed?.execution?.status
+        )
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    assert.equal(completed.execution.status, 'completed');
+    assert.equal(completed.qualification.status, 'eligible');
+    assert.equal(completed.runtimeState.runIndex.length, 6);
+    await waitForNoActiveRuns(apiModule.pipeline);
+
+    const cellsByExample = [0, 1].map((exampleIndex) =>
+      completed.runtimeState.runIndex.filter(
+        (cell) => cell.exampleIndex === exampleIndex
+      )
+    );
+    for (const cells of cellsByExample) {
+      assert.equal(cells.length, 3);
+      assert.deepEqual(
+        cells.map((cell) => cell.identity.repeatIndex),
+        [0, 1, 2]
+      );
+      assert.equal(
+        cells.every(
+          (cell) =>
+            cell.status === 'completed' &&
+            cell.selectedAttemptIndex !== null
+        ),
+        true
+      );
+    }
+
+    const allInitialContexts = [];
+    for (const cell of completed.runtimeState.runIndex) {
+      const attempt = cell.attempts[cell.selectedAttemptIndex];
+      const firstTurn = attempt.turns[0];
+      assert.equal(firstTurn.sentContextId, null);
+      assert.equal(firstTurn.sentTaskId, null);
+      assert.ok(firstTurn.contextId);
+      allInitialContexts.push(firstTurn.contextId);
+    }
+    assert.equal(new Set(allInitialContexts).size, 6);
+
+    const multipartContexts = cellsByExample[0].map((cell) => {
+      const attempt = cell.attempts[cell.selectedAttemptIndex];
+      assert.equal(attempt.turns.length, 2);
+      const [firstTurn, secondTurn] = attempt.turns;
+      assert.equal(secondTurn.sentContextId, firstTurn.contextId);
+      assert.equal(secondTurn.sentTaskId, null);
+      assert.equal(secondTurn.contextId, firstTurn.contextId);
+      return firstTurn.contextId;
+    });
+    assert.equal(new Set(multipartContexts).size, 3);
+
+    for (const cell of cellsByExample[1]) {
+      const attempt = cell.attempts[cell.selectedAttemptIndex];
+      assert.equal(attempt.acceptance.semanticSuccess, null);
+      assert.equal(attempt.acceptance.requiredExecutable, 0);
+    }
+
+    const selectedTurn =
+      cellsByExample[0][0]
+        .attempts[cellsByExample[0][0].selectedAttemptIndex]
+        .turns[0];
+    const requestManifest = completed.evidenceManifest.items.find(
+      (item) =>
+        item.kind === 'protocol-request' &&
+        item.runId === selectedTurn.runId
+    );
+    assert.ok(requestManifest);
+    const evidenceVault = new EvidenceVault({
+      root: evidenceRoot,
+      evaluationId: completed.id,
+      key: evidenceKey
+    });
+    const decrypted = await evidenceVault.get(
+      requestManifest.evidenceId,
+      requestManifest.recordHash
+    );
+    assert.equal(decrypted.recordHash, requestManifest.recordHash);
+    assert.match(JSON.stringify(decrypted.payload), new RegExp(privatePrompt));
+
+    const getResponse = await fetch(
+      `${apiOrigin}/api/evaluations/${completed.id}`
+    );
+    const getProjection = await getResponse.json();
+    assert.equal(getResponse.status, 200);
+
+    sseAbort = new AbortController();
+    const sseResponse = await fetch(
+      `${apiOrigin}/api/evaluations/${completed.id}/events`,
+      { signal: sseAbort.signal }
+    );
+    assert.equal(sseResponse.status, 200);
+    assert.match(
+      sseResponse.headers.get('content-type'),
+      /^text\/event-stream/iu
+    );
+    const reader = sseResponse.body.getReader();
+    const streamState = { buffer: '' };
+    const initialSseProjection = await readSseData(
+      reader,
+      streamState,
+      sseAbort
+    );
+    assert.equal(initialSseProjection.revision, getProjection.revision);
+    const archiveResponse = await fetch(
+      `${apiOrigin}/api/evaluations/${completed.id}`,
+      { method: 'DELETE' }
+    );
+    assert.equal(archiveResponse.status, 200);
+    const sseProjection = await readSseData(
+      reader,
+      streamState,
+      sseAbort
+    );
+    assert.equal(sseProjection.revision, getProjection.revision + 1);
+    assert.ok(sseProjection.archivedAt);
+    sseAbort.abort();
+
+    for (const projection of [getProjection, sseProjection]) {
+      assert.equal(
+        projection.evidenceManifest.items.length,
+        completed.evidenceManifest.items.length
+      );
+      const projectedRequest = projection.evidenceManifest.items.find(
+        (item) => item.evidenceId === requestManifest.evidenceId
+      );
+      assert.ok(projectedRequest);
+      assert.equal(projectedRequest.recordHash, requestManifest.recordHash);
+      assert.equal(Object.hasOwn(projectedRequest, 'payload'), false);
+      assert.equal(Object.hasOwn(projection, 'submission'), false);
+      assert.equal(Object.hasOwn(projection, 'runtimeState'), false);
+      assert.equal(
+        JSON.stringify(projection).includes(privatePrompt),
+        false
+      );
+    }
+  } finally {
+    sseAbort?.abort();
+    try {
+      if (apiModule) {
+        await shutdownApiFixture(apiModule);
+      }
+    } finally {
+      try {
+        if (liveAgents) await stopExampleAgents(liveAgents);
+      } finally {
+        restoreEnvironment(environment);
+        await rm(temporaryRoot, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+async function readSseData(reader, state, controller, timeoutMs = 5_000) {
+  const timeout = setTimeout(
+    () => controller.abort(new Error('SSE fixture timed out')),
+    timeoutMs
+  );
+  try {
+    while (true) {
+      const boundary = state.buffer.indexOf('\n\n');
+      if (boundary >= 0) {
+        const event = state.buffer.slice(0, boundary);
+        state.buffer = state.buffer.slice(boundary + 2);
+        const data = event
+          .split('\n')
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trimStart())
+          .join('\n');
+        if (data) return JSON.parse(data);
+        continue;
+      }
+      const { value, done } = await reader.read();
+      if (done) throw new Error('SSE fixture closed before a data event');
+      state.buffer += Buffer.from(value).toString('utf8').replace(/\r\n/gu, '\n');
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function waitForNoActiveRuns(pipeline, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (pipeline.activeRuns.size > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(pipeline.activeRuns.size, 0, 'V2 worker did not settle');
+}
+
+async function shutdownApiFixture(
+  apiModule,
+  waitForSettlement = waitForNoActiveRuns
+) {
+  try {
+    for (const controller of apiModule.pipeline.activeRuns.values()) {
+      controller.abort();
+    }
+    await waitForSettlement(apiModule.pipeline);
+  } finally {
+    if (apiModule.server.listening) {
+      await new Promise((resolve, reject) =>
+        apiModule.server.close((error) =>
+          error ? reject(error) : resolve()
+        )
+      );
+    }
+  }
+}
+
+function captureEnvironment(keys) {
+  return Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+}
+
+function restoreEnvironment(snapshot) {
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}

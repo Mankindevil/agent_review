@@ -646,7 +646,7 @@ Require result sections in this order:
 
 - [ ] **Step 2: Add evidence APIs**
 
-The manifest endpoint returns redacted metadata according to role. The evidence-item endpoint decrypts through `EvidenceVault`, applies current redaction again, records an event through the independent `AccessAuditStore`, and returns only content allowed for that principal. Judges never receive Replica evidence before lock. Evidence reads must not advance the assignment draft ETag.
+The manifest endpoint returns redacted metadata according to role. The evidence-item endpoint takes the independently projected manifest item's `recordHash`, decrypts through `EvidenceVault.get(evidenceId, recordHash)`, applies current redaction again, records an event through the independent `AccessAuditStore`, and returns only content allowed for that principal. Judges never receive Replica evidence before lock. Evidence reads must not advance the assignment draft ETag.
 
 - [ ] **Step 3: Render server-authoritative results**
 

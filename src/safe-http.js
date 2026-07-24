@@ -84,6 +84,11 @@ async function performSafeHttpRequest(rawUrl, options) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer;
+    let lastHookAt = 0;
+    const hookTime = () => {
+      lastHookAt = Math.max(lastHookAt, Date.now());
+      return lastHookAt;
+    };
     const finish = (callback, value) => {
       if (settled) return;
       settled = true;
@@ -105,15 +110,48 @@ async function performSafeHttpRequest(rawUrl, options) {
     }, (response) => {
       const chunks = [];
       let size = 0;
+      let firstChunk = true;
+      response.on('error', fail);
+      try {
+        options.onHeaders?.({
+          status: response.statusCode || 0,
+          headers: response.headers,
+          at: hookTime()
+        });
+      } catch {
+        const error = safeError('platform instrumentation error', 'instrumentation');
+        response.destroy(error);
+        request.destroy(error);
+        finish(reject, error);
+        return;
+      }
       response.on('data', (chunk) => {
-        size += chunk.length;
+        const nextSize = size + chunk.length;
+        if (nextSize > maxBytes) {
+          response.destroy(safeError('远程响应超过大小限制', 'response-too-large'));
+          return;
+        }
+        size = nextSize;
+        try {
+          options.onChunk?.({
+            bytes: Buffer.from(chunk),
+            at: hookTime(),
+            first: firstChunk
+          });
+        } catch {
+          const error = safeError('platform instrumentation error', 'instrumentation');
+          response.destroy(error);
+          request.destroy(error);
+          finish(reject, error);
+          return;
+        }
+        firstChunk = false;
         if (size > maxBytes) {
           response.destroy(safeError('远程响应超过大小限制', 'response-too-large'));
           return;
         }
         chunks.push(chunk);
       });
-      response.on('error', fail);
       response.on('end', () => finish(resolve, {
         status: response.statusCode || 0,
         headers: response.headers,
@@ -208,7 +246,7 @@ function safeError(message, code) {
 }
 
 function normalizeTransportError(error) {
-  if (error?.code && ['security', 'dns', 'timeout', 'cancelled', 'response-too-large'].includes(error.code)) return error;
+  if (error?.code && ['security', 'dns', 'timeout', 'cancelled', 'response-too-large', 'instrumentation'].includes(error.code)) return error;
   if (error?.code?.startsWith?.('ERR_TLS') || error?.code?.startsWith?.('CERT_')) return safeError('TLS 握手失败', 'tls');
   return safeError(error?.message || '远程连接失败', 'connection');
 }

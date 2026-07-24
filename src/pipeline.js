@@ -1,10 +1,39 @@
+import { createHash, createHmac } from 'node:crypto';
 import { callA2AAgent, validateAgentCard } from './a2a.js';
+import { validateAgentAuthorization } from './a2a-executor.js';
+import {
+  compileBlackBoxRunPlan,
+  PHASE1_EXECUTION_POLICY,
+  runBlackBoxFoundation
+} from './black-box-pipeline.js';
+import { canonicalJson } from './evidence.js';
+import { createEvaluationRecord } from './evaluation-model.js';
+import {
+  createParticipantAccess,
+  verifyParticipantAccess
+} from './participant-access.js';
+import {
+  assertFrozenSubmissionIntegrity,
+  freezeSubmission
+} from './submission.js';
 import { configuredReviewers, reviewAgent } from './providers.js';
 import { buildRoast, judgeOutput, scoreComplexity } from './scoring.js';
 import { buildSkill, RUNTIMES, runSkill } from './runtimes.js';
 import { average, deriveSeed, id, normalizeSeed, normalizeTemperature, now, round, stableNumber } from './utils.js';
 import { buildDataPlan, collectDataEvidence, normalizeTestCases, verifyOutputAgainstEvidence } from './data-verifier.js';
 import { queryPandaData } from './panda-data.js';
+
+const PIPELINE_PRIVATE = new WeakMap();
+const V2_CONFIG = Object.freeze({
+  rubricVersion: 'a2a-black-box-v1',
+  hiddenTestPackageVersion: null,
+  modelConfigVersion: null,
+  runtimeConfigVersion: 'phase1-black-box-runtime/v1'
+});
+const V2_CREATE_FIELDS = new Set([
+  'schemaVersion', 'agentCard', 'agentExamples', 'agentAuthorization'
+]);
+const V2_RESUME_FIELDS = new Set(['agentAuthorization']);
 
 export class EvaluationPipeline {
   constructor(store, events, options = {}) {
@@ -13,9 +42,28 @@ export class EvaluationPipeline {
     this.activeRuns = new Map();
     this.dataQuery = options.dataQuery || queryPandaData;
     this.dataVerificationEnabled = options.dataVerificationEnabled ?? (process.env.NODE_ENV !== 'test' && process.env.PANDA_DATA_AUTO_VERIFY === 'true');
+    const blackBoxEnabled = options.blackBoxEnabled === true;
+    PIPELINE_PRIVATE.set(this, {
+      blackBoxEnabled,
+      blackBoxServices: Object.freeze({ ...(options.blackBoxServices || {}) }),
+      credentialVault: options.credentialVault || null,
+      resumeMacKey: blackBoxEnabled && options.resumeMacKey
+        ? Buffer.from(options.resumeMacKey)
+        : null,
+      runBlackBox: options.runBlackBox || runBlackBoxFoundation,
+      createParticipantAccess:
+        options.createParticipantAccess || createParticipantAccess,
+      now: options.now || now,
+      createId: options.createId || id,
+      policy: options.policy || PHASE1_EXECUTION_POLICY
+    });
   }
 
   async create(input) {
+    if (input?.schemaVersion === 2) {
+      if (!privateState(this).blackBoxEnabled) throw v2DisabledError();
+      return this.createV2(input);
+    }
     const validation = validateAgentCard(input.agentCard);
     if (!validation.valid) throw Object.assign(new Error(`Agent Card 校验失败：${validation.errors.join('；')}`), { statusCode: 400 });
     if (!Array.isArray(input.cases) || !input.cases.length || input.cases.some((item) => typeof item?.prompt !== 'string' || !item.prompt.trim())) {
@@ -42,9 +90,322 @@ export class EvaluationPipeline {
     return evaluation;
   }
 
-  async cancel(evaluationId) {
+  async createV2(input) {
+    const state = privateState(this);
+    assertClosedObject(input, V2_CREATE_FIELDS, 'V2 create body');
+    if (
+      input.schemaVersion !== 2 ||
+      !Object.hasOwn(input, 'agentCard') ||
+      !Object.hasOwn(input, 'agentExamples')
+    ) {
+      throw httpError(
+        400,
+        'V2 create requires schemaVersion, agentCard, and agentExamples'
+      );
+    }
+    if (input.agentAuthorization !== undefined) {
+      assertAgentAuthorization(input.agentAuthorization);
+    }
+
+    const createdAt = state.now();
+    const cardValidation = validateAgentCard(input.agentCard);
+    if (!cardValidation.valid) {
+      const reason = cardValidation.interfaces.length > 0 &&
+        cardValidation.selectedInterface === null &&
+        cardValidation.errors.length > 0 &&
+        cardValidation.errors.every((message) =>
+          /at least one supported interface/iu.test(message)
+        )
+        ? 'unsupported-interface'
+        : 'invalid-agent-card';
+      throw transientIneligibleError(reason, createdAt);
+    }
+    let submission;
+    try {
+      submission = freezeSubmission({
+        agentCard: input.agentCard,
+        agentExamples: input.agentExamples,
+        config: V2_CONFIG,
+        frozenAt: createdAt
+      });
+    } catch (error) {
+      throw httpError(400, error.message);
+    }
+
+    const participant = state.createParticipantAccess();
+    const evaluationId = state.createId('eval');
+    const runIndex = compileBlackBoxRunPlan(submission, {
+      policy: state.policy,
+      createId: state.createId
+    });
+    const evaluation = createEvaluationRecord(submission, {
+      id: evaluationId,
+      createdAt,
+      participantAccess: {
+        tokenHash: participant.hash,
+        createdAt
+      },
+      authorizationRequired: input.agentAuthorization !== undefined,
+      endpointHash: sha256(submission.selectedInterface.url),
+      agentVersion: submission.agentCard.value.version ?? null,
+      serviceBuildId: null,
+      runIndex
+    });
+    evaluation.auditEvents.push({
+      id: state.createId('audit'),
+      type: 'created',
+      occurredAt: createdAt,
+      summary: 'V2 black-box evaluation created'
+    });
+    const committed = await this.store.set(evaluation);
+    this.events.emit(evaluationId, committed);
+    if (input.agentAuthorization !== undefined) {
+      state.credentialVault.put(evaluationId, input.agentAuthorization);
+    }
+    this.queueV2(committed);
+    return {
+      evaluation: committed,
+      participantAccessToken: participant.token
+    };
+  }
+
+  authenticateResume(evaluationId, participantAccessToken) {
+    const state = privateState(this);
+    if (!state.blackBoxEnabled) throw v2DisabledError();
+    const current = this.store.get(evaluationId);
+    if (!current) return null;
+    if (current.schemaVersion !== 2) {
+      throw httpError(409, 'Resume is available only for V2 evaluations');
+    }
+    assertV2ParticipantOwner(current, participantAccessToken);
+    return current;
+  }
+
+  async resume(evaluationId, input = {}) {
+    const state = privateState(this);
+    let current = this.authenticateResume(
+      evaluationId,
+      input.participantAccessToken
+    );
+    if (!current) return null;
+    const body = input.body === undefined ? {} : input.body;
+    assertClosedObject(body, V2_RESUME_FIELDS, 'V2 resume body');
+    const idempotencyKey = normalizeIdempotencyKey(input.idempotencyKey);
+    if (body.agentAuthorization !== undefined) {
+      assertAgentAuthorization(body.agentAuthorization);
+    }
+    if (
+      current.connection.authorizationRequired &&
+      body.agentAuthorization === undefined
+    ) {
+      throw httpError(400, 'Fresh Agent authorization is required');
+    }
+    const keyHash = sha256(idempotencyKey);
+    const requestMac = resumeRequestMac(state.resumeMacKey, body);
+    const replay = findResumeReceipt(current, keyHash, requestMac);
+    if (replay) return receiptResult(replay);
+    assertResumable(current);
+    try {
+      assertFrozenSubmissionIntegrity(current.submission, V2_CONFIG);
+    } catch {
+      throw httpError(409, 'Frozen submission integrity check failed');
+    }
+
+    const acceptedAt = state.now();
+    let committed;
+    try {
+      committed = await this.store.mutate(
+        evaluationId,
+        current.revision,
+        (record) => {
+          const existing = record.resumeReceipts.find(
+            (receipt) => receipt.keyHash === keyHash
+          );
+          if (existing) {
+            if (existing.requestMac !== requestMac) {
+              throw httpError(409, 'Idempotency request does not match');
+            }
+            return record;
+          }
+          assertResumable(record);
+          const acceptedRevision = record.revision + 1;
+          const response = {
+            schemaVersion: 2,
+            id: evaluationId,
+            accepted: true,
+            revision: acceptedRevision
+          };
+          return {
+            ...record,
+            execution: {
+              status: 'queued',
+              stage: 'resume',
+              progress: record.execution.progress
+            },
+            runtimeState: {
+              ...record.runtimeState,
+              runIndex: recoverDispatchedWork(
+                record.runtimeState.runIndex,
+                record.submission.agentExamples.value
+              )
+            },
+            resumeReceipts: [...record.resumeReceipts, {
+              keyHash,
+              requestMac,
+              acceptedAt,
+              acceptedRevision,
+              statusCode: 202,
+              response
+            }],
+            auditEvents: appendAuditEvent(record.auditEvents, {
+              id: state.createId('audit'),
+              type: 'resume-accepted',
+              occurredAt: acceptedAt,
+              summary: 'Participant-authenticated resume accepted'
+            })
+          };
+        }
+      );
+    } catch (error) {
+      if (error.statusCode !== 409) throw error;
+      current = this.store.get(evaluationId);
+      const racedReplay = findResumeReceipt(current, keyHash, requestMac);
+      if (racedReplay) return receiptResult(racedReplay);
+      throw error;
+    }
+    const receipt = committed.resumeReceipts.find(
+      (item) => item.keyHash === keyHash
+    );
+    if (body.agentAuthorization !== undefined) {
+      state.credentialVault.put(evaluationId, body.agentAuthorization);
+    }
+    this.events.emit(evaluationId, committed);
+    this.queueV2(committed);
+    return receiptResult(receipt);
+  }
+
+  queueV2(evaluation) {
+    const state = privateState(this);
+    const controller = new AbortController();
+    this.activeRuns.set(evaluation.id, controller);
+    queueMicrotask(() => state.runBlackBox(evaluation, {
+      ...state.blackBoxServices,
+      store: this.store,
+      events: this.events,
+      credentialVault: state.credentialVault,
+      signal: controller.signal,
+      policy: state.policy
+    }).catch(() => undefined).finally(() => {
+      state.credentialVault?.delete(evaluation.id);
+      if (this.activeRuns.get(evaluation.id) === controller) {
+        this.activeRuns.delete(evaluation.id);
+      }
+    }));
+  }
+
+  async archive(evaluationId, participantAccessToken) {
+    const state = privateState(this);
+    let current = this.store.get(evaluationId);
+    if (!current) return null;
+    if (current.schemaVersion !== 2) {
+      throw httpError(409, 'Archive is available only for V2 evaluations');
+    }
+    assertV2ParticipantOwner(current, participantAccessToken);
+    const archivedAt = state.now();
+    while (true) {
+      assertV2ParticipantOwner(current, participantAccessToken);
+      if (current.archivedAt !== undefined) return current;
+      if (!isArchivableV2Status(current.execution?.status)) {
+        throw httpError(409, 'Running V2 evaluations cannot be archived');
+      }
+      try {
+        const committed = await this.store.mutate(
+          evaluationId,
+          current.revision,
+          (record) => {
+            assertV2ParticipantOwner(record, participantAccessToken);
+            if (!isArchivableV2Status(record.execution?.status)) {
+              throw httpError(409, 'Running V2 evaluations cannot be archived');
+            }
+            return {
+              ...record,
+              archivedAt
+            };
+          }
+        );
+        this.events.emit(evaluationId, committed);
+        return committed;
+      } catch (error) {
+        if (error.statusCode !== 409 || error.message !== 'revision conflict') {
+          throw error;
+        }
+        current = this.store.get(evaluationId);
+        if (!current) return null;
+      }
+    }
+  }
+
+  async cancel(evaluationId, participantAccessToken) {
     const item = this.store.get(evaluationId);
     if (!item) return null;
+    if (item.schemaVersion === 2) {
+      const state = privateState(this);
+      if (!state.blackBoxEnabled) {
+        throw httpError(409, 'V2 cancellation service is not enabled');
+      }
+      assertV2ParticipantOwner(item, participantAccessToken);
+      if (item.archivedAt !== undefined) return item;
+      const cancelledAt = state.now();
+      const auditId = state.createId('audit');
+      let current = item;
+      let committed;
+      while (!committed) {
+        assertV2ParticipantOwner(current, participantAccessToken);
+        if (current.archivedAt !== undefined) return current;
+        if (['completed', 'cancelled'].includes(current.execution.status)) {
+          return current;
+        }
+        try {
+          committed = await this.store.mutate(
+            evaluationId,
+            current.revision,
+            (record) => {
+              assertV2ParticipantOwner(record, participantAccessToken);
+              return {
+                ...record,
+                execution: {
+                  status: 'cancelled',
+                  stage: 'cancelled',
+                  progress: record.execution.progress,
+                  cancelledAt
+                },
+                runtimeState: {
+                  ...record.runtimeState,
+                  runIndex: cancelDispatchedWork(record.runtimeState.runIndex)
+                },
+                auditEvents: appendAuditEvent(record.auditEvents, {
+                  id: auditId,
+                  type: 'cancelled',
+                  occurredAt: cancelledAt,
+                  summary: 'V2 evaluation cancelled'
+                })
+              };
+            }
+          );
+          break;
+        } catch (error) {
+          if (error.statusCode !== 409) throw error;
+          current = this.store.get(evaluationId);
+          if (!current) return null;
+        }
+      }
+      const reason = new Error('V2 evaluation cancelled');
+      reason.name = 'AbortError';
+      this.activeRuns.get(evaluationId)?.abort(reason);
+      state.credentialVault?.delete(evaluationId);
+      this.events.emit(evaluationId, committed);
+      return committed;
+    }
     if (isTerminal(item.status)) return item;
     const reason = new Error('用户停止了本次评测');
     reason.name = 'AbortError';
@@ -58,6 +419,9 @@ export class EvaluationPipeline {
   async retry(evaluationId, input) {
     const item = this.store.get(evaluationId);
     if (!item) return null;
+    if (item.schemaVersion === 2) {
+      throw Object.assign(new Error('V2 retry service is not enabled'), { statusCode: 409 });
+    }
     if (!isTerminal(item.status)) throw Object.assign(new Error('主评测仍在执行，请结束后再单独重试步骤'), { statusCode: 409 });
     const step = resolveRetryStep(item, input);
     const previous = retryTargetSummary(item, step);
@@ -74,10 +438,58 @@ export class EvaluationPipeline {
   }
 
   async recoverInterrupted() {
-    for (const item of this.store.list().filter((value) => ['queued', 'running', 'retrying'].includes(value.status))) {
-      await this.update(item, { status: 'interrupted', stage: '服务重启，评测已中断', stoppedAt: now(), error: '执行进程在评测期间重启；已保留重启前完成的阶段产物。', activeWork: null }, {
-        level: 'error', source: 'SYSTEM', phase: 'interrupted', text: '检测到未完成的遗留评测', detail: '执行进程已重启，旧任务不再实际运行', mode: item.mode
-      });
+    const state = privateState(this);
+    for (const item of this.store.list()) {
+      if (
+        item.schemaVersion === 2 &&
+        state.blackBoxEnabled &&
+        ['queued', 'running'].includes(item.execution?.status)
+      ) {
+        const status = item.connection.authorizationRequired
+          ? 'credentials-required'
+          : 'interrupted';
+        const occurredAt = state.now();
+        const committed = await this.store.mutate(
+          item.id,
+          item.revision,
+          (record) => ({
+            ...record,
+            execution: {
+              status,
+              stage: 'recovery',
+              progress: record.execution.progress,
+              interruptedAt: occurredAt
+            },
+            runtimeState: {
+              ...record.runtimeState,
+              runIndex: recoverDispatchedWork(
+                record.runtimeState.runIndex,
+                record.submission.agentExamples.value
+              )
+            },
+            auditEvents: appendAuditEvent(record.auditEvents, {
+              id: state.createId('audit'),
+              type: status === 'credentials-required'
+                ? 'credentials-required'
+                : 'execution-interrupted',
+              occurredAt,
+              summary: status === 'credentials-required'
+                ? 'Fresh Agent authorization is required after restart'
+                : 'V2 execution interrupted by process restart'
+            })
+          })
+        );
+        this.events.emit(item.id, committed);
+        continue;
+      }
+      if (
+        item.schemaVersion !== 2 &&
+        ['queued', 'running', 'retrying'].includes(item.status)
+      ) {
+        await this.update(item, { status: 'interrupted', stage: '服务重启，评测已中断', stoppedAt: now(), error: '执行进程在评测期间重启；已保留重启前完成的阶段产物。', activeWork: null }, {
+          level: 'error', source: 'SYSTEM', phase: 'interrupted', text: '检测到未完成的遗留评测', detail: '执行进程已重启，旧任务不再实际运行', mode: item.mode
+        });
+      }
     }
   }
 
@@ -354,6 +766,285 @@ export class EvaluationPipeline {
     if (!item || ['cancelled', 'interrupted'].includes(item.status)) return;
     await this.update(item, { status: 'failed', stage: '评测中断', error: error.message, activeWork: null }, { level: 'error', source: 'SYSTEM', phase: 'failed', text: '评测中断', detail: error.message, mode: item.mode });
   }
+}
+
+function privateState(pipeline) {
+  const state = PIPELINE_PRIVATE.get(pipeline);
+  if (!state) throw new TypeError('invalid evaluation pipeline');
+  return state;
+}
+
+function v2DisabledError() {
+  return httpError(409, 'A2A black-box V2 is disabled');
+}
+
+function httpError(statusCode, message) {
+  return Object.assign(new Error(message), { statusCode });
+}
+
+function transientIneligibleError(reason, completedAt) {
+  const error = httpError(422, 'V2 Agent Card is not eligible');
+  error.responseBody = {
+    schemaVersion: 2,
+    qualification: {
+      status: 'ineligible',
+      reason,
+      attemptRunIds: [],
+      selectedInterface: null,
+      completedAt
+    },
+    objectiveCapability: {
+      status: 'not-applicable',
+      score: null
+    },
+    resultV2: null
+  };
+  return error;
+}
+
+function assertClosedObject(value, allowed, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw httpError(400, `${label} must be an object`);
+  }
+  const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+  if (unknown.includes('cases')) {
+    throw httpError(400, 'V2 requires agentExamples; cases is not supported');
+  }
+  if (unknown.length > 0) {
+    throw httpError(400, `${label} contains unsupported fields`);
+  }
+}
+
+function assertAgentAuthorization(value) {
+  try {
+    validateAgentAuthorization(value);
+  } catch {
+    throw httpError(400, 'Agent authorization is invalid');
+  }
+}
+
+function normalizeIdempotencyKey(value) {
+  if (
+    typeof value !== 'string' ||
+    value !== value.trim() ||
+    Buffer.byteLength(value, 'utf8') < 16 ||
+    Buffer.byteLength(value, 'utf8') > 128 ||
+    !/^[\x20-\x7e]+$/u.test(value)
+  ) {
+    throw httpError(400, 'Idempotency-Key is invalid');
+  }
+  return value;
+}
+
+function resumeRequestMac(key, body) {
+  if (!Buffer.isBuffer(key) || key.length !== 32) {
+    throw httpError(500, 'V2 resume service is unavailable');
+  }
+  return createHmac('sha256', key)
+    .update(canonicalJson(body))
+    .digest('hex');
+}
+
+function findResumeReceipt(record, keyHash, requestMac) {
+  const receipt = record.resumeReceipts.find(
+    (item) => item.keyHash === keyHash
+  );
+  if (!receipt) return null;
+  if (receipt.requestMac !== requestMac) {
+    throw httpError(409, 'Idempotency request does not match');
+  }
+  return receipt;
+}
+
+function receiptResult(receipt) {
+  return {
+    statusCode: receipt.statusCode,
+    response: structuredClone(receipt.response)
+  };
+}
+
+function assertResumable(record) {
+  assertNotArchived(record);
+  if (
+    !['interrupted', 'credentials-required'].includes(
+      record.execution?.status
+    )
+  ) {
+    throw httpError(409, 'V2 evaluation is not resumable');
+  }
+}
+
+function assertNotArchived(record) {
+  if (record.archivedAt !== undefined) {
+    throw httpError(409, 'Archived V2 evaluations cannot be resumed');
+  }
+}
+
+function assertV2ParticipantOwner(record, participantAccessToken) {
+  if (!verifyParticipantAccess(
+    participantAccessToken,
+    record.participantAccess?.tokenHash
+  )) {
+    throw httpError(401, 'Participant authorization failed');
+  }
+}
+
+function isArchivableV2Status(status) {
+  return ['completed', 'failed', 'cancelled', 'interrupted'].includes(status);
+}
+
+function appendAuditEvent(events, event) {
+  return events.some((item) => item.id === event.id)
+    ? events
+    : [...events, event];
+}
+
+function recoverDispatchedWork(runIndex, examples) {
+  return runIndex.map((cell) => {
+    let foundDispatched = false;
+    const attempts = cell.attempts.map((attempt) => {
+      if (!attempt.turns.some((turn) => turn.status === 'dispatched')) {
+        return attempt;
+      }
+      foundDispatched = true;
+      const turns = attempt.turns.map((turn) => {
+        const criteria = examples[cell.exampleIndex]
+          .turns[turn.turnIndex].acceptanceCriteria;
+        return turn.status === 'dispatched'
+          ? {
+              ...turn,
+              status: 'unavailable',
+              outcome: {
+                status: 'unknown',
+                lifecycle: 'dispatched-before-restart'
+              },
+              acceptance: recoveryAcceptance(
+                criteria,
+                cell.identity.testId,
+                turn.turnIndex
+              ),
+              attribution: 'pending',
+              protocolObservation: null,
+              evidenceIds: []
+            }
+          : turn.status === 'planned'
+            ? {
+                ...turn,
+                status: 'skipped',
+                acceptance: recoveryAcceptance(
+                  criteria,
+                  cell.identity.testId,
+                  turn.turnIndex
+                )
+              }
+            : turn;
+      });
+      const checks = turns.flatMap(
+        (turn) => turn.acceptance?.checks || []
+      );
+      const passedRequiredExecutable = turns.reduce(
+        (sum, turn) =>
+          sum + (turn.acceptance?.passedRequiredExecutable || 0),
+        0
+      );
+      return {
+        ...attempt,
+        attribution: 'pending',
+        terminalSuccess: false,
+        acceptance: {
+          requiredExecutable: cell.requiredExecutable,
+          passedRequiredExecutable,
+          semanticSuccess: cell.requiredExecutable === 0
+            ? null
+            : passedRequiredExecutable === cell.requiredExecutable,
+          checks
+        },
+        timing: {
+          durationMs: null,
+          firstEventMs: null,
+          timedOut: false
+        },
+        evidenceIds: stableUnique(
+          turns.flatMap((turn) => turn.evidenceIds || [])
+        ),
+        turns
+      };
+    });
+    return foundDispatched
+      ? {
+          ...cell,
+          status: 'attribution-pending',
+          selectedAttemptIndex: null,
+          attempts
+        }
+      : cell;
+  });
+}
+
+function recoveryAcceptance(criteria, testId, turnIndex) {
+  const checks = criteria.map((criterion, index) => ({
+    id: `check_${createHash('sha256').update(canonicalJson({
+      testId,
+      turnIndex,
+      index,
+      submittedCriterionId: criterion.id
+    })).digest('hex').slice(0, 32)}`,
+    type: criterion.type,
+    required: criterion.required !== false,
+    status: criterion.type === 'model' ? 'not-executable' : 'failed'
+  }));
+  const requiredExecutable = checks.filter(
+    (check) => check.required && check.status !== 'not-executable'
+  ).length;
+  return {
+    checks,
+    requiredExecutable,
+    passedRequiredExecutable: 0,
+    semanticSuccess: requiredExecutable === 0 ? null : false
+  };
+}
+
+function cancelDispatchedWork(runIndex) {
+  return runIndex.map((cell) => {
+    let cancelled = false;
+    const attempts = cell.attempts.map((attempt) => {
+      if (!attempt.turns.some((turn) => turn.status === 'dispatched')) {
+        return attempt;
+      }
+      cancelled = true;
+      return {
+        ...attempt,
+        attribution: 'cancelled',
+        terminalSuccess: false,
+        turns: attempt.turns.map((turn) =>
+          ['planned', 'dispatched'].includes(turn.status)
+            ? {
+                ...turn,
+                status: 'cancelled',
+                outcome: { status: 'cancelled', lifecycle: 'cancelled' },
+                attribution: 'cancelled'
+              }
+            : turn
+        )
+      };
+    });
+    return cancelled
+      ? {
+          ...cell,
+          status: 'cancelled',
+          selectedAttemptIndex: null,
+          attempts
+        }
+      : { ...cell, attempts };
+  });
+}
+
+function stableUnique(values) {
+  return [...new Set(values)];
+}
+
+function sha256(value) {
+  return createHash('sha256').update(String(value)).digest('hex');
 }
 
 function professionalSnapshot(reviews) {

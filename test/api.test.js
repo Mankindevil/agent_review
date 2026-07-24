@@ -1,33 +1,207 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import {
+  createEvidenceManifestItem,
+  createEvidenceRecord
+} from '../src/evidence.js';
 
 process.env.NODE_ENV = 'test';
 process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-test-${process.pid}.json`);
 process.env.AGENT_DIAGNOSTICS_ACCESS_KEY = 'test-diagnostics-key';
 process.env.AGENT_DIAGNOSTICS_RATE_LIMIT = '100';
 process.env.ALLOW_PRIVATE_AGENT_URLS = 'true';
-const { server } = await import('../server.js');
+const API_UNSECURED_JWT = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ.';
+const apiEvidenceRecord = createEvidenceRecord({
+  evidenceId: 'ev_api',
+  runId: 'run_api',
+  grade: 'A',
+  kind: 'platform-timing',
+  testId: 'test_api',
+  turnIndex: 0,
+  repeatIndex: 0,
+  capturedAt: '2026-07-24T09:00:30.000Z',
+  payload: { durationMs: 30 }
+});
+const apiEvidenceManifestItem = createEvidenceManifestItem(apiEvidenceRecord, {
+  summary: 'Completed',
+  visibility: 'public'
+});
+const v2Fixture = {
+  schemaVersion: 2,
+  id: 'eval_v2_projection',
+  createdAt: '2026-07-24T09:00:00.000Z',
+  updatedAt: '2026-07-24T09:01:00.000Z',
+  revision: 0,
+  execution: {
+    status: 'completed',
+    stage: `password=api-flat-password; apiKey=api-flat-key; session=api-flat-session; credentials=api-flat-credentials; jwt=${API_UNSECURED_JWT}`,
+    progress: 100,
+    authorization: 'api-auth-secret'
+  },
+  governance: { phase: 'waiting_model', anonymousMapping: { A: 'api-mapping-secret' } },
+  qualification: { status: 'passed', attemptRunIds: ['run_api'], hiddenInput: 'api-hidden-secret' },
+  evidenceManifest: {
+    version: '1.0',
+    items: [apiEvidenceManifestItem]
+  },
+  objectiveCapability: { status: 'pending', score: null },
+  absoluteReview: { status: 'pending-model-review' },
+  replicaArena: { status: 'sealed', seal: 'api-seal-secret' },
+  resultV2: { status: 'pending', score: null },
+  agentCard: { description: 'api-card-secret' },
+  builds: [{
+    runtimeId: 'legacy-runtime',
+    skill: { name: 'leak', description: 'api-skill-secret', instructions: [], tools: [] }
+  }],
+  auditEvents: [{ payload: 'api-audit-secret' }],
+  rawEvidence: { value: 'api-raw-top-secret' },
+  logs: [{ message: 'api-sensitive-log-secret' }]
+};
+await writeFile(process.env.DATA_FILE, JSON.stringify({ schemaVersion: '1.0', items: [v2Fixture] }));
+const serverModule = await import('../server.js');
+const { server, evaluationStore, serializeEvaluationForResponse } = serverModule;
 
 let origin;
 test.before(async () => {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   origin = `http://127.0.0.1:${server.address().port}`;
 });
-test.after(async () => new Promise((resolve) => server.close(resolve)));
+test.after(async () => {
+  await new Promise((resolve) => server.close(resolve));
+  await rm(process.env.DATA_FILE, { force: true });
+  await rm(`${process.env.DATA_FILE}.tmp`, { force: true });
+});
 
 test('health endpoint responds', async () => {
   const response = await fetch(`${origin}/api/health`);
   assert.equal(response.status, 200);
   const health = await response.json();
   assert.equal(health.ok, true);
+  assert.equal(health.a2aBlackBoxV1Enabled, false);
   assert.equal(Number.isInteger(health.evaluationSeed), true);
   assert.equal(health.modelTemperature, 0);
   assert.equal(health.dataSource.provider, 'pandaai');
   assert.equal(typeof health.dataSource.configured, 'boolean');
   assert.equal(typeof health.dataSource.autoVerify, 'boolean');
+});
+
+test('keeps disabled V2 resume behind the feature flag', async () => {
+  const response = await fetch(
+    `${origin}/api/evaluations/${v2Fixture.id}/resume`,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${'T'.repeat(43)}`,
+        'content-type': 'application/json',
+        'idempotency-key': 'resume-api-key-00001'
+      },
+      body: JSON.stringify({})
+    }
+  );
+  const result = await response.json();
+  assert.equal(response.status, 409);
+  assert.match(result.error, /V2|black-box|disabled/i);
+});
+
+test('preserves the legacy evaluation request body limit while V2 is disabled', async () => {
+  const response = await fetch(`${origin}/api/evaluations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ padding: 'x'.repeat(1_000_000) })
+  });
+  assert.equal(response.status, 413);
+});
+
+test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes', async () => {
+  const forbidden = [
+    'api-auth-secret', 'api-mapping-secret', 'api-hidden-secret',
+    'api-seal-secret', 'api-card-secret', 'api-skill-secret', 'api-audit-secret',
+    'api-raw-top-secret', 'api-sensitive-log-secret', 'api-flat-password',
+    'api-flat-key', 'api-flat-session', 'api-flat-credentials', API_UNSECURED_JWT
+  ];
+  await assert.rejects(
+    () => evaluationStore.mutate(v2Fixture.id, 0, (current) => ({
+      ...current,
+      schemaVersion: 1
+    })),
+    /V2|schemaVersion|identity/i
+  );
+  const listResponse = await fetch(`${origin}/api/evaluations`);
+  const listed = (await listResponse.json()).find((item) => item.id === v2Fixture.id);
+  assert.equal(listResponse.status, 200);
+  assert.equal(listed.schemaVersion, 2);
+  assert.equal(listed.evidenceManifest.items[0].summary, 'Completed');
+  assert.equal(listed.evidenceManifest.items[0].recordHash, apiEvidenceRecord.recordHash);
+
+  const detailResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
+  const detailText = await detailResponse.text();
+  assert.equal(detailResponse.status, 200);
+  for (const secret of forbidden) assert.equal(detailText.includes(secret), false, `detail: ${secret}`);
+
+  const createProjection = serializeEvaluationForResponse(v2Fixture);
+  const createProjectionText = JSON.stringify(createProjection);
+  assert.equal(createProjection.schemaVersion, 2);
+  for (const secret of forbidden) assert.equal(createProjectionText.includes(secret), false, `create: ${secret}`);
+
+  const participantAccessToken = 'T'.repeat(43);
+  const createResponse = serializeEvaluationForResponse({
+    evaluation: v2Fixture,
+    participantAccessToken
+  });
+  const createResponseText = JSON.stringify(createResponse);
+  assert.equal(createResponse.participantAccessToken, participantAccessToken);
+  assert.equal(createResponse.schemaVersion, 2);
+  assert.equal(Object.hasOwn(createResponse, 'evaluation'), false);
+  for (const secret of forbidden) assert.equal(createResponseText.includes(secret), false, `create wrapper: ${secret}`);
+
+  for (const action of ['cancel', 'retry']) {
+    const response = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/${action}`, {
+      method: 'POST',
+      headers: action === 'retry' ? { 'content-type': 'application/json' } : undefined,
+      body: action === 'retry' ? JSON.stringify({ type: 'review', key: 'gpt' }) : undefined
+    });
+    const text = await response.text();
+    assert.equal(response.status, 409, action);
+    for (const secret of forbidden) assert.equal(text.includes(secret), false, `${action}: ${secret}`);
+  }
+
+  const streamResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/events`);
+  assert.equal(streamResponse.status, 200);
+  const reader = streamResponse.body.getReader();
+  const firstEvent = new TextDecoder().decode((await reader.read()).value);
+  assert.match(firstEvent, /^data: /);
+  for (const secret of forbidden) assert.equal(firstEvent.includes(secret), false, `SSE: ${secret}`);
+
+  const skillResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/builds/legacy-runtime/skill`);
+  const skillText = await skillResponse.text();
+  assert.equal(skillResponse.status, 404);
+  assert.equal(skillText.includes('api-skill-secret'), false);
+  assert.equal(skillText.includes('api-card-secret'), false);
+
+  const deleteResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`, { method: 'DELETE' });
+  const deleted = await deleteResponse.json();
+  assert.equal(deleteResponse.status, 200);
+  assert.equal(deleted.id, v2Fixture.id);
+  assert.equal(deleted.archived, true);
+  assert.equal(deleted.deleted, false);
+
+  const nextEvent = await Promise.race([
+    reader.read(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('missing subsequent SSE event')), 500))
+  ]);
+  const nextEventText = new TextDecoder().decode(nextEvent.value);
+  await reader.cancel();
+  assert.match(nextEventText, /^data: /);
+  for (const secret of forbidden) assert.equal(nextEventText.includes(secret), false, `subsequent SSE: ${secret}`);
+
+  const archivedResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
+  const archived = await archivedResponse.json();
+  assert.equal(archivedResponse.status, 200);
+  assert.equal(typeof archived.archivedAt, 'string');
+  assert.equal(archived.revision, 1);
 });
 
 test('reports PandaAI data source status without credentials', async () => {
@@ -111,8 +285,98 @@ test('serves localized loading effects with reduced-motion support', async () =>
   assert.match(app, /review-card-queued/);
   const indexResponse = await fetch(`${origin}/`);
   const index = await indexResponse.text();
-  assert.match(index, /app\.js\?v=20260721-finance2/);
-  assert.match(index, /styles\.css\?v=20260721-finance2/);
+  assert.match(index, /app\.js\?v=20260725-a2a1/);
+  assert.match(index, /styles\.css\?v=20260725-a2a1/);
+});
+
+test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
+  const [pageResponse, scriptResponse, styleResponse] = await Promise.all([
+    fetch(`${origin}/`),
+    fetch(`${origin}/app.js`),
+    fetch(`${origin}/styles.css`)
+  ]);
+  const [html, script, css] = await Promise.all([
+    pageResponse.text(),
+    scriptResponse.text(),
+    styleResponse.text()
+  ]);
+  assert.equal(pageResponse.status, 200);
+  assert.equal(scriptResponse.status, 200);
+  assert.equal(styleResponse.status, 200);
+
+  assert.match(html, /id="start-evaluation"[^>]*disabled/);
+  assert.match(html, /id="legacy-intake"/);
+  assert.match(html, /id="v2-intake"[^>]*class="[^"]*hidden/);
+  assert.match(html, />A2A Agent Card</);
+  assert.match(html, />Agent 使用示例</);
+  assert.match(html, /id="v2-example-list"/);
+  assert.match(html, /id="add-v2-example"/);
+  assert.match(html, /id="agent-authorization"[^>]*type="password"/);
+  assert.match(html, /id="participant-token-receipt"[^>]*class="[^"]*hidden/);
+  assert.match(html, /id="participant-token-output"/);
+  assert.doesNotMatch(html, /Skill 使用示例|skillId/);
+
+  for (const level of ['example', 'turn', 'part', 'criterion']) {
+    assert.match(script, new RegExp(`data-a2a-${level}`), level);
+  }
+  for (const partType of ['text', 'data', 'raw', 'url']) {
+    assert.match(script, new RegExp(`value="${partType}"`), partType);
+  }
+  for (const criterionType of ['contains', 'exact', 'json-schema', 'numeric', 'model']) {
+    assert.match(script, new RegExp(`value="${criterionType}"`), criterionType);
+  }
+  assert.match(script, /expectedDeliverable/);
+  assert.match(script, /acceptanceCriteria/);
+  assert.match(script, /constraints/);
+  assert.match(script, /evaluationModeFromHealth\(payload\)/);
+  assert.match(script, /function setBlackBoxMode/);
+  assert.match(script, /function setBlackBoxModeUnavailable/);
+  assert.match(script, /nextAvailableEditorId\(/);
+  assert.match(script, /data-record-kind="v2"/);
+  assert.match(script, /recordActionCopy\(isV2\)/);
+  assert.match(script, /recordActionFailure\(isV2, payload\.error\)/);
+  assert.match(script, /recordActionFailure\(isV2, error\.message\)/);
+
+  assert.match(css, /\.a2a-custody-rail/);
+  assert.match(css, /\.agent-auth-panel/);
+  assert.match(css, /\.participant-token-receipt/);
+  for (const selector of [
+    'a2a-example-list',
+    'a2a-custody-rail',
+    'a2a-turn-list',
+    'a2a-turn'
+  ]) {
+    assert.match(
+      css,
+      new RegExp(`\\.${selector}\\s*\\{[^}]*min-width:0;`),
+      `${selector} must shrink inside the intake card`
+    );
+  }
+  assert.match(css, /\.a2a-part\s*\{[^}]*grid-template-columns:[^;}]*minmax\(0,/);
+  assert.match(css, /\.a2a-criterion\s*\{[^}]*grid-template-columns:[^;}]*minmax\(0,/);
+  assert.match(css, /\.a2a-check input\s*\{[^}]*min-width:16px;[^}]*height:16px;/);
+  assert.match(css, /@media \(max-width: 700px\)/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+});
+
+test('keeps V2 browser secrets memory-only and renders nested projections safely', async () => {
+  const response = await fetch(`${origin}/app.js`);
+  const script = await response.text();
+  assert.equal(response.status, 200);
+
+  assert.match(script, /participantTokens:\s*new Map\(\)/);
+  assert.match(script, /function statusOf\(item\)/);
+  assert.match(script, /function stageOf\(item\)/);
+  assert.match(script, /function progressOf\(item\)/);
+  assert.match(script, /function renderV2Result\(item\)/);
+  assert.match(script, /function renderV2HistoryItem\(item\)/);
+  assert.match(script, /schemaVersion:\s*2,\s*agentCard,\s*agentExamples/);
+  assert.match(script, /participantAccessToken/);
+  assert.match(script, /participant-token-output'\)\.textContent/);
+  assert.match(script, /agent-authorization'\)\.value = ''/);
+  assert.match(script, /authorization:\s*`Bearer \$\{participantToken\}`/);
+  assert.match(script, /'idempotency-key':\s*crypto\.randomUUID\(\)/);
+  assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB|document\.cookie|console\./);
 });
 
 test('lets the final verdict use the available desktop width', async () => {
@@ -208,6 +472,20 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
   assert.match(readme, /agent-check\.html/);
   assert.match(readme, /Agent Card JSON 技术预检/);
   assert.match(readme, /20 分钟/);
+});
+
+test('documents the opt-in V2 create, one-time participant token, and resume contract', async () => {
+  const readme = await readFile(path.join(process.cwd(), 'README.md'), 'utf8');
+  assert.match(readme, /A2A_BLACK_BOX_V1_ENABLED=true/u);
+  assert.match(readme, /POST \/api\/evaluations\b/u);
+  assert.match(readme, /participantAccessToken/u);
+  assert.match(readme, /POST \/api\/evaluations\/:id\/resume/u);
+  assert.match(readme, /Idempotency-Key/u);
+  assert.match(readme, /only once|one-time/iu);
+  assert.match(readme, /non-idempotent/iu);
+  assert.match(readme, /lost response|response is lost/iu);
+  assert.match(readme, /public Agent[\s\S]*\{\}/iu);
+  assert.match(readme, /fresh Agent authorization/iu);
 });
 
 test('protects diagnostics before parsing its request body', async () => {

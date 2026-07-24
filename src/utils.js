@@ -73,6 +73,10 @@ function findJsonEnd(text, start) {
 }
 
 export async function readJsonBody(request, limit = 1_000_000) {
+  return (await readJsonBodyWithSize(request, limit)).value;
+}
+
+export async function readJsonBodyWithSize(request, limit = 1_000_000) {
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
@@ -81,7 +85,10 @@ export async function readJsonBody(request, limit = 1_000_000) {
     chunks.push(chunk);
   }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+    return {
+      value: JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'),
+      size
+    };
   } catch {
     throw Object.assign(new Error('请求体不是合法 JSON'), { statusCode: 400 });
   }

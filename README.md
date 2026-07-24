@@ -220,6 +220,44 @@ Content-Type: application/json
 
 源码压缩包、Git 仓库、Docker 镜像不是 A2A 规定的发现形式。后续可以把它们作为“托管验收”入口：平台先在隔离环境部署，再要求部署结果暴露 Agent Card 与 A2A endpoint。认证信息同样不放入 Agent Card；私有 Agent 应通过独立的凭据引用或企业密钥管理接入。
 
+### Phase 1 black-box V2 API
+
+The evidence-backed V2 path is opt-in. Set `A2A_BLACK_BOX_V1_ENABLED=true`,
+provide a canonical base64-encoded 32-byte `EVIDENCE_ENCRYPTION_KEY`, and
+optionally set `EVIDENCE_ROOT`. With the flag off, the legacy evaluation API
+and its request limits remain unchanged.
+
+Create a V2 evaluation with `POST /api/evaluations` using
+`schemaVersion: 2`, an `agentCard`, and `agentExamples`. The `202` response is
+the public evaluation projection plus `participantAccessToken`. That token is
+returned only once: the server persists only its SHA-256 hash, and the token
+does not appear in later GET, list, SSE, cancel, or resume responses. Store the
+one-time token securely on the participant side.
+
+V2 create is non-idempotent. If its HTTP response is lost, create a new
+evaluation; the replacement has a new evaluation ID and a new one-time
+participant token. There is no endpoint that can recover a lost token.
+
+After a restart marks an evaluation `interrupted` or `credentials-required`,
+resume only the missing planned work with:
+
+```http
+POST /api/evaluations/:id/resume
+Authorization: Bearer <participantAccessToken>
+Idempotency-Key: <unique 16-128 byte printable value>
+Content-Type: application/json
+
+{ "agentAuthorization": "Bearer <fresh Agent credential>" }
+```
+
+The resume body may contain only fresh Agent authorization. Reusing the same
+idempotency key with the same body returns the original `202` receipt without
+rerunning completed work; changing the body for that key returns `409`.
+Participant and Agent credentials are never persisted, projected, or logged.
+For a public Agent that did not require authorization at create time, the
+resume JSON body may be `{}`. An Agent that originally required authorization
+must provide fresh Agent authorization on every accepted resume.
+
 ### 示例资产
 
 - `examples/submissions/`：三份可直接上传的 Agent Card；
@@ -338,6 +376,9 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 | `NODE_ENV` | `development` | 运行环境标识 |
 | `PORT` | `4173` | HTTP 端口 |
 | `DATA_FILE` | `data/evaluations.json` | 评测持久化文件 |
+| `A2A_BLACK_BOX_V1_ENABLED` | `false` | 精确设为 `true` 时启用 Phase 1 V2 黑盒证据管线 |
+| `EVIDENCE_ENCRYPTION_KEY` | 空 | V2 必需的 canonical base64 32-byte AES-256 key；只存于密钥管理或本机 `.env` |
+| `EVIDENCE_ROOT` | `data/evidence` | V2 加密证据 envelope 的根目录 |
 | `ALLOW_PRIVATE_AGENT_URLS` | `false` | 是否允许 localhost/私网 Agent URL，仅建议本地开发开启 |
 | `AGENT_DIAGNOSTICS_ACCESS_KEY` | 空 | 保护一次性 Agent Card JSON 技术预检 API；为空时接口关闭 |
 | `AGENT_DIAGNOSTICS_RATE_LIMIT` | `6` | 每个诊断访问密钥每分钟的调用上限 |

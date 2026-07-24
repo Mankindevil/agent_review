@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-roast-arena.example/schemas/agent-use-examples-v1.schema.json",
+  "title": "Agent use examples submission v1",
+  "type": "array",
+  "minItems": 1,
+  "maxItems": 20,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["id", "name", "turns"],
+    "properties": {
+      "id": { "type": "string", "minLength": 1 },
+      "name": { "type": "string", "minLength": 1 },
+      "turns": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 20,
+        "items": { "$ref": "#/$defs/turn" }
+      },
+      "constraints": {
+        "type": "array",
+        "items": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "turn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input"],
+      "properties": {
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["parts"],
+          "properties": {
+            "parts": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 50,
+              "items": { "$ref": "#/$defs/part" }
+            }
+          }
+        },
+        "expectedDeliverable": { "type": "string", "minLength": 1 },
+        "acceptanceCriteria": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/criterion" }
+        }
+      }
+    },
+    "part": {
+      "type": "object",
+      "properties": {
+        "type": { "enum": ["text", "data", "raw", "url"] },
+        "text": { "type": "string", "minLength": 1 },
+        "data": {},
+        "raw": {
+          "type": "string",
+          "minLength": 4,
+          "contentEncoding": "base64",
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://(?![^/?#]*@)",
+          "$comment": "This pattern enforces HTTP(S) and excludes URL userinfo. Implementations MUST also call runtime validateSafeUrl for private/local hosts and other SSRF protections."
+        },
+        "mediaType": { "type": "string", "minLength": 1 },
+        "filename": { "type": "string", "minLength": 1 }
+      },
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": ["type", "text"],
+          "properties": {
+            "type": { "const": "text" },
+            "text": { "type": "string", "minLength": 1 },
+            "mediaType": { "type": "string", "minLength": 1 },
+            "filename": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["type", "data"],
+          "properties": {
+            "type": { "const": "data" },
+            "data": {},
+            "mediaType": { "type": "string", "minLength": 1 },
+            "filename": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["type", "raw", "mediaType"],
+          "properties": {
+            "type": { "const": "raw" },
+            "raw": {
+              "type": "string",
+              "minLength": 4,
+              "contentEncoding": "base64",
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+            },
+            "mediaType": { "type": "string", "minLength": 1 },
+            "filename": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["type", "url"],
+          "properties": {
+            "type": { "const": "url" },
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https?://(?![^/?#]*@)",
+              "$comment": "This pattern enforces HTTP(S) and excludes URL userinfo. Implementations MUST also call runtime validateSafeUrl for private/local hosts and other SSRF protections."
+            },
+            "mediaType": { "type": "string", "minLength": 1 },
+            "filename": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "criterion": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "type": {
+          "enum": ["model", "contains", "exact", "json-schema", "numeric"]
+        },
+        "description": { "type": "string", "minLength": 1 },
+        "required": { "type": "boolean", "default": true },
+        "caseSensitive": { "type": "boolean" },
+        "expected": {},
+        "schema": { "type": "object" },
+        "path": { "type": "string", "minLength": 1 },
+        "tolerance": { "type": "number", "minimum": 0 }
+      },
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": ["id", "type", "description", "required"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "type": { "const": "model" },
+            "description": { "type": "string", "minLength": 1 },
+            "required": { "type": "boolean" }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["id", "type", "expected", "description", "required"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "type": { "const": "contains" },
+            "expected": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "caseSensitive": { "type": "boolean" },
+            "description": { "type": "string", "minLength": 1 },
+            "required": { "type": "boolean" }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["id", "type", "expected", "description", "required"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "type": { "const": "exact" },
+            "expected": { "type": "string", "minLength": 1 },
+            "description": { "type": "string", "minLength": 1 },
+            "required": { "type": "boolean" }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["id", "type", "schema", "description", "required"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "type": { "const": "json-schema" },
+            "schema": { "type": "object" },
+            "description": { "type": "string", "minLength": 1 },
+            "required": { "type": "boolean" }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["id", "type", "path", "expected", "description", "required"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "type": { "const": "numeric" },
+            "path": { "type": "string", "minLength": 1 },
+            "expected": { "type": "number" },
+            "tolerance": { "type": "number", "minimum": 0 },
+            "description": { "type": "string", "minLength": 1 },
+            "required": { "type": "boolean" }
+          }
+        }
+      ]
+    }
+  }
+}

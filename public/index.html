@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="金融 A2A Agent 公开评测：审数据、查回测、压基线，判断一套投研智能体到底夯不夯。">
   <title>锐评局 · 金融 Agent 研究终审台</title>
-  <link rel="stylesheet" href="/styles.css?v=20260721-finance2">
+  <link rel="stylesheet" href="/styles.css?v=20260725-a2a1">
 </head>
 <body>
   <div class="noise" aria-hidden="true"></div>
@@ -41,7 +41,8 @@
 
       <div class="intake-card" id="submission-panel">
         <div class="card-kicker"><span>INTAKE / 送检入口</span><strong>01</strong></div>
-        <div class="evaluation-controls">
+        <div id="legacy-intake" class="legacy-only">
+          <div class="evaluation-controls">
           <div class="mode-switch" role="group" aria-label="评测模式">
             <button class="selected" data-mode="demo"><span>演示评测</span><small>零配置，跑完整流程</small></button>
             <button data-mode="live"><span>真实对测</span><small>调用 Agent 与已配置模型</small></button>
@@ -51,9 +52,16 @@
             <input id="evaluation-seed" type="number" min="0" max="2147483646" step="1" placeholder="读取中" inputmode="numeric">
             <small>尽力复现 · 可覆盖</small>
           </label>
+          </div>
+          <div class="runtime-health data-health" id="data-source-health" aria-live="polite"><span>DATA SOURCE</span><i>正在检查 PandaAI Quant…</i></div>
+          <div class="runtime-health" id="runtime-health" aria-live="polite"><span>RUNTIME PROBE</span><i>正在检查本机执行器…</i></div>
         </div>
-        <div class="runtime-health data-health" id="data-source-health" aria-live="polite"><span>DATA SOURCE</span><i>正在检查 PandaAI Quant…</i></div>
-        <div class="runtime-health" id="runtime-health" aria-live="polite"><span>RUNTIME PROBE</span><i>正在检查本机执行器…</i></div>
+
+        <div id="v2-card-heading" class="a2a-section-heading hidden">
+          <span>CUSTODY / SOURCE 01</span>
+          <b>A2A Agent Card</b>
+          <small>冻结本次评测使用的公开身份与协议入口。</small>
+        </div>
 
         <div class="source-switch" role="group" aria-label="Agent 提交方式">
           <button class="selected" data-source="direct">文件 / JSON</button>
@@ -81,21 +89,50 @@
           <div class="resolved-card hidden" id="resolved-card"></div>
         </div>
 
-        <div class="example-picks">
+        <div class="example-picks legacy-only">
           <span>本地真实样本</span>
           <button type="button" data-example="factor">因子显微镜</button>
           <button type="button" data-example="backtest">策略验钞机</button>
           <button type="button" data-example="portfolio">组合风控台</button>
         </div>
 
-        <div class="cases-head">
+        <div class="cases-head legacy-only">
           <div><b>同题对测用例</b><small>所有选手收到完全相同的 prompt</small></div>
           <button class="text-button" id="add-case" type="button">＋ 添加用例</button>
         </div>
-        <div id="case-list" class="case-list"></div>
+        <div id="case-list" class="case-list legacy-only"></div>
 
-        <div class="form-actions single"><button class="primary-button" id="start-evaluation" type="button"><span>送进研究终审台</span><i>↗</i></button></div>
+        <section id="v2-intake" class="a2a-intake hidden" aria-labelledby="v2-examples-heading">
+          <div class="a2a-section-heading">
+            <span>CUSTODY / CONTRACT 02</span>
+            <b id="v2-examples-heading">Agent 使用示例</b>
+            <small>按 Example → Turn → Part → Criterion 的执行顺序登记公开样本；每个 Example 固定采样三次。</small>
+          </div>
+          <div id="v2-example-list" class="a2a-example-list"></div>
+          <button class="text-button a2a-add-root" id="add-v2-example" type="button">＋ 添加 Example</button>
+
+          <label class="agent-auth-panel" for="agent-authorization">
+            <span>CONNECTION ONLY / 可选</span>
+            <b>Agent connection authorization</b>
+            <small>只发往 Agent 端点，不是 participant access token；请求进入内存后立即清空，不会写入浏览器存储。</small>
+            <input id="agent-authorization" type="password" autocomplete="off" spellcheck="false" placeholder="例如 Bearer …">
+          </label>
+        </section>
+
+        <div class="form-actions single"><button class="primary-button" id="start-evaluation" type="button" disabled><span>正在确认评测模式</span><i>↗</i></button></div>
         <p class="form-error" id="form-error" role="alert"></p>
+        <section id="participant-token-receipt" class="participant-token-receipt hidden" role="status" aria-live="polite">
+          <div>
+            <span>ONE-TIME RECEIPT / PARTICIPANT ACCESS</span>
+            <b>立即复制并安全保存</b>
+            <small>此 token 只用于恢复本次评测，不会发送给 Agent，也不会再次显示。</small>
+          </div>
+          <output id="participant-token-output" aria-label="Participant access token"></output>
+          <div class="receipt-actions">
+            <button id="copy-participant-token" type="button">复制 token</button>
+            <button id="dismiss-participant-token" type="button">我已保存</button>
+          </div>
+        </section>
       </div>
     </section>
 
@@ -119,6 +156,18 @@
         <div class="mode-pill" id="run-mode">DEMO</div>
         <button class="stop-run hidden" id="stop-evaluation" type="button"><i aria-hidden="true"></i><span>停止本次评测</span></button>
       </div>
+    </section>
+
+    <section id="v2-resume-panel" class="v2-resume-panel hidden" aria-labelledby="v2-resume-title">
+      <div>
+        <span>RECOVERY / PARTICIPANT ACCESS</span>
+        <b id="v2-resume-title">恢复已暂停的证据采集</b>
+        <small>Participant access token 用于授权恢复；Agent connection authorization 只连接 Agent。两者不会保存到浏览器存储。</small>
+      </div>
+      <label>Participant access token<input id="resume-participant-token" type="password" autocomplete="off" spellcheck="false"></label>
+      <label>Agent connection authorization（如原运行需要）<input id="resume-agent-authorization" type="password" autocomplete="off" spellcheck="false"></label>
+      <button id="resume-evaluation" type="button">恢复评测</button>
+      <p id="resume-error" role="alert"></p>
     </section>
 
     <section class="live-deck" id="live-deck">
@@ -162,6 +211,6 @@
     </div>
   </template>
 
-  <script type="module" src="/app.js?v=20260721-finance2"></script>
+  <script type="module" src="/app.js?v=20260725-a2a1"></script>
 </body>
 </html>
