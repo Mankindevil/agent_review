@@ -9,7 +9,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const CLAUDE_RUNTIME_SYSTEM_PROMPT = '你是 Agent 盲测平台中的隔离执行器。严格完成用户给出的单一任务并直接返回最终内容。当前会话没有任何工具，不得浏览文件、探索代码库、启动子代理，也不得输出或模拟 tool_call、Bash、Explore 等工具调用。';
+const CLAUDE_RUNTIME_SYSTEM_PROMPT = '你是 Agent 盲测平台中的隔离执行器。严格完成用户给出的单一任务，只输出最终内容。当前会话没有任何工具，不得浏览文件、探索代码库、启动子代理，也不得输出或模拟 tool_call、Bash、Explore 等工具调用。';
 
 export const RUNTIMES = [
   { id: 'claude-code', name: 'Claude Code', model: 'Claude Sonnet', badge: 'CC' },
@@ -187,6 +187,26 @@ function localRuntimeModel(runtime) {
   return runtime.model;
 }
 
+export function localCliArgs(runtimeId, prompt, { budget = '0.25' } = {}) {
+  if (runtimeId === 'claude-code') {
+    return [
+      '-p', prompt,
+      '--system-prompt', CLAUDE_RUNTIME_SYSTEM_PROMPT,
+      '--output-format', 'json',
+      '--tools', '',
+      '--permission-mode', 'plan',
+      '--safe-mode',
+      '--no-session-persistence',
+      '--max-turns', '1',
+      '--max-budget-usd', budget
+    ];
+  }
+  if (runtimeId === 'cursor') {
+    return ['-p', prompt, '--output-format', 'json'];
+  }
+  throw new Error(`Unsupported local Runtime: ${runtimeId}`);
+}
+
 async function callLocalCli(runtimeId, prompt, signal, sampling = {}) {
   const workspace = await mkdtemp(path.join(tmpdir(), `agent-roast-${runtimeId}-`));
   let arkProxy;
@@ -194,9 +214,7 @@ async function callLocalCli(runtimeId, prompt, signal, sampling = {}) {
   const timeout = Number(process.env.LOCAL_RUNTIME_TIMEOUT_MS || 180_000);
   const budget = process.env.CLAUDE_MAX_BUDGET_USD || '0.25';
   const command = runtimeId === 'claude-code' ? 'claude' : 'cursor-agent';
-  const args = runtimeId === 'claude-code'
-    ? ['-p', prompt, '--system-prompt', CLAUDE_RUNTIME_SYSTEM_PROMPT, '--output-format', 'json', '--tools', '', '--permission-mode', 'plan', '--safe-mode', '--no-session-persistence', '--max-turns', '1', '--max-budget-usd', budget]
-    : ['-p', prompt, '--output-format', 'json', '--mode', 'ask', '--sandbox', 'enabled', '--trust', '--workspace', workspace];
+  const args = localCliArgs(runtimeId, prompt, { budget });
   try {
     const commandEnv = { ...process.env, NO_COLOR: '1' };
     if (runtimeId === 'claude-code' && shouldUseArkClaude(commandEnv)) {

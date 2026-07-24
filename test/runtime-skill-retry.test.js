@@ -1,7 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildSkill, createSkillBundle, generateValidatedSkill, runSkill } from '../src/runtimes.js';
+import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, runSkill } from '../src/runtimes.js';
 import { runtimeBuildSkillPrompt } from '../src/prompts.js';
+
+test('uses supported read-only Claude Code arguments', () => {
+  const args = localCliArgs('claude-code', 'build a skill', { budget: '0.25' });
+
+  assert.deepEqual(args.slice(0, 3), ['-p', 'build a skill', '--system-prompt']);
+  assert.equal(typeof args[3], 'string');
+  assert.match(args[3], /只输出/);
+  assert.deepEqual(args.slice(4), [
+    '--output-format', 'json',
+    '--tools', '',
+    '--permission-mode', 'plan',
+    '--safe-mode',
+    '--no-session-persistence',
+    '--max-turns', '1',
+    '--max-budget-usd', '0.25'
+  ]);
+});
+
+test('uses documented Cursor Agent print arguments', () => {
+  assert.deepEqual(localCliArgs('cursor', 'build a skill'), [
+    '-p', 'build a skill',
+    '--output-format', 'json'
+  ]);
+});
 
 test('materializes a read-only portable folder from normalized runtime output', () => {
   const bundle = createSkillBundle({
