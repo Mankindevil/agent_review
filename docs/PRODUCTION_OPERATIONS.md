@@ -24,7 +24,14 @@ Run the following command on the administrator workstation, not on the productio
 ssh -N -L 4173:127.0.0.1:4173 root@14.103.143.171
 ```
 
-Keep that session open, then visit <http://127.0.0.1:4173/>. This connects directly to the Node service on the production loopback interface and does not pass through the public Nginx allowlist.
+Keep that session open. In a second PowerShell window, require an exact `200` from the tunneled full application:
+
+```powershell
+$tunnelStatus = curl.exe --silent --output NUL --write-out "%{http_code}" --max-redirs 0 --connect-timeout 5 --max-time 15 http://127.0.0.1:4173/
+if ($tunnelStatus -ne '200') { throw "SSH tunnel did not reach the full application" }
+```
+
+Then visit <http://127.0.0.1:4173/>. This connects directly to the Node service on the production loopback interface and does not pass through the public Nginx allowlist.
 
 ## Daily health and logs
 
@@ -39,6 +46,16 @@ require_200() {
   status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-redirs 0 --connect-timeout 5 --max-time 15 "$url")"
   test "$status" = '200'
 }
+require_308() {
+  local url="$1" status
+  status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-redirs 0 --connect-timeout 5 --max-time 15 "$url")"
+  test "$status" = '308'
+}
+require_401_post() {
+  local url="$1" status
+  status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-redirs 0 --connect-timeout 5 --max-time 15 --request POST --header 'Content-Type: application/json' --data '{}' "$url")"
+  test "$status" = '401'
+}
 require_404() {
   local url="$1" status
   status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-redirs 0 --connect-timeout 5 --max-time 15 "$url")"
@@ -48,6 +65,10 @@ sudo systemctl status agent-review --no-pager
 readlink -f /opt/agent-review/app
 health_ok
 require_200 https://14.103.143.171/agent-check
+require_200 https://14.103.143.171/agent-check.js
+require_200 https://14.103.143.171/agent-check.css
+require_308 https://14.103.143.171/agent-check.html
+require_401_post https://14.103.143.171/api/agent-diagnostics
 require_404 https://14.103.143.171/
 require_404 https://14.103.143.171/api/evaluations
 require_404 https://14.103.143.171/methodology.html
@@ -56,7 +77,7 @@ sudo systemctl status nginx --no-pager
 sudo journalctl -u nginx --since '24 hours ago' --no-pager
 ```
 
-The health response must contain JSON with `ok: true`; the diagnostics page must return exactly `200`, while the full evaluation UI and non-allowlisted APIs must return exactly `404`. These checks do not follow redirects. The existing failed `cloud-monitor-agent` and `console-setup` units are unrelated to this platform; record and investigate them separately unless evidence links them to the incident.
+The health response must contain JSON with `ok: true`; the diagnostics page and assets must return exactly `200`, the old HTML entry must return `308`, and an unauthenticated diagnostics POST must return `401`. The full evaluation UI and non-allowlisted APIs must return exactly `404`. These checks do not follow redirects. The existing failed `cloud-monitor-agent` and `console-setup` units are unrelated to this platform; record and investigate them separately unless evidence links them to the incident.
 
 ## Restart and reboot validation
 
@@ -134,14 +155,26 @@ test "$release_dir" = "$expected_release_dir"
 test -d "$release_dir"
 test -f "$release_dir/package.json"
 sudo -u agent-review -- sh -c 'cd "$1" && npm test && npm run check' sh "$release_dir"
+nginx_template="$release_dir/deploy/nginx-production.conf"
+test -f "$nginx_template"
+nginx_live=/etc/nginx/sites-available/agent-review
+nginx_stage="/etc/nginx/sites-available/agent-review.next.$$"
+nginx_backup="/etc/nginx/sites-available/agent-review.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+nginx_rendered="$(mktemp)"
+sed 's/__PUBLIC_IP__/14.103.143.171/g' "$nginx_template" > "$nginx_rendered"
+test -s "$nginx_rendered"
+sudo test -f "$nginx_live"
+sudo cp -p "$nginx_live" "$nginx_backup"
 previous_dir="$(readlink -f /opt/agent-review/app)"
 test -d "$previous_dir"
 stage_link="/opt/agent-review/app.next.$$"
 recovery_link="/opt/agent-review/app.recovery.$$"
 release_switched=0
+nginx_promoted=0
 release_cleanup() {
   status=$?
-  sudo rm -f -- "$stage_link" "$recovery_link" || true
+  rm -f -- "$nginx_rendered" || true
+  sudo rm -f -- "$stage_link" "$recovery_link" "$nginx_stage" || true
   if [ "$release_switched" -eq 1 ]; then
     sudo ln -s "$previous_dir" "$recovery_link" || true
     if [ "$(readlink -f "$recovery_link" 2>/dev/null || true)" = "$previous_dir" ]; then
@@ -150,17 +183,30 @@ release_cleanup() {
       wait_for_health || true
     fi
   fi
+  if [ "$nginx_promoted" -eq 1 ]; then
+    sudo cp -p "$nginx_backup" "$nginx_stage" || true
+    sudo mv -Tf "$nginx_stage" "$nginx_live" || true
+    sudo nginx -t && sudo systemctl reload nginx || true
+  fi
   exit "$status"
 }
 trap release_cleanup EXIT
+sudo install -o root -g root -m 0644 "$nginx_rendered" "$nginx_stage"
+sudo mv -Tf "$nginx_stage" "$nginx_live"
+nginx_promoted=1
+sudo nginx -t
+sudo systemctl reload nginx
 sudo ln -s "$release_dir" "$stage_link"
 test "$(readlink -f "$stage_link")" = "$release_dir"
 sudo mv -Tf "$stage_link" /opt/agent-review/app
 release_switched=1
 sudo systemctl restart agent-review
 wait_for_health
+rm -f -- "$nginx_rendered"
 trap - EXIT
 ```
+
+The rendered Nginx configuration is installed only after the existing file is backed up. Any failure after promotion restores that backup, validates it with `nginx -t`, reloads Nginx, and restores the previous application symlink if it had already moved. Keep the timestamped Nginx backup with the release record.
 
 If validation fails, switch only to a known retained directory. The documented active SHA is a rollback target while it remains present:
 

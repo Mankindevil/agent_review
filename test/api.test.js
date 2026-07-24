@@ -175,6 +175,9 @@ test('serves an Agent Card upload readiness console with isolated credentials an
   assert.match(html, /内部多 Agent/);
   assert.match(html, /最终报名表/);
   assert.match(html, /再次真实执行 Prompt/);
+  assert.doesNotMatch(html, /href="\/"/);
+  assert.match(html, /<div class="brand"/);
+  assert.match(html, /<a class="back-link" href="\/agent-check"/);
   assert.match(script, /\/api\/agent-diagnostics/);
   assert.match(script, /agentCard/);
   assert.match(script, /confirmAuthorizationTarget/);
