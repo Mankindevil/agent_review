@@ -433,22 +433,31 @@ test('returns JSON 404 for unknown API routes instead of the SPA shell', async (
 });
 
 test('serves an Agent Card upload readiness console with isolated credentials and explicit streaming consent', async () => {
-  const [pageResponse, aliasResponse, scriptResponse, styleResponse] = await Promise.all([
+  const [
+    pageResponse,
+    aliasResponse,
+    scriptResponse,
+    helperResponse,
+    styleResponse
+  ] = await Promise.all([
     fetch(`${origin}/agent-check.html`),
     fetch(`${origin}/agent-check`),
     fetch(`${origin}/agent-check.js`),
+    fetch(`${origin}/agent-check-helpers.js`),
     fetch(`${origin}/agent-check.css`)
   ]);
-  const [html, aliasHtml, script, css] = await Promise.all([
+  const [html, aliasHtml, script, helper, css] = await Promise.all([
     pageResponse.text(),
     aliasResponse.text(),
     scriptResponse.text(),
+    helperResponse.text(),
     styleResponse.text()
   ]);
   assert.equal(pageResponse.status, 200);
   assert.equal(aliasResponse.status, 200);
   assert.match(aliasHtml, /diagnostics-form/);
   assert.equal(scriptResponse.status, 200);
+  assert.equal(helperResponse.status, 200);
   assert.equal(styleResponse.status, 200);
   for (const id of [
     'diagnostics-form', 'agent-card-file', 'agent-card-json',
@@ -479,6 +488,9 @@ test('serves an Agent Card upload readiness console with isolated credentials an
   assert.match(script, /cardSource/);
   assert.match(script, /card-url/);
   assert.match(script, /service-url/);
+  assert.match(script, /\/api\/agent-cards\/resolve/);
+  assert.match(helper, /promptForAgentCard/);
+  assert.match(helper, /skills/);
   assert.match(script, /confirmAuthorizationTarget/);
   assert.match(script, /MAX_CARD_BYTES/);
   assert.doesNotMatch(script, /platformKey|platform-key/);

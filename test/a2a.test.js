@@ -310,6 +310,23 @@ test('builds versioned A2A requests with tenant and binding-specific endpoints',
   assert.equal(patchVersion.headers['a2a-version'], '1.0');
 });
 
+test('serializes explicitly negotiated output modes for both A2A bindings', () => {
+  const acceptedOutputModes = ['text/markdown', 'application/json'];
+  const rpc = buildA2ARequest(
+    { url: 'https://example.com/rpc', binding: 'JSONRPC', version: '1.0' },
+    'hello',
+    { acceptedOutputModes }
+  );
+  const rest = buildA2ARequest(
+    { url: 'https://example.com/a2a/v1', binding: 'HTTP+JSON', version: '1.0' },
+    'hello',
+    { acceptedOutputModes }
+  );
+
+  assert.deepEqual(rpc.body.params.configuration, { acceptedOutputModes });
+  assert.deepEqual(rest.body.configuration, { acceptedOutputModes });
+});
+
 test('serializes normalized multipart input for A2A 1.x and keeps turn context', () => {
   const request = buildA2ARequest(
     { url: 'https://example.com/a2a/v1', binding: 'HTTP+JSON', version: '1.0' },

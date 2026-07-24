@@ -95,7 +95,10 @@ test('enabled server wires the V2 runtime and applies separate create body limit
     }
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const origin = 'http://127.0.0.1:' + server.address().port;
-    await pipeline.cancel(direct.evaluation.id);
+    await pipeline.cancel(
+      direct.evaluation.id,
+      direct.participantAccessToken
+    );
     while (pipeline.activeRuns.has(direct.evaluation.id)) {
       await new Promise((resolve) => setTimeout(resolve, 1));
     }

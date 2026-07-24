@@ -4,6 +4,13 @@ import {
   recordActionCopy,
   recordActionFailure
 } from './a2a-ui-helpers.js?v=20260725-a2a1';
+import {
+  canArchiveEvaluation,
+  canStopEvaluation,
+  participantActionOptions,
+  resolveParticipantToken,
+  restoreV2StartButton
+} from './evaluation-actions.js?v=20260725-hardening1';
 
 const state = { mode: 'demo', sourceType: 'direct', blackBoxEnabled: false, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), participantTokens: new Map(), pendingEvaluationId: null, skillRequestToken: 0 };
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -526,7 +533,25 @@ function dismissParticipantTokenReceipt() {
   $('#participant-token-receipt').classList.add('hidden');
   $('#copy-participant-token').textContent = '复制 token';
   state.pendingEvaluationId = null;
+  restoreV2StartButton($('#start-evaluation'));
   if (id) openEvaluation(id);
+}
+
+function participantTokenForAction(evaluationId) {
+  const input = $('#resume-participant-token');
+  const remembered = state.participantTokens.get(evaluationId);
+  const manualValue = remembered
+    ? ''
+    : input.value.trim() || globalThis.prompt?.(
+        '请输入创建评测时保存的 Participant access token'
+      ) || '';
+  const token = resolveParticipantToken(
+    evaluationId,
+    state.participantTokens,
+    manualValue
+  );
+  input.value = '';
+  return token;
 }
 
 async function openEvaluation(id) {
@@ -563,13 +588,33 @@ function subscribe(id) {
 
 async function stopEvaluation() {
   const item = state.current;
-  if (!item || isTerminalEvaluation(item) || state.stopping) return;
+  if (!canStopEvaluation(item) || state.stopping) return;
   const button = $('#stop-evaluation');
+  let requestOptions = { method: 'POST' };
+  try {
+    if (item.schemaVersion === 2) {
+      requestOptions = participantActionOptions(
+        'POST',
+        participantTokenForAction(item.id)
+      );
+    }
+  } catch (error) {
+    $('span', button).textContent = error.message;
+    setTimeout(() => {
+      if (canStopEvaluation(state.current)) {
+        $('span', button).textContent = '停止本次评测';
+      }
+    }, 2200);
+    return;
+  }
   state.stopping = true;
   button.disabled = true;
   $('span', button).textContent = '正在停止';
   try {
-    const response = await fetch(`/api/evaluations/${item.id}/cancel`, { method: 'POST' });
+    const response = await fetch(
+      `/api/evaluations/${item.id}/cancel`,
+      requestOptions
+    );
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || '停止评测失败');
     state.eventSource?.close();
@@ -577,7 +622,11 @@ async function stopEvaluation() {
     loadHistory();
   } catch (error) {
     $('span', button).textContent = error.message;
-    setTimeout(() => { if (!isTerminalEvaluation(state.current)) $('span', button).textContent = '停止本次评测'; }, 2200);
+    setTimeout(() => {
+      if (canStopEvaluation(state.current)) {
+        $('span', button).textContent = '停止本次评测';
+      }
+    }, 2200);
   } finally {
     state.stopping = false;
     button.disabled = false;
@@ -635,7 +684,7 @@ function showEvaluation(item) {
   $('#pulse-dot').style.top = `calc(${Math.min(progress, 96)}% - 2px)`;
   $('#live-deck').classList.toggle('running', ['running','retrying'].includes(status));
   const stopButton = $('#stop-evaluation');
-  stopButton.classList.toggle('hidden', !['queued','running','retrying','credentials-required','interrupted'].includes(status));
+  stopButton.classList.toggle('hidden', !canStopEvaluation(item));
   stopButton.disabled = state.stopping;
   if (!state.stopping) $('span', stopButton).textContent = '停止本次评测';
   if (changedStage) {
@@ -1270,8 +1319,14 @@ function renderLegacyHistoryItem(item) {
 
 function renderV2HistoryItem(item) {
   const archived = Boolean(item.archivedAt);
+  const canArchive = canArchiveEvaluation(item);
   const label = archived ? '已归档' : statusOf(item);
-  return `<article class="history-item history-item-v2"><button class="history-open" type="button" data-evaluation-id="${item.id}"><header><span>${formatTime(item.createdAt)}</span><span>${progressOf(item)}%</span></header><h3>A2A 证据卷宗</h3><p>${escapeHtml(label)} · ${escapeHtml(stageOf(item) || 'qualification')} · ${item.evidenceManifest?.items?.length || 0} evidence</p></button><button class="history-delete" type="button" data-delete-evaluation="${item.id}" data-record-kind="v2" aria-label="归档 ${escapeHtml(item.id)} 的评测记录" title="软归档；证据仍可查阅"${archived ? ' disabled' : ''}><i aria-hidden="true">×</i><span>归档</span></button></article>`;
+  const archiveTitle = archived
+    ? '卷宗已归档'
+    : canArchive
+      ? '软归档；证据仍可查阅'
+      : '运行中的卷宗暂不可归档';
+  return `<article class="history-item history-item-v2"><button class="history-open" type="button" data-evaluation-id="${item.id}"><header><span>${formatTime(item.createdAt)}</span><span>${progressOf(item)}%</span></header><h3>A2A 证据卷宗</h3><p>${escapeHtml(label)} · ${escapeHtml(stageOf(item) || 'qualification')} · ${item.evidenceManifest?.items?.length || 0} evidence</p></button><button class="history-delete" type="button" data-delete-evaluation="${item.id}" data-record-kind="v2" aria-label="归档 ${escapeHtml(item.id)} 的评测记录" title="${archiveTitle}"${canArchive ? '' : ' disabled'}><i aria-hidden="true">×</i><span>归档</span></button></article>`;
 }
 
 async function deleteEvaluation(button) {
@@ -1295,7 +1350,13 @@ async function deleteEvaluation(button) {
   button.classList.add('deleting');
   $('span', button).textContent = copy.pending;
   try {
-    const response = await fetch(`/api/evaluations/${id}`, { method: 'DELETE' });
+    const requestOptions = isV2
+      ? participantActionOptions(
+          'DELETE',
+          participantTokenForAction(id)
+        )
+      : { method: 'DELETE' };
+    const response = await fetch(`/api/evaluations/${id}`, requestOptions);
     const payload = await response.json();
     if (!response.ok) throw new Error(recordActionFailure(isV2, payload.error));
     if (state.current?.id === id) {
@@ -1314,7 +1375,20 @@ async function deleteEvaluation(button) {
   }
 }
 
-function showLanding() { if(state.eventSource)state.eventSource.close(); state.eventSource=null; state.openEvaluationToken+=1; state.current=null; state.lastStage=null; state.completedRendered=null; state.verdictRevealToken+=1; history.replaceState(null,'',location.pathname); $('#evaluation-view').classList.add('hidden'); $('#landing-view').classList.remove('hidden'); scrollTo({top:0,behavior:'smooth'}); }
+function showLanding() {
+  if (state.eventSource) state.eventSource.close();
+  state.eventSource = null;
+  state.openEvaluationToken += 1;
+  state.current = null;
+  state.lastStage = null;
+  state.completedRendered = null;
+  state.verdictRevealToken += 1;
+  history.replaceState(null, '', location.pathname);
+  $('#evaluation-view').classList.add('hidden');
+  $('#landing-view').classList.remove('hidden');
+  if (state.blackBoxEnabled) restoreV2StartButton($('#start-evaluation'));
+  scrollTo({ top: 0, behavior: 'smooth' });
+}
 function openHistory() { $('#history-drawer').classList.add('open'); $('#drawer-backdrop').classList.add('open'); $('#history-drawer').setAttribute('aria-hidden','false'); loadHistory(); }
 function closeHistory() { $('#history-drawer').classList.remove('open'); $('#drawer-backdrop').classList.remove('open'); $('#history-drawer').setAttribute('aria-hidden','true'); }
 function showError(text) { $('#form-error').textContent = text; }
@@ -1326,9 +1400,6 @@ function progressOf(item) {
 }
 function shouldSubscribe(item) {
   return item?.schemaVersion === 2 ? ['queued','running'].includes(statusOf(item)) : !isTerminal(statusOf(item));
-}
-function isTerminalEvaluation(item) {
-  return item?.schemaVersion === 2 ? ['completed','cancelled'].includes(statusOf(item)) : isTerminal(statusOf(item));
 }
 function isTerminal(status) { return ['completed','failed','cancelled','interrupted'].includes(status); }
 function normalizeTier(tier = {}) {

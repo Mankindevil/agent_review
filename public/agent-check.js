@@ -1,3 +1,5 @@
+import { promptForAgentCard } from './agent-check-helpers.js';
+
 const MAX_CARD_BYTES = 1024 * 1024;
 
 const form = document.querySelector('#diagnostics-form');
@@ -99,6 +101,7 @@ form.addEventListener('submit', async (event) => {
       showFormError('请填写合法的 HTTP(S) Agent Card 地址。', cardUrl);
       return;
     }
+    await previewCardPrompt(cardSourceMode, url);
     cardInput = { cardSource: { type: cardSourceMode, url } };
   }
   if (authMethod.value === 'bearer' && !agentToken.value) {
@@ -205,6 +208,7 @@ function applyCardText(text, sourceName = '') {
   }
 
   parsedAgentCard = value;
+  diagnosticPrompt.value = promptForAgentCard(diagnosticPrompt.value, value);
   const target = selectCardInterface(value);
   if (target) {
     try {
@@ -215,6 +219,24 @@ function applyCardText(text, sourceName = '') {
   }
   authTargetOrigin.textContent = selectedTargetOrigin || '接口地址待服务端校验';
   renderCardSummary(value, target, raw, sourceName);
+}
+
+async function previewCardPrompt(sourceType, url) {
+  try {
+    const response = await fetch('/api/agent-cards/resolve', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sourceType, url })
+    });
+    if (!response.ok) return;
+    const resolved = await response.json();
+    diagnosticPrompt.value = promptForAgentCard(
+      diagnosticPrompt.value,
+      resolved.card
+    );
+  } catch {
+    // The diagnostics API remains authoritative for Card resolution errors.
+  }
 }
 
 function applyCardUrl(value) {

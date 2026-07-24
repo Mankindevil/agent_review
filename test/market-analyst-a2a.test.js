@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { parseSseEvents } from '../src/a2a.js';
+import { runAgentDiagnostics } from '../src/agent-diagnostics.js';
 import { createMarketAgentServer } from '../agents/market-analyst/a2a-server.js';
 import { validateEvidencePack } from '../agents/market-analyst/schemas.js';
 
@@ -429,6 +430,42 @@ test('well-known Agent Card declares the exact A2A 1.0 market interface and five
     schemes: { bearerAuth: { list: [] } }
   }]);
   assert.equal(JSON.stringify(card).includes('configured-secret-must-never-appear'), false);
+});
+
+test('diagnostics negotiates the protected market Agent Card for ordinary and streaming calls', async (t) => {
+  const { origin } = await startHarness(t);
+  const card = await json(await fetch(`${origin}/.well-known/agent-card.json`));
+
+  const report = await runAgentDiagnostics({
+    agentCard: card,
+    authMethod: 'bearer',
+    agentAuthorization: 'owner-a',
+    confirmAuthorizationTarget: true,
+    prompt: card.skills[0].examples[0],
+    timeoutMs: 300_000,
+    runStreaming: true,
+    confirmStreamingSideEffects: true,
+    attestations: {
+      deepseekV4Pro: true,
+      authorizedDataOnly: true
+    }
+  }, { allowPrivate: true });
+
+  assert.equal(report.ok, true);
+  assert.equal(report.streamingOk, true);
+  assert.deepEqual(
+    report.checks.map(({ id, status }) => [id, status]),
+    [
+      ['card-input', 'passed'],
+      ['card-validation', 'passed'],
+      ['call', 'passed'],
+      ['stream', 'passed']
+    ]
+  );
+  assert.deepEqual(
+    report.checks[1].details.acceptedOutputModes,
+    ['text/markdown', 'application/json']
+  );
 });
 
 test('repository Skills stay synchronized with the Agent Card and tool boundaries', async (t) => {

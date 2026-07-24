@@ -699,7 +699,10 @@ test('rejects resume of an archived interrupted V2 record without side effects',
   assert.equal(calls.deletes.length, before.deletes);
   assert.equal(calls.runs.length, before.runs);
 
-  const archivedCancel = await pipeline.cancel(current.id);
+  const archivedCancel = await pipeline.cancel(
+    current.id,
+    created.participantAccessToken
+  );
   assert.equal(archivedCancel.execution.status, 'interrupted');
   assert.equal(archivedCancel.revision, before.revision);
   assert.equal(store.get(current.id).revision, before.revision);
@@ -1098,7 +1101,10 @@ test('enabled V2 cancel commits before abort/delete/emit and is revision-idempot
   await new Promise(setImmediate);
   operations.length = 0;
 
-  const cancelled = await pipeline.cancel(created.evaluation.id);
+  const cancelled = await pipeline.cancel(
+    created.evaluation.id,
+    created.participantAccessToken
+  );
   const revision = cancelled.revision;
   assert.equal(cancelled.execution.status, 'cancelled');
   assert.equal(cancelled.auditEvents.at(-1).type, 'cancelled');
@@ -1107,7 +1113,10 @@ test('enabled V2 cancel commits before abort/delete/emit and is revision-idempot
     operations.indexOf('credential-delete') <
       operations.indexOf('emit-cancelled')
   );
-  const again = await pipeline.cancel(created.evaluation.id);
+  const again = await pipeline.cancel(
+    created.evaluation.id,
+    created.participantAccessToken
+  );
   assert.equal(again.revision, revision);
   assert.equal(calls.puts.length, 1);
   releaseRun();
@@ -1155,7 +1164,10 @@ test('V2 cancel retries a stale worker revision and still aborts and clears cred
     return mutate(id, expectedRevision, updater);
   };
 
-  const cancelled = await pipeline.cancel(created.evaluation.id);
+  const cancelled = await pipeline.cancel(
+    created.evaluation.id,
+    created.participantAccessToken
+  );
 
   assert.equal(injectedWorkerCommits, 17);
   assert.equal(cancelled.execution.status, 'cancelled');
@@ -1203,8 +1215,8 @@ test('concurrent V2 cancels commit one transition and both return the current re
   const revisionBefore = store.get(created.evaluation.id).revision;
 
   const results = await Promise.all([
-    pipeline.cancel(created.evaluation.id),
-    pipeline.cancel(created.evaluation.id)
+    pipeline.cancel(created.evaluation.id, created.participantAccessToken),
+    pipeline.cancel(created.evaluation.id, created.participantAccessToken)
   ]);
 
   assert.equal(results[0].execution.status, 'cancelled');
@@ -1258,7 +1270,10 @@ test('V2 cancel closes a dispatched turn, attempt, and cell without pending attr
     }
   }));
 
-  const cancelled = await pipeline.cancel(current.id);
+  const cancelled = await pipeline.cancel(
+    current.id,
+    created.participantAccessToken
+  );
   const cell = cancelled.runtimeState.runIndex[0];
   const attempt = cell.attempts[0];
   assert.equal(cell.status, 'cancelled');

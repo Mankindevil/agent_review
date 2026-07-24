@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDiagnosticsGuard } from '../src/diagnostics-guard.js';
-import { runAgentDiagnostics, validateDiagnosticsInput } from '../src/agent-diagnostics.js';
+import {
+  negotiateDiagnosticOutputModes,
+  runAgentDiagnostics,
+  validateDiagnosticsInput
+} from '../src/agent-diagnostics.js';
 
 const card = {
   name: 'Diagnostic Agent',
@@ -474,6 +478,102 @@ test('uses an independent full timeout for an explicitly confirmed streaming cal
   assert.equal(report.streamingOk, true);
   assert.equal(report.checks[3].status, 'passed');
   assert.equal(report.checks[3].details.eventCount, 1);
+});
+
+test('negotiates supported Card output modes in declared order without duplicates', () => {
+  assert.deepEqual(
+    negotiateDiagnosticOutputModes({
+      defaultOutputModes: [
+        'application/pdf',
+        'text/markdown',
+        'application/json',
+        'text/markdown'
+      ]
+    }),
+    ['text/markdown', 'application/json']
+  );
+  assert.deepEqual(
+    negotiateDiagnosticOutputModes({}),
+    ['text/plain', 'application/json']
+  );
+});
+
+test('uses the same negotiated output modes for ordinary and streaming requests', async () => {
+  const requests = [];
+  const httpCard = {
+    ...card,
+    supportedInterfaces: [{
+      url: 'https://agent.example/a2a/v1',
+      protocolBinding: 'HTTP+JSON',
+      protocolVersion: '1.0'
+    }],
+    defaultOutputModes: ['text/markdown', 'application/json']
+  };
+  const request = async (url, options) => {
+    const body = JSON.parse(options.body);
+    requests.push({ url, body });
+    if (url.endsWith('/message:stream')) {
+      return {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+        body: Buffer.from(`data: ${JSON.stringify({
+          message: {
+            messageId: 'stream-reply',
+            role: 'ROLE_AGENT',
+            parts: [{ text: 'stream ok' }]
+          }
+        })}\n\n`)
+      };
+    }
+    return jsonResponse({
+      message: {
+        messageId: 'reply',
+        role: 'ROLE_AGENT',
+        parts: [{ text: 'normal ok' }]
+      }
+    });
+  };
+
+  const report = await runAgentDiagnostics({
+    ...baseInput,
+    agentCard: httpCard,
+    runStreaming: true,
+    confirmStreamingSideEffects: true
+  }, { request });
+
+  assert.equal(report.ok, true);
+  assert.equal(report.streamingOk, true);
+  assert.deepEqual(
+    requests.map(({ body }) => body.configuration.acceptedOutputModes),
+    [
+      ['text/markdown', 'application/json'],
+      ['text/markdown', 'application/json']
+    ]
+  );
+});
+
+test('fails at the protocol stage before calling an Agent with incompatible declared output modes', async () => {
+  let calls = 0;
+  const report = await runAgentDiagnostics({
+    ...baseInput,
+    agentCard: {
+      ...card,
+      defaultOutputModes: ['application/pdf']
+    }
+  }, {
+    request: async () => {
+      calls += 1;
+      throw new Error('must not run');
+    }
+  });
+
+  assert.equal(calls, 0);
+  assert.equal(report.ok, false);
+  assert.equal(report.checks[1].status, 'failed');
+  assert.equal(report.checks[1].details.category, 'protocol');
+  assert.match(report.checks[1].summary, /output mode|输出模式/i);
+  assert.equal(report.checks[2].status, 'blocked');
+  assert.equal(report.checks[3].status, 'blocked');
 });
 
 function jsonResponse(payload, status = 200) {

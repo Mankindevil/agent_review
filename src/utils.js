@@ -90,6 +90,9 @@ export async function readJsonBodyWithSize(request, limit = 1_000_000) {
       size
     };
   } catch {
-    throw Object.assign(new Error('请求体不是合法 JSON'), { statusCode: 400 });
+    throw Object.assign(
+      new Error('请求体不是合法 JSON'),
+      { statusCode: 400, bodySize: size }
+    );
   }
 }

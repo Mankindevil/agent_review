@@ -24,6 +24,12 @@ Production systemd units are in `deploy/`; the operator runbook is
 `docs/PRODUCTION_OPERATIONS.md`, and the full agent contract is
 `docs/MARKET_ANALYST_AGENT.md`.
 
+On Windows, create `.venv` with an installed `python` or `py` launcher and set
+`PANDA_DATA_PYTHON` to `.\.venv\Scripts\python.exe` when the interpreter is not
+discoverable from `PATH`. The data requirements pin the Parquet engine used by
+the Market Worker cache; after installation, `npm run test:market-worker`
+verifies the cache and provider-call contract with that interpreter.
+
 一个面向 A2A 金融智能体黑客松的全栈评测系统。用户提交 Agent Card 和真实投研任务后，平台依次判断 Agent 必要性，按研究严谨性、数据纪律、回测可信度、风险合规、可复现性进行四模型审稿，让不同 runtime 只凭 description 现场直出 Skill，再把所有选手放进同题研究压测，最终给出“夯 / 人上人 / NPC / 拉”的证据化锐评。
 
 未接入主办方 Data / Research Skills 时，平台只审查研究设计与输出纪律，不验证金融数字真伪，也不会把模拟结果包装成真实回测。接入数据能力后可在现有同题执行层增加 point-in-time 数据复算、回测结果校验和结构化验收断言。

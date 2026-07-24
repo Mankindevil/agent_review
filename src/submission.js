@@ -130,12 +130,12 @@ export function assertFrozenSubmissionIntegrity(snapshot, expectedConfig) {
 }
 
 function assertV2CardEndpointCredentialBoundary(agentCard) {
-  if (typeof agentCard?.url === 'string') {
+  if (Object.hasOwn(agentCard || {}, 'url')) {
     assertV2EndpointCredentialBoundary(agentCard.url);
   }
   if (!Array.isArray(agentCard?.supportedInterfaces)) return;
   for (const declaredInterface of agentCard.supportedInterfaces) {
-    if (typeof declaredInterface?.url === 'string') {
+    if (Object.hasOwn(declaredInterface || {}, 'url')) {
       assertV2EndpointCredentialBoundary(declaredInterface.url);
     }
   }

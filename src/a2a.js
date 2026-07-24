@@ -271,6 +271,13 @@ export function buildA2ARequest(target, input, options = {}) {
   if (options.taskId) message.taskId = options.taskId;
   const params = { message };
   if (target.tenant) params.tenant = target.tenant;
+  if (options.acceptedOutputModes !== undefined) {
+    params.configuration = {
+      acceptedOutputModes: normalizedAcceptedOutputModes(
+        options.acceptedOutputModes
+      )
+    };
+  }
   if (isJsonRpc) {
     return {
       url: assertSafeAgentUrl(target.url, { allowPrivate: options.allowPrivate }).toString(),
@@ -291,7 +298,11 @@ export function buildA2ARequest(target, input, options = {}) {
   );
   const body = {
     message,
-    configuration: { acceptedOutputModes: ['text/plain', 'application/json'] }
+    configuration: {
+      acceptedOutputModes: options.acceptedOutputModes === undefined
+        ? ['text/plain', 'application/json']
+        : normalizedAcceptedOutputModes(options.acceptedOutputModes)
+    }
   };
   if (target.tenant) body.tenant = target.tenant;
   return {
@@ -303,6 +314,19 @@ export function buildA2ARequest(target, input, options = {}) {
     body,
     requestId
   };
+}
+
+function normalizedAcceptedOutputModes(value) {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((mode) => typeof mode !== 'string' || !mode.trim())
+  ) {
+    throw new TypeError(
+      'acceptedOutputModes must be a non-empty array of non-empty strings'
+    );
+  }
+  return [...new Set(value.map((mode) => mode.trim()))];
 }
 
 export function buildGetTaskRequest(target, { taskId, requestId = crypto.randomUUID(), historyLength = 50 }) {

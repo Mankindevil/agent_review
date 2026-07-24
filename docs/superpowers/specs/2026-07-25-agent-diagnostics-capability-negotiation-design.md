@@ -50,6 +50,12 @@ from capability selection.
 When a valid card is loaded or resolved, the browser will locate the first
 non-empty string in `skills[].examples[]`.
 
+For URL-based Card sources, the browser will pre-resolve the Card through the
+existing same-origin resolver before submitting diagnostics. This preview is
+used only to select the example Prompt; the diagnostics endpoint will still
+resolve the submitted Card source itself so its source and network-policy
+checks remain authoritative.
+
 If the prompt field still contains the original stock diagnostics prompt, the
 page will replace it with that skill example. If the user has edited the
 field, their text will be preserved. Cards without examples keep the stock

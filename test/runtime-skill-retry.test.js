@@ -205,7 +205,10 @@ test('terminates the whole Linux CLI process group with TERM then KILL at the ha
     return true;
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  const killDeadline = Date.now() + 250;
+  while (groupKills.length < 2 && Date.now() < killDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
   assert.equal(spawnOptions.detached, true);
   assert.deepEqual(spawnOptions.stdio, ['ignore', 'pipe', 'pipe']);
   assert.deepEqual(groupKills, [[-4312, 'SIGTERM'], [-4312, 'SIGKILL']]);

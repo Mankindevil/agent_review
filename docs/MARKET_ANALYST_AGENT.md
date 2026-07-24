@@ -24,16 +24,23 @@ Windows PowerShell：
 
 ```powershell
 npm ci
-py -3.10 -m venv .venv
+python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements-data.txt
+$env:PANDA_DATA_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
+npm run test:market-worker
 Copy-Item .env.example .env
 ```
+
+如果机器只安装了 Windows `py` launcher，可把第一行改为
+`py -3.10 -m venv .venv`。测试入口的解释器优先级为
+`PANDA_DATA_PYTHON`、仓库 `.venv`、Windows `python`/`py` 或 POSIX
+`python3`/`python`；都不可用时会明确失败。
 
 生产环境应锁定 `requirements-data.txt` 中的版本，并把 `PANDA_DATA_PYTHON` 设为虚拟环境 Python 的绝对路径。先用该解释器验证：
 
 ```bash
-/srv/agent-review/.venv/bin/python -c "import panda_data, pandas; print('panda_data ready')"
+/srv/agent-review/.venv/bin/python -c "import panda_data, pandas, pyarrow; print('panda_data and parquet ready')"
 ```
 
 ## 配置

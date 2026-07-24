@@ -31,7 +31,7 @@
 
 ### 3. Legacy/V2 body 大小兼容
 
-请求读取器在不完整解析整个 JSON 的情况下识别顶层 `schemaVersion: 2`，并据此选择 3 MiB 或 1,000,000-byte 上限。不能可靠识别为 V2 的请求按 legacy 上限处理，因此 1,000,001-byte malformed body 返回 413；合法 V2 body 仍可超过 legacy 上限。
+请求先在 3 MiB 的绝对上限内读取。解析成功后，只有顶层 `schemaVersion: 2` 可以使用完整的 V2 上限，其他请求继续执行 1,000,000-byte legacy 限制；解析失败且 body 已超过 legacy 上限时返回 413。这样无需根据不完整 JSON 猜测 schema，1,000,001-byte malformed body 仍返回 413，合法 V2 body 仍可超过 legacy 上限。
 
 ### 4. 前端状态一致性
 

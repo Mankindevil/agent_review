@@ -159,7 +159,10 @@ export const server = createServer(async (request, response) => {
     }
     const cancelMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/cancel$/);
     if (request.method === 'POST' && cancelMatch) {
-      const item = await pipeline.cancel(cancelMatch[1]);
+      const item = await pipeline.cancel(
+        cancelMatch[1],
+        bearerToken(request.headers.authorization)
+      );
       return item
         ? json(response, 200, serializeEvaluationForResponse(item))
         : json(response, 404, { error: '评测不存在' });
@@ -195,22 +198,21 @@ export const server = createServer(async (request, response) => {
     if (request.method === 'DELETE' && match) {
       const item = store.get(match[1]);
       if (!item) return json(response, 404, { error: '评测不存在' });
-      const status = item.schemaVersion === 2 ? item.execution?.status : item.status;
-      if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(status)) {
-        return json(response, 409, { error: '运行中的评测不能删除，请先停止本次评测' });
-      }
       if (item.schemaVersion === 2) {
-        const archived = await store.mutate(match[1], item.revision, (current) => ({
-          ...current,
-          archivedAt: new Date().toISOString()
-        }));
-        events.emit(match[1], archived);
+        const archived = await pipeline.archive(
+          match[1],
+          bearerToken(request.headers.authorization)
+        );
         return json(response, 200, {
           id: match[1],
           archived: true,
           deleted: false,
           revision: archived.revision
         });
+      }
+      const status = item.status;
+      if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(status)) {
+        return json(response, 409, { error: '运行中的评测不能删除，请先停止本次评测' });
       }
       await store.delete(match[1]);
       return json(response, 200, { id: match[1], deleted: true });
@@ -312,10 +314,25 @@ async function readEvaluationCreateBody(request) {
   if (!blackBoxRuntimeConfig.enabled) {
     return readJsonBody(request, LEGACY_EVALUATION_BODY_LIMIT);
   }
-  const { value, size } = await readJsonBodyWithSize(
-    request,
-    V2_EVALUATION_BODY_LIMIT
-  );
+  let parsed;
+  try {
+    parsed = await readJsonBodyWithSize(
+      request,
+      V2_EVALUATION_BODY_LIMIT
+    );
+  } catch (error) {
+    if (
+      error.statusCode === 400 &&
+      error.bodySize > LEGACY_EVALUATION_BODY_LIMIT
+    ) {
+      throw Object.assign(
+        new Error('Legacy evaluation request body exceeds the size limit'),
+        { statusCode: 413 }
+      );
+    }
+    throw error;
+  }
+  const { value, size } = parsed;
   if (value?.schemaVersion !== 2 && size > LEGACY_EVALUATION_BODY_LIMIT) {
     throw Object.assign(
       new Error('Legacy evaluation request body exceeds the size limit'),

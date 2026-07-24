@@ -64,13 +64,23 @@ test('returns a flat one-time V2 create token with no-store caching', async () =
       .includes(body.participantAccessToken),
     false
   );
-  await pipeline.cancel(body.id);
+  await pipeline.cancel(body.id, body.participantAccessToken);
+});
+
+test('preserves the legacy 413 limit for oversized malformed create bodies when V2 is enabled', async () => {
+  const response = await fetch(`${origin}/api/evaluations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: 'x'.repeat(1_000_001)
+  });
+
+  assert.equal(response.status, 413);
 });
 
 test('returns no-store on participant-authenticated resume and exact replay', async () => {
   const createdResponse = await createEvaluation();
   const created = await createdResponse.json();
-  await pipeline.cancel(created.id);
+  await pipeline.cancel(created.id, created.participantAccessToken);
   while (pipeline.activeRuns.has(created.id)) {
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
@@ -147,7 +157,7 @@ test('authenticates resume before parsing malformed, oversized, or unknown reque
     assert.equal(oversized.status, 401);
     assert.equal(unknown.status, 404);
   } finally {
-    await pipeline.cancel(created.id);
+    await pipeline.cancel(created.id, created.participantAccessToken);
     while (pipeline.activeRuns.has(created.id)) {
       await new Promise((resolve) => setTimeout(resolve, 1));
     }
@@ -256,7 +266,7 @@ test('requires participant Bearer ownership for HTTP V2 cancel and archive', asy
 test('rejects HTTP resume after an interrupted V2 evaluation is archived', async () => {
   const createdResponse = await createEvaluation();
   const created = await createdResponse.json();
-  await pipeline.cancel(created.id);
+  await pipeline.cancel(created.id, created.participantAccessToken);
   while (pipeline.activeRuns.has(created.id)) {
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
@@ -275,7 +285,10 @@ test('rejects HTTP resume after an interrupted V2 evaluation is archived', async
     })
   );
   const archived = await fetch(`${origin}/api/evaluations/${created.id}`, {
-    method: 'DELETE'
+    method: 'DELETE',
+    headers: {
+      authorization: `Bearer ${created.participantAccessToken}`
+    }
   });
   assert.equal(archived.status, 200);
   const revision = evaluationStore.get(created.id).revision;

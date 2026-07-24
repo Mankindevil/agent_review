@@ -493,6 +493,47 @@ test('rejects query or fragment credentials in every declared V2 interface witho
   );
 });
 
+test('rejects every declared non-string top-level V2 endpoint without echoing it', () => {
+  const secret = 'sentinel-top-level-endpoint-secret';
+  const args = {
+    agentExamples: examples,
+    config: { rubricVersion: 'a2a-black-box-v1' },
+    frozenAt: '2026-07-24T10:00:00.000Z'
+  };
+  const invalidEndpoints = [
+    null,
+    { hidden: `?token=${secret}` },
+    [`#${secret}`]
+  ];
+
+  for (const url of invalidEndpoints) {
+    const invalidCard = structuredClone(card);
+    invalidCard.url = url;
+    assert.throws(
+      () => freezeSubmission({
+        ...args,
+        agentCard: invalidCard
+      }),
+      (error) =>
+        /agentAuthorization|query|fragment|endpoint/iu.test(error.message) &&
+        !error.message.includes(secret)
+    );
+  }
+
+  const frozen = freezeSubmission({
+    ...args,
+    agentCard: card
+  });
+  const tampered = structuredClone(frozen);
+  tampered.agentCard.value.url = { hidden: `?token=${secret}` };
+  assert.throws(
+    () => assertFrozenSubmissionIntegrity(tampered, args.config),
+    (error) =>
+      /agentAuthorization|query|fragment|endpoint/iu.test(error.message) &&
+      !error.message.includes(secret)
+  );
+});
+
 test('verifies the frozen submission in place across hashes, interface, and every config version', () => {
   const config = {
     rubricVersion: 'a2a-black-box-v1',

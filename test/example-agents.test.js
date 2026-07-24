@@ -353,7 +353,12 @@ test('runs the complete V2 black-box evidence pipeline against a real A2A agent'
     assert.equal(initialSseProjection.revision, getProjection.revision);
     const archiveResponse = await fetch(
       `${apiOrigin}/api/evaluations/${completed.id}`,
-      { method: 'DELETE' }
+      {
+        method: 'DELETE',
+        headers: {
+          authorization: `Bearer ${created.participantAccessToken}`
+        }
+      }
     );
     assert.equal(archiveResponse.status, 200);
     const sseProjection = await readSseData(

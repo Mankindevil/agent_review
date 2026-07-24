@@ -16,6 +16,12 @@ const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 1_200_000;
 const MAX_CARD_BYTES = 1024 * 1024;
 const CARD_RESOLVE_TIMEOUT_MS = 12_000;
+const SUPPORTED_OUTPUT_MODES = new Set([
+  'text/plain',
+  'text/markdown',
+  'application/json'
+]);
+const DEFAULT_OUTPUT_MODES = ['text/plain', 'application/json'];
 
 export function validateDiagnosticsInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -173,10 +179,12 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
   }
 
   let targetUrl;
+  let acceptedOutputModes;
   try {
     targetUrl = validateSafeUrl(target.url, {
       allowPrivate
     });
+    acceptedOutputModes = negotiateDiagnosticOutputModes(card);
   } catch (error) {
     checks[1] = failed('card-validation', validationStarted, error);
     block(checks, 2, 'Card 接口地址校验失败，无法调用 Agent');
@@ -189,13 +197,17 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
     networkPolicy: allowPrivate ? '允许内网/本机' : '仅公网',
     targetScope: urlScopeLabel(targetUrl),
     streaming: card.capabilities?.streaming === true,
+    acceptedOutputModes,
     tenant: target.tenant || null,
     skillsCount: card.skills.length
   });
 
   const callStarted = Date.now();
   try {
-    const normalRequest = buildA2ARequest(target, input.prompt, { allowPrivate });
+    const normalRequest = buildA2ARequest(target, input.prompt, {
+      allowPrivate,
+      acceptedOutputModes
+    });
     const headers = withAgentAuthorization(normalRequest.headers, input.agentAuthorization);
     const response = await request(normalRequest.url, requestOptions({
       method: 'POST',
@@ -229,7 +241,8 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
     try {
       const streamRequest = buildA2ARequest(target, input.prompt, {
         streaming: true,
-        allowPrivate
+        allowPrivate,
+        acceptedOutputModes
       });
       const headers = withAgentAuthorization(streamRequest.headers, input.agentAuthorization);
       const response = await request(streamRequest.url, requestOptions({
@@ -255,6 +268,25 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
   }
 
   return redactReport(finalize(checks, input, startedAt), secrets);
+}
+
+export function negotiateDiagnosticOutputModes(card) {
+  if (!Object.hasOwn(card || {}, 'defaultOutputModes')) {
+    return [...DEFAULT_OUTPUT_MODES];
+  }
+  const modes = [];
+  for (const mode of card.defaultOutputModes || []) {
+    if (SUPPORTED_OUTPUT_MODES.has(mode) && !modes.includes(mode)) {
+      modes.push(mode);
+    }
+  }
+  if (modes.length === 0) {
+    throw stageError(
+      'Agent Card 声明的输出模式与诊断平台支持的 output mode 不兼容',
+      'protocol'
+    );
+  }
+  return modes;
 }
 
 function emptyCheck(id) {

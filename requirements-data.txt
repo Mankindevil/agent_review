@@ -1,1 +1,2 @@
 panda-data==0.0.12
+pyarrow==25.0.0
