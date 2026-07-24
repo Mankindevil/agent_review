@@ -106,6 +106,7 @@ test('live smoke validates artifacts from the orchestrator runs directory', asyn
     'market-report.txt': 'report',
     'evidence-pack.json': `${JSON.stringify({
       schemaVersion: '1.0',
+      evidenceModelVersion: '2.0',
       runId,
       reportDate,
       status: 'complete',
@@ -274,6 +275,7 @@ test('fresh orchestrator processes reuse the durable same-date smoke receipt', a
       mailer,
       worker: async ({ request }) => ({
         schemaVersion: '1.0',
+        evidenceModelVersion: '2.0',
         runId: request.runId,
         reportDate: request.date,
         status: 'complete',

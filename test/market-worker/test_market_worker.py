@@ -135,6 +135,32 @@ class FakePanda:
         ])
 
 
+class AcceleratingPanda(FakePanda):
+    def get_stock_daily(self, *args, **kwargs):
+        rows = super().get_stock_daily(*args, **kwargs).to_dict()
+        by_symbol = {}
+        for row in rows:
+            by_symbol.setdefault(row["symbol"], []).append(row)
+        for values in by_symbol.values():
+            values.sort(key=lambda row: row["date"])
+            previous = float(values[0]["pre_close"])
+            acceleration_start = max(0, len(values) - 5)
+            for index, row in enumerate(values):
+                rate = .01 if index >= acceleration_start else .001
+                close = previous * (1 + rate)
+                row.update({
+                    "open": previous,
+                    "close": close,
+                    "high": close * 1.01,
+                    "low": previous * .99,
+                    "pre_close": previous,
+                    "limit_up": previous * 1.1,
+                    "limit_down": previous * .9,
+                })
+                previous = close
+        return FakeFrame(rows)
+
+
 class MarketWorkerTests(unittest.TestCase):
     def test_build_evidence_pack_uses_completed_trade_date_and_traces_every_call(self):
         trace = []
@@ -617,7 +643,7 @@ class MarketWorkerTests(unittest.TestCase):
         self.assertEqual([item["method"] for item in concept_missing], ["get_concept_list"])
 
     def test_financial_publication_after_report_date_is_excluded(self):
-        class LateFinancialPanda(FakePanda):
+        class LateFinancialPanda(AcceleratingPanda):
             def get_fina_performance(self, symbol=None, **params):
                 return FakeFrame([
                     {"symbol": stock_symbol, "info_date": publication,
@@ -865,7 +891,7 @@ class MarketWorkerTests(unittest.TestCase):
         pack = worker.build_evidence_pack(
             {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
              "minLiquidityCny": 20_000_000},
-            worker.PandaCollector(FakePanda(), lambda _: None, None, 0),
+            worker.PandaCollector(AcceleratingPanda(), lambda _: None, None, 0),
             now="2026-07-24T10:30:00Z",
         )
         last_member = next(
@@ -930,7 +956,7 @@ class MarketWorkerTests(unittest.TestCase):
 
     def test_fixed_query_plan_batches_broad_daily_requests(self):
         class ManyStocksPanda(FakePanda):
-            symbols = [f"{value:06d}.SZ" for value in range(1, 402)]
+            symbols = [f"{value:06d}.SZ" for value in range(1, 602)]
 
             def __init__(self):
                 self.daily_batch_sizes = []
@@ -949,7 +975,7 @@ class MarketWorkerTests(unittest.TestCase):
             worker.PandaCollector(provider, lambda _: None, None, 0),
             now="2026-07-24T10:30:00Z",
         )
-        self.assertEqual(sum(provider.daily_batch_sizes), 401)
+        self.assertEqual(sum(provider.daily_batch_sizes), 601)
         self.assertTrue(all(size * 60 <= 480 for size in provider.daily_batch_sizes))
 
     def test_report_date_coverage_is_global_not_per_small_batch(self):
@@ -994,26 +1020,47 @@ class MarketWorkerTests(unittest.TestCase):
         self.assertEqual(trace[0]["status"], "error")
         self.assertTrue(trace[0]["truncated"])
 
-    def test_collector_accepts_legitimate_response_at_declared_bound(self):
+    def test_collector_accepts_legitimate_response_below_provider_bound(self):
         class ExactBoundPanda:
             __version__ = "0.0.12"
 
             def get_stock_daily(self, **params):
                 return FakeFrame([
                     {"symbol": "000001.SZ", "date": "20260723", "sequence": index}
-                    for index in range(500)
+                    for index in range(499)
                 ])
 
         trace = []
         rows = worker.PandaCollector(ExactBoundPanda(), trace.append, None, 0).call(
             "get_stock_daily",
-            expected_max_rows=500,
+            expected_max_rows=499,
             start_date="20260101",
             end_date="20260723",
             symbol=["000001.SZ"],
         )
-        self.assertEqual(len(rows), 500)
+        self.assertEqual(len(rows), 499)
         self.assertFalse(trace[0]["truncated"])
+
+    def test_collector_traces_industry_membership_in_date_as_data_as_of(self):
+        class IndustryPanda:
+            __version__ = "0.0.12"
+
+            def get_industry_constituents(self, **params):
+                return FakeFrame([{
+                    "stock_symbol": "000001.SZ",
+                    "l1_code": "801010",
+                    "in_date": "20200102",
+                    "out_date": None,
+                }])
+
+        trace = []
+        worker.PandaCollector(IndustryPanda(), trace.append, None, 0).call(
+            "get_industry_constituents",
+            expected_max_rows=4,
+            stock_symbol=["000001.SZ"],
+            level="L1",
+        )
+        self.assertEqual(trace[0]["dataAsOf"], "2020-01-02")
 
     def test_collector_traces_exception_paths_without_secrets(self):
         class FailingPanda:
@@ -1476,13 +1523,26 @@ class MarketWorkerTests(unittest.TestCase):
         self.assertAlmostEqual(ranked["finite"]["score"], 75)
 
     def test_potential_watchlist_applies_audit_and_unlock_vetoes(self):
+        evidence = {
+            name: {
+                "raw": 1, "transformed": 1, "coverage": 1, "positive": True,
+            }
+            for name in (
+                "trend", "theme", "quality", "valuation", "capital",
+                "liquidity_stability",
+            )
+        }
         rows = [
             {"symbol": "000001.SZ", "trend": 80, "theme": 80, "quality": 80, "valuation": 80,
              "capital": 80, "liquidity_stability": 80, "risk_penalty": 0, "st": False,
-             "nonstandard_audit": False, "unlock_float_pct_30d": 0, "coverage": 1},
+             "nonstandard_audit": False, "unlock_float_pct_30d": 0, "coverage": 1,
+             "rowCount": 20, "medianAmount20": 30_000_000,
+             "_metricEvidence": evidence},
             {"symbol": "000002.SZ", "trend": 99, "theme": 99, "quality": 99, "valuation": 99,
              "capital": 99, "liquidity_stability": 99, "risk_penalty": 0, "st": False,
-             "nonstandard_audit": True, "unlock_float_pct_30d": 0, "coverage": 1},
+             "nonstandard_audit": True, "unlock_float_pct_30d": 0, "coverage": 1,
+             "rowCount": 20, "medianAmount20": 30_000_000,
+             "_metricEvidence": evidence},
         ]
         ranked = worker.compute_potential_watchlist(rows)
         self.assertEqual(ranked[0]["symbol"], "000001.SZ")
@@ -1540,6 +1600,16 @@ class MarketWorkerTests(unittest.TestCase):
             "capital": 80, "liquidity_stability": 80, "risk_penalty": 0,
             "tradable": True, "st": False, "suspended": False,
             "rowCount": 20, "medianAmount20": 20_000_000,
+            "_metricEvidence": {
+                name: {
+                    "raw": 1, "transformed": 1,
+                    "coverage": 1, "positive": True,
+                }
+                for name in (
+                    "trend", "theme", "quality", "valuation", "capital",
+                    "liquidity_stability",
+                )
+            },
         }
         rows = worker.compute_potential_watchlist([
             {**base, "symbol": "eligible"},
@@ -1608,6 +1678,344 @@ class MarketWorkerTests(unittest.TestCase):
         self.assertIn("applicationVersion", pack)
         self.assertIn("skillVersions", pack)
         self.assertIn("configFingerprint", pack)
+
+    def test_group_hot_formulas_use_constituent_winsorization_and_daily_aggregate_turnover(self):
+        daily = {}
+        accelerations = [.01, .02, .03, .04, 10.0]
+        for index, ret1 in enumerate([.01, .02, .03, .04, 10.0], start=1):
+            symbol = f"00000{index}.SZ"
+            series = []
+            for day in range(20):
+                amount = 20.0 if day == 19 else (10.0 if index == 1 else 0.1)
+                series.append({
+                    "date": f"202601{day + 1:02d}",
+                    "amount": amount,
+                })
+            daily[symbol] = {
+                "symbol": symbol,
+                "dataDate": "2026-01-20",
+                "ret1": ret1,
+                "ret5": ret1,
+                "acceleration": accelerations[index - 1],
+                "windowCoverage": {
+                    "ret1": 1, "ret5": 1, "breadth5": 1,
+                    "turnover_heat": 1, "acceleration": 1,
+                },
+                "dailySeries": series,
+            }
+        memberships = [
+            {
+                "stock_symbol": symbol,
+                "l1_code": "group",
+                "l1_name": "group",
+                "in_date": "20200101",
+            }
+            for symbol in daily
+        ]
+        group = worker._group_metrics(
+            memberships, daily, "l1_code", "l1_name", "stock_symbol",
+            {next(iter(daily))}, True, "industry",
+        )[0]
+        expected_ret = sum(worker.winsorize([.01, .02, .03, .04, 10.0])) / 5
+        self.assertAlmostEqual(group["ret1"], expected_ret)
+        self.assertAlmostEqual(group["ret5"], expected_ret)
+        self.assertAlmostEqual(
+            group["acceleration"],
+            sum(worker.winsorize(accelerations)) / len(accelerations),
+        )
+        self.assertAlmostEqual(group["turnover_heat"], 100 / 10.4)
+        self.assertAlmostEqual(group["lhb_activity"], .2)
+
+    def test_potential_requires_four_genuinely_positive_families(self):
+        row = {
+            "symbol": "all-negative",
+            "trend": 90, "theme": 90, "quality": 90,
+            "capital": 90, "liquidity_stability": 90,
+            "valuation": None, "rowCount": 20, "medianAmount20": 30_000_000,
+            "tradable": True, "st": False, "suspended": False,
+            "_metricEvidence": {
+                name: {
+                    "raw": -1, "transformed": -1, "coverage": 1,
+                    "positive": False,
+                }
+                for name in (
+                    "trend", "theme", "quality", "capital",
+                    "liquidity_stability",
+                )
+            },
+        }
+        ranked = worker.compute_potential_watchlist([row])
+        self.assertEqual(ranked[0]["status"], "EVIDENCE_INSUFFICIENT")
+        self.assertEqual(ranked[0]["positiveFamilyCount"], 0)
+
+    def test_potential_fails_closed_when_candidate_gates_or_metric_evidence_are_missing(self):
+        base = {
+            "trend": 90, "theme": 90, "quality": 90, "capital": 90,
+            "liquidity_stability": 90, "valuation": None,
+            "tradable": True, "st": False, "suspended": False,
+        }
+        rows = worker.compute_potential_watchlist([
+            {**base, "symbol": "missing-gates"},
+            {
+                **base, "symbol": "missing-evidence",
+                "rowCount": 20, "medianAmount20": 30_000_000,
+            },
+        ])
+        by_symbol = {row["symbol"]: row for row in rows}
+        self.assertEqual(by_symbol["missing-gates"]["status"], "EVIDENCE_INSUFFICIENT")
+        self.assertIn(
+            "CANDIDATE_GATE_FAILED",
+            by_symbol["missing-gates"]["eligibilityFailures"],
+        )
+        self.assertEqual(
+            by_symbol["missing-evidence"]["status"], "EVIDENCE_INSUFFICIENT"
+        )
+        self.assertEqual(by_symbol["missing-evidence"]["evidenceCoverage"], 0)
+        self.assertEqual(by_symbol["missing-evidence"]["positiveFamilyCount"], 0)
+
+    def test_potential_risk_penalty_is_represented_by_traceable_metrics(self):
+        evidence = {
+            name: {
+                "raw": 1, "transformed": 1, "coverage": 1, "positive": True,
+                "dataDate": "2026-07-23", "window": "20d",
+                "evidenceIds": ["panda-call-daily"],
+            }
+            for name in (
+                "trend", "theme", "quality", "capital", "liquidity_stability",
+            )
+        }
+        row = worker.compute_potential_watchlist([{
+            "symbol": "000001.SZ", "reportDate": "2026-07-23",
+            "dataDate": "2026-07-23", "trend": 90, "theme": 90, "quality": 90,
+            "capital": 90, "liquidity_stability": 90, "valuation": None,
+            "rowCount": 20, "medianAmount20": 30_000_000,
+            "tradable": True, "st": False, "suspended": False,
+            "risk_penalty": 5, "riskPenalties": {"crowding": 5},
+            "_metricEvidence": evidence,
+            "_riskMetricEvidence": {
+                "crowding": {
+                    "raw": {"turnoverHeat": 3.5}, "transformed": 3.5,
+                    "dataDate": "2026-07-23", "window": "20d", "coverage": 1,
+                    "sourceRole": "risk_crowding",
+                    "evidenceIds": ["panda-call-daily"],
+                }
+            },
+        }])[0]
+        risk_metrics = [metric for metric in row["metrics"] if metric["penalty"] > 0]
+        self.assertEqual([metric["name"] for metric in risk_metrics], ["risk_crowding"])
+        self.assertEqual(sum(metric["penalty"] for metric in risk_metrics), 5)
+        self.assertEqual(risk_metrics[0]["evidenceIds"], ["panda-call-daily"])
+
+    def test_built_pack_carries_nonzero_risk_penalty_into_conclusion_lineage(self):
+        class CrowdedPanda(AcceleratingPanda):
+            def get_stock_daily(self, *args, **kwargs):
+                rows = super().get_stock_daily(*args, **kwargs).to_dict()
+                for row in rows:
+                    if row["date"] == kwargs["end_date"]:
+                        row["amount"] *= 4
+                return FakeFrame(rows)
+
+        pack = worker.build_evidence_pack(
+            {
+                "operation": "daily-market-report", "date": "2026-07-23",
+                "topN": 10, "minLiquidityCny": 20_000_000,
+            },
+            worker.PandaCollector(CrowdedPanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertTrue(pack["leaderboards"]["potentialWatchlist"])
+        row = pack["leaderboards"]["potentialWatchlist"][0]
+        risk_metrics = [metric for metric in row["metrics"] if metric["penalty"] > 0]
+        self.assertEqual(row["riskPenalty"], 5)
+        self.assertEqual([metric["sourceRole"] for metric in risk_metrics], [
+            "risk_crowding"
+        ])
+        conclusion = next(
+            item for item in pack["conclusions"]
+            if item["leaderboard"] == "potentialWatchlist"
+            and item["entryId"] == row["symbol"]
+        )
+        self.assertTrue(
+            set(risk_metrics[0]["evidenceIds"]) <= set(conclusion["pandaCalls"])
+        )
+
+    def test_theme_family_only_uses_broad_accelerating_groups(self):
+        groups = [
+            {"id": "warming", "memberSymbols": ["000001.SZ"],
+             "constituent_count": 6, "coverage": .9, "acceleration": .02},
+            {"id": "cooling", "memberSymbols": ["000001.SZ"],
+             "constituent_count": 20, "coverage": 1, "acceleration": -.50},
+        ]
+        selected = worker._accelerating_groups_for_symbol(groups, "000001.SZ")
+        self.assertEqual([item["id"] for item in selected], ["warming"])
+
+    def test_point_in_time_helpers_reject_future_announcements_and_select_latest_as_of(self):
+        rows = [
+            {"symbol": "000001.SZ", "info_date": "20260430",
+             "end_date": "20260331", "value": 1},
+            {"symbol": "000001.SZ", "info_date": "20260830",
+             "end_date": "20260630", "value": 999},
+        ]
+        latest = worker._latest_as_of_by_symbol(
+            rows, "20260723", ("info_date",), ("end_date",)
+        )
+        self.assertEqual(latest["000001.SZ"]["value"], 1)
+        self.assertEqual(
+            worker._quarter_bounds(date(2026, 7, 23), years=2),
+            ("2024q1", "2026q2"),
+        )
+
+    def test_latest_audit_ignores_newer_no_audit_placeholder(self):
+        selected = worker._latest_actual_audit_by_symbol([
+            {
+                "symbol": "000001.SZ", "date": "20260430",
+                "opinion": "qualified_opinion",
+            },
+            {
+                "symbol": "000001.SZ", "date": "20260720",
+                "opinion": "no_audit_performed",
+            },
+        ], "20260723")
+        self.assertEqual(
+            selected["000001.SZ"][0]["opinion"], "qualified_opinion"
+        )
+
+    def test_unlock_and_event_filters_apply_announcement_as_of_and_forward_window(self):
+        rows = [
+            {"symbol": "past-event", "date": "20260701", "relieve_date": "20260720"},
+            {"symbol": "valid", "date": "20260701", "relieve_date": "20260801"},
+            {"symbol": "future-announcement", "date": "20260724", "relieve_date": "20260801"},
+            {"symbol": "too-late", "date": "20260701", "relieve_date": "20260830"},
+        ]
+        selected = worker._unlock_events_as_of(rows, date(2026, 7, 23), days=30)
+        self.assertEqual([row["symbol"] for row in selected], ["valid"])
+
+    def test_block_discount_uses_same_date_close_not_report_date_close(self):
+        blocks = [
+            {"symbol": "000001.SZ", "date": "20260701", "price": 9.5},
+        ]
+        daily_rows = [
+            {"symbol": "000001.SZ", "date": "20260701", "close": 9.0},
+            {"symbol": "000001.SZ", "date": "20260723", "close": 12.0},
+        ]
+        self.assertEqual(worker._discounted_block_trades(blocks, daily_rows), [])
+
+    def test_directional_lhb_requires_complete_buy_and_sell_queries(self):
+        buy = [{"symbol": "000001.SZ", "side": "buy", "b_value": 100, "s_value": 20}]
+        sell = [{"symbol": "000001.SZ", "side": "sell", "b_value": 10, "s_value": 200}]
+        self.assertIsNone(worker._complete_directional_lhb(buy, sell, True, False))
+        self.assertEqual(
+            worker._complete_directional_lhb(buy, sell, True, True)["000001.SZ"],
+            110,
+        )
+
+    def test_potential_rejects_stale_security_even_when_universe_coverage_is_allowed(self):
+        row = {
+            "symbol": "stale",
+            "reportDate": "2026-07-23",
+            "dataDate": "2026-07-22",
+            "trend": 90, "theme": 90, "quality": 90, "capital": 90,
+            "liquidity_stability": 90, "valuation": None,
+            "rowCount": 20, "medianAmount20": 30_000_000,
+            "tradable": True, "st": False, "suspended": False,
+            "_metricEvidence": {
+                name: {
+                    "raw": 1, "transformed": 1, "coverage": 1,
+                    "positive": True,
+                }
+                for name in (
+                    "trend", "theme", "quality", "capital",
+                    "liquidity_stability",
+                )
+            },
+        }
+        ranked = worker.compute_potential_watchlist([row])
+        self.assertEqual(ranked[0]["status"], "EVIDENCE_INSUFFICIENT")
+        self.assertIn("STALE_SECURITY_DATE", ranked[0]["eligibilityFailures"])
+
+    def test_hot_exclusions_are_recorded_for_every_insufficiency_reason(self):
+        groups = [
+            {"id": "small", "constituent_count": 4, "coverage": 1},
+            {"id": "missing", "constituent_count": 6, "coverage": 1,
+             "ret1": None, "ret5": 1, "breadth5": 1,
+             "turnover_heat": 1, "acceleration": 1},
+        ]
+        result = worker.compute_hot_topics(groups)
+        missing = []
+        worker._record_hot_exclusions(missing, "hotIndustries", result["excluded"])
+        self.assertEqual(
+            {item["reason"] for item in missing},
+            {"MIN_CONSTITUENTS", "INSUFFICIENT_REQUIRED_COMPONENTS"},
+        )
+
+    def test_exact_provider_cap_is_incomplete_even_when_equal_to_declared_bound(self):
+        class ExactCapPanda:
+            def get_rows(self):
+                return FakeFrame([{"symbol": f"S{index}", "date": "20260723"}
+                                  for index in range(500)])
+
+        trace = []
+        collector = worker.PandaCollector(ExactCapPanda(), trace.append, None, 0, 500)
+        with self.assertRaisesRegex(ValueError, "截断|cap|trunc"):
+            collector.call("get_rows", expected_max_rows=500)
+        self.assertTrue(trace[-1]["truncated"])
+        self.assertEqual(trace[-1]["providerMaxRows"], 500)
+
+    def test_unpaginated_trade_list_can_exceed_internal_batch_cap(self):
+        class FullUniversePanda:
+            def get_trade_list(self, **_params):
+                return FakeFrame([
+                    {"symbol": f"{index:06d}.SZ", "date": "20260723"}
+                    for index in range(1, 502)
+                ])
+
+        trace = []
+        collector = worker.PandaCollector(
+            FullUniversePanda(), trace.append, None, 0, 500
+        )
+        rows = collector.call(
+            "get_trade_list", expected_max_rows=20_000,
+            allow_over_provider_cap=True, date="20260723", exchange="SH",
+        )
+        self.assertEqual(len(rows), 501)
+        self.assertFalse(trace[-1]["truncated"])
+
+    def test_symbol_batches_stay_below_provider_cap_and_record_batch_metadata(self):
+        class BatchPanda:
+            def get_margin(self, symbol=None, **_params):
+                return FakeFrame([
+                    {"symbol": item, "date": "20260723", "margin_balance": 1}
+                    for item in symbol
+                ])
+
+        trace = []
+        collector = worker.PandaCollector(BatchPanda(), trace.append, None, 0, 500)
+        rows, complete = worker._call_symbol_batches(
+            collector, [], "capital", "get_margin",
+            [f"S{index}" for index in range(100)],
+            rows_per_symbol=20,
+            start_date="20260701", end_date="20260723",
+        )
+        self.assertTrue(complete)
+        self.assertEqual(len(rows), 100)
+        self.assertTrue(all(event["expectedMaxRows"] < 500 for event in trace))
+        self.assertTrue(all(event["batchCount"] == 5 for event in trace))
+
+    def test_pack_emits_one_exact_conclusion_per_public_ranked_row(self):
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(FakePanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        expected = sum(len(rows) for rows in pack["leaderboards"].values())
+        self.assertEqual(len(pack["conclusions"]), expected)
+        for conclusion in pack["conclusions"]:
+            self.assertNotIn(",", conclusion["leaderboard"])
+            self.assertTrue(conclusion["dataDates"])
+            self.assertTrue(conclusion["windows"])
+            self.assertIn("stale", conclusion)
+            self.assertIn("missing", conclusion)
 
 
 if __name__ == "__main__":

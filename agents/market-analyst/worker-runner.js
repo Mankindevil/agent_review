@@ -60,9 +60,6 @@ export function runMarketWorker({
   onTrace = () => {}
 }) {
   if (!config || typeof config !== 'object') throw new TypeError('config is required');
-  if (typeof config.python !== 'string' || !config.python) {
-    throw new TypeError('config.python is required');
-  }
   if (typeof config.stateDir !== 'string' || !config.stateDir) {
     throw new TypeError('config.stateDir is required');
   }
@@ -71,6 +68,9 @@ export function runMarketWorker({
   }
   if (!config.panda?.ready) {
     throw workerError('Panda data source is not configured and ready', 'PANDA_NOT_READY');
+  }
+  if (typeof config.panda.python !== 'string' || !config.panda.python) {
+    throw new TypeError('config.panda.python is required');
   }
   const timeoutMs = positiveInteger(config.workerTimeoutMs, 'workerTimeoutMs');
   const terminationGraceMs = positiveInteger(
@@ -243,7 +243,7 @@ export function runMarketWorker({
     };
 
     try {
-      child = spawnImpl(config.python, [WORKER_FILE], {
+      child = spawnImpl(config.panda.python, [WORKER_FILE], {
         cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'pipe'],
         env: {

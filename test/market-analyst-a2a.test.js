@@ -38,6 +38,78 @@ function continuationRequest(messageId, taskId, text, configuration = {}) {
   };
 }
 
+function traceableRow(board, identity, sourceId, sourceRole, score = 80) {
+  return {
+    rank: 1,
+    symbol: identity,
+    dataDate: '2026-07-23',
+    status: 'RANKED',
+    score,
+    baseScore: score,
+    weightCoverage: 1,
+    riskPenalty: 0,
+    confidence: 1,
+    metrics: [{
+      id: `metric-${board}-${identity}`,
+      name: sourceRole,
+      sourceRole,
+      raw: score,
+      transformed: score,
+      winsorized: score,
+      percentile: score,
+      originalWeight: 1,
+      effectiveWeight: 1,
+      contribution: score,
+      penalty: 0,
+      coverage: 1,
+      dataDate: '2026-07-23',
+      window: '20d',
+      evidenceIds: [sourceId]
+    }]
+  };
+}
+
+function traceableConclusion(board, row, sourceId, sectionId) {
+  const identity = String(row.symbol || row.id || row.name);
+  return {
+    id: `${board}:${identity}`,
+    conclusion_id: `${board}:${identity}`,
+    sectionId,
+    leaderboard: board,
+    entryId: identity,
+    formula: `${board}-v2`,
+    metricIds: row.metrics.map((metric) => metric.id),
+    evidenceIds: [sourceId],
+    pandaCalls: [sourceId],
+    sourceIds: [sourceId],
+    dataDates: ['2026-07-23'],
+    windows: ['20d'],
+    stale: false,
+    missing: [],
+    limitations: [],
+    confidence: 1
+  };
+}
+
+function traceableSource(id) {
+  return {
+    id,
+    traceCallId: id,
+    method: 'get_stock_daily',
+    paramsHash: 'a'.repeat(64),
+    fields: ['symbol', 'date', 'close'],
+    dataAsOf: '2026-07-23',
+    window: '2026-07-01/2026-07-23',
+    coverage: 1,
+    rowCount: 20,
+    status: 'ok',
+    responseHash: 'b'.repeat(64),
+    cacheStatus: 'miss',
+    retryCount: 0,
+    truncated: false
+  };
+}
+
 function completedArtifacts(runId = 'run-fake') {
   return [
     {
@@ -50,10 +122,14 @@ function completedArtifacts(runId = 'run-fake') {
       mediaType: 'application/json',
       data: {
         schemaVersion: '1.0',
+        evidenceModelVersion: '2.0',
         runId,
         reportDate: '2026-07-23',
         status: 'complete',
-        conclusions: []
+        markets: {},
+        conclusions: [],
+        leaderboards: {},
+        sources: []
       }
     },
     {
@@ -69,6 +145,14 @@ function completedArtifacts(runId = 'run-fake') {
 }
 
 function analyticalArtifacts(runId = 'run-analytical') {
+  const hotRow = traceableRow('hotIndustries', 'HOT-MARKER', 'source-hot', 'ret1');
+  const conceptRow = traceableRow('hotConcepts', 'CONCEPT-MARKER', 'source-hot', 'ret1');
+  const sellRow = traceableRow(
+    'sellPressure', 'SELL-MARKER', 'source-sell', 'downside_volume'
+  );
+  const potentialRow = traceableRow(
+    'potentialWatchlist', 'POTENTIAL-MARKER', 'source-potential', 'trend'
+  );
   return [
     {
       name: 'market-report.md',
@@ -84,29 +168,30 @@ function analyticalArtifacts(runId = 'run-analytical') {
       sha256: 'b'.repeat(64),
       data: {
         schemaVersion: '1.0',
+        evidenceModelVersion: '2.0',
         runId,
         reportDate: '2026-07-23',
         status: 'complete',
         markets: { unrelated: 'UNRELATED-MARKET' },
         conclusions: [
-          { id: 'hot', sectionId: 'hot-topics', sourceIds: ['source-hot'] },
-          { id: 'sell', sectionId: 'sell-pressure', sourceIds: ['source-sell'] },
-          {
-            id: 'potential',
-            sectionId: 'potential-watchlist',
-            sourceIds: ['source-potential']
-          }
+          traceableConclusion('hotIndustries', hotRow, 'source-hot', 'hot-topics'),
+          traceableConclusion('hotConcepts', conceptRow, 'source-hot', 'hot-topics'),
+          traceableConclusion('sellPressure', sellRow, 'source-sell', 'sell-pressure'),
+          traceableConclusion(
+            'potentialWatchlist', potentialRow, 'source-potential',
+            'potential-watchlist'
+          )
         ],
         leaderboards: {
-          hotIndustries: [{ symbol: 'HOT-MARKER' }],
-          hotConcepts: [{ symbol: 'CONCEPT-MARKER' }],
-          sellPressure: [{ symbol: 'SELL-MARKER' }],
-          potentialWatchlist: [{ symbol: 'POTENTIAL-MARKER' }]
+          hotIndustries: [hotRow],
+          hotConcepts: [conceptRow],
+          sellPressure: [sellRow],
+          potentialWatchlist: [potentialRow]
         },
         sources: [
-          { id: 'source-hot', marker: 'HOT-SOURCE' },
-          { id: 'source-sell', marker: 'SELL-SOURCE' },
-          { id: 'source-potential', marker: 'POTENTIAL-SOURCE' }
+          { ...traceableSource('source-hot'), marker: 'HOT-SOURCE' },
+          { ...traceableSource('source-sell'), marker: 'SELL-SOURCE' },
+          { ...traceableSource('source-potential'), marker: 'POTENTIAL-SOURCE' }
         ],
         missingData: [
           { section: 'hotIndustries', marker: 'HOT-MISSING' },
@@ -1570,13 +1655,24 @@ test('protected analytical run detail always applies the persisted public projec
 test('oversized analytical stream artifacts never link to an unprojected run artifact', async (t) => {
   const artifactLoader = async (summary) => {
     const artifacts = analyticalArtifacts(summary.runId);
-    artifacts[1].data.leaderboards.hotIndustries = Array.from(
-      { length: 500 },
-      (_, index) => ({
-        symbol: `HOT-${String(index).padStart(4, '0')}`,
-        detail: 'projected-evidence'.repeat(8)
-      })
+    const rows = Array.from(
+      { length: 60 },
+      (_, index) => traceableRow(
+        'hotIndustries',
+        `HOT-${String(index).padStart(4, '0')}`,
+        'source-hot',
+        'ret1'
+      )
     );
+    artifacts[1].data.leaderboards.hotIndustries = rows;
+    artifacts[1].data.conclusions = [
+      ...artifacts[1].data.conclusions.filter(
+        ({ leaderboard }) => leaderboard !== 'hotIndustries'
+      ),
+      ...rows.map((row) =>
+        traceableConclusion('hotIndustries', row, 'source-hot', 'hot-topics')
+      )
+    ];
     return artifacts;
   };
   const { origin } = await startHarness(t, { artifactLoader });
@@ -1593,7 +1689,7 @@ test('oversized analytical stream artifacts never link to an unprojected run art
     .find(({ artifactUpdate }) =>
       artifactUpdate?.artifact?.name === 'evidence-pack.json'
     )?.artifactUpdate?.artifact;
-  assert.ok(evidence);
+  assert.ok(evidence, raw);
   assert.equal(evidence.parts.some(({ url }) => url?.startsWith('/runs/')), false);
   assert.equal(JSON.stringify(evidence).includes('SELL-MARKER'), false);
   for (const frame of raw.split('\n\n').filter(Boolean)) {

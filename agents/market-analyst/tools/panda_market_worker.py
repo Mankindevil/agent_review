@@ -24,7 +24,6 @@ SKILL_VERSIONS = {
 }
 REQUIRED_TRADING_SESSIONS = 60
 PROVIDER_ROW_CAP = 500
-SAFE_DAILY_ROW_BUDGET = 480
 CORE_REPORT_DATE_COVERAGE = .95
 OPTIONAL_CANDIDATE_COVERAGE = .80
 MAX_PRELIMINARY_CANDIDATES = 300
@@ -113,7 +112,8 @@ def _file_hash(path):
 
 
 class PandaCollector:
-    def __init__(self, module, trace, cache_dir, cache_days):
+    def __init__(self, module, trace, cache_dir, cache_days,
+                 provider_max_rows=PROVIDER_ROW_CAP):
         self.module = module
         self.trace = trace
         self.cache_dir = cache_dir
@@ -122,6 +122,9 @@ class PandaCollector:
         self.records = []
         self._sequence = 0
         self._cache_transaction = None
+        self.provider_max_rows = int(provider_max_rows)
+        if self.provider_max_rows < 2:
+            raise ValueError("provider_max_rows must be at least 2")
 
     def _emit(self, record):
         self.records.append(record)
@@ -276,8 +279,10 @@ class PandaCollector:
             for cache_key in pending:
                 self._invalidate_cache(cache_key)
 
-    def call(self, method, *, expected_max_rows=None, required_date=None,
-             required_symbols=None, minimum_symbol_coverage=None, **params):
+    def call(self, method, *, expected_max_rows=None,
+             allow_over_provider_cap=False, required_date=None,
+             required_symbols=None, minimum_symbol_coverage=None,
+             batch_index=None, batch_count=None, **params):
         started = datetime.now(timezone.utc)
         rows = []
         status = "error"
@@ -303,8 +308,8 @@ class PandaCollector:
                 provider_fetched = True
             if expected_max_rows is not None:
                 cap_shape = (
-                    len(rows) == PROVIDER_ROW_CAP and
-                    int(expected_max_rows) > PROVIDER_ROW_CAP
+                    not allow_over_provider_cap
+                    and len(rows) >= self.provider_max_rows
                 )
                 if len(rows) > int(expected_max_rows) or cap_shape:
                     truncated = True
@@ -312,6 +317,12 @@ class PandaCollector:
                         f"{method} 响应违反声明上限，疑似截断："
                         f"{len(rows)}/{expected_max_rows}"
                     )
+            elif not allow_over_provider_cap and len(rows) >= self.provider_max_rows:
+                truncated = True
+                raise ValueError(
+                    f"{method} response is truncated at provider cap: "
+                    f"{len(rows)}/{self.provider_max_rows}"
+                )
             if required_symbols is not None and required_date is not None:
                 expected_symbols = {str(value) for value in required_symbols}
                 present_symbols = {
@@ -354,16 +365,25 @@ class PandaCollector:
                 _iso_date(
                     row.get("date") or row.get("nature_date")
                     or row.get("info_date") or row.get("publish_date")
+                    or row.get("in_date")
                 )
                 for row in rows
             ]
+            scope_value = (
+                params.get("symbol") or params.get("stock_symbol")
+                or params.get("concept_stock")
+            )
             requested_symbols = (
-                {str(value) for value in params.get("symbol")}
-                if isinstance(params.get("symbol"), (list, tuple, set))
-                else ({str(params["symbol"])} if params.get("symbol") else set())
+                {str(value) for value in scope_value}
+                if isinstance(scope_value, (list, tuple, set))
+                else ({str(scope_value)} if scope_value else set())
             )
             present_symbols = {
-                str(row.get("symbol")) for row in rows if row.get("symbol")
+                str(row.get("symbol") or row.get("stock_symbol")
+                    or row.get("concept_stock"))
+                for row in rows
+                if (row.get("symbol") or row.get("stock_symbol")
+                    or row.get("concept_stock"))
             }
             call_coverage = (
                 len(requested_symbols & present_symbols) / len(requested_symbols)
@@ -389,7 +409,13 @@ class PandaCollector:
                     if params.get("start_date") and params.get("end_date")
                     else _iso_date(params.get("date"))
                 ),
-                "dataAsOf": max((item for item in dates if item), default=None),
+                "dataAsOf": max(
+                    (item for item in dates if item),
+                    default=_iso_date(
+                        params.get("end_date") or params.get("date")
+                        or params.get("info_date")
+                    ),
+                ),
                 "responseHash": _content_hash(rows) if status == "ok" else None,
                 "status": status,
                 "error": error,
@@ -398,10 +424,14 @@ class PandaCollector:
                 "cacheError": cache_error,
                 "retryCount": 0,
                 "truncated": truncated,
+                "providerMaxRows": self.provider_max_rows,
+                "expectedMaxRows": expected_max_rows,
+                "batchIndex": batch_index,
+                "batchCount": batch_count,
                 "_scopeSymbols": (
-                    [str(value) for value in params.get("symbol")]
-                    if isinstance(params.get("symbol"), (list, tuple, set))
-                    else ([str(params["symbol"])] if params.get("symbol") else [])
+                    [str(value) for value in scope_value]
+                    if isinstance(scope_value, (list, tuple, set))
+                    else ([str(scope_value)] if scope_value else [])
                 ),
             }
             self._emit(record)
@@ -493,6 +523,8 @@ def _metric_rows(row, weights, used, base_score, penalty=0):
             "freshnessDays": freshness_days,
             "freshnessFactor": freshness_factor,
             "window": detail.get("window") or "cross-section",
+            "sourceRole": detail.get("sourceRole") or key,
+            "positive": detail.get("positive"),
             "evidenceIds": list(detail.get("evidenceIds") or []),
         })
     # Avoid serialisation drift while making the contribution invariant exact.
@@ -500,6 +532,46 @@ def _metric_rows(row, weights, used, base_score, penalty=0):
         metrics[-1]["contribution"] += float(base_score) - sum(
             metric["contribution"] for metric in metrics
         )
+    return metrics
+
+
+def _risk_metric_rows(row):
+    evidence = row.get("_riskMetricEvidence") or {}
+    penalties = row.get("riskPenalties") or {}
+    metrics = []
+    for name, value in penalties.items():
+        if not _is_finite(value) or float(value) <= 0:
+            continue
+        penalty = float(value)
+        detail = evidence.get(name) or {}
+        data_date = detail.get("dataDate") or row.get("dataDate")
+        freshness_days, freshness_factor = _freshness(
+            data_date, row.get("reportDate") or row.get("dataDate")
+        )
+        transformed = detail.get("transformed")
+        transformed = float(transformed) if _is_finite(transformed) else penalty
+        metrics.append({
+            "id": detail.get("id") or (
+                f"metric-{_identity(row) or 'row'}-risk-{name}"
+            ),
+            "name": f"risk_{name}",
+            "raw": detail.get("raw", penalty),
+            "transformed": transformed,
+            "winsorized": transformed,
+            "percentile": min(100, max(0, penalty * 20)),
+            "originalWeight": 0,
+            "effectiveWeight": 0,
+            "contribution": 0,
+            "penalty": penalty,
+            "coverage": float(detail.get("coverage", 0)),
+            "dataDate": data_date,
+            "freshnessDays": freshness_days,
+            "freshnessFactor": freshness_factor,
+            "window": detail.get("window") or "risk-event",
+            "sourceRole": detail.get("sourceRole") or f"risk_{name}",
+            "positive": False,
+            "evidenceIds": list(detail.get("evidenceIds") or []),
+        })
     return metrics
 
 
@@ -570,6 +642,10 @@ def compute_sell_pressure(rows):
     for row in rows:
         score, coverage, used = effective_weights(row, SELL_WEIGHTS, 3)
         metrics = _metric_rows(row, SELL_WEIGHTS, used, score)
+        fresh_security = (
+            not row.get("reportDate")
+            or row.get("dataDate") == row.get("reportDate")
+        )
         ranked.append({
             **row, "baseScore": score, "score": score, "weightCoverage": coverage,
             "componentsUsed": used, "componentCount": len(used),
@@ -577,7 +653,13 @@ def compute_sell_pressure(rows):
             "scoreContributions": {
                 item["name"]: item["contribution"] for item in metrics
             },
-            "status": "RANKED" if score is not None else "EVIDENCE_INSUFFICIENT",
+            "eligibilityFailures": (
+                [] if fresh_security else ["STALE_SECURITY_DATE"]
+            ),
+            "status": (
+                "RANKED" if score is not None and fresh_security
+                else "EVIDENCE_INSUFFICIENT"
+            ),
         })
     ranked.sort(key=lambda item: (-(item["score"] if item["score"] is not None else -1), _identity(item)))
     return ranked
@@ -597,27 +679,60 @@ def compute_potential_watchlist(rows):
         if _is_finite(unlock) and float(unlock) > 10:
             vetoes.append("LARGE_UNLOCK_30D")
         score, coverage, used = effective_weights(row, POTENTIAL_WEIGHTS, 4)
-        candidate_eligible = (
-            (not _is_finite(row.get("rowCount")) or float(row["rowCount"]) >= 20)
-            and (
-                not _is_finite(row.get("medianAmount20"))
-                or float(row["medianAmount20"]) >= float(row.get(
-                    "minLiquidityCny", 20_000_000
-                ))
+        evidence = row.get("_metricEvidence") or {}
+        positive_used = [
+            key for key in used
+            if (evidence.get(key) or {}).get("positive") is True
+        ]
+        evidence_coverage = sum(
+            POTENTIAL_WEIGHTS[key] * (
+                max(
+                    0,
+                    min(1, float((evidence.get(key) or {}).get("coverage"))),
+                )
+                if key in evidence
+                and _is_finite((evidence.get(key) or {}).get("coverage"))
+                else 0
             )
+            for key in used
         )
+        candidate_eligible = (
+            _is_finite(row.get("rowCount")) and float(row["rowCount"]) >= 20
+            and _is_finite(row.get("medianAmount20"))
+            and float(row["medianAmount20"]) >= float(row.get(
+                "minLiquidityCny", 20_000_000
+            ))
+        )
+        eligibility_failures = []
+        if not candidate_eligible:
+            eligibility_failures.append("CANDIDATE_GATE_FAILED")
+        if (row.get("reportDate") and
+                row.get("dataDate") != row.get("reportDate")):
+            eligibility_failures.append("STALE_SECURITY_DATE")
         status = (
             "VETOED" if vetoes else
-            ("RANKED" if score is not None and coverage >= .70 and candidate_eligible
+            ("RANKED" if score is not None and coverage >= .70
+             and evidence_coverage >= .70 and len(positive_used) >= 4
+             and not eligibility_failures
              else "EVIDENCE_INSUFFICIENT")
         )
         risk_penalty = row.get("risk_penalty")
         penalty = float(risk_penalty) if _is_finite(risk_penalty) else 0
+        risk_metrics = _risk_metric_rows(row)
+        if abs(sum(item["penalty"] for item in risk_metrics) - penalty) > 1e-8:
+            eligibility_failures.append("RISK_EVIDENCE_MISSING")
+            if status == "RANKED":
+                status = "EVIDENCE_INSUFFICIENT"
         final = None if score is None else max(0, score - penalty)
         metrics = _metric_rows(row, POTENTIAL_WEIGHTS, used, score, penalty)
+        metrics.extend(risk_metrics)
         output.append({
             **row, "baseScore": score, "score": final, "riskPenalty": penalty,
             "weightCoverage": coverage, "componentsUsed": used,
+            "evidenceCoverage": evidence_coverage,
+            "positiveFamilies": positive_used,
+            "positiveFamilyCount": len(positive_used),
+            "eligibilityFailures": eligibility_failures,
             "componentCount": len(used), "metrics": metrics,
             "scoreContributions": {
                 **{item["name"]: item["contribution"] for item in metrics},
@@ -641,8 +756,16 @@ def _call_optional(collector, missing_data, section, method, **params):
 
 
 def _record_missing(missing_data, section, method, status, **details):
-    if any(item.get("section") == section and item.get("method") == method
-           for item in missing_data):
+    duplicate = any(
+        item.get("section") == section
+        and item.get("method") == method
+        and (
+            method != "hot-topic-eligibility"
+            or item.get("reason") == details.get("reason")
+        )
+        for item in missing_data
+    )
+    if duplicate:
         return
     missing = {"method": method, "section": section, "status": status, **details}
     if method == "get_lhb_list":
@@ -653,6 +776,41 @@ def _record_missing(missing_data, section, method, status, **details):
 def _batches(values, size):
     for index in range(0, len(values), size):
         yield values[index:index + size]
+
+
+def _call_symbol_batches(collector, missing_data, section, method, symbols,
+                         rows_per_symbol=1, symbol_param="symbol", **params):
+    symbols = list(dict.fromkeys(str(value) for value in symbols if value))
+    if not symbols:
+        return [], True
+    rows_per_symbol = max(1, int(rows_per_symbol))
+    batch_size = max(1, (collector.provider_max_rows - 1) // rows_per_symbol)
+    batches = list(_batches(symbols, batch_size))
+    output = []
+    for index, symbol_batch in enumerate(batches, start=1):
+        try:
+            call_params = {**params, symbol_param: symbol_batch}
+            output.extend(collector.call(
+                method,
+                expected_max_rows=len(symbol_batch) * rows_per_symbol,
+                batch_index=index,
+                batch_count=len(batches),
+                **call_params,
+            ))
+        except Exception as error:
+            record = collector.records[-1] if collector.records else {}
+            _record_missing(
+                missing_data, section, method, "INCOMPLETE_RESPONSE",
+                reason="provider batch failed or reached its row cap",
+                error=_sanitize_error(error),
+                batchIndex=index,
+                batchCount=len(batches),
+                truncated=bool(record.get("truncated")),
+                expectedMaxRows=record.get("expectedMaxRows"),
+                providerMaxRows=collector.provider_max_rows,
+            )
+            return [], False
+    return output, True
 
 
 def _daily_metrics(rows):
@@ -710,6 +868,17 @@ def _daily_metrics(rows):
             "volatility": max(closes[-20:]) / min(closes[-20:]) - 1
             if len(closes) >= 2 and min(closes[-20:]) else None,
             "rowCount": len(ordered),
+            "dailySeries": [
+                {
+                    "date": _date_text(row.get("date")),
+                    "amount": (
+                        float(row["amount"]) if _is_finite(row.get("amount"))
+                        else None
+                    ),
+                }
+                for row in ordered[-20:]
+                if _date_text(row.get("date"))
+            ],
             "windowCoverage": {
                 "ret1": min(1, len(log_returns)),
                 "ret5": min(1, len(log_returns) / 5),
@@ -753,13 +922,154 @@ def _point_in_time(rows, report_date, fields=("date", "info_date", "publish_date
     return output
 
 
+def _latest_as_of_by_symbol(rows, report_date, availability_fields,
+                            period_fields=()):
+    eligible = _point_in_time(rows, report_date, fields=availability_fields)
+    grouped = defaultdict(list)
+    for row in eligible:
+        if row.get("symbol"):
+            grouped[str(row["symbol"])].append(row)
+
+    def sort_key(row):
+        availability = max(
+            (_date_text(row.get(field)) for field in availability_fields),
+            default="",
+        )
+        period = max(
+            (_date_text(row.get(field)) for field in period_fields),
+            default="",
+        )
+        return availability, period
+
+    return {
+        symbol: max(values, key=sort_key)
+        for symbol, values in grouped.items()
+    }
+
+
+def _latest_actual_audit_by_symbol(rows, report_date):
+    actual = [
+        row for row in _point_in_time(rows, report_date, fields=("date",))
+        if str(row.get("opinion") or "").strip() not in {
+            "", "no_audit_performed"
+        }
+    ]
+    grouped = defaultdict(list)
+    for row in actual:
+        if row.get("symbol"):
+            grouped[str(row["symbol"])].append(row)
+    output = {}
+    for symbol, values in grouped.items():
+        latest_date = max(_date_text(row.get("date")) for row in values)
+        output[symbol] = [
+            row for row in values if _date_text(row.get("date")) == latest_date
+        ]
+    return output
+
+
+def _quarter_bounds(report_date, years=3):
+    current_quarter = (report_date.month - 1) // 3 + 1
+    completed_quarter = current_quarter - 1
+    end_year = report_date.year
+    if completed_quarter == 0:
+        completed_quarter = 4
+        end_year -= 1
+    return (
+        f"{report_date.year - int(years)}q1",
+        f"{end_year}q{completed_quarter}",
+    )
+
+
+def _quarter_sequence(start_quarter, end_quarter):
+    start_year, start_number = int(start_quarter[:4]), int(start_quarter[-1])
+    end_year, end_number = int(end_quarter[:4]), int(end_quarter[-1])
+    output = []
+    year, number = start_year, start_number
+    while (year, number) <= (end_year, end_number):
+        output.append(f"{year}q{number}")
+        number += 1
+        if number == 5:
+            year += 1
+            number = 1
+    return output
+
+
+def _unlock_events_as_of(rows, report_date, days=30):
+    cutoff = report_date.strftime("%Y%m%d")
+    end = (report_date + timedelta(days=days)).strftime("%Y%m%d")
+    return [
+        row for row in rows or []
+        if _date_text(row.get("date"))
+        and _date_text(row.get("date")) <= cutoff
+        and cutoff < _date_text(row.get("relieve_date")) <= end
+    ]
+
+
+def _discounted_block_trades(block_rows, daily_rows):
+    close_by_symbol_date = {
+        (str(row.get("symbol")), _date_text(row.get("date"))): float(row["close"])
+        for row in daily_rows or []
+        if row.get("symbol") and _date_text(row.get("date"))
+        and _is_finite(row.get("close"))
+    }
+    return [
+        row for row in block_rows or []
+        if _is_finite(row.get("price"))
+        and (
+            str(row.get("symbol")), _date_text(row.get("date"))
+        ) in close_by_symbol_date
+        and float(row["price"]) < close_by_symbol_date[(
+            str(row.get("symbol")), _date_text(row.get("date"))
+        )]
+    ]
+
+
+def _complete_directional_lhb(buy_rows, sell_rows, buy_complete, sell_complete):
+    if not buy_complete or not sell_complete:
+        return None
+    return _directional_lhb_net_sell(list(buy_rows or []) + list(sell_rows or []))
+
+
+def _accelerating_groups_for_symbol(groups, symbol):
+    return [
+        group for group in groups
+        if symbol in group.get("memberSymbols", [])
+        and group.get("constituent_count", 0) >= 5
+        and group.get("coverage", 0) >= .8
+        and _is_finite(group.get("acceleration"))
+        and float(group["acceleration"]) > 0
+    ]
+
+
+def _record_hot_exclusions(missing_data, section, source_method, exclusions=None):
+    if exclusions is None:
+        exclusions = source_method
+        source_method = "hot-topic-eligibility"
+    for exclusion in exclusions:
+        reason = exclusion.get("reason") or "UNKNOWN"
+        method = source_method if reason == "MIN_COVERAGE" else "hot-topic-eligibility"
+        status = (
+            "COVERAGE_INSUFFICIENT"
+            if reason == "MIN_COVERAGE"
+            else "ELIGIBILITY_INSUFFICIENT"
+        )
+        _record_missing(
+            missing_data,
+            section,
+            method,
+            status,
+            reason=reason,
+            groupId=exclusion.get("id"),
+        )
+
+
 def _mean_present(rows, key):
     values = [float(row[key]) for row in rows if _is_finite(row.get(key))]
     return sum(values) / len(values) if values else None
 
 
 def _group_metrics(memberships, daily, group_code, group_name, member_code,
-                   lhb_symbols, metric_prefix="group"):
+                   lhb_symbols, lhb_complete=True, metric_prefix="group"):
     grouped = defaultdict(list)
     names = {}
     membership_dates = defaultdict(list)
@@ -794,30 +1104,63 @@ def _group_metrics(memberships, daily, group_code, group_name, member_code,
                     for item in covered
                 ) / count if count else 0
             )
+        ret1_values = [
+            item.get("ret1") for item in covered if _is_finite(item.get("ret1"))
+        ]
+        ret5_values = [
+            item.get("ret5") for item in covered if _is_finite(item.get("ret5"))
+        ]
+        daily_group_amount = defaultdict(float)
+        for item in covered:
+            for daily_row in item.get("dailySeries") or []:
+                if (_date_text(daily_row.get("date"))
+                        and _is_finite(daily_row.get("amount"))):
+                    daily_group_amount[_date_text(daily_row["date"])] += float(
+                        daily_row["amount"]
+                    )
+        aggregate_amounts = [
+            value for _, value in sorted(daily_group_amount.items())[-20:]
+        ]
+        group_median_amount = (
+            statistics.median(aggregate_amounts) if aggregate_amounts else None
+        )
+        group_latest_amount = aggregate_amounts[-1] if aggregate_amounts else None
         raw_metrics = {
-            "ret1": _mean_present(covered, "ret1"),
-            "ret5": _mean_present(covered, "ret5"),
+            "ret1": (
+                sum(winsorize(ret1_values)) / len(ret1_values)
+                if ret1_values else None
+            ),
+            "ret5": (
+                sum(winsorize(ret5_values)) / len(ret5_values)
+                if ret5_values else None
+            ),
             "breadth5": (
                 sum(float(item["ret5"]) > 0 for item in covered
                     if _is_finite(item.get("ret5"))) /
                 max(1, sum(_is_finite(item.get("ret5")) for item in covered))
             ),
             "turnover_heat": (
-                sum(
-                    float(item["latestAmount"])
-                    for item in covered if _is_finite(item.get("latestAmount"))
-                ) / sum([
-                    float(item["medianAmount20"])
-                    for item in covered if _is_finite(item.get("medianAmount20"))
-                ])
-                if any(_is_finite(item.get("medianAmount20")) for item in covered)
-                and sum([
-                    float(item["medianAmount20"])
-                    for item in covered if _is_finite(item.get("medianAmount20"))
-                ]) > 0 else None
+                group_latest_amount / group_median_amount
+                if _is_finite(group_latest_amount)
+                and _is_finite(group_median_amount)
+                and float(group_median_amount) > 0 else None
             ),
-            "acceleration": _mean_present(covered, "acceleration"),
-            "lhb_activity": sum(symbol in lhb_symbols for symbol in unique),
+            "acceleration": (
+                sum(winsorize([
+                    float(item["acceleration"]) for item in covered
+                    if _is_finite(item.get("acceleration"))
+                ])) / len([
+                    item for item in covered
+                    if _is_finite(item.get("acceleration"))
+                ])
+                if any(_is_finite(item.get("acceleration")) for item in covered)
+                else None
+            ),
+            "lhb_activity": (
+                sum(symbol in lhb_symbols for symbol in unique if symbol in daily)
+                / len(covered)
+                if lhb_complete and covered else None
+            ),
         }
         data_date = max(
             (item.get("dataDate") for item in covered if item.get("dataDate")),
@@ -880,6 +1223,8 @@ def _public_ranked(rows, top_n):
         "coverage", "representativeSymbols", "financialEvidenceDate",
         "componentCount", "metrics", "scoreContributions", "riskPenalty",
         "riskPenalties", "medianAmount20", "membershipDate", "windowCoverage",
+        "evidenceCoverage", "positiveFamilies", "positiveFamilyCount",
+        "eligibilityFailures",
     }
     eligible = [row for row in rows if row.get("status", "RANKED") == "RANKED"]
     return [
@@ -967,6 +1312,7 @@ def _skipped_evidence_pack(request, requested, reason):
     )
     return {
         "schemaVersion": "1.0",
+        "evidenceModelVersion": EVIDENCE_MODEL_VERSION,
         "runId": request.get("runId") or hashlib.sha256(run_seed.encode()).hexdigest()[:16],
         "reportDate": requested.isoformat(),
         "status": "skipped",
@@ -1002,6 +1348,7 @@ def build_evidence_pack(request, collector, now):
     collector.report_date = report_compact
     target_calendar = collector.call(
         "get_trade_cal",
+        expected_max_rows=2,
         start_date=report_compact,
         end_date=report_compact,
         exchange="SH",
@@ -1022,13 +1369,16 @@ def build_evidence_pack(request, collector, now):
         )
     if requested == shanghai_now.date() and shanghai_now.hour < 15:
         raise ValueError("报告日期交易时段尚未完成")
-    latest_rows = collector.call("get_last_trade_date", exchange="SH")
+    latest_rows = collector.call(
+        "get_last_trade_date", expected_max_rows=10, exchange="SH"
+    )
     latest = max((_date_text(row.get("date")) for row in latest_rows), default="")
     if not latest:
         raise ValueError("Panda latest completed trading date is unavailable")
     calendar_start = (requested - timedelta(days=120)).strftime("%Y%m%d")
     sh_calendar = collector.call(
         "get_trade_cal",
+        expected_max_rows=200,
         start_date=calendar_start,
         end_date=report_compact,
         exchange="SH",
@@ -1049,7 +1399,13 @@ def build_evidence_pack(request, collector, now):
     window_dates = trade_dates[-REQUIRED_TRADING_SESSIONS:]
     window_date_set = set(window_dates)
 
-    universe_rows = collector.call("get_trade_list", date=report_compact, exchange="SH")
+    universe_rows = collector.call(
+        "get_trade_list",
+        expected_max_rows=20_000,
+        allow_over_provider_cap=True,
+        date=report_compact,
+        exchange="SH",
+    )
     universe = sorted({str(row.get("symbol")) for row in universe_rows if row.get("symbol")})
     if not universe:
         raise ValueError("在售股票列表为空")
@@ -1060,7 +1416,9 @@ def build_evidence_pack(request, collector, now):
         "symbol", "date", "name", "open", "close", "high", "low", "volume", "amount",
         "pre_close", "limit_up", "limit_down", "trade_status",
     ]
-    daily_batch_size = max(1, SAFE_DAILY_ROW_BUDGET // len(window_dates))
+    daily_batch_size = max(
+        1, (collector.provider_max_rows - 1) // len(window_dates)
+    )
     try:
         for symbol_batch in _batches(universe, daily_batch_size):
             batch_rows = collector.call(
@@ -1148,8 +1506,9 @@ def build_evidence_pack(request, collector, now):
             missing_data, section, "not-implemented", "NOT_IMPLEMENTED",
             reason="required Panda context query plan is not implemented",
         )
-    industries = _call_optional(
+    industries, industries_complete = _call_symbol_batches(
         collector, missing_data, "hotIndustries", "get_industry_constituents",
+        universe, rows_per_symbol=4, symbol_param="stock_symbol",
         level="L1",
         fields=["stock_symbol", "l1_code", "l1_name", "in_date", "out_date"],
     )
@@ -1161,6 +1520,7 @@ def build_evidence_pack(request, collector, now):
         )
     concepts = _call_optional(
         collector, missing_data, "hotConcepts", "get_concept_list",
+        expected_max_rows=collector.provider_max_rows - 1,
         end_date=report_compact,
     )
     concept_memberships = None
@@ -1176,8 +1536,9 @@ def build_evidence_pack(request, collector, now):
                 "POINT_IN_TIME_INSUFFICIENT",
             )
         else:
-            concept_memberships = _call_optional(
+            concept_memberships, concept_memberships_complete = _call_symbol_batches(
                 collector, missing_data, "hotConcepts", "get_concept_constituents",
+                universe, rows_per_symbol=20, symbol_param="concept_stock",
                 concept=concept_names,
                 date=report_compact,
                 fields=["concept", "concept_stock", "date"],
@@ -1189,90 +1550,111 @@ def build_evidence_pack(request, collector, now):
                     "POINT_IN_TIME_INSUFFICIENT",
                 )
 
-    lhb = []
-    if candidate_symbols:
-        lhb = _call_optional(
-            collector, missing_data, "lhb", "get_lhb_list",
-            symbol=candidate_symbols,
-            start_date=window_dates[-20],
-            end_date=report_compact,
-            fields=[
-                "symbol", "date", "start_date", "end_date", "type",
-                "amount", "volume", "change_rate",
-            ],
+    lhb_query_symbols = sorted(covered_symbols) if candidate_symbols else []
+    lhb, lhb_complete = _call_symbol_batches(
+        collector,
+        missing_data,
+        "lhb",
+        "get_lhb_list",
+        lhb_query_symbols,
+        rows_per_symbol=20,
+        start_date=window_dates[-20],
+        end_date=report_compact,
+        fields=[
+            "symbol", "date", "start_date", "end_date", "type",
+            "amount", "volume", "change_rate",
+        ],
+    )
+    lhb = _point_in_time(
+        lhb, report_compact, fields=("date", "start_date", "end_date")
+    )
+    lhb_available = lhb_complete and bool(lhb_query_symbols) and bool(lhb)
+    if lhb_query_symbols and not lhb:
+        _record_missing(
+            missing_data,
+            "lhb",
+            "get_lhb_list",
+            "POINT_IN_TIME_INSUFFICIENT",
         )
-        lhb = _point_in_time(
-            lhb, report_compact, fields=("date", "start_date", "end_date")
-        )
-        if not lhb:
-            _record_missing(
-                missing_data, "lhb", "get_lhb_list", "POINT_IN_TIME_INSUFFICIENT"
-            )
-    lhb_available = bool(lhb)
     lhb_symbols = {str(row.get("symbol")) for row in (lhb or []) if row.get("symbol")}
 
     enrichment_start = window_dates[-20]
     enrichment_end = report_compact
-    lhb_detail = []
+    lhb_by_side = {}
+    lhb_side_complete = {}
     for side in ("buy", "sell"):
-        rows = _call_optional(
+        lhb_by_side[side], lhb_side_complete[side] = _call_symbol_batches(
             collector, missing_data, "sellPressure", "get_lhb_detail",
-            symbol=candidate_symbols,
-            start_date=enrichment_start,
-            end_date=enrichment_end,
-            side=side,
+            candidate_symbols, rows_per_symbol=100,
+            start_date=enrichment_start, end_date=enrichment_end, side=side,
             fields=[
                 "symbol", "date", "type", "side", "rank", "agency",
                 "b_value", "s_value", "reason",
             ],
-        ) if candidate_symbols else []
-        lhb_detail.extend(rows or [])
-    directional_lhb = _directional_lhb_net_sell(
-        _point_in_time(lhb_detail, report_compact, fields=("date",))
+        )
+        lhb_by_side[side] = _point_in_time(
+            lhb_by_side[side], report_compact, fields=("date",)
+        )
+    directional_lhb = _complete_directional_lhb(
+        lhb_by_side["buy"], lhb_by_side["sell"],
+        lhb_side_complete["buy"], lhb_side_complete["sell"],
     )
-    hsgt = _call_optional(
+    directional_lhb_complete = directional_lhb is not None
+    directional_lhb = directional_lhb or {}
+    hsgt, hsgt_complete = _call_symbol_batches(
         collector, missing_data, "capital", "get_hsgt_hold",
-        symbol=candidate_symbols, start_date=enrichment_start, end_date=enrichment_end,
+        candidate_symbols, rows_per_symbol=20,
+        start_date=enrichment_start, end_date=enrichment_end,
         fields=["symbol", "date", "shares_num", "holding_ratio",
                 "adjusted_holding_ratio"],
-    ) if candidate_symbols else []
+    )
     hsgt_delta = _dated_delta(hsgt, "holding_ratio")
-    margin = _call_optional(
+    margin, margin_complete = _call_symbol_batches(
         collector, missing_data, "capital", "get_margin",
-        symbol=candidate_symbols, start_date=enrichment_start, end_date=enrichment_end,
+        candidate_symbols, rows_per_symbol=20,
+        start_date=enrichment_start, end_date=enrichment_end,
         margin_type="cash",
         fields=["symbol", "date", "margin_balance", "buy_on_margin_value",
                 "total_balance", "margin_type"],
-    ) if candidate_symbols else []
+    )
     margin_delta = _dated_delta(margin, "margin_balance")
-    block_trades = _call_optional(
+    block_trades, block_complete = _call_symbol_batches(
         collector, missing_data, "capital", "get_block_trade",
-        symbol=candidate_symbols, start_date=enrichment_start, end_date=enrichment_end,
+        candidate_symbols, rows_per_symbol=20,
+        start_date=enrichment_start, end_date=enrichment_end,
         fields=["symbol", "date", "price", "volume", "amount", "buyer", "seller"],
-    ) if candidate_symbols else []
-    shareholder_changes = _call_optional(
+    )
+    block_trades = _point_in_time(block_trades, report_compact, fields=("date",))
+    shareholder_changes, shareholder_complete = _call_symbol_batches(
         collector, missing_data, "events", "get_stock_shareholder_change",
-        symbol=candidate_symbols, start_date=enrichment_start, end_date=enrichment_end,
+        candidate_symbols, rows_per_symbol=20,
+        start_date=enrichment_start, end_date=enrichment_end,
         fields=["symbol", "info_date", "begin_date", "end_date", "direction",
                 "ratio_up_limit", "change_up_limit", "progress"],
-    ) if candidate_symbols else []
-    investor_activity = _call_optional(
+    )
+    shareholder_changes = _point_in_time(
+        shareholder_changes, report_compact, fields=("info_date",)
+    )
+    investor_activity, activity_complete = _call_symbol_batches(
         collector, missing_data, "capital", "get_investor_activity",
-        symbol=candidate_symbols, start_date=enrichment_start, end_date=enrichment_end,
+        candidate_symbols, rows_per_symbol=20,
+        start_date=enrichment_start, end_date=enrichment_end,
         fields=["symbol", "date", "participant", "institute"],
-    ) if candidate_symbols else []
+    )
+    investor_activity = _point_in_time(
+        investor_activity, report_compact, fields=("date",)
+    )
 
-    financial = []
-    if candidate_symbols:
-        financial = _call_optional(
-            collector, missing_data, "fundamentals", "get_fina_reports",
-            symbol=candidate_symbols,
-            date=report_compact,
-            is_latest=True,
-            fields=[
-                "symbol", "date", "quarter",
-            ],
-        )
+    start_quarter, end_quarter = _quarter_bounds(requested, years=3)
+    financial, financial_complete = _call_symbol_batches(
+        collector, missing_data, "fundamentals", "get_fina_reports",
+        candidate_symbols, rows_per_symbol=16,
+        start_quarter=start_quarter,
+        end_quarter=end_quarter,
+        date=report_compact,
+        is_latest=False,
+        fields=["symbol", "date", "quarter"],
+    )
     financial = _point_in_time(financial, report_compact)
     if candidate_symbols and not financial:
         _record_missing(
@@ -1295,15 +1677,24 @@ def build_evidence_pack(request, collector, now):
     for row in financial or []:
         financial_by_symbol[str(row.get("symbol"))].append(row)
 
-    performance = _call_optional(
-        collector, missing_data, "fundamentals", "get_fina_performance",
-        symbol=candidate_symbols,
-        end_quarter=f"{requested.year}q4",
-        fields=[
-            "symbol", "info_date", "end_date", "roe_weighted",
-            "net_profit_parent_yoy", "net_cash_flow_operating_yoy",
-        ],
-    ) if candidate_symbols else []
+    performance = []
+    performance_complete = True
+    performance_quarters = _quarter_sequence(start_quarter, end_quarter)[-8:]
+    for performance_quarter in performance_quarters:
+        quarter_rows, quarter_complete = _call_symbol_batches(
+            collector, missing_data, "fundamentals", "get_fina_performance",
+            candidate_symbols, rows_per_symbol=2,
+            end_quarter=performance_quarter,
+            fields=[
+                "symbol", "info_date", "end_date", "roe_weighted",
+                "net_profit_parent_yoy", "net_cash_flow_operating_yoy",
+            ],
+        )
+        if not quarter_complete:
+            performance_complete = False
+            performance = []
+            break
+        performance.extend(quarter_rows)
     performance = _point_in_time(
         performance, report_compact, fields=("info_date",)
     )
@@ -1312,88 +1703,107 @@ def build_evidence_pack(request, collector, now):
             missing_data, "fundamentals", "get_fina_performance",
             "POINT_IN_TIME_INSUFFICIENT",
         )
-    performance_by_symbol = defaultdict(list)
-    for row in performance or []:
-        performance_by_symbol[str(row.get("symbol"))].append(row)
+    performance_by_symbol = _latest_as_of_by_symbol(
+        performance, report_compact, ("info_date",), ("end_date",)
+    )
 
-    audit = _call_optional(
+    audit, audit_complete = _call_symbol_batches(
         collector, missing_data, "events", "get_audit_opinion",
-        symbol=candidate_symbols, start_quarter="2025q1", end_quarter="2026q4",
+        candidate_symbols, rows_per_symbol=16,
+        start_quarter=start_quarter, end_quarter=end_quarter,
         market="cn",
         fields=["symbol", "date", "quarter", "audit_type", "opinion"],
-    ) if candidate_symbols else []
-    audit = _point_in_time(audit, report_compact, fields=("date",))
-    audit_by_symbol = defaultdict(list)
-    for row in audit or []:
-        audit_by_symbol[str(row.get("symbol"))].append(row)
+    )
+    audit_by_symbol = _latest_actual_audit_by_symbol(audit, report_compact)
 
     unlock_end = (requested + timedelta(days=30)).strftime("%Y%m%d")
-    restricted = _call_optional(
+    restricted, restricted_complete = _call_symbol_batches(
         collector, missing_data, "events", "get_restricted_list",
-        symbol=candidate_symbols, start_date=report_compact, end_date=unlock_end,
+        candidate_symbols, rows_per_symbol=20,
+        start_date=(requested - timedelta(days=365)).strftime("%Y%m%d"),
+        end_date=unlock_end,
         market="cn",
         fields=["symbol", "date", "relieve_date", "relieve_shares",
                 "actual_relieve_shares"],
-    ) if candidate_symbols else []
-    share_float = _call_optional(
+    )
+    restricted = _unlock_events_as_of(restricted, requested, days=30)
+    share_float, float_complete = _call_symbol_batches(
         collector, missing_data, "events", "get_share_float",
-        symbol=candidate_symbols, start_date=enrichment_start, end_date=report_compact,
+        candidate_symbols, rows_per_symbol=20,
+        start_date=enrichment_start, end_date=report_compact,
         fields=["symbol", "date", "free_circulation", "circulation_a", "total"],
-    ) if candidate_symbols else []
-    float_by_symbol = _latest_by_symbol(share_float)
+    )
+    float_by_symbol = _latest_as_of_by_symbol(
+        share_float, report_compact, ("date",)
+    )
     unlock_shares = defaultdict(float)
     for row in restricted or []:
-        if (_date_text(row.get("relieve_date")) >= report_compact
-                and _date_text(row.get("relieve_date")) <= unlock_end):
+        if report_compact < _date_text(row.get("relieve_date")) <= unlock_end:
             value = row.get("actual_relieve_shares")
             if not _is_finite(value):
                 value = row.get("relieve_shares")
             if _is_finite(value):
                 unlock_shares[str(row.get("symbol"))] += float(value)
-    status_changes = _call_optional(
+    status_changes, status_complete = _call_symbol_batches(
         collector, missing_data, "events", "get_stock_status_change",
-        symbol=candidate_symbols, start_date=window_dates[0], end_date=report_compact,
+        candidate_symbols, rows_per_symbol=20,
+        start_date=window_dates[0], end_date=report_compact,
         fields=["symbol", "date", "change_date", "description", "name", "type"],
-    ) if candidate_symbols else []
-    status_by_symbol = _latest_by_symbol(
-        _point_in_time(status_changes, report_compact, fields=("date", "change_date"))
     )
-    pledges = _call_optional(
+    status_by_symbol = _latest_as_of_by_symbol(
+        status_changes, report_compact, ("date",), ("change_date",)
+    )
+    pledges, pledge_complete = _call_symbol_batches(
         collector, missing_data, "events", "get_stock_pledge",
-        symbol=candidate_symbols, start_date=enrichment_start, end_date=report_compact,
+        candidate_symbols, rows_per_symbol=20,
+        start_date=enrichment_start, end_date=report_compact,
         fields=["symbol", "publish_date", "acc_pledge_total_ratio",
                 "acc_pledged_hold_ratio", "is_released"],
-    ) if candidate_symbols else []
-    pledge_by_symbol = _latest_by_symbol(pledges, date_fields=("publish_date",))
-    forecasts = _call_optional(
-        collector, missing_data, "events", "get_fina_forecast",
-        symbol=candidate_symbols, end_quarter=f"{requested.year}q4",
-        fields=["symbol", "info_date", "end_date", "forecast_type",
-                "forecast_growth_rate_floor", "forecast_growth_rate_ceiling",
-                "forecast_np_floor", "forecast_np_ceiling"],
-    ) if candidate_symbols else []
-    forecasts = _point_in_time(forecasts, report_compact, fields=("info_date",))
-    forecast_by_symbol = _latest_by_symbol(forecasts, date_fields=("info_date",))
+    )
+    pledge_by_symbol = _latest_as_of_by_symbol(
+        pledges, report_compact, ("publish_date",)
+    )
+    forecasts = []
+    forecast_complete = True
+    for forecast_quarter in _quarter_sequence(start_quarter, end_quarter)[-4:]:
+        quarter_rows, quarter_complete = _call_symbol_batches(
+            collector, missing_data, "events", "get_fina_forecast",
+            candidate_symbols, rows_per_symbol=1,
+            end_quarter=forecast_quarter,
+            fields=["symbol", "info_date", "end_date", "forecast_type",
+                    "forecast_growth_rate_floor", "forecast_growth_rate_ceiling",
+                    "forecast_np_floor", "forecast_np_ceiling"],
+        )
+        if not quarter_complete:
+            forecast_complete = False
+            forecasts = []
+            break
+        forecasts.extend(quarter_rows)
+    forecast_by_symbol = _latest_as_of_by_symbol(
+        forecasts, report_compact, ("info_date",), ("end_date",)
+    )
 
     headline_ineligible = {
         symbol for symbol, item in daily.items()
-        if not item.get("isHeadlineEligible")
+        if (not item.get("isHeadlineEligible")
+            or item.get("dataDate") != requested.isoformat())
     }
     headline_daily = {
         symbol: item for symbol, item in daily.items()
         if item.get("isHeadlineEligible")
+        and item.get("dataDate") == requested.isoformat()
     }
     industry_groups = _group_metrics(
         [row for row in active_industries
          if str(row.get("stock_symbol")) not in headline_ineligible],
         headline_daily, "l1_code", "l1_name", "stock_symbol", lhb_symbols,
-        "industry",
+        lhb_available, "industry",
     )
     concept_groups = _group_metrics(
         [row for row in (concept_memberships or [])
          if str(row.get("concept_stock")) not in headline_ineligible],
         headline_daily, "concept", "concept", "concept_stock", lhb_symbols,
-        "concept",
+        lhb_available, "concept",
     )
     for group in industry_groups:
         group["reportDate"] = requested.isoformat()
@@ -1418,18 +1828,18 @@ def build_evidence_pack(request, collector, now):
             )
     hot_industries = compute_hot_topics(industry_groups, lhb_available=lhb_available)
     hot_concepts = compute_hot_topics(concept_groups, lhb_available=lhb_available)
-    if any(item.get("reason") == "MIN_COVERAGE"
-           for item in hot_industries["excluded"]):
-        _record_missing(
-            missing_data, "hotIndustries", "get_industry_constituents",
-            "COVERAGE_INSUFFICIENT",
-        )
-    if any(item.get("reason") == "MIN_COVERAGE"
-           for item in hot_concepts["excluded"]):
-        _record_missing(
-            missing_data, "hotConcepts", "get_concept_constituents",
-            "COVERAGE_INSUFFICIENT",
-        )
+    _record_hot_exclusions(
+        missing_data,
+        "hotIndustries",
+        "get_industry_constituents",
+        hot_industries["excluded"],
+    )
+    _record_hot_exclusions(
+        missing_data,
+        "hotConcepts",
+        "get_concept_constituents",
+        hot_concepts["excluded"],
+    )
 
     _record_missing(
         missing_data, "valuation", "get_factor", "METRIC_UNAVAILABLE",
@@ -1473,9 +1883,7 @@ def build_evidence_pack(request, collector, now):
 
     candidate_rows = []
     for item in enriched:
-        fina_rows = performance_by_symbol.get(item["symbol"], [])
-        latest_fina = max(fina_rows, key=lambda row: _date_text(row.get("info_date")),
-                          default={})
+        latest_fina = performance_by_symbol.get(item["symbol"], {})
         quality_values = [
             float(latest_fina[key]) for key in (
                 "roe_weighted", "net_profit_parent_yoy",
@@ -1484,13 +1892,9 @@ def build_evidence_pack(request, collector, now):
             if _is_finite(latest_fina.get(key))
         ]
         symbol = item["symbol"]
-        broad_groups = [
-            group for group in industry_groups + concept_groups
-            if symbol in group.get("memberSymbols", [])
-            and group.get("constituent_count", 0) >= 5
-            and group.get("coverage", 0) >= .8
-            and _is_finite(group.get("acceleration"))
-        ]
+        broad_groups = _accelerating_groups_for_symbol(
+            industry_groups + concept_groups, symbol
+        )
         trend_value = (
             float(item["ret20"]) - float(market_ret20)
             + max(-.05, min(.05, float(item.get("acceleration") or 0)))
@@ -1515,34 +1919,30 @@ def build_evidence_pack(request, collector, now):
                 for value in capital_signals)
             if len(capital_signals) >= 2 else None
         )
-        latest_close = next(
-            (float(row["close"]) for row in reversed(sorted(
-                [row for row in daily_rows if str(row.get("symbol")) == symbol],
-                key=lambda row: _date_text(row.get("date")),
-            )) if _is_finite(row.get("close"))),
-            None,
+        discounted_blocks = _discounted_block_trades(
+            block_by_symbol.get(symbol, []), daily_rows
         )
-        discounted_blocks = [
-            row for row in block_by_symbol.get(symbol, [])
-            if _is_finite(row.get("price")) and _is_finite(latest_close)
-            and float(row["price"]) < latest_close
-        ]
         reductions = [
             row for row in change_by_symbol.get(symbol, [])
             if "减持" in str(row.get("direction") or "")
-        ]
+        ] if shareholder_complete else []
         float_row = float_by_symbol.get(symbol, {})
         free_float = float_row.get("free_circulation")
         unlock_pct = (
             unlock_shares[symbol] / float(free_float) * 100
             if _is_finite(free_float) and float(free_float) > 0
-            and unlock_shares.get(symbol) else None
+            and unlock_shares.get(symbol)
+            and restricted_complete and float_complete else None
         )
-        nonstandard_audit = any(
-            str(row.get("opinion") or "") not in {
-                "", "unqualified_opinion", "no_audit_performed"
-            }
-            for row in audit_by_symbol.get(symbol, [])
+        latest_audit_rows = audit_by_symbol.get(symbol, [])
+        nonstandard_audit = (
+            audit_complete and bool(latest_audit_rows)
+            and any(
+                str(row.get("opinion") or "") not in {
+                    "", "unqualified_opinion", "no_audit_performed"
+                }
+                for row in latest_audit_rows
+            )
         )
         status_row = status_by_symbol.get(symbol, {})
         status_text = " ".join(str(status_row.get(field) or "")
@@ -1553,7 +1953,9 @@ def build_evidence_pack(request, collector, now):
         )
         pledge_row = pledge_by_symbol.get(symbol, {})
         pledge_ratio = pledge_row.get("acc_pledge_total_ratio")
-        forecast_row = forecast_by_symbol.get(symbol, {})
+        forecast_row = (
+            forecast_by_symbol.get(symbol, {}) if forecast_complete else {}
+        )
         forecast_floor = forecast_row.get("forecast_growth_rate_floor")
         risk_penalties = {
             "crowding": (
@@ -1576,6 +1978,74 @@ def build_evidence_pack(request, collector, now):
             ),
         }
         risk_penalty = min(30, sum(risk_penalties.values()))
+        risk_metric_evidence = {
+            "crowding": {
+                "raw": {"turnoverHeat": item.get("turnover_heat")},
+                "transformed": item.get("turnover_heat"),
+                "dataDate": item.get("dataDate"), "window": "20d",
+                "coverage": item["windowCoverage"]["turnover_heat"],
+                "sourceRole": "risk_crowding",
+                "evidenceIds": evidence_ids("get_stock_daily", symbols=[symbol]),
+            },
+            "extremeVolatility": {
+                "raw": {"volatility20": item.get("volatility")},
+                "transformed": item.get("volatility"),
+                "dataDate": item.get("dataDate"), "window": "20d",
+                "coverage": item["windowCoverage"]["ret20"],
+                "sourceRole": "risk_extreme_volatility",
+                "evidenceIds": evidence_ids("get_stock_daily", symbols=[symbol]),
+            },
+            "pledge": {
+                "raw": {"accPledgeTotalRatio": pledge_ratio},
+                "transformed": pledge_ratio,
+                "dataDate": evidence_date("get_stock_pledge", symbol=symbol),
+                "window": "latest-as-of", "coverage": 1 if pledge_complete else 0,
+                "sourceRole": "risk_pledge",
+                "evidenceIds": evidence_ids(
+                    "get_stock_pledge", symbols=[symbol]
+                ),
+            },
+            "unlock": {
+                "raw": {
+                    "unlockFloatPct30d": unlock_pct,
+                    "unlockShares": unlock_shares.get(symbol),
+                    "freeCirculation": free_float,
+                },
+                "transformed": unlock_pct,
+                "dataDate": evidence_date(
+                    "get_restricted_list", "get_share_float", symbol=symbol
+                ),
+                "window": f"{requested.isoformat()}/{_iso_date(unlock_end)}",
+                "coverage": 1 if restricted_complete and float_complete else 0,
+                "sourceRole": "risk_unlock",
+                "evidenceIds": evidence_ids(
+                    "get_restricted_list", "get_share_float", symbols=[symbol]
+                ),
+            },
+            "reduction": {
+                "raw": {"eventCount": len(reductions)},
+                "transformed": len(reductions),
+                "dataDate": evidence_date(
+                    "get_stock_shareholder_change", symbol=symbol
+                ),
+                "window": "365d", "coverage": 1 if shareholder_complete else 0,
+                "sourceRole": "risk_reduction",
+                "evidenceIds": evidence_ids(
+                    "get_stock_shareholder_change", symbols=[symbol]
+                ),
+            },
+            "forecastEvent": {
+                "raw": {"forecastGrowthRateFloor": forecast_floor},
+                "transformed": forecast_floor,
+                "dataDate": evidence_date("get_fina_forecast", symbol=symbol),
+                "window": "latest-as-of",
+                "coverage": 1 if forecast_complete else 0,
+                "sourceRole": "risk_forecast",
+                "evidenceIds": evidence_ids(
+                    "get_fina_forecast", symbols=[symbol]
+                ),
+            },
+        }
         metric_evidence = {
             "trend": {
                 "raw": {"relativeStrength20": (
@@ -1585,12 +2055,19 @@ def build_evidence_pack(request, collector, now):
                 ), "acceleration5": item.get("acceleration")},
                 "transformed": trend_value, "dataDate": item.get("dataDate"),
                 "window": "20d+5d", "coverage": item["windowCoverage"]["ret20"],
+                "positive": _is_finite(trend_value) and trend_value > 0,
+                "sourceRole": "trend",
                 "evidenceIds": evidence_ids("get_stock_daily", symbols=[symbol]),
             },
             "theme": {
-                "raw": [group["id"] for group in broad_groups],
+                "raw": {
+                    group["id"]: float(group["acceleration"])
+                    for group in broad_groups
+                },
                 "transformed": theme_value, "dataDate": item.get("dataDate"),
                 "window": "membership-snapshot", "coverage": 1 if broad_groups else 0,
+                "positive": _is_finite(theme_value) and theme_value > 0,
+                "sourceRole": "theme",
                 "evidenceIds": evidence_ids(
                     "get_industry_constituents", "get_concept_constituents",
                     symbols=[symbol],
@@ -1609,6 +2086,11 @@ def build_evidence_pack(request, collector, now):
                 ),
                 "dataDate": _iso_date(latest_fina.get("info_date")),
                 "window": "point-in-time", "coverage": len(quality_values) / 3,
+                "positive": (
+                    len(quality_values) >= 2
+                    and sum(value > 0 for value in quality_values) >= 2
+                ),
+                "sourceRole": "quality",
                 "evidenceIds": evidence_ids(
                     "get_fina_performance", symbols=[symbol]
                 ),
@@ -1620,6 +2102,8 @@ def build_evidence_pack(request, collector, now):
                     "get_investor_activity", symbol=symbol
                 ), "window": "20d",
                 "coverage": min(1, len(capital_signals) / 2),
+                "positive": _is_finite(capital_value) and capital_value > 0,
+                "sourceRole": "capital",
                 "evidenceIds": evidence_ids(
                     "get_hsgt_hold", "get_lhb_detail", "get_margin",
                     "get_investor_activity", symbols=[symbol]
@@ -1634,12 +2118,19 @@ def build_evidence_pack(request, collector, now):
                 ),
                 "dataDate": item.get("dataDate"), "window": "20d",
                 "coverage": item["windowCoverage"]["ret20"],
+                "positive": (
+                    _is_finite(item.get("medianAmount20"))
+                    and float(item["medianAmount20"]) >= min_liquidity
+                    and _is_finite(item.get("volatility"))
+                    and float(item["volatility"]) <= .35
+                ),
+                "sourceRole": "liquidity_stability",
                 "evidenceIds": evidence_ids("get_stock_daily", symbols=[symbol]),
             },
         }
         discount_event_raw = (
             len(discounted_blocks) + len(reductions)
-            if block_trades is not None and shareholder_changes is not None
+            if block_complete and shareholder_complete
             else None
         )
         candidate_rows.append({
@@ -1664,13 +2155,17 @@ def build_evidence_pack(request, collector, now):
             "riskPenalties": risk_penalties,
             "minLiquidityCny": min_liquidity,
             "_metricEvidence": metric_evidence,
+            "_riskMetricEvidence": risk_metric_evidence,
             "_discountEventRaw": discount_event_raw,
         })
 
     sell_input = _rank_columns([
         {
             **item,
-            "lhb_net_sell": directional_lhb.get(item["symbol"]),
+            "lhb_net_sell": (
+                directional_lhb.get(item["symbol"], 0)
+                if directional_lhb_complete else None
+            ),
             "northbound_reduction": (
                 -hsgt_delta[item["symbol"]]
                 if item["symbol"] in hsgt_delta else None
@@ -1689,17 +2184,25 @@ def build_evidence_pack(request, collector, now):
                     "transformed": item.get("downside_volume"),
                     "dataDate": item.get("dataDate"), "window": "20d",
                     "coverage": item["windowCoverage"]["turnover_heat"],
+                    "sourceRole": "downside_volume",
                     "evidenceIds": evidence_ids(
                         "get_stock_daily", symbols=[item["symbol"]]
                     ),
                 },
                 "lhb_net_sell": {
-                    "raw": directional_lhb.get(item["symbol"]),
-                    "transformed": directional_lhb.get(item["symbol"]),
+                    "raw": (
+                        directional_lhb.get(item["symbol"], 0)
+                        if directional_lhb_complete else None
+                    ),
+                    "transformed": (
+                        directional_lhb.get(item["symbol"], 0)
+                        if directional_lhb_complete else None
+                    ),
                     "dataDate": evidence_date(
                         "get_lhb_detail", symbol=item["symbol"]
                     ), "window": "20d",
-                    "coverage": 1 if item["symbol"] in directional_lhb else 0,
+                    "coverage": 1 if directional_lhb_complete else 0,
+                    "sourceRole": "lhb_net_sell",
                     "evidenceIds": evidence_ids(
                         "get_lhb_detail", symbols=[item["symbol"]]
                     ),
@@ -1714,6 +2217,7 @@ def build_evidence_pack(request, collector, now):
                         "get_hsgt_hold", symbol=item["symbol"]
                     ), "window": "20d",
                     "coverage": 1 if item["symbol"] in hsgt_delta else 0,
+                    "sourceRole": "northbound_reduction",
                     "evidenceIds": evidence_ids(
                         "get_hsgt_hold", symbols=[item["symbol"]]
                     ),
@@ -1728,6 +2232,7 @@ def build_evidence_pack(request, collector, now):
                         "get_margin", symbol=item["symbol"]
                     ), "window": "20d",
                     "coverage": 1 if item["symbol"] in margin_delta else 0,
+                    "sourceRole": "margin_contraction",
                     "evidenceIds": evidence_ids(
                         "get_margin", symbols=[item["symbol"]]
                     ),
@@ -1740,9 +2245,9 @@ def build_evidence_pack(request, collector, now):
                         symbol=item["symbol"]
                     ), "window": "20d",
                     "coverage": (
-                        1 if block_trades is not None
-                        and shareholder_changes is not None else 0
+                        1 if block_complete and shareholder_complete else 0
                     ),
+                    "sourceRole": "discount_event",
                     "evidenceIds": evidence_ids(
                         "get_block_trade", "get_stock_shareholder_change",
                         symbols=[item["symbol"]],
@@ -1759,6 +2264,7 @@ def build_evidence_pack(request, collector, now):
     us_cutoff = requested - timedelta(days=1)
     us_calendar = _call_optional(
         collector, missing_data, "us", "get_trade_cal",
+        expected_max_rows=20,
         start_date=(us_cutoff - timedelta(days=14)).strftime("%Y%m%d"),
         end_date=us_cutoff.strftime("%Y%m%d"),
         exchange="US",
@@ -1779,6 +2285,7 @@ def build_evidence_pack(request, collector, now):
     if us_date:
         us_rows = _call_optional(
             collector, missing_data, "us", "get_us_daily",
+            expected_max_rows=len(US_CONTEXT_SYMBOLS),
             start_date=us_date,
             end_date=us_date,
             symbol=US_CONTEXT_SYMBOLS,
@@ -1822,7 +2329,7 @@ def build_evidence_pack(request, collector, now):
             "traceCallId": record["id"],
             "method": record["method"],
             "paramsHash": record.get("paramsHash"),
-            "window": record.get("window"),
+            "window": record.get("window") or record.get("dataAsOf"),
             "fields": record.get("fields", []),
             "dataDate": record["dataAsOf"],
             "dataAsOf": record["dataAsOf"],
@@ -1834,6 +2341,10 @@ def build_evidence_pack(request, collector, now):
             "cacheError": record.get("cacheError"),
             "retryCount": record.get("retryCount", 0),
             "truncated": bool(record.get("truncated")),
+            "providerMaxRows": record.get("providerMaxRows"),
+            "expectedMaxRows": record.get("expectedMaxRows"),
+            "batchIndex": record.get("batchIndex"),
+            "batchCount": record.get("batchCount"),
         }
         for record in collector.records
     ]
@@ -1849,48 +2360,72 @@ def build_evidence_pack(request, collector, now):
         "potentialWatchlist": _public_ranked(potential, top_n),
     }
 
-    def conclusion(conclusion_id, formula, board_names):
-        rows = [
-            row for board_name in board_names
-            for row in public_boards[board_name]
-        ]
-        metric_ids = sorted({
-            metric["id"] for row in rows for metric in row.get("metrics", [])
-        })
-        call_ids = sorted({
-            evidence_id
-            for row in rows
-            for metric in row.get("metrics", [])
-            for evidence_id in metric.get("evidenceIds", [])
-        })
-        if not metric_ids:
-            return None
-        return {
-            "conclusion_id": conclusion_id,
-            "formula": formula,
-            "leaderboard": ",".join(board_names),
-            "metricIds": metric_ids,
-            "evidenceIds": call_ids,
-            "pandaCalls": call_ids,
-            "sourceIds": call_ids,
-            "confidence": min(
-                [row.get("confidence", 0) for row in rows] or [0]
-            ),
-            "limitations": sorted({
-                item["section"] for item in missing_data
-            }),
-        }
-
-    conclusions = [item for item in [
-        conclusion(
-            "market-hot-industries", "hot-topic-v2",
-            ["hotIndustries", "hotConcepts"],
-        ),
-        conclusion(
-            "market-watchlists", "sell-pressure-v2,potential-v2",
-            ["sellPressure", "potentialWatchlist"],
-        ),
-    ] if item is not None]
+    formula_by_board = {
+        "hotIndustries": "hot-topic-v2",
+        "hotConcepts": "hot-topic-v2",
+        "sellPressure": "sell-pressure-v2",
+        "potentialWatchlist": "potential-v2",
+    }
+    sections_by_board = {
+        "hotIndustries": {"hotIndustries", "lhb"},
+        "hotConcepts": {"hotConcepts", "lhb"},
+        "sellPressure": {"sellPressure", "capital", "events"},
+        "potentialWatchlist": {
+            "fundamentals", "capital", "events", "valuation",
+        },
+    }
+    conclusions = []
+    for board_name, rows in public_boards.items():
+        for row in rows:
+            metrics = list(row.get("metrics") or [])
+            if not metrics:
+                continue
+            metric_ids = [metric["id"] for metric in metrics]
+            call_ids = sorted({
+                evidence_id for metric in metrics
+                for evidence_id in metric.get("evidenceIds", [])
+            })
+            identity = str(row.get("symbol") or row.get("id") or row.get("name"))
+            relevant_missing = [
+                item for item in missing_data
+                if item.get("section") in sections_by_board[board_name]
+            ]
+            conclusions.append({
+                "conclusion_id": f"{board_name}:{identity}",
+                "formula": formula_by_board[board_name],
+                "leaderboard": board_name,
+                "entryId": identity,
+                "rank": row.get("rank"),
+                "metricIds": metric_ids,
+                "evidenceIds": call_ids,
+                "pandaCalls": call_ids,
+                "sourceIds": call_ids,
+                "dataDates": sorted({
+                    metric["dataDate"] for metric in metrics
+                    if metric.get("dataDate")
+                }),
+                "windows": sorted({
+                    metric["window"] for metric in metrics
+                    if metric.get("window")
+                }),
+                "stale": any(
+                    float(metric.get("freshnessFactor", 0)) < 1
+                    for metric in metrics
+                ),
+                "missing": [
+                    {
+                        "method": item.get("method"),
+                        "status": item.get("status"),
+                        "reason": item.get("reason"),
+                    }
+                    for item in relevant_missing
+                ],
+                "confidence": row.get("confidence", 0),
+                "limitations": sorted({
+                    f"{item.get('method')}:{item.get('status')}"
+                    for item in relevant_missing
+                }),
+            })
     return {
         "schemaVersion": "1.0",
         "evidenceModelVersion": EVIDENCE_MODEL_VERSION,

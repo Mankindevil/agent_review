@@ -2,7 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  utimes,
+  writeFile
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -23,6 +33,7 @@ const MAX_WORKER_OUTPUT_BYTES = 20 * 1024 * 1024;
 
 const evidencePack = {
   schemaVersion: '1.0',
+  evidenceModelVersion: '2.0',
   runId: 'run-20260723',
   reportDate: '2026-07-23',
   status: 'complete',
@@ -73,7 +84,7 @@ function completeChild(child, { stdout = '', stderr = '', code = 0 } = {}) {
 }
 
 function workerConfig(stateDir, overrides = {}) {
-  return {
+  const base = {
     python: 'python-test',
     stateDir,
     workerTimeoutMs: 1_000,
@@ -82,11 +93,24 @@ function workerConfig(stateDir, overrides = {}) {
     panda: {
       enabled: true,
       ready: true,
+      python: 'python-test',
+      timeoutMs: 1_000,
+      maxRows: 500,
       username: '8613800000000',
       password: 'worker-secret',
       baseUrl: 'http://pandadata.pandaaiquant.com'
-    },
-    ...overrides
+    }
+  };
+  return {
+    ...base,
+    ...overrides,
+    panda: {
+      ...base.panda,
+      ...(overrides.workerTimeoutMs
+        ? { timeoutMs: overrides.workerTimeoutMs }
+        : {}),
+      ...(overrides.panda || {})
+    }
   };
 }
 
@@ -928,6 +952,29 @@ test('RunTrace records sanitized step, worker, model, email, and lineage detail'
   assert.equal(JSON.stringify(output).includes('should-not-persist'), false);
 });
 
+test('RunTrace preserves every Panda call ID beyond the previous 512-event limit', () => {
+  const trace = createRunTrace({ runId: 'broad-plan', reportDate: '2026-07-23' });
+  const callCount = 700;
+  for (let index = 1; index <= callCount; index += 1) {
+    trace.addWorkerEvent({
+      id: `panda-call-${String(index).padStart(4, '0')}`,
+      type: 'panda-call',
+      method: 'get_margin',
+      status: 'ok',
+      rowCount: 1
+    });
+  }
+  const evidence = {
+    sources: Array.from({ length: callCount }, (_, index) => ({
+      traceCallId: `panda-call-${String(index + 1).padStart(4, '0')}`
+    }))
+  };
+  assert.doesNotThrow(() => trace.assertEvidenceTraceCalls(evidence));
+  const output = trace.toJSON();
+  assert.equal(output.workerEvents.length, callCount);
+  assert.equal(output.workerEvents.at(-1).id, 'panda-call-0700');
+});
+
 test('acquireRunLock rejects a second live lock for the same report date', async (t) => {
   const stateDir = await temporaryDirectory(t);
   const first = await acquireRunLock({ stateDir, reportDate: '2026-07-23', staleMs: 60_000 });
@@ -981,23 +1028,44 @@ test('acquireRunLock recovers only a stale, provably dead same-host owner', asyn
   await lock.release();
 });
 
-test('concurrent stale recovery never grants two owners', async (t) => {
+test('acquireRunLock recovers an interrupted stale owner claim', async (t) => {
   const stateDir = await temporaryDirectory(t);
-  await createStaleOwner(stateDir, '2026-07-23');
-  const results = await Promise.allSettled([
-    acquireRunLock({ stateDir, reportDate: '2026-07-23', staleMs: 1_000 }),
-    acquireRunLock({ stateDir, reportDate: '2026-07-23', staleMs: 1_000 })
-  ]);
-  const acquired = results.filter((result) => result.status === 'fulfilled');
-  const rejected = results.filter((result) => result.status === 'rejected');
-  assert.equal(
-    acquired.length,
-    1,
-    rejected.map((result) => `${result.reason.code}: ${result.reason.message}`).join('\n')
+  const lockPath = await createStaleOwner(stateDir, '2026-07-23');
+  const [ownerFile] = (await readdir(lockPath)).filter((name) => name.startsWith('owner-'));
+  await rename(
+    path.join(lockPath, ownerFile),
+    path.join(lockPath, 'recovery-00000000-0000-4000-8000-000000000003.json')
   );
-  assert.equal(rejected.length, 1);
-  assert.equal(rejected[0].reason.code, 'RUN_LOCKED');
-  await acquired[0].value.release();
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockPath, old, old);
+
+  const lock = await acquireRunLock({
+    stateDir,
+    reportDate: '2026-07-23',
+    staleMs: 1_000
+  });
+  await lock.release();
+});
+
+test('concurrent stale recovery never grants two owners', async (t) => {
+  for (let iteration = 0; iteration < 20; iteration += 1) {
+    const stateDir = await temporaryDirectory(t);
+    await createStaleOwner(stateDir, '2026-07-23');
+    const results = await Promise.allSettled([
+      acquireRunLock({ stateDir, reportDate: '2026-07-23', staleMs: 1_000 }),
+      acquireRunLock({ stateDir, reportDate: '2026-07-23', staleMs: 1_000 })
+    ]);
+    const acquired = results.filter((result) => result.status === 'fulfilled');
+    const rejected = results.filter((result) => result.status === 'rejected');
+    assert.equal(
+      acquired.length,
+      1,
+      rejected.map((result) => `${result.reason.code}: ${result.reason.message}`).join('\n')
+    );
+    assert.equal(rejected.length, 1);
+    assert.equal(rejected[0].reason.code, 'RUN_LOCKED');
+    await acquired[0].value.release();
+  }
 });
 
 test('stale recovery never removes a live replacement owner record', async (t) => {
@@ -1214,14 +1282,24 @@ test('runMarketWorker enforces its 20 MB output bound', async (t) => {
 
 test('runMarketWorker terminates on timeout and propagates abort', async (t) => {
   const stateDir = await temporaryDirectory(t);
-  await assert.rejects(
-    runMarketWorker({
-      request: { operation: 'daily-market-report' },
-      config: workerConfig(stateDir, { workerTimeoutMs: 5 }),
-      spawnImpl: fakeSpawn(() => {})
-    }),
-    (error) => error.code === 'WORKER_TIMEOUT'
-  );
+  const timeoutGuard = new AbortController();
+  const timeoutGuardTimer = setTimeout(() => timeoutGuard.abort(), 50);
+  try {
+    await assert.rejects(
+      runMarketWorker({
+        request: { operation: 'daily-market-report' },
+        config: workerConfig(stateDir, {
+          workerTimeoutMs: 5,
+          panda: { timeoutMs: 5_000 }
+        }),
+        signal: timeoutGuard.signal,
+        spawnImpl: fakeSpawn(() => {})
+      }),
+      (error) => error.code === 'WORKER_TIMEOUT'
+    );
+  } finally {
+    clearTimeout(timeoutGuardTimer);
+  }
 
   const controller = new AbortController();
   const running = runMarketWorker({

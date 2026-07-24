@@ -40,6 +40,7 @@ test('accepts declared operations and rejects arbitrary Panda methods', () => {
 test('requires evidence pack fields and array evidence collections', () => {
   const evidencePack = {
     schemaVersion: '1.0',
+    evidenceModelVersion: '2.0',
     runId: 'run-1',
     reportDate: '2026-07-23',
     status: 'complete',
@@ -64,6 +65,16 @@ test('requires evidence pack fields and array evidence collections', () => {
   ]) {
     assert.throws(() => validateEvidencePack(invalid), /Evidence Pack/);
   }
+  assert.throws(
+    () => validateEvidencePack(Object.fromEntries(
+      Object.entries(evidencePack).filter(([key]) => key !== 'evidenceModelVersion')
+    )),
+    /evidenceModelVersion|2\.0/
+  );
+  assert.throws(
+    () => validateEvidencePack({ ...evidencePack, evidenceModelVersion: '2.1' }),
+    /evidenceModelVersion|2\.0/
+  );
   let deep = {};
   for (let index = 0; index < 40; index += 1) deep = { child: deep };
   assert.throws(() => validateEvidencePack({ ...evidencePack, extension: deep }), /bounds/);
@@ -74,12 +85,18 @@ test('reuses authoritative Panda enablement readiness and username normalization
     PANDA_DATA_ENABLED: 'true',
     PANDA_DATA_USERNAME: '13800000000',
     PANDA_DATA_PASSWORD: 'secret',
-    PANDA_DATA_BASE_URL: '   '
+    PANDA_DATA_BASE_URL: '   ',
+    PANDA_DATA_PYTHON: 'C:\\python\\python.exe',
+    PANDA_DATA_TIMEOUT_MS: '12345',
+    PANDA_DATA_MAX_ROWS: '321'
   }, 'C:\\repo');
   assert.equal(config.panda.enabled, true);
   assert.equal(config.panda.ready, true);
   assert.equal(config.panda.username, '8613800000000');
   assert.equal(config.panda.baseUrl, 'http://pandadata.pandaaiquant.com');
+  assert.equal(config.python, config.panda.python);
+  assert.equal(config.workerTimeoutMs, config.panda.timeoutMs * 10);
+  assert.equal(config.panda.maxRows, 321);
   assert.equal(config.public.pandaReady, true);
 });
 
@@ -98,6 +115,7 @@ test('traceable evidence rejects dangling lineage, orphan metrics, and bad sums'
     coverage: 1,
     dataDate: '2026-07-23',
     window: '20d',
+    sourceRole: 'downside_volume',
     evidenceIds: ['panda-call-1']
   };
   const pack = {
@@ -113,15 +131,25 @@ test('traceable evidence rejects dangling lineage, orphan metrics, and bad sums'
         status: 'RANKED',
         score: 80,
         baseScore: 80,
+        weightCoverage: 0.25,
         riskPenalty: 0,
         metrics: [metric]
       }]
     },
     conclusions: [{
       conclusion_id: 'sell-1',
+      leaderboard: 'sellPressure',
+      entryId: '000001.SZ',
       metricIds: [metric.id],
       evidenceIds: ['panda-call-1'],
-      pandaCalls: ['panda-call-1']
+      pandaCalls: ['panda-call-1'],
+      sourceIds: ['panda-call-1'],
+      dataDates: ['2026-07-23'],
+      windows: ['20d'],
+      stale: false,
+      missing: [],
+      limitations: [],
+      confidence: 1
     }],
     sources: [{
       id: 'panda-call-1',
@@ -129,7 +157,7 @@ test('traceable evidence rejects dangling lineage, orphan metrics, and bad sums'
       method: 'get_stock_daily',
       paramsHash: 'a'.repeat(64),
       fields: ['close'],
-      window: '20d',
+      window: '2026-07-01/2026-07-23',
       dataAsOf: '2026-07-23',
       rowCount: 20,
       coverage: 1,
@@ -142,6 +170,39 @@ test('traceable evidence rejects dangling lineage, orphan metrics, and bad sums'
     missingData: [{ section: 'macro', method: 'unimplemented', status: 'NOT_IMPLEMENTED' }]
   };
   assert.equal(validateEvidencePack(pack), pack);
+  const riskMetric = {
+    id: 'metric-potential-1-risk-crowding',
+    name: 'risk_crowding',
+    raw: { turnoverHeat: 3.5 },
+    transformed: 3.5,
+    winsorized: 3.5,
+    percentile: 100,
+    originalWeight: 0,
+    effectiveWeight: 0,
+    contribution: 0,
+    penalty: 5,
+    coverage: 1,
+    dataDate: '2026-07-23',
+    window: '20d',
+    sourceRole: 'risk_crowding',
+    evidenceIds: ['panda-call-1']
+  };
+  const packWithRiskLineage = {
+    ...pack,
+    leaderboards: {
+      sellPressure: [{
+        ...pack.leaderboards.sellPressure[0],
+        riskPenalty: 5,
+        score: 75,
+        metrics: [metric, riskMetric]
+      }]
+    },
+    conclusions: [{
+      ...pack.conclusions[0],
+      metricIds: [metric.id, riskMetric.id]
+    }]
+  };
+  assert.equal(validateEvidencePack(packWithRiskLineage), packWithRiskLineage);
   assert.throws(
     () => validateEvidencePack({
       ...pack,
@@ -174,5 +235,86 @@ test('traceable evidence rejects dangling lineage, orphan metrics, and bad sums'
       sources: [{ ...pack.sources[0], traceCallId: '' }]
     }),
     /traceCallId|call ID/i
+  );
+  assert.throws(
+    () => validateEvidencePack({
+      ...pack,
+      sources: [{
+        ...pack.sources[0],
+        status: 'error',
+        responseHash: null
+      }]
+    }),
+    /usable|successful|source/i
+  );
+  assert.throws(
+    () => validateEvidencePack({
+      ...pack,
+      sources: [{ ...pack.sources[0], truncated: true }]
+    }),
+    /usable|truncat|source/i
+  );
+  assert.throws(
+    () => validateEvidencePack({
+      ...pack,
+      sources: [{ ...pack.sources[0], dataAsOf: '2026-02-30' }]
+    }),
+    /date|source/i
+  );
+  assert.throws(
+    () => validateEvidencePack({
+      ...pack,
+      sources: [{ ...pack.sources[0], method: 'get_margin' }]
+    }),
+    /role|method|source/i
+  );
+  assert.throws(
+    () => validateEvidencePack({
+      ...pack,
+      leaderboards: {
+        sellPressure: [{
+          ...pack.leaderboards.sellPressure[0],
+          metrics: [{
+            ...metric,
+            effectiveWeight: 0.9,
+            contribution: 72
+          }],
+          baseScore: 72,
+          score: 72
+        }]
+      }
+    }),
+    /weight|sum/i
+  );
+  assert.throws(
+    () => validateEvidencePack({
+      ...pack,
+      leaderboards: {
+        sellPressure: [{
+          ...pack.leaderboards.sellPressure[0],
+          metrics: [{
+            ...metric,
+            percentile: 120,
+            contribution: 120
+          }],
+          baseScore: 120,
+          score: 120
+        }]
+      }
+    }),
+    /percentile|range|metric/i
+  );
+  assert.throws(
+    () => validateEvidencePack({
+      ...pack,
+      leaderboards: {
+        sellPressure: [{
+          ...pack.leaderboards.sellPressure[0],
+          riskPenalty: 5,
+          score: 75
+        }]
+      }
+    }),
+    /penalty|risk|lineage/i
   );
 });

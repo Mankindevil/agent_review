@@ -513,6 +513,7 @@ function projectAnalyticalArtifacts(operation, artifacts, expectedRunId) {
   ));
   const evidence = {
     schemaVersion: sourceEvidence.schemaVersion,
+    evidenceModelVersion: sourceEvidence.evidenceModelVersion,
     runId: sourceEvidence.runId,
     reportDate: sourceEvidence.reportDate,
     status: sourceEvidence.status,

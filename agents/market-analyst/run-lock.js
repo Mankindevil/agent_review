@@ -3,6 +3,7 @@ import {
   open,
   readFile,
   readdir,
+  rename,
   rmdir,
   stat,
   unlink
@@ -13,6 +14,7 @@ import path from 'node:path';
 
 const DEFAULT_STALE_MS = 30 * 60 * 1_000;
 const OWNER_FILE = /^owner-[a-f0-9-]+\.json$/i;
+const RECOVERY_OWNER_FILE = /^recovery-[a-f0-9-]+\.json$/i;
 
 function lockError(message, code) {
   const error = new Error(message);
@@ -33,7 +35,9 @@ async function inspectOwner(lockPath, staleMs) {
   try {
     const info = await stat(lockPath);
     if (!info.isDirectory()) return { recoverable: false };
-    const files = (await readdir(lockPath)).filter((name) => OWNER_FILE.test(name));
+    const files = (await readdir(lockPath)).filter(
+      (name) => OWNER_FILE.test(name) || RECOVERY_OWNER_FILE.test(name)
+    );
     if (files.length !== 1) return { recoverable: false };
     const file = files[0];
     try {
@@ -62,29 +66,61 @@ async function inspectOwner(lockPath, staleMs) {
 }
 
 async function removeDeadOwner(lockPath, ownerFile) {
+  const recoveryToken = randomUUID();
+  const claimedOwnerFile = `recovery-${recoveryToken}.json`;
+  const claimedOwnerPath = path.join(lockPath, claimedOwnerFile);
   try {
-    await unlink(path.join(lockPath, ownerFile));
+    await rename(path.join(lockPath, ownerFile), claimedOwnerPath);
   } catch (error) {
     if (error.code === 'ENOENT') return 'retry';
+    if (process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error.code)) {
+      return 'retry';
+    }
     throw error;
+  }
+
+  const recoveryPath = `${lockPath}.recovery-${recoveryToken}`;
+  let moved = false;
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    try {
+      await rename(lockPath, recoveryPath);
+      moved = true;
+      break;
+    } catch (error) {
+      if (error.code === 'ENOENT') return 'retry';
+      if (process.platform !== 'win32' || !['EACCES', 'EPERM'].includes(error.code)) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+  }
+  if (!moved) {
+    await rename(claimedOwnerPath, path.join(lockPath, ownerFile)).catch(() => undefined);
+    return 'retry';
+  }
+
+  try {
+    await unlink(path.join(recoveryPath, claimedOwnerFile));
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
   }
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
-      await rmdir(lockPath);
+      await rmdir(recoveryPath);
       return 'removed';
     } catch (error) {
-      if (error.code === 'ENOENT') return 'retry';
+      if (error.code === 'ENOENT') return 'removed';
       if (!['ENOTEMPTY', 'EEXIST'].includes(error.code)) throw error;
-      const remaining = await readdir(lockPath).catch((cause) => {
+      const remaining = await readdir(recoveryPath).catch((cause) => {
         if (cause.code === 'ENOENT') return null;
         throw cause;
       });
-      if (remaining === null) return 'retry';
-      if (remaining.length > 0) return 'locked';
+      if (remaining === null) return 'removed';
+      if (remaining.length > 0) return 'removed';
       await new Promise((resolve) => setImmediate(resolve));
     }
   }
-  return 'locked';
+  return 'removed';
 }
 
 export async function acquireRunLock({ stateDir, reportDate, staleMs = DEFAULT_STALE_MS }) {

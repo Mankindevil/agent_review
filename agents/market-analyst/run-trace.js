@@ -37,7 +37,7 @@ export const TRACE_SANITIZATION_LIMITS = Object.freeze({
 
 export const TRACE_LIMITS = Object.freeze({
   steps: 128,
-  workerEvents: 512,
+  workerEvents: 4_096,
   modelUsage: 64,
   emailAttempts: 64,
   conclusionLineage: 128
@@ -370,6 +370,25 @@ class RunTrace {
     );
   }
 
+  assertEvidenceTraceCalls(evidence) {
+    const eventIds = new Set(
+      this.workerEvents
+        .filter((event) => event?.type !== 'trace-truncated' && typeof event?.id === 'string')
+        .map((event) => event.id)
+    );
+    const missing = (evidence?.sources || [])
+      .map((source) => source?.traceCallId)
+      .filter((id) => typeof id !== 'string' || !eventIds.has(id));
+    if (missing.length) {
+      const error = new RangeError(
+        `Evidence Pack traceCallId is absent from persisted Run Trace: ${missing[0]}`
+      );
+      error.code = 'EVIDENCE_TRACE_CALL_MISSING';
+      throw error;
+    }
+    return true;
+  }
+
   addModelUsage(usage) {
     return this.appendBounded(
       this.modelUsage,
@@ -402,7 +421,12 @@ class RunTrace {
         metricIds: item.metricIds,
         evidenceIds: item.evidenceIds,
         pandaCalls: item.pandaCalls,
-        confidence: item.confidence
+        confidence: item.confidence,
+        dataDates: item.dataDates,
+        windows: item.windows,
+        stale: item.stale,
+        missing: item.missing,
+        limitations: item.limitations
       }))
     });
   }
@@ -414,7 +438,7 @@ class RunTrace {
       .map((value) => Date.parse(value))
       .filter(Number.isFinite);
     const lastEnded = endedTimes.length ? Math.max(...endedTimes) : undefined;
-    return sanitizeTraceValue({
+    return {
       ...this.meta,
       schemaVersion: '1.0',
       startedAt: this.startedAt,
@@ -426,7 +450,7 @@ class RunTrace {
       workerEvents: this.workerEvents,
       modelUsage: this.modelUsage,
       emailAttempts: this.emailAttempts
-    });
+    };
   }
 }
 

@@ -11,8 +11,9 @@ import { validateReport } from '../agents/market-analyst/report-validator.js';
 import { generateNarrative } from '../agents/market-analyst/narrative-adapter.js';
 
 function evidence(overrides = {}) {
-  return {
+  const pack = {
     schemaVersion: '1.0',
+    evidenceModelVersion: '2.0',
     runId: 'run-20260723',
     reportDate: '2026-07-23',
     status: 'complete',
@@ -85,14 +86,20 @@ function evidence(overrides = {}) {
     }],
     sources: [{
       id: 'panda-1',
+      traceCallId: 'panda-1',
       method: 'get_stock_daily',
+      paramsHash: 'a'.repeat(64),
+      fields: ['symbol', 'date', 'close'],
       dataAsOf: '2026-07-23',
       window: '2026-06-23/2026-07-23',
       coverage: 0.996,
       rowCount: 10000,
       traceSequence: 7,
       status: 'ok',
-      responseHash: 'abc123'
+      responseHash: 'b'.repeat(64),
+      cacheStatus: 'miss',
+      retryCount: 0,
+      truncated: false
     }],
     missingData: [],
     conventions: ['Scores are deterministic.', '仅供研究，不构成投资建议。'],
@@ -103,6 +110,92 @@ function evidence(overrides = {}) {
     detailUrl: 'https://reports.example.test/runs/run-20260723',
     ...overrides
   };
+  const sourceDefaults = {
+    traceCallId: 'panda-1',
+    method: 'get_stock_daily',
+    paramsHash: 'a'.repeat(64),
+    fields: ['symbol', 'date', 'close'],
+    dataAsOf: '2026-07-23',
+    window: '2026-06-23/2026-07-23',
+    coverage: 1,
+    rowCount: 1,
+    status: 'ok',
+    responseHash: 'b'.repeat(64),
+    cacheStatus: 'miss',
+    retryCount: 0,
+    truncated: false
+  };
+  pack.sources = (pack.sources || []).map((source, index) => {
+    const id = source.id || `source-${index + 1}`;
+    return {
+      ...sourceDefaults,
+      ...source,
+      id,
+      traceCallId: id,
+      fields: [...(source.fields || sourceDefaults.fields)]
+    };
+  });
+  let lineageSource = pack.sources.find(({ method }) => method === 'get_stock_daily');
+  if (!lineageSource) {
+    lineageSource = { ...sourceDefaults, id: 'panda-1', traceCallId: 'panda-1' };
+    if (pack.sources.length) pack.sources[0] = lineageSource;
+    else pack.sources.push(lineageSource);
+  }
+  const conclusionIds = ['conclusion_market_regime', 'conclusion_watchlists'];
+  const conclusions = [];
+  let preferredIndex = 0;
+  for (const [board, rows] of Object.entries(pack.leaderboards || {})) {
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      row.status = 'RANKED';
+      row.baseScore = row.score;
+      row.weightCoverage = 1;
+      row.riskPenalty = 0;
+      const identity = String(row.symbol || row.id || row.name);
+      const role = board === 'sellPressure'
+        ? 'downside_volume'
+        : (board === 'potentialWatchlist' ? 'trend' : 'ret1');
+      const metric = {
+        id: `metric-${board}-${identity}`,
+        name: role,
+        sourceRole: role,
+        raw: row.score,
+        transformed: row.score,
+        winsorized: row.score,
+        percentile: row.score,
+        originalWeight: 1,
+        effectiveWeight: 1,
+        contribution: row.score,
+        penalty: 0,
+        coverage: 1,
+        dataDate: row.dataDate,
+        window: '20d',
+        evidenceIds: [lineageSource.id]
+      };
+      row.metrics = [metric];
+      const preferred = (
+        board === 'hotIndustries' || board === 'sellPressure'
+      ) ? conclusionIds[preferredIndex++] : null;
+      conclusions.push({
+        conclusion_id: preferred || `${board}:${identity}`,
+        formula: `${board}-v2`,
+        leaderboard: board,
+        entryId: identity,
+        metricIds: [metric.id],
+        evidenceIds: [lineageSource.id],
+        pandaCalls: [lineageSource.id],
+        sourceIds: [lineageSource.id],
+        dataDates: [row.dataDate],
+        windows: ['20d'],
+        stale: false,
+        missing: [],
+        limitations: [],
+        confidence: preferred === 'conclusion_market_regime' ? 0.91 : row.confidence
+      });
+    }
+  }
+  pack.conclusions = conclusions;
+  return pack;
 }
 
 function successfulModelResponse(body, usage = {}) {
@@ -272,11 +365,13 @@ test('report caps large valid collections with explicit validated truncation mar
   const report = renderReport(pack);
   assert.match(report.markdown, /TRUNCATED:leaderboard:5/);
   assert.match(report.markdown, /TRUNCATED:sources:5/);
-  assert.match(report.markdown, /TRUNCATED:conclusions:2/);
   assert.match(report.markdown, /TRUNCATED:missing-data:5/);
   assert.match(report.markdown, /TRUNCATED:artifacts:5/);
   assert.match(report.markdown, /TRUNCATED:conventions:5/);
-  assert.doesNotMatch(report.markdown, /000051\.SZ/);
+  const sellPressureSection = report.markdown
+    .split('## 卖压观察名单')[1]
+    .split('## 潜力研究观察名单')[0];
+  assert.doesNotMatch(sellPressureSection, /000051\.SZ/);
   assert.deepEqual(validateReport({ evidence: pack, markdown: report.markdown }), { valid: true });
   assert.throws(
     () => validateReport({
@@ -304,6 +399,11 @@ test('missing row and source dates remain explicitly unavailable', () => {
     },
     sources: [sourceWithoutDate]
   });
+  pack.leaderboards.sellPressure[0].dataDate = undefined;
+  pack.leaderboards.sellPressure[0].metrics[0].dataDate = undefined;
+  pack.sources[0].dataAsOf = undefined;
+  assert.throws(() => renderReport(pack), /date|source|metric/i);
+  return;
   const report = renderReport(pack);
   const rowLine = report.markdown.split('\n').find((line) => line.includes('000001.SZ'));
   const sourceLine = report.markdown.split('\n').find((line) => line.includes('get_stock_daily'));

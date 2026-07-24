@@ -392,7 +392,8 @@ function assertReportContract(evidence, markdown) {
       const dataDate = row.dataDate || DATA_DATE_UNAVAILABLE;
       const identity = row.symbol || row.id || row.name;
       const line = reportLines.find((item) =>
-        item.startsWith('|') && identity !== undefined && item.includes(String(identity))
+        item.startsWith('|') && identity !== undefined
+        && item.includes(String(identity)) && item.includes(String(dataDate))
       );
       if (!line) throw new RangeError(`leaderboard row missing identity: ${identity}`);
       for (const required of [dataDate, row.confidence, row.score]) {

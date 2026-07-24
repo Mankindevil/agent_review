@@ -26,6 +26,7 @@ async function temporaryDirectory(t) {
 function evidence(overrides = {}) {
   return {
     schemaVersion: '1.0',
+    evidenceModelVersion: '2.0',
     runId: 'injected-by-worker',
     reportDate: date,
     status: 'complete',
