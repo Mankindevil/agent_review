@@ -151,6 +151,44 @@ class MarketWorkerTests(unittest.TestCase):
                 now="2026-07-24T10:30:00Z",
             )
 
+    def test_authoritative_sh_calendar_marks_exchange_holiday_as_skipped(self):
+        class HolidayPanda(FakePanda):
+            def __init__(self):
+                self.trade_list_calls = 0
+
+            def get_trade_cal(self, start_date=None, end_date=None, exchange="SH",
+                              is_trading_day=None, fields=None):
+                if exchange == "SH" and start_date == end_date == "20260724":
+                    return FakeFrame([{
+                        "nature_date": "20260724",
+                        "exchange": "SH",
+                        "is_trade": 0,
+                    }])
+                return super().get_trade_cal(
+                    start_date=start_date,
+                    end_date=end_date,
+                    exchange=exchange,
+                    is_trading_day=is_trading_day,
+                    fields=fields,
+                )
+
+            def get_trade_list(self, date, exchange="SH"):
+                self.trade_list_calls += 1
+                return super().get_trade_list(date, exchange)
+
+        provider = HolidayPanda()
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-24", "topN": 10,
+             "minLiquidityCny": 20_000_000, "runId": "holiday-run"},
+            worker.PandaCollector(provider, lambda _: None, None, 0),
+            now="2026-07-25T10:30:00Z",
+        )
+        self.assertEqual(pack["status"], "skipped")
+        self.assertEqual(pack["runId"], "holiday-run")
+        self.assertEqual(pack["reportDate"], "2026-07-24")
+        self.assertIn("Panda", pack["skipReason"])
+        self.assertEqual(provider.trade_list_calls, 0)
+
     def test_open_shanghai_session_is_rejected(self):
         collector = worker.PandaCollector(FakePanda(), lambda _: None, None, 0)
         with self.assertRaisesRegex(ValueError, "未完成"):

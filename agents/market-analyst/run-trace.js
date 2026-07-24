@@ -27,6 +27,8 @@ const MAX_DEPTH = 16;
 const MAX_TOTAL_NODES = 4_096;
 const MAX_TOTAL_BYTES = 256 * 1024;
 const MAX_OBJECT_KEY_BYTES = 128;
+const SAFE_MARKET_MESSAGE_ID =
+  /^<market-report\.[a-f0-9]{64}@market-analyst\.local>$/;
 
 export const TRACE_SANITIZATION_LIMITS = Object.freeze({
   maxTotalBytes: MAX_TOTAL_BYTES,
@@ -88,7 +90,9 @@ function redactEmails(input) {
 }
 
 function sanitizeString(input) {
-  let value = redactUrlCredentials(String(input));
+  let value = String(input);
+  if (SAFE_MARKET_MESSAGE_ID.test(value)) return value;
+  value = redactUrlCredentials(value);
   value = value.replace(CREDENTIAL_ASSIGNMENT, (_match, prefix) => `${prefix}${REDACTED}`);
   value = value.replace(
     /\b(Bearer|Basic)\s+[a-z0-9._~+/=-]+/gi,

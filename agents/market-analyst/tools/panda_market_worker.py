@@ -641,6 +641,31 @@ def _listing_date(row):
     return ""
 
 
+def _skipped_evidence_pack(request, requested, reason):
+    run_seed = json.dumps(
+        {
+            "operation": request.get("operation"),
+            "date": requested.isoformat(),
+            "topN": request.get("topN", 10),
+            "status": "skipped",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {
+        "schemaVersion": "1.0",
+        "runId": request.get("runId") or hashlib.sha256(run_seed.encode()).hexdigest()[:16],
+        "reportDate": requested.isoformat(),
+        "status": "skipped",
+        "skipReason": reason,
+        "markets": {},
+        "conclusions": [],
+        "leaderboards": {},
+        "sources": [],
+        "missingData": [],
+    }
+
+
 def build_evidence_pack(request, collector, now):
     if request.get("operation") != "daily-market-report":
         raise ValueError("不支持的 operation")
@@ -660,6 +685,28 @@ def build_evidence_pack(request, collector, now):
     collector.report_date = report_compact
     latest_rows = collector.call("get_last_trade_date", exchange="SH")
     latest = max((_date_text(row.get("date")) for row in latest_rows), default="")
+    if not latest:
+        raise ValueError("Panda latest completed trading date is unavailable")
+    target_calendar = collector.call(
+        "get_trade_cal",
+        start_date=report_compact,
+        end_date=report_compact,
+        exchange="SH",
+        is_trading_day=None,
+        fields=["nature_date", "exchange", "is_trade"],
+    )
+    target_rows = [
+        row for row in target_calendar
+        if _date_text(row.get("nature_date")) == report_compact
+    ]
+    if not target_rows:
+        raise ValueError("Panda trading calendar omitted the report date")
+    if not any(int(row.get("is_trade", 0)) == 1 for row in target_rows):
+        return _skipped_evidence_pack(
+            request,
+            requested,
+            "Panda SH exchange calendar reports a non-trading day",
+        )
     calendar_start = (requested - timedelta(days=120)).strftime("%Y%m%d")
     sh_calendar = collector.call(
         "get_trade_cal",
