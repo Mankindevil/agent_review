@@ -64,17 +64,38 @@ function parseRemoteAdapters(value) {
 }
 
 function isRemoteAdapterReady(adapter) {
-  if (!isObject(adapter) || typeof adapter.url !== 'string') return false;
+  if (!isObject(adapter)) return false;
+  if (adapter.kind === 'model-api') return isRemoteModelApiReady(adapter);
+  return isRemoteHttpAdapterReady(adapter);
+}
+
+function isRemoteHttpAdapterReady(adapter) {
+  return typeof adapter.url === 'string'
+    && isValidHttpUrl(adapter.url)
+    && hasRemoteApiKey(adapter, false);
+}
+
+function isRemoteModelApiReady(adapter) {
+  return typeof adapter.baseUrl === 'string'
+    && isValidHttpUrl(adapter.baseUrl)
+    && typeof adapter.model === 'string'
+    && adapter.model.trim().length > 0
+    && hasRemoteApiKey(adapter, true);
+}
+
+function isValidHttpUrl(value) {
   try {
-    const { protocol } = new URL(adapter.url);
-    if (protocol !== 'http:' && protocol !== 'https:') return false;
+    const { protocol } = new URL(value);
+    return protocol === 'http:' || protocol === 'https:';
   } catch {
     return false;
   }
-  if (!Object.hasOwn(adapter, 'apiKeyEnv')) return true;
-  return typeof adapter.apiKeyEnv === 'string'
-    && adapter.apiKeyEnv.length > 0
-    && Boolean(process.env[adapter.apiKeyEnv]);
+}
+
+function hasRemoteApiKey(adapter, required) {
+  if (!Object.hasOwn(adapter, 'apiKeyEnv')) return !required;
+  if (typeof adapter.apiKeyEnv !== 'string' || !adapter.apiKeyEnv) return false;
+  return Boolean(process.env[adapter.apiKeyEnv]);
 }
 
 function isObject(value) {

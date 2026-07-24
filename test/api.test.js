@@ -365,6 +365,37 @@ test('reports structurally valid remote adapters independently from local execut
   });
 });
 
+test('validates remote model-api adapters against the execution contract', async () => {
+  await withRuntimeStatusEnv(async () => {
+    const config = {
+      kind: 'model-api',
+      baseUrl: 'https://runtime.example/v1',
+      apiKeyEnv: 'RUNTIME_STATUS_MODEL_API_KEY',
+      model: 'runtime-model'
+    };
+    process.env.RUNTIME_ADAPTERS_JSON = JSON.stringify({ doubao: config });
+    let runtimes = await getRuntimeStatus();
+    assert.equal(runtimeFor(runtimes, 'doubao').enabled, false);
+    assert.equal(runtimeFor(runtimes, 'doubao').runtimeReady, false);
+
+    process.env.RUNTIME_STATUS_MODEL_API_KEY = 'test-model-api-key';
+    runtimes = await getRuntimeStatus();
+    assert.equal(runtimeFor(runtimes, 'doubao').enabled, true);
+    assert.equal(runtimeFor(runtimes, 'doubao').runtimeReady, true);
+
+    for (const invalidConfig of [
+      { ...config, model: '' },
+      { ...config, baseUrl: 'ftp://runtime.example/v1' },
+      { ...config, apiKeyEnv: '' }
+    ]) {
+      process.env.RUNTIME_ADAPTERS_JSON = JSON.stringify({ doubao: invalidConfig });
+      runtimes = await getRuntimeStatus();
+      assert.equal(runtimeFor(runtimes, 'doubao').enabled, false);
+      assert.equal(runtimeFor(runtimes, 'doubao').runtimeReady, false);
+    }
+  });
+});
+
 function restoreEnv(name, value) {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
@@ -372,7 +403,7 @@ function restoreEnv(name, value) {
 
 async function withRuntimeStatusEnv(run) {
   const names = [
-    'RUNTIME_ADAPTERS_JSON', 'RUNTIME_STATUS_TEST_KEY', 'ENABLE_LOCAL_CLAUDE_CODE',
+    'RUNTIME_ADAPTERS_JSON', 'RUNTIME_STATUS_TEST_KEY', 'RUNTIME_STATUS_MODEL_API_KEY', 'ENABLE_LOCAL_CLAUDE_CODE',
     'ENABLE_LOCAL_CURSOR_AGENT', 'PATH', 'ARK_BASE_URL', 'ARK_API_KEY',
     'REVIEW_MODEL_DOUBAO', 'CURSOR_API_KEY'
   ];
