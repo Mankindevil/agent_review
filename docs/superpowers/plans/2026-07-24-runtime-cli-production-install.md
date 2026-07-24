@@ -4,7 +4,7 @@
 
 **Goal:** Install production-ready Linux x64 Claude Code and Cursor Agent runtimes through locally relayed official artifacts, then make the evaluation platform invoke them safely and report their status accurately.
 
-**Architecture:** The Windows workstation downloads pinned official Linux x64 artifacts, verifies them, and uploads them through SCP. The production host installs immutable tool releases under `/opt/agent-review/tools`, while the Node application invokes each CLI as the unprivileged `agent-review` user in a disposable workspace. Claude uses the existing loopback Anthropic-to-Ark bridge; Cursor uses its own API key and direct outbound service.
+**Architecture:** The Windows workstation downloads pinned official Linux x64 artifacts, verifies them, and uploads them through SCP. The production host installs immutable tool releases under `/opt/agent-review/tools`, while the Node application invokes each CLI as the unprivileged `agent-review` user in a disposable workspace. Claude uses the existing loopback Anthropic-to-Ark bridge; Cursor uses a dedicated persistent file-backed account login while every non-authentication directory remains disposable.
 
 **Tech Stack:** Node.js 24 ESM, native Node test runner, Claude Code 2.1.218 native Linux x64, Cursor Agent `2026.07.23-e383d2b` Linux x64, PowerShell, OpenSSH/SCP, Ubuntu systemd, Nginx.
 
@@ -13,10 +13,10 @@
 - Do not install a global VPN or change the production host's default route.
 - Do not copy the Windows `claude.exe` to Linux.
 - Runtime execution must not depend on the workstation remaining online.
-- Claude must use the existing Ark configuration; Cursor must use a separate `CURSOR_API_KEY`; Doubao remains the existing Ark API adapter.
+- Claude must use the existing Ark configuration; Cursor must use file-backed account login under `CURSOR_AUTH_CONFIG_HOME` and must not receive an API key; Doubao remains the existing Ark API adapter.
 - Reviewer models and Runtime models are independent of the contestant-only DeepSeek V4 Pro requirement.
 - Tool releases are immutable and owned by `root:agent-review`; the application may only execute them.
-- Secrets remain in `/etc/agent-review/agent-review.env` with `root:root 0600`.
+- Environment secrets remain in `/etc/agent-review/agent-review.env` with `root:root 0600`; Cursor's account token exists only in the service-owned mode-0600 `cursor/auth.json`.
 - Runtime workspaces are disposable and may not expose production code, `.env` files, certificates, or persistent evaluation state.
 - Any single Runtime invocation must remain within the competition's 20-minute ceiling.
 - The SSH host key must be verified through the cloud console before credentialed login.
@@ -31,7 +31,7 @@
 - Modify `src/runtime-status.js`: probe executables using the configured PATH and distinguish installation, enablement, authentication, and readiness.
 - Modify `test/runtime-skill-retry.test.js`: cover CLI arguments and workspace sandbox preparation.
 - Modify `test/api.test.js`: cover honest runtime status after injecting mock CLI executables.
-- Modify `.env.example`: document production PATH and Cursor API key requirements without adding secrets.
+- Modify `.env.example`: document production PATH and Cursor's dedicated file-backed account-login directory without adding secrets.
 - Modify `README.md`: document pinned local Runtime installation and independent model responsibilities.
 - Use `docs/PRODUCTION_OPERATIONS.md`: follow the existing immutable release, restart, health, and rollback procedures.
 
@@ -147,7 +147,7 @@ git commit -m "fix: use supported runtime CLI arguments"
 - Test: `test/runtime-skill-retry.test.js`
 
 **Interfaces:**
-- Produces: `prepareRuntimeWorkspace(runtimeId: string, workspace: string): Promise<void>`
+- Produces: `prepareRuntimeWorkspace(runtimeId: string, workspace: string, options?): Promise<void>`
 - Consumes: the temporary directory returned by `mkdtemp()` in `callLocalCli()`.
 
 - [ ] **Step 1: Add the failing sandbox test**
@@ -164,10 +164,14 @@ test('writes deny-by-default Cursor permissions only inside the temporary worksp
     await prepareRuntimeWorkspace('cursor', root);
     const payload = JSON.parse(await readFile(path.join(root, '.cursor', 'cli.json'), 'utf8'));
     assert.deepEqual(payload.permissions.allow, []);
-    assert.ok(payload.permissions.deny.includes('Shell(*)'));
-    assert.ok(payload.permissions.deny.includes('Write(**)'));
-    assert.ok(payload.permissions.deny.includes('Read(**/.env*)'));
-    assert.ok(payload.permissions.deny.includes('Read(**/*.key)'));
+    for (const rule of [
+      'Shell(*)', 'WebFetch(*)', 'WebSearch(*)', 'Mcp(*)',
+      'Write(**)', 'Write(/**)', 'Read(**)', 'Read(/**)',
+      'Read(/proc/**)', 'Read(/run/**)', 'Read(/tmp/**)',
+      'Read(/var/lib/agent-review/cursor-auth/**)'
+    ]) {
+      assert.ok(payload.permissions.deny.includes(rule));
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -192,31 +196,53 @@ Create `src/runtime-sandbox.js`:
 import path from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
 
-const CURSOR_PERMISSIONS = {
-  permissions: {
-    allow: [],
-    deny: [
-      'Shell(*)',
-      'Write(**)',
-      'Read(**/.env*)',
-      'Read(**/*.key)',
-      'Read(**/*.pem)',
-      'Read(/etc/**)',
-      'Read(/opt/agent-review/**)',
-      'Read(/var/lib/agent-review/**)'
-    ]
-  }
-};
+const DEFAULT_CURSOR_AUTH_CONFIG_HOME = '/var/lib/agent-review/cursor-auth';
+const ABSOLUTE_READ_DENIES = [
+  '/proc/**', '/run/**', '/tmp/**', '/sys/**', '/dev/**',
+  '/etc/**', '/opt/**', '/var/**', '/home/**', '/root/**',
+  '/mnt/**', '/media/**'
+];
 
-export async function prepareRuntimeWorkspace(runtimeId, workspace) {
+export async function prepareRuntimeWorkspace(runtimeId, workspace, {
+  cursorAuthConfigHome = process.env.CURSOR_AUTH_CONFIG_HOME
+} = {}) {
   if (runtimeId !== 'cursor') return;
   const directory = path.join(workspace, '.cursor');
+  const authHome = normalizeAbsoluteRulePath(cursorAuthConfigHome)
+    || DEFAULT_CURSOR_AUTH_CONFIG_HOME;
+  const permissions = {
+    permissions: {
+      allow: [],
+      deny: [
+        'Shell(*)',
+        'WebFetch(*)',
+        'WebSearch(*)',
+        'Mcp(*)',
+        'Write(**)',
+        'Write(/**)',
+        'Read(**)',
+        'Read(/**)',
+        'Read(**/.env*)',
+        'Read(**/*.key)',
+        'Read(**/*.pem)',
+        ...ABSOLUTE_READ_DENIES.map((target) => `Read(${target})`),
+        `Read(${authHome}/**)`,
+        'Read(/opt/agent-review/**)',
+        'Read(/var/lib/agent-review/**)'
+      ]
+    }
+  };
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await writeFile(
     path.join(directory, 'cli.json'),
-    `${JSON.stringify(CURSOR_PERMISSIONS, null, 2)}\n`,
+    `${JSON.stringify(permissions, null, 2)}\n`,
     { mode: 0o600 }
   );
+}
+
+function normalizeAbsoluteRulePath(value) {
+  if (typeof value !== 'string' || !value.trim() || !path.isAbsolute(value.trim())) return null;
+  return value.trim().replaceAll('\\', '/').replace(/\/+$/, '');
 }
 ```
 
@@ -225,7 +251,9 @@ Import and call it immediately after the temporary directory is created:
 ```js
 import { prepareRuntimeWorkspace } from './runtime-sandbox.js';
 
-await prepareRuntimeWorkspace(runtimeId, workspace);
+await prepareRuntimeWorkspace(runtimeId, workspace, {
+  cursorAuthConfigHome: parentEnv.CURSOR_AUTH_CONFIG_HOME
+});
 ```
 
 - [ ] **Step 4: Run the focused test**
@@ -255,7 +283,7 @@ git commit -m "feat: sandbox Cursor runtime workspace"
 
 **Interfaces:**
 - Produces: `getRuntimeStatus()` entries with `installed`, `authenticated`, `enabled`, and `runtimeReady`.
-- Consumes: `PATH`, `RUNTIME_ADAPTERS_JSON`, `ENABLE_LOCAL_CLAUDE_CODE`, `ENABLE_LOCAL_CURSOR_AGENT`, `CURSOR_API_KEY`, and existing Claude backend configuration.
+- Consumes: `PATH`, `RUNTIME_ADAPTERS_JSON`, `ENABLE_LOCAL_CLAUDE_CODE`, `ENABLE_LOCAL_CURSOR_AGENT`, `CURSOR_AUTH_CONFIG_HOME`, and existing Claude backend configuration.
 
 - [ ] **Step 1: Add failing readiness assertions**
 
@@ -324,17 +352,18 @@ const cursorEnabled = remoteConfig.includes('cursor')
   || process.env.ENABLE_LOCAL_CURSOR_AGENT === 'true';
 ```
 
-Add `enabled: claudeEnabled` and `enabled: cursorEnabled` to the respective entries. For Cursor authentication, accept the production API key before invoking `status`:
+Add `enabled: claudeEnabled` and `enabled: cursorEnabled` to the respective entries. Probe Cursor authentication with the same minimal environment and persistent config directory used for execution:
 
 ```js
 async function probeCursorAuth() {
-  if (process.env.CURSOR_API_KEY) return true;
   try {
     const { stdout } = await execFileAsync('cursor-agent', ['status'], {
       timeout: 5_000,
-      maxBuffer: 64_000
+      maxBuffer: 64_000,
+      env: localCliEnv('cursor', workspace, process.env)
     });
-    return !/not logged|unauthenticated/i.test(stdout);
+    return /\blogged in\b|\bauthenticated\b/i.test(stdout)
+      && !/not logged|logged out|unauthenticated/i.test(stdout);
   } catch {
     return false;
   }
@@ -380,10 +409,10 @@ git commit -m "fix: report runtime readiness accurately"
 Extend the documentation API test:
 
 ```js
-assert.match(envExample, /CURSOR_API_KEY=/);
+assert.match(envExample, /CURSOR_AUTH_CONFIG_HOME=/);
 assert.match(envExample, /\/opt\/agent-review\/tools\/bin/);
 assert.match(readme, /评审模型与 Runtime 模型独立配置/);
-assert.match(readme, /Cursor Agent.*CURSOR_API_KEY/s);
+assert.match(readme, /Cursor Agent.*CURSOR_AUTH_CONFIG_HOME/s);
 ```
 
 - [ ] **Step 2: Run the test and verify failure**
@@ -403,7 +432,7 @@ Add:
 ```env
 # 生产工具目录由 root 管理；不要指向用户可写目录。
 # PATH=/opt/agent-review/tools/bin:/usr/local/bin:/usr/bin:/bin
-CURSOR_API_KEY=
+CURSOR_AUTH_CONFIG_HOME=/var/lib/agent-review/cursor-auth
 ```
 
 Keep both local Runtime enable flags defaulted to `false`.
@@ -414,7 +443,7 @@ Document:
 
 - the pinned release layout under `/opt/agent-review/tools`;
 - Claude's existing Ark bridge;
-- Cursor's independent API key;
+- Cursor's dedicated file-backed account login and isolated config directory;
 - Doubao's unchanged API adapter;
 - the fact that reviewer models, Runtime models, and contestant model eligibility are three separate concerns;
 - the `/api/runtimes` readiness semantics.
@@ -633,7 +662,7 @@ Expected: both version checks succeed as `agent-review`.
 - Remote backup: root-only timestamped environment backup.
 
 **Interfaces:**
-- Consumes existing Ark configuration and an independently supplied Cursor API Key.
+- Consumes existing Ark configuration and an independently provisioned Cursor account login.
 - Produces a systemd process environment with immutable tool PATH and explicit enable flags.
 
 - [ ] **Step 1: Verify required secret names without printing values**
@@ -653,9 +682,9 @@ done
 
 Expected: every listed variable reports `present`.
 
-- [ ] **Step 2: Supply Cursor API Key through an approved secret channel**
+- [ ] **Step 2: Create the dedicated Cursor account-login directory**
 
-The operator places the Cursor API Key into a root-owned temporary environment fragment on the server. The key must never appear in chat, shell history, journal output, Git, or the plan. Confirm the fragment is `root:root 0600`.
+Create `/var/lib/agent-review/cursor-auth` as `agent-review:agent-review` mode `0700`. Run the official interactive account login as the service user with `AGENT_CLI_CREDENTIAL_STORE=file` and `XDG_CONFIG_HOME` set to that directory. Confirm `cursor/auth.json` is owned by `agent-review` and mode `0600`. Do not configure or pass a Cursor API key.
 
 - [ ] **Step 3: Atomically update the environment file**
 
@@ -665,18 +694,27 @@ Use a root-only temporary file in `/etc/agent-review`, preserve all existing val
 PATH="/opt/agent-review/tools/bin:/usr/local/bin:/usr/bin:/bin"
 ENABLE_LOCAL_CLAUDE_CODE="true"
 ENABLE_LOCAL_CURSOR_AGENT="true"
+CURSOR_AUTH_CONFIG_HOME="/var/lib/agent-review/cursor-auth"
 LOCAL_RUNTIME_TIMEOUT_MS="1200000"
 ```
 
-Merge the actual `CURSOR_API_KEY` value from the root-owned temporary fragment created in Step 2; do not put it in a command argument. Validate that the final file contains no newlines inside values, then set `root:root 0600` and atomically rename it over the old file.
+Validate that the final file contains no newlines inside values, then set `root:root 0600` and atomically rename it over the old file. The account token remains only in the dedicated file-backed credential directory.
 
 - [ ] **Step 4: Verify Cursor network and authentication as the service user**
 
 ```bash
-set -a
-. /etc/agent-review/agent-review.env
-set +a
-sudo -u agent-review --preserve-env=PATH,CURSOR_API_KEY cursor-agent status
+workspace="$(mktemp -d /tmp/cursor-status.XXXXXX)"
+sudo -u agent-review env \
+  PATH=/opt/agent-review/tools/bin:/usr/local/bin:/usr/bin:/bin \
+  HOME="$workspace" \
+  XDG_CONFIG_HOME=/var/lib/agent-review/cursor-auth \
+  XDG_CACHE_HOME="$workspace" \
+  XDG_DATA_HOME="$workspace" \
+  XDG_STATE_HOME="$workspace" \
+  TMPDIR="$workspace" \
+  AGENT_CLI_CREDENTIAL_STORE=file \
+  cursor-agent status
+rm -rf "$workspace"
 ```
 
 Expected: authenticated status. If DNS, TLS, region, or connection fails, set `ENABLE_LOCAL_CURSOR_AGENT=false` and continue with Claude and Doubao only.
@@ -779,7 +817,7 @@ curl --fail --silent --show-error https://14.103.143.171/agent-check.html >/dev/
 curl --fail --silent --show-error https://14.103.143.171/api/runtimes | python3 -m json.tool
 ```
 
-Expected: Claude Code and Doubao ready; Cursor ready only when direct connectivity and its API key both work.
+Expected: Claude Code and Doubao ready; Cursor ready only when direct connectivity, persistent account status, and its minimum call all work.
 
 - [ ] **Step 3: Execute isolated CLI smoke tests**
 
@@ -803,7 +841,7 @@ journalctl -u agent-review --since '-30 minutes' --no-pager -n 500
 systemctl show agent-review -p MainPID -p ActiveState -p SubState
 ```
 
-Review output for errors and verify that no Ark key, Cursor key, platform access key, bearer token, or full environment value appears.
+Review output for errors and verify that no Ark key, Cursor account token, platform access key, bearer token, or full environment value appears.
 
 - [ ] **Step 6: Prove rollback commands without invoking them**
 

@@ -1,9 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { constants as fsConstants } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { getRuntimeStatus } from '../src/runtime-status.js';
+import * as runtimeStatusModule from '../src/runtime-status.js';
+
+const {
+  cachedRuntimeReadiness,
+  clearRuntimeReadinessCache,
+  getRuntimeStatus,
+  probeCursorAuthentication,
+  probeExecutable
+} = runtimeStatusModule;
 
 process.env.NODE_ENV = 'test';
 process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-test-${process.pid}.json`);
@@ -212,21 +221,29 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
 });
 
 test('documents production runtime tool configuration and independent model responsibilities', async () => {
-  const [envExample, readme] = await Promise.all([
+  const [envExample, readme, design, plan] = await Promise.all([
     readFile(new URL('../.env.example', import.meta.url), 'utf8'),
-    readFile(new URL('../README.md', import.meta.url), 'utf8')
+    readFile(new URL('../README.md', import.meta.url), 'utf8'),
+    readFile(new URL('../docs/superpowers/specs/2026-07-24-runtime-cli-production-install-design.md', import.meta.url), 'utf8'),
+    readFile(new URL('../docs/superpowers/plans/2026-07-24-runtime-cli-production-install.md', import.meta.url), 'utf8')
   ]);
-  assert.match(envExample, /CURSOR_API_KEY=/);
+  assert.match(envExample, /^CURSOR_AUTH_CONFIG_HOME=\/var\/lib\/agent-review\/cursor-auth$/m);
+  assert.doesNotMatch(envExample, /^CURSOR_API_KEY=/m);
   assert.match(envExample, /\/opt\/agent-review\/tools\/bin/);
   assert.match(envExample, /^ENABLE_LOCAL_CLAUDE_CODE=false$/m);
   assert.match(envExample, /^ENABLE_LOCAL_CURSOR_AGENT=false$/m);
   assert.match(readme, /评审模型与 Runtime 模型独立配置/);
-  assert.match(readme, /Cursor Agent.*CURSOR_API_KEY/s);
+  assert.match(readme, /Cursor Agent.*CURSOR_AUTH_CONFIG_HOME/s);
+  assert.doesNotMatch(readme, /--mode ask|--sandbox enabled|CURSOR_API_KEY/);
+  assert.match(readme, /\/opt\/agent-review\/tools\/claude\/releases\/2\.1\.218/);
+  assert.match(readme, /\/opt\/agent-review\/tools\/cursor-agent\/releases\/2026\.07\.23-e383d2b/);
+  assert.match(readme, /生产.*ENABLE_LOCAL_CLAUDE_CODE=true.*ENABLE_LOCAL_CURSOR_AGENT=true/s);
   assert.match(readme, /评审模型、Runtime 模型、参赛 Agent 资格是三件事/);
   assert.match(readme, /只有参赛 Agent Card 与最终报名表的声明要求 DeepSeek V4 Pro/);
   assert.match(readme, /评审模型以及 Claude、Cursor、Doubao Runtime 不受该底模限制/);
   assert.match(readme, /GET \/api\/runtimes/);
   assert.match(readme, /runtimeReady/);
+  assert.doesNotMatch(`${design}\n${plan}`, /Cursor Agent 使用独立 Cursor API Key|Cursor API key requirements|Cursor's independent API key|independently supplied Cursor API Key|Cursor ready only when.*API key/i);
 });
 
 test('protects diagnostics before parsing its request body', async () => {
@@ -340,15 +357,160 @@ test('reports enablement independently from local installation', async () => {
   }
 });
 
+test('reports local authentication independently from adapter enablement', async () => {
+  const env = {
+    PATH: '',
+    CLAUDE_BACKEND: 'deepseek',
+    DEEPSEEK_API_KEY: 'deepseek-runtime-token',
+    CURSOR_AUTH_CONFIG_HOME: '/var/lib/agent-review/cursor-auth'
+  };
+  const status = await getRuntimeStatus({
+    env,
+    probeExecutableImpl: async (command) => ({
+      installed: command === 'claude' || command === 'cursor-agent',
+      version: 'test-version',
+      executable: `/runtime/bin/${command}`
+    }),
+    probeCursorAuthImpl: async () => true,
+    liveProbe: async () => assert.fail('disabled adapters must not run live probes')
+  });
+  assert.equal(runtimeFor(status, 'claude-code').authenticated, true);
+  assert.equal(runtimeFor(status, 'claude-code').enabled, false);
+  assert.equal(runtimeFor(status, 'cursor').authenticated, true);
+  assert.equal(runtimeFor(status, 'cursor').enabled, false);
+  assert.equal(runtimeFor(status, 'cursor').runtimeReady, false);
+});
+
+test('does not treat an unresolved authentication Promise as a credential', async () => {
+  const probeExecutableImpl = async (command) => ({
+    installed: command === 'claude',
+    version: command === 'claude' ? '2.1.218' : null,
+    executable: command === 'claude' ? '/runtime/bin/claude' : null
+  });
+  let liveCalls = 0;
+  let status = await getRuntimeStatus({
+    env: { PATH: '', ENABLE_LOCAL_CLAUDE_CODE: 'true' },
+    probeExecutableImpl,
+    liveProbe: async () => {
+      liveCalls += 1;
+      return true;
+    }
+  });
+  assert.equal(runtimeFor(status, 'claude-code').authenticated, false);
+  assert.equal(runtimeFor(status, 'claude-code').runtimeReady, false);
+  assert.equal(liveCalls, 0);
+
+  status = await getRuntimeStatus({
+    env: {
+      PATH: '',
+      RUNTIME_ADAPTERS_JSON: JSON.stringify({
+        'claude-code': {
+          kind: 'model-api',
+          baseUrl: 'https://runtime.example/v1',
+          apiKeyEnv: 'MISSING_CLAUDE_KEY',
+          model: 'runtime-model'
+        }
+      })
+    },
+    probeExecutableImpl,
+    liveProbe: async () => {
+      liveCalls += 1;
+      return true;
+    }
+  });
+  assert.equal(runtimeFor(status, 'claude-code').authenticated, false);
+  assert.equal(runtimeFor(status, 'claude-code').runtimeReady, false);
+  assert.equal(liveCalls, 0);
+});
+
+test('probes executable version with X_OK and a disposable minimal environment', async () => {
+  assert.equal(typeof probeExecutable, 'function');
+  let accessMode;
+  let execOptions;
+  let removed = false;
+  const result = await probeExecutable('claude', {
+    env: {
+      PATH: '/runtime/bin',
+      LANG: 'C.UTF-8',
+      ARK_API_KEY: 'must-not-leak',
+      HOME: '/persistent/home'
+    },
+    accessImpl: async (_candidate, mode) => { accessMode = mode; },
+    execFileImpl: async (_command, _args, options) => {
+      execOptions = options;
+      return { stdout: '2.1.218 (Claude Code)\n', stderr: '' };
+    },
+    createWorkspace: async () => '/tmp/runtime-probe',
+    removeWorkspace: async (_workspace, options) => {
+      removed = options.recursive === true && options.force === true;
+    }
+  });
+
+  assert.equal(accessMode, fsConstants.X_OK);
+  assert.equal(result.installed, true);
+  assert.equal(result.version, '2.1.218 (Claude Code)');
+  assert.equal(execOptions.cwd, '/tmp/runtime-probe');
+  assert.equal(execOptions.env.HOME, '/tmp/runtime-probe');
+  assert.equal(execOptions.env.ARK_API_KEY, undefined);
+  assert.equal(removed, true);
+});
+
+test('does not call a failed version probe installed', async () => {
+  assert.equal(typeof probeExecutable, 'function');
+  const result = await probeExecutable('claude', {
+    env: { PATH: '/runtime/bin' },
+    accessImpl: async () => {},
+    execFileImpl: async () => { throw new Error('version failed'); },
+    createWorkspace: async () => '/tmp/runtime-probe-failure',
+    removeWorkspace: async () => {}
+  });
+  assert.deepEqual(result, { installed: false, version: null, executable: null });
+});
+
+test('probes Cursor login with the same minimal persistent auth directory as execution', async () => {
+  assert.equal(typeof probeCursorAuthentication, 'function');
+  let options;
+  const authenticated = await probeCursorAuthentication('/runtime/bin/cursor-agent', {
+    env: {
+      PATH: '/runtime/bin',
+      CURSOR_AUTH_CONFIG_HOME: '/var/lib/agent-review/cursor-auth',
+      CURSOR_API_KEY: 'must-not-leak',
+      ARK_API_KEY: 'must-not-leak'
+    },
+    execFileImpl: async (_command, _args, execOptions) => {
+      options = execOptions;
+      return { stdout: 'Logged in as production-reviewer\n', stderr: '' };
+    },
+    createWorkspace: async () => '/tmp/cursor-status-probe',
+    removeWorkspace: async () => {}
+  });
+  assert.equal(authenticated, true);
+  assert.equal(options.env.HOME, '/tmp/cursor-status-probe');
+  assert.equal(options.env.XDG_CONFIG_HOME, '/var/lib/agent-review/cursor-auth');
+  assert.equal(options.env.XDG_CACHE_HOME, '/tmp/cursor-status-probe');
+  assert.equal(options.env.AGENT_CLI_CREDENTIAL_STORE, 'file');
+  assert.equal(options.env.CURSOR_API_KEY, undefined);
+  assert.equal(options.env.ARK_API_KEY, undefined);
+
+  for (const stdout of ['', 'Not logged in', 'Logged out']) {
+    assert.equal(await probeCursorAuthentication('/runtime/bin/cursor-agent', {
+      env: { PATH: '/runtime/bin', CURSOR_AUTH_CONFIG_HOME: '/var/lib/agent-review/cursor-auth' },
+      execFileImpl: async () => ({ stdout, stderr: '' }),
+      createWorkspace: async () => '/tmp/cursor-negative-probe',
+      removeWorkspace: async () => {}
+    }), false);
+  }
+});
+
 test('rejects imprecise and unusable remote runtime adapter configuration', async () => {
   await withRuntimeStatusEnv(async () => {
     for (const remoteConfig of [
       JSON.stringify({ note: 'claude-code cursor doubao' }),
       '{"claude-code":',
       JSON.stringify({
-        'claude-code': { url: 'ftp://runtime.example/claude' },
-        cursor: { url: 'not-a-url' },
-        doubao: { url: 'https://runtime.example/doubao', apiKeyEnv: 'RUNTIME_STATUS_TEST_KEY' }
+        'claude-code': { kind: 'remote-http', url: 'ftp://runtime.example/claude' },
+        cursor: { kind: 'remote-http', url: 'not-a-url' },
+        doubao: { kind: 'remote-http', url: 'https://runtime.example/doubao', apiKeyEnv: '' }
       })
     ]) {
       process.env.RUNTIME_ADAPTERS_JSON = remoteConfig;
@@ -361,26 +523,72 @@ test('rejects imprecise and unusable remote runtime adapter configuration', asyn
   });
 });
 
-test('reports structurally valid remote adapters independently from local executables', async () => {
+test('keeps remote enablement, authentication, and live readiness independent', async () => {
   await withRuntimeStatusEnv(async () => {
     process.env.RUNTIME_ADAPTERS_JSON = JSON.stringify({
-      'claude-code': { url: 'https://runtime.example/claude' },
-      cursor: { url: 'http://runtime.example/cursor' },
-      doubao: { url: 'https://runtime.example/doubao', apiKeyEnv: 'RUNTIME_STATUS_TEST_KEY' }
+      'claude-code': { kind: 'remote-http', url: 'https://runtime.example/claude' },
+      cursor: { kind: 'remote-http', url: 'http://runtime.example/cursor' },
+      doubao: { kind: 'remote-http', url: 'https://runtime.example/doubao', apiKeyEnv: 'RUNTIME_STATUS_TEST_KEY' }
     });
-    let runtimes = await getRuntimeStatus();
+    let probes = 0;
+    let runtimes = await getRuntimeStatus({ liveProbe: async () => { probes += 1; return false; } });
     assert.equal(runtimeFor(runtimes, 'claude-code').enabled, true);
-    assert.equal(runtimeFor(runtimes, 'claude-code').runtimeReady, true);
+    assert.equal(runtimeFor(runtimes, 'claude-code').authenticated, true);
+    assert.equal(runtimeFor(runtimes, 'claude-code').runtimeReady, false);
     assert.equal(runtimeFor(runtimes, 'cursor').enabled, true);
-    assert.equal(runtimeFor(runtimes, 'cursor').runtimeReady, true);
-    assert.equal(runtimeFor(runtimes, 'doubao').enabled, false);
+    assert.equal(runtimeFor(runtimes, 'cursor').authenticated, true);
+    assert.equal(runtimeFor(runtimes, 'cursor').runtimeReady, false);
+    assert.equal(runtimeFor(runtimes, 'doubao').enabled, true);
+    assert.equal(runtimeFor(runtimes, 'doubao').authenticated, false);
     assert.equal(runtimeFor(runtimes, 'doubao').runtimeReady, false);
+    assert.equal(probes, 2);
 
     process.env.RUNTIME_STATUS_TEST_KEY = 'test-runtime-key';
-    runtimes = await getRuntimeStatus();
+    runtimes = await getRuntimeStatus({ liveProbe: async () => true });
     assert.equal(runtimeFor(runtimes, 'doubao').enabled, true);
+    assert.equal(runtimeFor(runtimes, 'doubao').authenticated, true);
     assert.equal(runtimeFor(runtimes, 'doubao').runtimeReady, true);
+
+    process.env.RUNTIME_ADAPTERS_JSON = JSON.stringify({
+      cursor: { kind: 'remote-http', url: 'https://runtime.example/cursor', apiKeyEnv: 'toString' }
+    });
+    runtimes = await getRuntimeStatus({ liveProbe: async () => assert.fail('inherited API key must not trigger a probe') });
+    assert.equal(runtimeFor(runtimes, 'cursor').enabled, true);
+    assert.equal(runtimeFor(runtimes, 'cursor').authenticated, false);
+    assert.equal(runtimeFor(runtimes, 'cursor').runtimeReady, false);
   });
+});
+
+test('coalesces and briefly caches expensive live readiness probes', async () => {
+  assert.equal(typeof cachedRuntimeReadiness, 'function');
+  assert.equal(typeof clearRuntimeReadinessCache, 'function');
+  clearRuntimeReadinessCache();
+  const config = {
+    source: 'remote',
+    kind: 'remote-http',
+    url: 'https://runtime.example/cursor'
+  };
+  let calls = 0;
+  const probe = async () => {
+    calls += 1;
+    return true;
+  };
+
+  const first = await Promise.all([
+    cachedRuntimeReadiness('cursor', config, { env: {}, probe, ttlMs: 60_000 }),
+    cachedRuntimeReadiness('cursor', config, { env: {}, probe, ttlMs: 60_000 })
+  ]);
+  assert.deepEqual(first, [true, true]);
+  assert.equal(await cachedRuntimeReadiness('cursor', config, { env: {}, probe, ttlMs: 60_000 }), true);
+  assert.equal(calls, 1);
+
+  await cachedRuntimeReadiness('cursor', { ...config, url: 'https://runtime.example/other' }, {
+    env: {},
+    probe,
+    ttlMs: 60_000
+  });
+  assert.equal(calls, 2);
+  clearRuntimeReadinessCache();
 });
 
 test('validates remote model-api adapters against the execution contract', async () => {
@@ -392,13 +600,17 @@ test('validates remote model-api adapters against the execution contract', async
       model: 'runtime-model'
     };
     process.env.RUNTIME_ADAPTERS_JSON = JSON.stringify({ doubao: config });
-    let runtimes = await getRuntimeStatus();
-    assert.equal(runtimeFor(runtimes, 'doubao').enabled, false);
+    let runtimes = await getRuntimeStatus({ liveProbe: async () => assert.fail('missing key must skip probe') });
+    assert.equal(runtimeFor(runtimes, 'doubao').enabled, true);
+    assert.equal(runtimeFor(runtimes, 'doubao').authenticated, false);
     assert.equal(runtimeFor(runtimes, 'doubao').runtimeReady, false);
 
     process.env.RUNTIME_STATUS_MODEL_API_KEY = 'test-model-api-key';
-    runtimes = await getRuntimeStatus();
+    runtimes = await getRuntimeStatus({ liveProbe: async () => false });
     assert.equal(runtimeFor(runtimes, 'doubao').enabled, true);
+    assert.equal(runtimeFor(runtimes, 'doubao').authenticated, true);
+    assert.equal(runtimeFor(runtimes, 'doubao').runtimeReady, false);
+    runtimes = await getRuntimeStatus({ liveProbe: async () => true });
     assert.equal(runtimeFor(runtimes, 'doubao').runtimeReady, true);
 
     for (const invalidConfig of [
@@ -407,7 +619,7 @@ test('validates remote model-api adapters against the execution contract', async
       { ...config, apiKeyEnv: '' }
     ]) {
       process.env.RUNTIME_ADAPTERS_JSON = JSON.stringify({ doubao: invalidConfig });
-      runtimes = await getRuntimeStatus();
+      runtimes = await getRuntimeStatus({ liveProbe: async () => true });
       assert.equal(runtimeFor(runtimes, 'doubao').enabled, false);
       assert.equal(runtimeFor(runtimes, 'doubao').runtimeReady, false);
     }
@@ -423,7 +635,7 @@ async function withRuntimeStatusEnv(run) {
   const names = [
     'RUNTIME_ADAPTERS_JSON', 'RUNTIME_STATUS_TEST_KEY', 'RUNTIME_STATUS_MODEL_API_KEY', 'ENABLE_LOCAL_CLAUDE_CODE',
     'ENABLE_LOCAL_CURSOR_AGENT', 'PATH', 'ARK_BASE_URL', 'ARK_API_KEY',
-    'REVIEW_MODEL_DOUBAO', 'CURSOR_API_KEY'
+    'REVIEW_MODEL_DOUBAO', 'CURSOR_API_KEY', 'CURSOR_AUTH_CONFIG_HOME'
   ];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   try {

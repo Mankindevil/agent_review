@@ -1,12 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, localRuntimeTimeout, runSkill, withRuntimeWorkspace } from '../src/runtimes.js';
+import { PassThrough } from 'node:stream';
+import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, localRuntimeTimeout, probeRuntimeReadiness, runSkill, withRuntimeWorkspace } from '../src/runtimes.js';
 import { prepareRuntimeWorkspace } from '../src/runtime-sandbox.js';
 import { runtimeBuildSkillPrompt } from '../src/prompts.js';
 import { applyArkClaudeEnv } from '../src/claude-env.js';
+
+const runtimeProcessModule = await import('../src/runtime-process.js').catch(() => ({}));
 
 test('uses supported read-only Claude Code arguments', () => {
   const args = localCliArgs('claude-code', 'build a skill', { budget: '0.25' });
@@ -43,6 +47,15 @@ test('writes deny-by-default Cursor permissions only inside the temporary worksp
     assert.ok(payload.permissions.deny.includes('Read(**)'));
     assert.ok(payload.permissions.deny.includes('Read(**/.env*)'));
     assert.ok(payload.permissions.deny.includes('Read(**/*.key)'));
+    for (const rule of [
+      'WebFetch(*)', 'WebSearch(*)', 'Mcp(*)',
+      'Read(/**)', 'Write(/**)',
+      'Read(/proc/**)', 'Read(/run/**)', 'Read(/tmp/**)',
+      'Read(/sys/**)', 'Read(/dev/**)',
+      'Read(/var/lib/agent-review/cursor-auth/**)'
+    ]) {
+      assert.ok(payload.permissions.deny.includes(rule), `missing absolute deny rule ${rule}`);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -84,8 +97,10 @@ test('cleans the temporary workspace when Cursor runtime startup fails', async (
 
 test('isolates Cursor Agent from host secrets and persistent user directories', () => {
   const workspace = '/tmp/agent-roast-cursor';
+  const authConfigHome = '/var/lib/agent-review/cursor-auth';
   const env = localCliEnv('cursor', workspace, {
-    CURSOR_API_KEY: 'cursor-only-key',
+    CURSOR_AUTH_CONFIG_HOME: authConfigHome,
+    CURSOR_API_KEY: 'must-not-leak',
     PATH: '/safe/bin',
     SystemRoot: 'C:\\Windows',
     ComSpec: 'C:\\Windows\\System32\\cmd.exe',
@@ -97,7 +112,8 @@ test('isolates Cursor Agent from host secrets and persistent user directories', 
     TMPDIR: '/persistent/tmp'
   });
 
-  assert.equal(env.CURSOR_API_KEY, 'cursor-only-key');
+  assert.equal(env.CURSOR_API_KEY, undefined);
+  assert.equal(env.AGENT_CLI_CREDENTIAL_STORE, 'file');
   assert.equal(env.PATH, '/safe/bin');
   assert.equal(env.SystemRoot, 'C:\\Windows');
   assert.equal(env.ComSpec, 'C:\\Windows\\System32\\cmd.exe');
@@ -107,7 +123,7 @@ test('isolates Cursor Agent from host secrets and persistent user directories', 
   assert.equal(env.USERPROFILE, workspace);
   assert.equal(env.APPDATA, workspace);
   assert.equal(env.LOCALAPPDATA, workspace);
-  assert.equal(env.XDG_CONFIG_HOME, workspace);
+  assert.equal(env.XDG_CONFIG_HOME, authConfigHome);
   assert.equal(env.XDG_CACHE_HOME, workspace);
   assert.equal(env.XDG_DATA_HOME, workspace);
   assert.equal(env.XDG_STATE_HOME, workspace);
@@ -117,7 +133,107 @@ test('isolates Cursor Agent from host secrets and persistent user directories', 
   assert.equal(env.NO_COLOR, '1');
 });
 
-test('isolates Claude Code from unrelated production secrets and persistent user directories', () => {
+test('terminates the whole Linux CLI process group with TERM then KILL at the hard timeout', async () => {
+  const { runLocalCliProcess } = runtimeProcessModule;
+  assert.equal(typeof runLocalCliProcess, 'function');
+
+  class FakeChild extends EventEmitter {
+    constructor() {
+      super();
+      this.pid = 4312;
+      this.stdout = new PassThrough();
+      this.stderr = new PassThrough();
+      this.directKills = [];
+    }
+
+    kill(signal) {
+      this.directKills.push(signal);
+      return true;
+    }
+  }
+
+  const child = new FakeChild();
+  const groupKills = [];
+  let spawnOptions;
+  const promise = runLocalCliProcess('cursor-agent', ['-p', 'probe'], {
+    cwd: '/tmp/runtime',
+    env: { PATH: '/safe/bin' },
+    timeoutMs: 5,
+    graceMs: 5,
+    platform: 'linux',
+    spawnImpl: (_command, _args, options) => {
+      spawnOptions = options;
+      return child;
+    },
+    killImpl: (pid, signal) => {
+      groupKills.push([pid, signal]);
+      return true;
+    }
+  });
+  const rejected = assert.rejects(promise, (error) => {
+    assert.equal(error.code, 'LOCAL_RUNTIME_TIMEOUT');
+    return true;
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(spawnOptions.detached, true);
+  assert.deepEqual(spawnOptions.stdio, ['ignore', 'pipe', 'pipe']);
+  assert.deepEqual(groupKills, [[-4312, 'SIGTERM'], [-4312, 'SIGKILL']]);
+  assert.deepEqual(child.directKills, []);
+  child.emit('close', null, 'SIGKILL');
+  await rejected;
+});
+
+test('injects the model API readiness transport without mutating global fetch', async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  const ready = await probeRuntimeReadiness('doubao', {
+    source: 'remote',
+    kind: 'model-api',
+    baseUrl: 'https://runtime.example/v1',
+    apiKeyEnv: 'RUNTIME_PROBE_KEY',
+    model: 'runtime-model'
+  }, {
+    env: {
+      RUNTIME_PROBE_KEY: 'test-key',
+      RUNTIME_PROBE_TIMEOUT_MS: '1000'
+    },
+    fetchImpl: async (url, options) => {
+      assert.equal(globalThis.fetch, originalFetch);
+      request = { url, options };
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'READY' } }]
+      }), { status: 200 });
+    }
+  });
+
+  assert.equal(ready, true);
+  assert.equal(request.url, 'https://runtime.example/v1/chat/completions');
+  assert.equal(request.options.headers.authorization, 'Bearer test-key');
+  assert.equal(globalThis.fetch, originalFetch);
+});
+
+test('rejects noncompliant nonempty readiness output', async () => {
+  const ready = await probeRuntimeReadiness('doubao', {
+    source: 'remote',
+    kind: 'model-api',
+    baseUrl: 'https://runtime.example/v1',
+    apiKeyEnv: 'RUNTIME_PROBE_KEY',
+    model: 'runtime-model'
+  }, {
+    env: {
+      RUNTIME_PROBE_KEY: 'test-key',
+      RUNTIME_PROBE_TIMEOUT_MS: '1000'
+    },
+    fetchImpl: async () => new Response(JSON.stringify({
+      choices: [{ message: { content: 'I cannot confirm readiness.' } }]
+    }), { status: 200 })
+  });
+
+  assert.equal(ready, false);
+});
+
+test('isolates Claude Code from inherited provider credentials and persistent user directories', () => {
   const workspace = '/tmp/agent-roast-claude';
   const env = localCliEnv('claude-code', workspace, {
     PATH: '/safe/bin',
@@ -138,9 +254,15 @@ test('isolates Claude Code from unrelated production secrets and persistent user
   assert.equal(env.SystemRoot, 'C:\\Windows');
   assert.equal(env.ComSpec, 'C:\\Windows\\System32\\cmd.exe');
   assert.equal(env.LANG, 'C.UTF-8');
-  assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'claude-only-token');
-  assert.equal(env.ANTHROPIC_MODEL, 'claude-only-model');
-  for (const name of ['CURSOR_API_KEY', 'ARK_API_KEY', 'REVIEW_MODEL_DEEPSEEK', 'DEEPSEEK_API_KEY', 'AWS_SECRET_ACCESS_KEY']) {
+  for (const name of [
+    'ANTHROPIC_AUTH_TOKEN',
+    'ANTHROPIC_MODEL',
+    'CURSOR_API_KEY',
+    'ARK_API_KEY',
+    'REVIEW_MODEL_DEEPSEEK',
+    'DEEPSEEK_API_KEY',
+    'AWS_SECRET_ACCESS_KEY'
+  ]) {
     assert.equal(env[name], undefined, `${name} must not reach Claude`);
   }
   for (const name of ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'TMPDIR', 'TMP', 'TEMP']) {
@@ -262,7 +384,7 @@ test('normalizes remote runtime adapter responses to the platform contract', asy
   const originalAdapters = process.env.RUNTIME_ADAPTERS_JSON;
   const originalKey = process.env.RUNTIME_TEST_KEY;
   const requests = [];
-  process.env.RUNTIME_ADAPTERS_JSON = JSON.stringify({ cursor: { url: 'https://runtime.example/cursor', apiKeyEnv: 'RUNTIME_TEST_KEY' } });
+  process.env.RUNTIME_ADAPTERS_JSON = JSON.stringify({ cursor: { kind: 'remote-http', url: 'https://runtime.example/cursor', apiKeyEnv: 'RUNTIME_TEST_KEY' } });
   process.env.RUNTIME_TEST_KEY = 'test-only';
   globalThis.fetch = async (_url, options) => {
     requests.push({ headers: options.headers, body: JSON.parse(options.body) });

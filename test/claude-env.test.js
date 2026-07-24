@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyArkClaudeEnv, applyDeepSeekClaudeEnv, hasClaudeCredential, shouldUseArkClaude } from '../src/claude-env.js';
+import {
+  applyArkClaudeEnv,
+  applyDeepSeekClaudeEnv,
+  hasClaudeCredential,
+  resolveClaudeBackend,
+  shouldUseArkClaude
+} from '../src/claude-env.js';
 
 test('prefers a configured Ark DeepSeek endpoint for Claude Code', () => {
   const env = {
@@ -16,18 +22,72 @@ test('prefers a configured Ark DeepSeek endpoint for Claude Code', () => {
 });
 
 test('maps a DeepSeek key into an isolated Claude Code environment', () => {
-  const env = { DEEPSEEK_API_KEY: 'test-key', DEEPSEEK_CLAUDE_MODEL: 'test-model' };
+  const env = {
+    CLAUDE_BACKEND: 'deepseek',
+    DEEPSEEK_API_KEY: 'test-key',
+    DEEPSEEK_CLAUDE_MODEL: 'test-model'
+  };
+  assert.equal(hasClaudeCredential(env), true);
   assert.equal(applyDeepSeekClaudeEnv(env), true);
   assert.equal(env.ANTHROPIC_BASE_URL, 'https://api.deepseek.com/anthropic');
   assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'test-key');
   assert.equal(env.ANTHROPIC_MODEL, 'test-model');
   assert.equal(env.DEEPSEEK_API_KEY, undefined);
-  assert.equal(hasClaudeCredential(env), true);
 });
 
 test('does not mutate Claude settings when no DeepSeek key exists', () => {
-  const env = {};
+  const env = { CLAUDE_BACKEND: 'deepseek' };
   assert.equal(applyDeepSeekClaudeEnv(env), false);
-  assert.deepEqual(env, {});
+  assert.deepEqual(env, { CLAUDE_BACKEND: 'deepseek' });
   assert.equal(hasClaudeCredential(env), false);
+});
+
+test('DeepSeek direct mode replaces every inherited Anthropic endpoint and credential', () => {
+  const source = {
+    CLAUDE_BACKEND: 'deepseek',
+    DEEPSEEK_API_KEY: 'deepseek-only-key',
+    DEEPSEEK_CLAUDE_MODEL: 'deepseek-only-model',
+    ANTHROPIC_BASE_URL: 'https://wrong-endpoint.example',
+    ANTHROPIC_AUTH_TOKEN: 'reviewer-token-must-not-leak',
+    ANTHROPIC_API_KEY: 'reviewer-key-must-not-leak'
+  };
+  const env = {
+    ANTHROPIC_BASE_URL: source.ANTHROPIC_BASE_URL,
+    ANTHROPIC_AUTH_TOKEN: source.ANTHROPIC_AUTH_TOKEN,
+    ANTHROPIC_API_KEY: source.ANTHROPIC_API_KEY
+  };
+
+  assert.equal(applyDeepSeekClaudeEnv(env, source), true);
+  assert.equal(env.ANTHROPIC_BASE_URL, 'https://api.deepseek.com/anthropic');
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'deepseek-only-key');
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(env.ANTHROPIC_MODEL, 'deepseek-only-model');
+});
+
+test('fails closed when the explicitly selected Claude backend is incomplete or unsupported', () => {
+  const incompleteArk = {
+    CLAUDE_BACKEND: 'ark',
+    ARK_BASE_URL: 'https://ark.example/api/v3',
+    ARK_API_KEY: ' ',
+    CLAUDE_ARK_MODEL: 'ep-deepseek',
+    DEEPSEEK_API_KEY: 'must-not-fallback',
+    ANTHROPIC_AUTH_TOKEN: 'must-not-fallback'
+  };
+  assert.equal(resolveClaudeBackend(incompleteArk), 'ark');
+  assert.equal(shouldUseArkClaude(incompleteArk), false);
+  assert.equal(hasClaudeCredential(incompleteArk), false);
+
+  const incompleteDeepSeek = {
+    CLAUDE_BACKEND: 'deepseek',
+    DEEPSEEK_API_KEY: ' ',
+    ANTHROPIC_API_KEY: 'must-not-fallback'
+  };
+  assert.equal(resolveClaudeBackend(incompleteDeepSeek), 'deepseek');
+  assert.equal(hasClaudeCredential(incompleteDeepSeek), false);
+
+  assert.equal(resolveClaudeBackend({ CLAUDE_BACKEND: 'anthropic' }), null);
+  assert.equal(hasClaudeCredential({
+    CLAUDE_BACKEND: 'anthropic',
+    ANTHROPIC_AUTH_TOKEN: 'must-not-enable-an-unsupported-backend'
+  }), false);
 });

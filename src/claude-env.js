@@ -1,15 +1,25 @@
 export function hasClaudeCredential(env = process.env) {
-  if (env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY) return true;
-  if (shouldUseArkClaude(env)) return true;
-  return Boolean(env.DEEPSEEK_API_KEY);
+  const backend = resolveClaudeBackend(env);
+  if (backend === 'ark') return shouldUseArkClaude(env);
+  if (backend === 'deepseek') return nonBlank(env.DEEPSEEK_API_KEY);
+  return false;
+}
+
+export function resolveClaudeBackend(env = process.env) {
+  const backend = typeof env.CLAUDE_BACKEND === 'string'
+    ? env.CLAUDE_BACKEND.trim().toLowerCase()
+    : '';
+  return backend === 'ark' || backend === 'deepseek' ? backend : null;
 }
 
 export function shouldUseArkClaude(env = process.env) {
-  return (env.CLAUDE_BACKEND || '').toLowerCase() === 'ark'
-    && Boolean(env.ARK_BASE_URL && env.ARK_API_KEY && (env.CLAUDE_ARK_MODEL || env.REVIEW_MODEL_DEEPSEEK));
+  return resolveClaudeBackend(env) === 'ark'
+    && nonBlank(env.ARK_BASE_URL)
+    && nonBlank(env.ARK_API_KEY)
+    && nonBlank(env.CLAUDE_ARK_MODEL);
 }
 
-export function applyArkClaudeEnv(env, proxyBaseUrl, model = env.CLAUDE_ARK_MODEL || env.REVIEW_MODEL_DEEPSEEK) {
+export function applyArkClaudeEnv(env, proxyBaseUrl, model = env.CLAUDE_ARK_MODEL) {
   env.ANTHROPIC_BASE_URL = proxyBaseUrl;
   env.ANTHROPIC_AUTH_TOKEN = 'local-ark-proxy';
   env.ANTHROPIC_API_KEY = '';
@@ -22,16 +32,23 @@ export function applyArkClaudeEnv(env, proxyBaseUrl, model = env.CLAUDE_ARK_MODE
 }
 
 export function applyDeepSeekClaudeEnv(env = process.env, sourceEnv = env) {
-  if (!sourceEnv.DEEPSEEK_API_KEY) return false;
+  if (resolveClaudeBackend(sourceEnv) !== 'deepseek' || !nonBlank(sourceEnv.DEEPSEEK_API_KEY)) {
+    return false;
+  }
   const model = sourceEnv.DEEPSEEK_CLAUDE_MODEL || 'deepseek-v4-pro[1m]';
-  env.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL || sourceEnv.ANTHROPIC_BASE_URL || 'https://api.deepseek.com/anthropic';
-  env.ANTHROPIC_AUTH_TOKEN = env.ANTHROPIC_AUTH_TOKEN || sourceEnv.ANTHROPIC_AUTH_TOKEN || sourceEnv.DEEPSEEK_API_KEY;
-  env.ANTHROPIC_MODEL = env.ANTHROPIC_MODEL || model;
-  env.ANTHROPIC_DEFAULT_OPUS_MODEL = env.ANTHROPIC_DEFAULT_OPUS_MODEL || model;
-  env.ANTHROPIC_DEFAULT_SONNET_MODEL = env.ANTHROPIC_DEFAULT_SONNET_MODEL || model;
-  env.ANTHROPIC_DEFAULT_HAIKU_MODEL = env.ANTHROPIC_DEFAULT_HAIKU_MODEL || 'deepseek-v4-flash';
-  env.CLAUDE_CODE_SUBAGENT_MODEL = env.CLAUDE_CODE_SUBAGENT_MODEL || 'deepseek-v4-flash';
-  env.CLAUDE_CODE_EFFORT_LEVEL = env.CLAUDE_CODE_EFFORT_LEVEL || 'max';
+  env.ANTHROPIC_BASE_URL = 'https://api.deepseek.com/anthropic';
+  env.ANTHROPIC_AUTH_TOKEN = sourceEnv.DEEPSEEK_API_KEY;
+  delete env.ANTHROPIC_API_KEY;
+  env.ANTHROPIC_MODEL = model;
+  env.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
+  env.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
+  env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'deepseek-v4-flash';
+  env.CLAUDE_CODE_SUBAGENT_MODEL = 'deepseek-v4-flash';
+  env.CLAUDE_CODE_EFFORT_LEVEL = 'max';
   delete env.DEEPSEEK_API_KEY;
   return true;
+}
+
+function nonBlank(value) {
+  return typeof value === 'string' && value.trim().length > 0;
 }

@@ -10,7 +10,7 @@
 
 - 在生产服务器安装并固定 Claude Code 与 Cursor Agent 的 Linux x86_64 版本。
 - Claude Code 使用服务器现有火山方舟配置执行；该选择只属于评测 Runtime，不代表评审模型或参赛 Agent 的模型要求。
-- Cursor Agent 使用独立 Cursor API Key，并由服务器直接访问 Cursor 服务。
+- Cursor Agent 使用专用文件凭据目录中的持久账户登录，并由服务器直接访问 Cursor 服务。
 - Doubao 继续使用现有火山方舟 API adapter，不安装本地 CLI。
 - 平台能够通过受限、非交互方式真实调用 Claude Code 与 Cursor Agent。
 - 安装、启用、升级和回滚均不依赖开发机持续在线。
@@ -57,8 +57,8 @@ systemd 环境文件补充工具 PATH、显式启用开关和独立凭据：
 - `PATH=/opt/agent-review/tools/bin:/usr/local/bin:/usr/bin:/bin`
 - `ENABLE_LOCAL_CLAUDE_CODE=true`
 - `ENABLE_LOCAL_CURSOR_AGENT=true`
-- Claude 方舟配置使用现有 `CLAUDE_BACKEND`、`ARK_BASE_URL`、`ARK_API_KEY` 与 `CLAUDE_ARK_MODEL`
-- Cursor 使用 `CURSOR_API_KEY`
+- Claude 方舟配置使用现有 `CLAUDE_BACKEND`、`ARK_BASE_URL`、`ARK_API_KEY` 与 `CLAUDE_ARK_MODEL`；所选后端配置不完整时失败关闭，不跨供应商回退
+- Cursor 使用专用 `CURSOR_AUTH_CONFIG_HOME` 中的持久账户登录，设置 `AGENT_CLI_CREDENTIAL_STORE=file`，不向子进程传递 API Key
 - 单次 Runtime 上限通过 `LOCAL_RUNTIME_TIMEOUT_MS` 控制，且不得超过赛事规定的 20 分钟
 
 环境文件保持 `root:root 0600`。服务状态接口只能返回版本、鉴权布尔值和就绪状态，不返回任何凭据。
@@ -81,6 +81,7 @@ systemd 环境文件补充工具 PATH、显式启用开关和独立凭据：
 权限配置明确禁止：
 
 - Shell 与 Git 操作；
+- WebFetch、WebSearch 与全部 MCP 工具；
 - 读取 `.env`、密钥、证书和系统配置；
 - 写入生产代码、发布目录和持久化数据；
 - 网络访问比赛任务不需要的目标。
