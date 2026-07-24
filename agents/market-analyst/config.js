@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { pandaDataConfig } from '../../src/panda-data.js';
 import { normalizeMarketAgentPrincipalId } from './owner-scope.js';
 
 const truthy = (value) => String(value).toLowerCase() === 'true';
@@ -12,6 +13,7 @@ export function marketAgentConfig(env = process.env, cwd = process.cwd()) {
     .split(',').map((item) => item.trim()).filter(Boolean);
   const accessToken = String(env.MARKET_AGENT_ACCESS_TOKEN || '');
   const smtpPassword = String(env.MARKET_REPORT_SMTP_PASSWORD || '');
+  const panda = pandaDataConfig(env);
   const config = {
     host: env.MARKET_AGENT_HOST || '127.0.0.1',
     port: positive(env.MARKET_AGENT_PORT, 4190),
@@ -26,6 +28,7 @@ export function marketAgentConfig(env = process.env, cwd = process.cwd()) {
     retentionDays: positive(env.MARKET_REPORT_RETENTION_DAYS, 365),
     cacheDays: positive(env.MARKET_REPORT_CACHE_DAYS, 30),
     minLiquidityCny: positive(env.MARKET_REPORT_MIN_LIQUIDITY_CNY, 20_000_000),
+    panda,
     model: {
       enabled: truthy(env.MARKET_REPORT_MODEL_ENABLED),
       baseUrl: String(env.OPENAI_BASE_URL || ''),
@@ -55,6 +58,9 @@ export function marketAgentConfig(env = process.env, cwd = process.cwd()) {
     allowInsecureLoopback: config.allowInsecureLoopback,
     modelEnabled: config.model.enabled,
     emailConfigured: Boolean(to.length && config.email.from && config.smtp.host),
+    pandaEnabled: panda.enabled,
+    pandaConfigured: panda.configured,
+    pandaReady: panda.ready,
     smtp: { host: config.smtp.host, port: config.smtp.port, secure: config.smtp.secure }
   };
   return config;

@@ -79,6 +79,13 @@ function workerConfig(stateDir, overrides = {}) {
     workerTimeoutMs: 1_000,
     minLiquidityCny: 20_000_000,
     cacheDays: 30,
+    panda: {
+      enabled: true,
+      ready: true,
+      username: '8613800000000',
+      password: 'worker-secret',
+      baseUrl: 'http://pandadata.pandaaiquant.com'
+    },
     ...overrides
   };
 }
@@ -888,6 +895,21 @@ test('RunTrace records sanitized step, worker, model, email, and lineage detail'
   });
   trace.addModelUsage({ model: 'g5.4', totalTokens: 42, cost: 0.01 });
   trace.addEmailAttempt({ attempt: 1, recipient: 'jane.doe@example.com', status: 'sent' });
+  trace.addEvidenceMetadata({
+    applicationVersion: '1.0.0',
+    skillVersions: { 'daily-market-report': '1.0.0' },
+    metricVersion: '2.0',
+    configFingerprint: 'a'.repeat(64),
+    lineageSummary: { conclusionCount: 1, metricCount: 1, pandaCallCount: 1 },
+    conclusions: [{
+      conclusion_id: 'market-hot-industries',
+      formula: 'hot-topic-v2',
+      metricIds: ['metric-1'],
+      evidenceIds: ['panda-call-1'],
+      pandaCalls: ['panda-call-1'],
+      confidence: 0.9
+    }]
+  });
 
   const output = trace.toJSON();
   assert.equal(output.steps[0].sequence, 1);
@@ -898,6 +920,10 @@ test('RunTrace records sanitized step, worker, model, email, and lineage detail'
   assert.equal(typeof output.steps[0].durationMs, 'number');
   assert.equal(output.workerEvents[0].rowCount, 4000);
   assert.equal(output.modelUsage[0].totalTokens, 42);
+  assert.equal(output.applicationVersion, '1.0.0');
+  assert.equal(output.metricVersion, '2.0');
+  assert.equal(output.configFingerprint, 'a'.repeat(64));
+  assert.deepEqual(output.conclusionLineage[0].pandaCalls, ['panda-call-1']);
   assert.equal(JSON.stringify(output).includes('jane.doe@example.com'), false);
   assert.equal(JSON.stringify(output).includes('should-not-persist'), false);
 });
@@ -1093,6 +1119,42 @@ test('runMarketWorker rejects malformed evidence and nonzero exits', async (t) =
       spawnImpl: fakeSpawn((child) => completeChild(child, { code: 2 }))
     }),
     (error) => error.code === 'WORKER_EXIT_ERROR' && !error.message.includes('PANDA_DATA_PASSWORD')
+  );
+});
+
+test('worker omits empty Panda base URL and refuses disabled config', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const capture = {};
+  const result = await runMarketWorker({
+    request: { operation: 'daily-market-report', date: '2026-07-23', topN: 1 },
+    config: workerConfig(stateDir, {
+      panda: {
+        enabled: true,
+        ready: true,
+        username: '8613800000000',
+        password: 'worker-secret',
+        baseUrl: ''
+      }
+    }),
+    spawnImpl: fakeSpawn((child) => completeChild(child, {
+      stdout: JSON.stringify(evidencePack)
+    }), capture)
+  });
+  assert.equal(result.runId, evidencePack.runId);
+  assert.equal(capture.options.env.PANDA_DATA_USERNAME, '8613800000000');
+  assert.equal('PANDA_DATA_BASE_URL' in capture.options.env, false);
+
+  assert.throws(
+    () => runMarketWorker({
+      request: { operation: 'daily-market-report' },
+      config: workerConfig(stateDir, {
+        panda: { enabled: false, ready: false }
+      }),
+      spawnImpl: () => {
+        throw new Error('must not spawn');
+      }
+    }),
+    /enabled|ready|configured/i
   );
 });
 

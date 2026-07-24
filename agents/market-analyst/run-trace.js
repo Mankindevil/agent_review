@@ -388,6 +388,25 @@ class RunTrace {
     );
   }
 
+  addEvidenceMetadata(evidence) {
+    this.meta = sanitizeTraceValue({
+      ...this.meta,
+      applicationVersion: evidence?.applicationVersion,
+      skillVersions: evidence?.skillVersions,
+      metricVersion: evidence?.metricVersion,
+      configFingerprint: evidence?.configFingerprint,
+      lineageSummary: evidence?.lineageSummary,
+      conclusionLineage: (evidence?.conclusions || []).map((item) => ({
+        conclusionId: item.conclusion_id,
+        formula: item.formula,
+        metricIds: item.metricIds,
+        evidenceIds: item.evidenceIds,
+        pandaCalls: item.pandaCalls,
+        confidence: item.confidence
+      }))
+    });
+  }
+
   toJSON() {
     const endedTimes = this.steps
       .map((step) => step.endedAt)

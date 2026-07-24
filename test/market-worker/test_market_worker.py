@@ -117,6 +117,16 @@ class FakePanda:
             for index, stock_symbol in enumerate(symbol or [])
         ])
 
+    def get_fina_performance(self, symbol=None, info_date=None, end_quarter=None,
+                             fields=None):
+        return FakeFrame([
+            {"symbol": stock_symbol, "info_date": info_date or "20260723",
+             "end_date": "20260630", "roe_weighted": 10 + index,
+             "net_profit_parent_yoy": 20 + index,
+             "net_cash_flow_operating_yoy": 15 + index}
+            for index, stock_symbol in enumerate(symbol or [])
+        ])
+
     def get_us_daily(self, start_date, end_date, symbol=None, fields=None):
         return FakeFrame([
             {"symbol": stock_symbol, "date": end_date, "close": 100 + index,
@@ -608,12 +618,13 @@ class MarketWorkerTests(unittest.TestCase):
 
     def test_financial_publication_after_report_date_is_excluded(self):
         class LateFinancialPanda(FakePanda):
-            def get_fina_reports(self, symbol=None, start_quarter=None, end_quarter=None,
-                                 date=None, is_latest=True, fields=None):
+            def get_fina_performance(self, symbol=None, **params):
                 return FakeFrame([
-                    {"symbol": stock_symbol, "date": publication, "quarter": "2026q2",
-                     "roe": 10 if publication == "20260722" else 99,
-                     "net_profit_yoy": 20 if publication == "20260722" else 999}
+                    {"symbol": stock_symbol, "info_date": publication,
+                     "end_date": "20260630",
+                     "roe_weighted": 10 if publication == "20260722" else 99,
+                     "net_profit_parent_yoy": 20 if publication == "20260722" else 999,
+                     "net_cash_flow_operating_yoy": 15}
                     for stock_symbol in (symbol or [])
                     for publication in ("20260722", "20260724")
                 ])
@@ -637,6 +648,15 @@ class MarketWorkerTests(unittest.TestCase):
                     {"symbol": stock_symbol, "date": "20260722",
                      "publish_date": "20260724", "quarter": "2026q2",
                      "roe": 99, "net_profit_yoy": 999}
+                    for stock_symbol in (symbol or [])
+                ])
+
+            def get_fina_performance(self, symbol=None, **params):
+                return FakeFrame([
+                    {"symbol": stock_symbol, "info_date": "20260724",
+                     "end_date": "20260630", "roe_weighted": 99,
+                     "net_profit_parent_yoy": 999,
+                     "net_cash_flow_operating_yoy": 999}
                     for stock_symbol in (symbol or [])
                 ])
 
@@ -691,11 +711,11 @@ class MarketWorkerTests(unittest.TestCase):
 
     def test_undated_financial_rows_do_not_contribute_quality_evidence(self):
         class UndatedFinancialPanda(FakePanda):
-            def get_fina_reports(self, symbol=None, start_quarter=None, end_quarter=None,
-                                 date=None, is_latest=True, fields=None):
+            def get_fina_performance(self, symbol=None, **params):
                 return FakeFrame([
-                    {"symbol": stock_symbol, "date": None, "quarter": "2026q2",
-                     "roe": 99, "net_profit_yoy": 999}
+                    {"symbol": stock_symbol, "info_date": None, "end_date": "20260630",
+                     "roe_weighted": 99, "net_profit_parent_yoy": 999,
+                     "net_cash_flow_operating_yoy": 999}
                     for stock_symbol in (symbol or [])
                 ])
 
@@ -705,11 +725,7 @@ class MarketWorkerTests(unittest.TestCase):
             worker.PandaCollector(UndatedFinancialPanda(), lambda _: None, None, 0),
             now="2026-07-24T10:30:00Z",
         )
-        self.assertTrue(pack["leaderboards"]["potentialWatchlist"])
-        self.assertTrue(all(
-            "quality" not in item["componentsUsed"]
-            for item in pack["leaderboards"]["potentialWatchlist"]
-        ))
+        self.assertEqual(pack["leaderboards"]["potentialWatchlist"], [])
 
     def test_truncated_broad_daily_data_fails_instead_of_ranking(self):
         class TruncatedPanda(FakePanda):
@@ -839,7 +855,11 @@ class MarketWorkerTests(unittest.TestCase):
                          [{"id": "small", "reason": "MIN_CONSTITUENTS"}])
         self.assertFalse(any(item["method"] == "get_industry_constituents"
                              for item in pack["missingData"]))
-        self.assertEqual(pack["status"], "complete")
+        self.assertEqual(pack["status"], "degraded")
+        self.assertTrue(any(
+            item["section"] in {"hk", "futures", "funds", "options", "macro"}
+            for item in pack["missingData"]
+        ))
 
     def test_theme_component_applies_to_all_group_members_not_only_representatives(self):
         pack = worker.build_evidence_pack(
@@ -1320,6 +1340,9 @@ class MarketWorkerTests(unittest.TestCase):
         self.assertAlmostEqual(coverage, .60)
         self.assertEqual(set(used), {"downside_volume", "northbound_reduction", "margin_contraction"})
 
+    def test_percentile_rank_assigns_equal_average_rank_to_ties(self):
+        self.assertEqual(worker.percentile_rank([1, 1, 2]), [25.0, 25.0, 100.0])
+
     def test_hot_topic_requires_constituent_and_coverage_thresholds(self):
         result = worker.compute_hot_topics([
             {"id": "eligible", "constituent_count": 10, "coverage": .9, "ret1": 2, "ret5": 5,
@@ -1385,8 +1408,10 @@ class MarketWorkerTests(unittest.TestCase):
         ]
         result = worker.compute_hot_topics(groups, lhb_available=False)
         high = result["ranked"][0]
-        self.assertEqual(high["id"], "41")
-        self.assertAlmostEqual(high["score"], 100)
+        self.assertEqual(high["id"], "40")
+        self.assertEqual(result["ranked"][1]["id"], "41")
+        self.assertAlmostEqual(high["score"], result["ranked"][1]["score"])
+        self.assertAlmostEqual(high["score"], 98.75)
         self.assertAlmostEqual(high["weightCoverage"], .95)
         self.assertNotIn("lhb_activity", high["componentsUsed"])
 
@@ -1463,6 +1488,126 @@ class MarketWorkerTests(unittest.TestCase):
         self.assertEqual(ranked[0]["symbol"], "000001.SZ")
         self.assertEqual(ranked[1]["status"], "VETOED")
         self.assertIn("NONSTANDARD_AUDIT", ranked[1]["vetoes"])
+
+    def test_daily_metrics_use_median_amount_log_acceleration_and_window_coverage(self):
+        rows = []
+        previous = 100.0
+        for index in range(20):
+            close = previous * (1.02 if index >= 15 else 1.005)
+            rows.append({
+                "symbol": "000001.SZ", "date": f"202601{index + 1:02d}",
+                "name": "sample", "close": close, "pre_close": previous,
+                "amount": 1_000_000 if index < 19 else 4_000_000,
+                "volume": 100, "trade_status": 0,
+            })
+            previous = close
+        metric = worker._daily_metrics(rows)["000001.SZ"]
+        self.assertAlmostEqual(metric["turnover_heat"], 4.0)
+        self.assertAlmostEqual(
+            metric["acceleration"],
+            math.log(1.02) - (
+                15 * math.log(1.005) + 5 * math.log(1.02)
+            ) / 20,
+        )
+        self.assertEqual(metric["windowCoverage"]["ret5"], 1)
+        self.assertEqual(metric["windowCoverage"]["ret20"], 1)
+        self.assertEqual(metric["medianAmount20"], 1_000_000)
+
+    def test_public_sell_leaderboard_excludes_unscored_rows(self):
+        rows = worker.compute_sell_pressure([
+            {"symbol": "eligible", "downside_volume": 90, "lhb_net_sell": 80,
+             "northbound_reduction": 70, "margin_contraction": None,
+             "discount_event": None},
+            {"symbol": "ineligible", "downside_volume": 100, "lhb_net_sell": None,
+             "northbound_reduction": None, "margin_contraction": None,
+             "discount_event": None},
+        ])
+        public = worker._public_ranked(rows, 10)
+        self.assertEqual([row["symbol"] for row in public], ["eligible"])
+        self.assertEqual(public[0]["componentCount"], 3)
+
+    def test_directional_lhb_detail_excludes_cumulative_rows(self):
+        values = worker._directional_lhb_net_sell([
+            {"symbol": "000001.SZ", "side": "sell", "s_value": 300, "b_value": 50},
+            {"symbol": "000001.SZ", "side": "buy", "s_value": 20, "b_value": 100},
+            {"symbol": "000001.SZ", "side": "cum", "s_value": 10_000, "b_value": 0},
+        ])
+        self.assertEqual(values["000001.SZ"], 170)
+
+    def test_potential_candidate_gates_are_enforced_before_ranking(self):
+        base = {
+            "trend": 80, "theme": 80, "quality": 80, "valuation": 80,
+            "capital": 80, "liquidity_stability": 80, "risk_penalty": 0,
+            "tradable": True, "st": False, "suspended": False,
+            "rowCount": 20, "medianAmount20": 20_000_000,
+        }
+        rows = worker.compute_potential_watchlist([
+            {**base, "symbol": "eligible"},
+            {**base, "symbol": "suspended", "suspended": True},
+            {**base, "symbol": "young", "rowCount": 19},
+            {**base, "symbol": "illiquid", "medianAmount20": 19_999_999},
+        ])
+        by_symbol = {row["symbol"]: row for row in rows}
+        self.assertEqual(by_symbol["eligible"]["status"], "RANKED")
+        self.assertEqual(by_symbol["suspended"]["status"], "VETOED")
+        self.assertEqual(by_symbol["young"]["status"], "EVIDENCE_INSUFFICIENT")
+        self.assertEqual(by_symbol["illiquid"]["status"], "EVIDENCE_INSUFFICIENT")
+
+    def test_scored_rows_retain_exact_metric_evidence_and_contribution_sum(self):
+        ranked = worker.compute_sell_pressure([
+            {"symbol": "000001.SZ", "downside_volume": 90, "lhb_net_sell": 80,
+             "northbound_reduction": 70, "margin_contraction": None,
+             "discount_event": None,
+             "_metricEvidence": {
+                 "downside_volume": {"raw": -0.03, "transformed": 3.0,
+                                     "dataDate": "2026-07-23", "window": "20d",
+                                     "coverage": 1, "evidenceIds": ["panda-call-001"]},
+                 "lhb_net_sell": {"raw": 1000, "transformed": 1000,
+                                  "dataDate": "2026-07-23", "window": "20d",
+                                  "coverage": 1, "evidenceIds": ["panda-call-002"]},
+                 "northbound_reduction": {"raw": -0.1, "transformed": 0.1,
+                                           "dataDate": "2026-07-22", "window": "20d",
+                                           "coverage": .9, "evidenceIds": ["panda-call-003"]},
+             }},
+        ])[0]
+        required = {
+            "raw", "transformed", "winsorized", "percentile",
+            "originalWeight", "effectiveWeight", "contribution", "penalty",
+            "coverage", "dataDate", "window", "evidenceIds",
+        }
+        for metric in ranked["metrics"]:
+            self.assertTrue(required.issubset(metric))
+        self.assertAlmostEqual(
+            sum(metric["contribution"] for metric in ranked["metrics"]),
+            ranked["baseScore"],
+        )
+
+    def test_pack_records_required_missing_context_and_exact_lineage(self):
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(FakePanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(pack["status"], "degraded")
+        missing_sections = {item["section"] for item in pack["missingData"]}
+        self.assertTrue({"hk", "futures", "funds", "options", "macro"} <= missing_sections)
+        source_ids = {source["id"] for source in pack["sources"]}
+        for source in pack["sources"]:
+            self.assertEqual(source["traceCallId"], source["id"])
+            self.assertIn("paramsHash", source)
+            self.assertIn("fields", source)
+            self.assertIn("window", source)
+            self.assertIn("cacheStatus", source)
+            self.assertIn("retryCount", source)
+            self.assertIn("truncated", source)
+        for conclusion in pack["conclusions"]:
+            self.assertTrue(set(conclusion["pandaCalls"]) <= source_ids)
+            self.assertTrue(conclusion["metricIds"])
+            self.assertTrue(conclusion["evidenceIds"])
+        self.assertIn("applicationVersion", pack)
+        self.assertIn("skillVersions", pack)
+        self.assertIn("configFingerprint", pack)
 
 
 if __name__ == "__main__":

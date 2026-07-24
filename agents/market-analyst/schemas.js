@@ -81,6 +81,95 @@ function assertBoundedEvidence(root) {
   visit(root, 0);
 }
 
+function sameMembers(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+  return [...new Set(left)].sort().join('\u0000')
+    === [...new Set(right)].sort().join('\u0000');
+}
+
+function assertTraceableEvidence(value) {
+  const sourceIds = new Set();
+  for (const source of value.sources) {
+    if (!isRecord(source)
+        || typeof source.id !== 'string' || !source.id
+        || source.traceCallId !== source.id
+        || typeof source.method !== 'string' || !source.method
+        || typeof source.paramsHash !== 'string' || !/^[a-f0-9]{64}$/i.test(source.paramsHash)
+        || !Array.isArray(source.fields)
+        || !Number.isFinite(source.coverage)
+        || !Number.isSafeInteger(source.retryCount) || source.retryCount < 0
+        || typeof source.cacheStatus !== 'string'
+        || typeof source.truncated !== 'boolean') {
+      throw new TypeError('Evidence Pack source requires a valid traceCallId and call metadata');
+    }
+    if (sourceIds.has(source.id)) throw new RangeError('Evidence Pack has duplicate call IDs');
+    sourceIds.add(source.id);
+  }
+
+  const metricIds = new Set();
+  for (const rows of Object.values(value.leaderboards)) {
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      if (!isRecord(row) || row.status !== 'RANKED' || !Array.isArray(row.metrics)) {
+        throw new TypeError('Traceable leaderboard rows must be ranked and include metrics');
+      }
+      let contributions = 0;
+      for (const metric of row.metrics) {
+        if (!isRecord(metric)
+            || typeof metric.id !== 'string' || !metric.id
+            || typeof metric.name !== 'string' || !metric.name
+            || !Object.hasOwn(metric, 'raw')
+            || !Object.hasOwn(metric, 'transformed')
+            || !Object.hasOwn(metric, 'winsorized')
+            || !Number.isFinite(metric.percentile)
+            || !Number.isFinite(metric.originalWeight)
+            || !Number.isFinite(metric.effectiveWeight)
+            || !Number.isFinite(metric.contribution)
+            || !Number.isFinite(metric.penalty)
+            || !Number.isFinite(metric.coverage)
+            || typeof metric.window !== 'string' || !metric.window
+            || !Array.isArray(metric.evidenceIds)
+            || metric.evidenceIds.length === 0
+            || metric.evidenceIds.some((id) => !sourceIds.has(id))) {
+          throw new TypeError('Evidence Pack metric lineage is dangling or incomplete');
+        }
+        if (metricIds.has(metric.id)) throw new RangeError('Evidence Pack metric ID is duplicated');
+        metricIds.add(metric.id);
+        contributions += metric.contribution;
+      }
+      if (!Number.isFinite(row.baseScore)
+          || Math.abs(contributions - row.baseScore) > 1e-8) {
+        throw new RangeError('Evidence Pack contribution sum does not match base score');
+      }
+      const penalty = Number(row.riskPenalty || 0);
+      const expected = Math.max(0, row.baseScore - penalty);
+      if (!Number.isFinite(row.score) || Math.abs(row.score - expected) > 1e-8) {
+        throw new RangeError('Evidence Pack score does not match contribution sum and penalty');
+      }
+    }
+  }
+
+  const referencedMetrics = new Set();
+  for (const conclusion of value.conclusions) {
+    if (!isRecord(conclusion)
+        || !Array.isArray(conclusion.metricIds) || conclusion.metricIds.length === 0
+        || !Array.isArray(conclusion.evidenceIds) || conclusion.evidenceIds.length === 0
+        || !Array.isArray(conclusion.pandaCalls) || conclusion.pandaCalls.length === 0
+        || conclusion.metricIds.some((id) => !metricIds.has(id))
+        || conclusion.pandaCalls.some((id) => !sourceIds.has(id))
+        || !sameMembers(conclusion.evidenceIds, conclusion.pandaCalls)) {
+      throw new RangeError('Evidence Pack conclusion lineage is dangling or incomplete');
+    }
+    for (const id of conclusion.metricIds) referencedMetrics.add(id);
+  }
+  if (referencedMetrics.size !== metricIds.size
+      || [...metricIds].some((id) => !referencedMetrics.has(id))) {
+    throw new RangeError('Evidence Pack contains orphan metric lineage');
+  }
+}
+
 export function validateOperation(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError('operation request must be an object');
@@ -151,6 +240,7 @@ export function validateEvidencePack(value) {
       || (value.missingData !== undefined && !Array.isArray(value.missingData))) {
     throw new TypeError('Evidence Pack conclusions/sources/missingData must be arrays');
   }
+  if (value.evidenceModelVersion === '2.0') assertTraceableEvidence(value);
   assertBoundedEvidence(value);
   return value;
 }

@@ -66,6 +66,12 @@ export function runMarketWorker({
   if (typeof config.stateDir !== 'string' || !config.stateDir) {
     throw new TypeError('config.stateDir is required');
   }
+  if (!config.panda?.enabled) {
+    throw workerError('Panda data source is not enabled', 'PANDA_DISABLED');
+  }
+  if (!config.panda?.ready) {
+    throw workerError('Panda data source is not configured and ready', 'PANDA_NOT_READY');
+  }
   const timeoutMs = positiveInteger(config.workerTimeoutMs, 'workerTimeoutMs');
   const terminationGraceMs = positiveInteger(
     config.workerTerminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS,
@@ -243,9 +249,11 @@ export function runMarketWorker({
         env: {
           PATH: process.env.PATH || '',
           PYTHONIOENCODING: 'utf-8',
-          PANDA_DATA_USERNAME: process.env.PANDA_DATA_USERNAME || '',
-          PANDA_DATA_PASSWORD: process.env.PANDA_DATA_PASSWORD || '',
-          PANDA_DATA_BASE_URL: process.env.PANDA_DATA_BASE_URL || '',
+          PANDA_DATA_USERNAME: config.panda.username,
+          PANDA_DATA_PASSWORD: config.panda.password,
+          ...(String(config.panda.baseUrl || '').trim()
+            ? { PANDA_DATA_BASE_URL: String(config.panda.baseUrl).trim() }
+            : {}),
           MARKET_REPORT_CACHE_DIR: path.join(path.resolve(config.stateDir), 'cache')
         }
       });

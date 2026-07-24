@@ -458,6 +458,7 @@ export class MarketOrchestrator {
           error.code = 'EVIDENCE_IDENTITY_MISMATCH';
           throw error;
         }
+        trace.addEvidenceMetadata(evidence);
         trace.finishStep(activeStep, { status: evidence.status });
         activeStep = undefined;
         if (evidence.status === 'failed') {
