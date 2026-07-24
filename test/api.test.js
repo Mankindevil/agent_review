@@ -299,10 +299,12 @@ test('reports enablement independently from local installation', async () => {
   const previousClaude = process.env.ENABLE_LOCAL_CLAUDE_CODE;
   const previousCursor = process.env.ENABLE_LOCAL_CURSOR_AGENT;
   const previousPath = process.env.PATH;
+  const previousRemoteAdapters = process.env.RUNTIME_ADAPTERS_JSON;
   try {
     process.env.ENABLE_LOCAL_CLAUDE_CODE = 'true';
     process.env.ENABLE_LOCAL_CURSOR_AGENT = 'true';
     process.env.PATH = '';
+    process.env.RUNTIME_ADAPTERS_JSON = '{}';
     const runtimes = await getRuntimeStatus();
     const claude = runtimes.find((item) => item.id === 'claude-code');
     const cursor = runtimes.find((item) => item.id === 'cursor');
@@ -316,12 +318,78 @@ test('reports enablement independently from local installation', async () => {
     restoreEnv('ENABLE_LOCAL_CLAUDE_CODE', previousClaude);
     restoreEnv('ENABLE_LOCAL_CURSOR_AGENT', previousCursor);
     restoreEnv('PATH', previousPath);
+    restoreEnv('RUNTIME_ADAPTERS_JSON', previousRemoteAdapters);
   }
+});
+
+test('rejects imprecise and unusable remote runtime adapter configuration', async () => {
+  await withRuntimeStatusEnv(async () => {
+    for (const remoteConfig of [
+      JSON.stringify({ note: 'claude-code cursor doubao' }),
+      '{"claude-code":',
+      JSON.stringify({
+        'claude-code': { url: 'ftp://runtime.example/claude' },
+        cursor: { url: 'not-a-url' },
+        doubao: { url: 'https://runtime.example/doubao', apiKeyEnv: 'RUNTIME_STATUS_TEST_KEY' }
+      })
+    ]) {
+      process.env.RUNTIME_ADAPTERS_JSON = remoteConfig;
+      const runtimes = await getRuntimeStatus();
+      for (const runtime of runtimes) {
+        assert.equal(runtime.enabled, false, `${runtime.id} should reject ${remoteConfig}`);
+        assert.equal(runtime.runtimeReady, false, `${runtime.id} should not be ready for ${remoteConfig}`);
+      }
+    }
+  });
+});
+
+test('reports structurally valid remote adapters independently from local executables', async () => {
+  await withRuntimeStatusEnv(async () => {
+    process.env.RUNTIME_ADAPTERS_JSON = JSON.stringify({
+      'claude-code': { url: 'https://runtime.example/claude' },
+      cursor: { url: 'http://runtime.example/cursor' },
+      doubao: { url: 'https://runtime.example/doubao', apiKeyEnv: 'RUNTIME_STATUS_TEST_KEY' }
+    });
+    let runtimes = await getRuntimeStatus();
+    assert.equal(runtimeFor(runtimes, 'claude-code').enabled, true);
+    assert.equal(runtimeFor(runtimes, 'claude-code').runtimeReady, true);
+    assert.equal(runtimeFor(runtimes, 'cursor').enabled, true);
+    assert.equal(runtimeFor(runtimes, 'cursor').runtimeReady, true);
+    assert.equal(runtimeFor(runtimes, 'doubao').enabled, false);
+    assert.equal(runtimeFor(runtimes, 'doubao').runtimeReady, false);
+
+    process.env.RUNTIME_STATUS_TEST_KEY = 'test-runtime-key';
+    runtimes = await getRuntimeStatus();
+    assert.equal(runtimeFor(runtimes, 'doubao').enabled, true);
+    assert.equal(runtimeFor(runtimes, 'doubao').runtimeReady, true);
+  });
 });
 
 function restoreEnv(name, value) {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
+}
+
+async function withRuntimeStatusEnv(run) {
+  const names = [
+    'RUNTIME_ADAPTERS_JSON', 'RUNTIME_STATUS_TEST_KEY', 'ENABLE_LOCAL_CLAUDE_CODE',
+    'ENABLE_LOCAL_CURSOR_AGENT', 'PATH', 'ARK_BASE_URL', 'ARK_API_KEY',
+    'REVIEW_MODEL_DOUBAO', 'CURSOR_API_KEY'
+  ];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  try {
+    for (const name of names) delete process.env[name];
+    process.env.PATH = '';
+    await run();
+  } finally {
+    for (const name of names) restoreEnv(name, previous[name]);
+  }
+}
+
+function runtimeFor(runtimes, id) {
+  const runtime = runtimes.find((item) => item.id === id);
+  assert.ok(runtime, `missing ${id} runtime`);
+  return runtime;
 }
 
 test('creates and completes a demo evaluation', async () => {

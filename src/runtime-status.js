@@ -10,30 +10,35 @@ export async function getRuntimeStatus() {
   const [claude, cursorAgent, cursorDesktop, doubao, claudeAuth, cursorAuth] = await Promise.all([
     probe('claude'), probe('cursor-agent'), probe('cursor'), probe('doubao'), probeClaudeAuth(), probeCursorAuth()
   ]);
-  const remoteConfig = process.env.RUNTIME_ADAPTERS_JSON || '';
-  const claudeEnabled = remoteConfig.includes('claude-code') || process.env.ENABLE_LOCAL_CLAUDE_CODE === 'true';
-  const cursorEnabled = remoteConfig.includes('cursor') || process.env.ENABLE_LOCAL_CURSOR_AGENT === 'true';
+  const remoteAdapters = parseRemoteAdapters(process.env.RUNTIME_ADAPTERS_JSON);
+  const claudeRemoteReady = isRemoteAdapterReady(remoteAdapters['claude-code']);
+  const cursorRemoteReady = isRemoteAdapterReady(remoteAdapters.cursor);
+  const doubaoRemoteReady = isRemoteAdapterReady(remoteAdapters.doubao);
+  const claudeLocalEnabled = process.env.ENABLE_LOCAL_CLAUDE_CODE === 'true';
+  const cursorLocalEnabled = process.env.ENABLE_LOCAL_CURSOR_AGENT === 'true';
+  const claudeEnabled = claudeRemoteReady || claudeLocalEnabled;
+  const cursorEnabled = cursorRemoteReady || cursorLocalEnabled;
   const doubaoApiReady = Boolean(process.env.ARK_BASE_URL && process.env.ARK_API_KEY && process.env.REVIEW_MODEL_DOUBAO);
-  const doubaoEnabled = remoteConfig.includes('doubao') || doubaoApiReady;
+  const doubaoEnabled = doubaoRemoteReady || doubaoApiReady;
   const claudeBackend = shouldUseArkClaude() ? '火山方舟 DeepSeek' : process.env.DEEPSEEK_API_KEY ? 'DeepSeek 直连' : 'Claude';
   return [
     {
       id: 'claude-code', name: 'Claude Code', installed: claude.installed,
       version: claude.version, authenticated: claudeAuth, enabled: claudeEnabled,
-      runtimeReady: Boolean(claude.installed && claudeEnabled && (claudeAuth || remoteConfig.includes('claude-code'))),
+      runtimeReady: claudeRemoteReady || Boolean(claude.installed && claudeLocalEnabled && claudeAuth),
       note: !claude.installed ? '未安装' : !claudeAuth ? '已安装但未登录' : claudeEnabled ? `本地 CLI adapter 已就绪 · ${claudeBackend}` : `凭据已就绪（${claudeBackend}）；需显式启用本地 adapter`
     },
     {
       id: 'cursor', name: 'Cursor Agent', installed: cursorAgent.installed,
       version: cursorAgent.version || cursorDesktop.version,
       authenticated: cursorAuth, enabled: cursorEnabled,
-      runtimeReady: Boolean(cursorAgent.installed && cursorEnabled && (cursorAuth || remoteConfig.includes('cursor'))),
+      runtimeReady: cursorRemoteReady || Boolean(cursorAgent.installed && cursorLocalEnabled && cursorAuth),
       note: !cursorAgent.installed ? (cursorDesktop.installed ? '只有 Cursor Desktop CLI，缺少 cursor-agent' : '未安装') : !cursorAuth ? 'Agent CLI 已安装但未登录' : cursorEnabled ? '本地 CLI adapter 已就绪' : '已登录；需显式启用本地 adapter'
     },
     {
       id: 'doubao', name: 'Doubao Agent', installed: doubao.installed,
       version: doubao.version, authenticated: doubaoApiReady, enabled: doubaoEnabled,
-      runtimeReady: doubaoEnabled,
+      runtimeReady: doubaoRemoteReady || doubaoApiReady,
       note: doubaoApiReady ? '火山方舟 API adapter 已就绪' : doubao.installed ? '已安装；需配置 adapter' : '未检测到本地 CLI，也未配置方舟 API'
     }
   ];
@@ -47,6 +52,33 @@ async function probeClaudeAuth() {
 async function probeCursorAuth() {
   if (process.env.CURSOR_API_KEY) return true;
   try { const { stdout } = await execFileAsync('cursor-agent', ['status'], { timeout: 5_000, maxBuffer: 64_000 }); return !/not logged|unauthenticated/i.test(stdout); } catch { return false; }
+}
+
+function parseRemoteAdapters(value) {
+  try {
+    const parsed = JSON.parse(value || '{}');
+    return isObject(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function isRemoteAdapterReady(adapter) {
+  if (!isObject(adapter) || typeof adapter.url !== 'string') return false;
+  try {
+    const { protocol } = new URL(adapter.url);
+    if (protocol !== 'http:' && protocol !== 'https:') return false;
+  } catch {
+    return false;
+  }
+  if (!Object.hasOwn(adapter, 'apiKeyEnv')) return true;
+  return typeof adapter.apiKeyEnv === 'string'
+    && adapter.apiKeyEnv.length > 0
+    && Boolean(process.env[adapter.apiKeyEnv]);
+}
+
+function isObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 async function probe(command) {
