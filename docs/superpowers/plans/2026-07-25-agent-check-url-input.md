@@ -13,7 +13,7 @@
 - Keep JSON upload and paste backward compatible.
 - Accept only `card-url` and `service-url` source types.
 - Do not expose `/api/agent-cards/resolve` through the public Nginx allowlist.
-- Keep the existing platform access-key guard, 1 MB Card limit, 12-second Card fetch timeout, SSRF checks, DNS pinning, and no-redirect behavior.
+- Keep the existing platform access-key guard, 1 MB Card limit, 12-second Card fetch timeout, DNS pinning, and no-redirect behavior. Allow private/local targets when either the platform-wide or diagnostics-specific environment flag is enabled, and label the diagnostics policy.
 - Derive the tested Agent service URL only from the resolved Card.
 
 ---

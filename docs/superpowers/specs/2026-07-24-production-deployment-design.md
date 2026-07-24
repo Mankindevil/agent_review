@@ -87,7 +87,7 @@
 - `PORT=4173`
 - `DATA_FILE=/var/lib/agent-review/evaluations.json`
 - `AGENT_DIAGNOSTICS_ACCESS_KEY=<随机高强度访问密钥>`
-- `ALLOW_PRIVATE_AGENT_URLS=false`
+- `ALLOW_PRIVATE_AGENT_URLS=true`（当前私人部署需要让测试入口和正式测评访问服务器可达的内网/本机 Agent；公开多租户部署应恢复为 `false`）
 
 任何密码、API key、Agent token 或访问密钥都不得写入文档、Git diff、systemd 单元或 Nginx 配置。环境变量文件通过受保护的传输会话写入，并设置为 root 专属。
 

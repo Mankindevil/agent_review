@@ -253,6 +253,7 @@ test('resolves both URL source modes before running the existing diagnostics flo
       agentCard: undefined,
       cardSource: { type, url }
     }, {
+      allowPrivate: true,
       resolveCard: async (...args) => {
         resolutions.push(args);
         return {
@@ -278,13 +279,46 @@ test('resolves both URL source modes before running the existing diagnostics flo
       }
     });
 
-    assert.deepEqual(resolutions, [[type, url, 12_000]]);
+    assert.deepEqual(resolutions, [[type, url, 12_000, { allowPrivate: true }]]);
     assert.deepEqual(calls, ['https://agent.example/a2a']);
     assert.equal(report.ok, true);
     assert.equal(report.checks[0].details.sourceType, type);
     assert.equal(report.checks[0].details.sourceUrl, url);
     assert.equal(report.checks[0].details.resolvedUrl, resolvedUrl);
   }
+});
+
+test('allows and labels private targets when the platform policy enables them', async () => {
+  const privateCard = {
+    ...card,
+    supportedInterfaces: [{
+      ...card.supportedInterfaces[0],
+      url: 'http://127.0.0.1:3000/a2a'
+    }]
+  };
+  const request = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    return jsonResponse({
+      jsonrpc: '2.0',
+      id: body.id,
+      result: {
+        message: {
+          messageId: 'private-reply',
+          role: 'ROLE_AGENT',
+          parts: [{ text: 'private healthy' }]
+        }
+      }
+    });
+  };
+
+  const report = await runAgentDiagnostics(
+    { ...baseInput, agentCard: privateCard },
+    { request, allowPrivate: true }
+  );
+
+  assert.equal(report.ok, true);
+  assert.equal(report.checks[1].details.networkPolicy, '允许内网/本机');
+  assert.equal(report.checks[1].details.targetScope, '本机或非公网地址');
 });
 
 test('reports URL resolution failures and blocks Agent calls', async () => {

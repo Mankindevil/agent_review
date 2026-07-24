@@ -16,6 +16,8 @@ Run these commands on the production host as an authorized administrator. Never 
 
 Manage the app only through systemd; do not start an additional Node process. Nginx remains the public TLS endpoint and exposes only `/agent-check`, its JS/CSS, `/api/agent-diagnostics`, and `/api/health`.
 
+This private deployment intentionally sets `ALLOW_PRIVATE_AGENT_URLS=true`. The setting applies to diagnostics, Agent Card discovery, and formal evaluation A2A calls. Targets are resolved and reached from the production host, so `127.0.0.1` means this server rather than the submitter's browser or workstation. Keep the flag disabled for an untrusted multi-tenant deployment.
+
 ## Private administrator access
 
 Run the following command on the administrator workstation, not on the production host:

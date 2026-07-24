@@ -57,17 +57,22 @@ export function selectInterface(card) {
 
 function isNonEmptyString(value) { return typeof value === 'string' && value.trim().length > 0; }
 
-export function assertSafeAgentUrl(rawUrl) {
-  return validateSafeUrl(rawUrl, { allowPrivate: process.env.ALLOW_PRIVATE_AGENT_URLS === 'true' });
+export function assertSafeAgentUrl(rawUrl, options = {}) {
+  const allowPrivate = options.allowPrivate ??
+    process.env.ALLOW_PRIVATE_AGENT_URLS === 'true';
+  return validateSafeUrl(rawUrl, { allowPrivate });
 }
 
-export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000) {
+export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000, options = {}) {
   if (!['card-url', 'service-url'].includes(sourceType)) throw new Error('不支持的 Agent Card 发现方式');
-  const input = assertSafeAgentUrl(rawUrl);
+  const allowPrivate = options.allowPrivate ??
+    process.env.ALLOW_PRIVATE_AGENT_URLS === 'true';
+  const input = assertSafeAgentUrl(rawUrl, { allowPrivate });
   const target = sourceType === 'service-url'
     ? new URL('/.well-known/agent-card.json', input.origin)
     : input;
   const response = await safeHttpRequest(target.toString(), {
+    allowPrivate,
     headers: { accept: 'application/json, application/a2a+json' },
     timeoutMs,
     maxBytes: 1_000_000
@@ -118,7 +123,7 @@ export function buildA2ARequest(target, prompt, options = {}) {
   if (target.tenant) params.tenant = target.tenant;
   if (isJsonRpc) {
     return {
-      url: assertSafeAgentUrl(target.url).toString(),
+      url: assertSafeAgentUrl(target.url, { allowPrivate: options.allowPrivate }).toString(),
       headers: { 'content-type': 'application/json', 'a2a-version': target.version },
       body: {
         jsonrpc: '2.0',
@@ -129,7 +134,11 @@ export function buildA2ARequest(target, prompt, options = {}) {
       requestId
     };
   }
-  const endpoint = appendOperation(target.url, streaming ? 'message:stream' : 'message:send');
+  const endpoint = appendOperation(
+    target.url,
+    streaming ? 'message:stream' : 'message:send',
+    { allowPrivate: options.allowPrivate }
+  );
   const body = {
     message,
     configuration: { acceptedOutputModes: ['text/plain', 'application/json'] }
@@ -210,8 +219,8 @@ export function validateStreamResult(target, events, requestId) {
   return { terminal: true, eventCount: events.length, text: events.map(extractAgentText).filter(Boolean).join('\n') };
 }
 
-function appendOperation(rawUrl, operation) {
-  const url = assertSafeAgentUrl(rawUrl);
+function appendOperation(rawUrl, operation, options = {}) {
+  const url = assertSafeAgentUrl(rawUrl, options);
   url.pathname = `${url.pathname.replace(/\/+$/, '')}/${operation}`;
   return url.toString();
 }

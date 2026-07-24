@@ -112,10 +112,16 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
   let input = validateDiagnosticsInput(rawInput);
   const request = options.request || safeHttpRequest;
   const resolveCard = options.resolveCard || resolveAgentCard;
+  const allowPrivate = options.allowPrivate ??
+    (
+      process.env.ALLOW_PRIVATE_DIAGNOSTICS_URLS === 'true' ||
+      process.env.ALLOW_PRIVATE_AGENT_URLS === 'true'
+    );
   const startedAt = Date.now();
   const checks = CHECK_IDS.map((id) => emptyCheck(id));
   const secrets = [input.agentAuthorization, ...(options.secrets || [])].filter(Boolean);
   const requestOptions = (overrides = {}) => ({
+    allowPrivate,
     signal: options.signal,
     timeoutMs: input.timeoutMs,
     ...overrides
@@ -127,7 +133,8 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
       const resolved = await resolveCard(
         input.cardSource.type,
         input.cardSource.url,
-        CARD_RESOLVE_TIMEOUT_MS
+        CARD_RESOLVE_TIMEOUT_MS,
+        { allowPrivate }
       );
       const cardBytes = serializedCardBytes(resolved.card);
       input = { ...input, agentCard: resolved.card, cardBytes };
@@ -135,6 +142,7 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
         sourceType: input.cardSource.type,
         sourceUrl: input.cardSource.url,
         resolvedUrl: resolved.resolvedUrl,
+        sourceScope: urlScopeLabel(resolved.resolvedUrl),
         name: truncate(input.agentCard.name, 240),
         sizeBytes: input.cardBytes
       });
@@ -167,7 +175,7 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
   let targetUrl;
   try {
     targetUrl = validateSafeUrl(target.url, {
-      allowPrivate: process.env.ALLOW_PRIVATE_AGENT_URLS === 'true'
+      allowPrivate
     });
   } catch (error) {
     checks[1] = failed('card-validation', validationStarted, error);
@@ -178,6 +186,8 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
     version: validation.version,
     binding: target.binding,
     targetOrigin: targetUrl.origin,
+    networkPolicy: allowPrivate ? '允许内网/本机' : '仅公网',
+    targetScope: urlScopeLabel(targetUrl),
     streaming: card.capabilities?.streaming === true,
     tenant: target.tenant || null,
     skillsCount: card.skills.length
@@ -185,7 +195,7 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
 
   const callStarted = Date.now();
   try {
-    const normalRequest = buildA2ARequest(target, input.prompt);
+    const normalRequest = buildA2ARequest(target, input.prompt, { allowPrivate });
     const headers = withAgentAuthorization(normalRequest.headers, input.agentAuthorization);
     const response = await request(normalRequest.url, requestOptions({
       method: 'POST',
@@ -217,7 +227,10 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
   } else {
     const streamStarted = Date.now();
     try {
-      const streamRequest = buildA2ARequest(target, input.prompt, { streaming: true });
+      const streamRequest = buildA2ARequest(target, input.prompt, {
+        streaming: true,
+        allowPrivate
+      });
       const headers = withAgentAuthorization(streamRequest.headers, input.agentAuthorization);
       const response = await request(streamRequest.url, requestOptions({
         method: 'POST',
@@ -416,8 +429,8 @@ function safeErrorMessage(error, category) {
 
 function suggestionFor(category) {
   const suggestions = {
-    dns: '检查域名和 DNS 记录是否公开可解析。',
-    connection: '确认 Agent 服务已启动、防火墙允许公网访问。',
+    dns: '检查域名和平台服务器使用的 DNS 记录是否可解析。',
+    connection: '确认 Agent 服务已启动，且平台服务器到目标地址的网络与防火墙策略允许访问。',
     tls: '检查证书有效期、域名和完整证书链。',
     http: '检查接口路径、鉴权和服务端错误日志。',
     'content-type': '返回规范要求的 JSON 或 text/event-stream Content-Type。',
@@ -425,7 +438,7 @@ function suggestionFor(category) {
     protocol: '按 Agent Card 声明的 A2A 版本和 binding 修正响应结构。',
     timeout: '缩短 Agent 执行时间或适当提高诊断超时。',
     'response-too-large': '缩短 Agent 输出并限制流式事件数量。',
-    security: '使用公开可访问的 HTTP(S) 地址，不要指向内网或本机。',
+    security: '检查 URL 协议、内嵌凭据和当前部署的内网访问策略。',
     cancelled: '保持页面连接后重新诊断。'
   };
   return suggestions[category] || '检查 Agent 配置后重试。';
@@ -471,4 +484,29 @@ function serializedCardBytes(card) {
   }
   if (cardBytes > MAX_CARD_BYTES) throw clientError('agentCard 不能超过 1 MiB');
   return cardBytes;
+}
+
+function urlScopeLabel(rawUrl) {
+  let hostname;
+  try {
+    hostname = (rawUrl instanceof URL ? rawUrl : new URL(rawUrl)).hostname
+      .toLowerCase()
+      .replace(/^\[|\]$/g, '');
+  } catch {
+    return '地址格式待校验';
+  }
+  if (
+    hostname === 'localhost' ||
+    hostname.endsWith('.local') ||
+    hostname === '::1' ||
+    /^127\./.test(hostname) ||
+    /^10\./.test(hostname) ||
+    /^192\.168\./.test(hostname) ||
+    /^169\.254\./.test(hostname) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+    /^(fc|fd|fe8|fe9|fea|feb)/.test(hostname)
+  ) {
+    return '本机或非公网地址';
+  }
+  return '公网地址或待 DNS 解析';
 }

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="上传、粘贴或通过 URL 获取单个 A2A Agent Card，执行一次性参评技术预检。">
   <title>Agent Card 技术预检台 · 锐评局</title>
-  <link rel="stylesheet" href="/agent-check.css?v=20260725-url1">
+  <link rel="stylesheet" href="/agent-check.css?v=20260725-url2">
 </head>
 <body>
   <header class="topbar">
@@ -33,6 +33,10 @@
     <div class="scope-strip" role="note">
       <span>技术入口</span>
       <p>这里验证 Card、A2A 调用和响应时限。团队、作品说明、示例问答、Skills 清单与仓库地址在最终报名表填写。</p>
+    </div>
+    <div id="private-network-note" class="private-network-note" role="note">
+      <span>内网测试已允许</span>
+      <p>可以填写测试服务器可达的内网或本机地址。结果会明确标注；<code>127.0.0.1</code> 指测试平台服务器自身，不是当前浏览器所在电脑。</p>
     </div>
 
     <div class="workspace">
@@ -227,6 +231,6 @@
     </div>
   </main>
 
-  <script type="module" src="/agent-check.js?v=20260725-url1"></script>
+  <script type="module" src="/agent-check.js?v=20260725-url2"></script>
 </body>
 </html>

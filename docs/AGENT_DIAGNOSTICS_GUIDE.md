@@ -70,6 +70,7 @@ cp .env.example .env
 AGENT_DIAGNOSTICS_ACCESS_KEY=替换为随机生成的长密钥
 AGENT_DIAGNOSTICS_RATE_LIMIT=6
 AGENT_DIAGNOSTICS_CONCURRENCY=4
+ALLOW_PRIVATE_DIAGNOSTICS_URLS=false
 ALLOW_PRIVATE_AGENT_URLS=false
 ```
 
@@ -93,7 +94,8 @@ npm start
 | `AGENT_DIAGNOSTICS_ACCESS_KEY` | 无 | 保护 `/api/agent-diagnostics`；未配置时返回 503 |
 | `AGENT_DIAGNOSTICS_RATE_LIMIT` | 6 | 每个访问密钥每分钟最多执行的预检次数 |
 | `AGENT_DIAGNOSTICS_CONCURRENCY` | 4 | 全局同时运行的预检数量 |
-| `ALLOW_PRIVATE_AGENT_URLS` | false | 仅本地开发可以设为 true；生产环境禁止启用 |
+| `ALLOW_PRIVATE_DIAGNOSTICS_URLS` | false | 仅为 `/agent-check` 的 Card 获取和 A2A 调用允许内网/本机地址 |
+| `ALLOW_PRIVATE_AGENT_URLS` | false | 为测试入口、Card 发现和正式测评 A2A 请求统一允许内网/本机地址 |
 
 生产环境必须通过 HTTPS 提供页面和 API，否则平台访问密钥与 Agent Bearer Token 可能在传输过程中泄露。
 
@@ -113,7 +115,7 @@ JSON 文件要求：
 - Card 序列化后不超过 1 MiB；
 - 必须包含非空 `name`、`description` 和至少一个合法 `skill`；
 - 必须声明至少一个平台支持的接口；
-- 接口必须使用公开 HTTP(S) 地址。
+- 接口必须使用 HTTP(S) 地址；是否允许内网/本机由诊断网络策略决定。
 
 A2A 1.0 示例：
 
@@ -151,7 +153,8 @@ URL 获取仅用于得到 Agent Card。平台不会把 Card 来源地址当作 A
 - Card 响应最大 1,000,000 字节；
 - 获取超时为 12 秒；
 - 不跟随重定向；
-- 生产环境拒绝 localhost、私网、链路本地和其他非公网地址；
+- `ALLOW_PRIVATE_DIAGNOSTICS_URLS=false` 时拒绝 localhost、私网、链路本地和其他非公网地址；
+- 私有测试部署可以设置为 `true`，页面和报告会标注已放行内网/本机；
 - Agent Bearer Token 不会用于获取 Card。
 
 ## 5. 页面操作步骤
@@ -370,13 +373,13 @@ Bearer 模式额外提交：
 | `protocol` | binding、版本、请求 ID、Message/Task 或 SSE 结构错误 | 按 Card 声明的 A2A 版本修复 |
 | `timeout` | Agent 未在 1–20 分钟所选上限内完成 | 缩短任务执行时间或调整合理上限 |
 | `response-too-large` | 普通响应、流式累计内容或事件超限 | 缩短输出和事件数量 |
-| `security` | SSRF 策略拒绝本机、私网或危险地址 | 使用公开 HTTP(S) 地址 |
+| `security` | URL 含凭据、协议不受支持，或当前诊断策略没有放行非公网地址 | 修正 URL，或由管理员确认诊断专用内网策略 |
 | `cancelled` | 页面关闭或客户端断连 | 保持页面连接后重试 |
 
 ## 12. 安全与隐私边界
 
 - SSRF 防护校验 URL、全部 DNS 结果和实际连接地址。
-- 默认拒绝 localhost、私网、链路本地、未指定、组播和其他危险地址。
+- 默认拒绝 localhost、私网、链路本地、未指定、组播和其他危险地址；私有测试环境可以仅对诊断入口显式放行。
 - DNS 校验后的地址直接用于连接，降低 DNS rebinding 风险。
 - 禁止重定向，防止凭据被转发到第三方。
 - Agent 普通与流式响应分别限制为 2 MiB。
@@ -387,13 +390,19 @@ Bearer 模式额外提交：
 - 服务端不把技术预检写入 `EvaluationStore`。
 - 浏览器交互登录、OAuth 跳转、gRPC 和自定义 binding 不在支持范围内。
 
-本地示例 Agent 使用 loopback 地址，只有开发环境可以临时设置：
+只有测试入口需要访问内网或本机 Agent 时，可以设置诊断专用开关：
+
+```dotenv
+ALLOW_PRIVATE_DIAGNOSTICS_URLS=true
+```
+
+如果测试入口和正式测评平台都需要访问内网或本机 Agent，使用全平台开关：
 
 ```dotenv
 ALLOW_PRIVATE_AGENT_URLS=true
 ```
 
-生产环境必须保持 `false`，否则测试入口可能成为访问内网资源的通道。
+全平台开关同时作用于 Card 发现、诊断调用和正式测评 A2A 请求，诊断入口也会继承它。页面会显示“内网测试已允许”，报告的 `networkPolicy` 和 `targetScope` 会标注目标范围。地址是从平台服务器发起访问，因此 `127.0.0.1` 指平台服务器自身，不是提交者浏览器所在电脑。只有私人或受控环境应开启。
 
 ## 13. 哪些结果仍需人工核验
 

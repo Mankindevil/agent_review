@@ -23,7 +23,7 @@ The Agent service target remains authoritative only when declared inside the res
 
 `POST /api/agent-diagnostics` remains the only public diagnostics API and continues to require the platform access key. For a URL source, it calls the existing `resolveAgentCard()` before Card validation and A2A execution. No unauthenticated resolver route is added to the public allowlist.
 
-Remote Card retrieval inherits the existing protections: HTTP(S) only, no URL credentials, no local/private destinations by default, DNS address validation and pinning, no redirects, a 1 MB response limit, and a 12-second timeout.
+Remote Card retrieval inherits the existing protections: HTTP(S) only, no URL credentials, DNS address validation and pinning, no redirects, a 1 MB response limit, and a 12-second timeout. Local/private destinations are denied by default. `ALLOW_PRIVATE_AGENT_URLS=true` enables them platform-wide, while `ALLOW_PRIVATE_DIAGNOSTICS_URLS=true` enables only diagnostics; the page and report label the active diagnostics policy explicitly.
 
 The diagnostics report records the source type and final resolved Card URL in the `card-input` check. Retrieval failures are returned as a normal diagnostics report with later stages blocked, so DNS, TLS, timeout, HTTP, invalid JSON, and invalid Card failures remain understandable to the user.
 

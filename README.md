@@ -43,7 +43,7 @@ npm start
 
 打开 `http://localhost:4173`，选择任一“本地真实样本”，再点击“送进评测舱”即可体验演示评测。
 
-设置 `AGENT_DIAGNOSTICS_ACCESS_KEY` 后，可打开 `http://localhost:4173/agent-check` 使用 Agent Card 技术预检平台。一次测试一张 Card，支持上传或粘贴 JSON、填写完整 Agent Card URL，以及通过服务根地址自动发现 `/.well-known/agent-card.json`。平台会执行真实 A2A 自然语言任务，并提供 1、5、10、20 分钟的单次响应上限；团队与作品材料仍在最终报名表提交。平台访问密钥与 Agent Bearer Token 用途不同，配置与安全说明见 [完整使用指南](./docs/AGENT_DIAGNOSTICS_GUIDE.md)。
+设置 `AGENT_DIAGNOSTICS_ACCESS_KEY` 后，可打开 `http://localhost:4173/agent-check` 使用 Agent Card 技术预检平台。一次测试一张 Card，支持上传或粘贴 JSON、填写完整 Agent Card URL，以及通过服务根地址自动发现 `/.well-known/agent-card.json`。私人部署可用 `ALLOW_PRIVATE_AGENT_URLS=true` 为测试入口和正式测评统一放行平台服务器可达的内网/本机地址，页面和诊断结果会明确标注；若只想放行测试入口，可改用 `ALLOW_PRIVATE_DIAGNOSTICS_URLS=true`。平台会执行真实 A2A 自然语言任务，并提供 1、5、10、20 分钟的单次响应上限；团队与作品材料仍在最终报名表提交。平台访问密钥与 Agent Bearer Token 用途不同，配置与安全说明见 [完整使用指南](./docs/AGENT_DIAGNOSTICS_GUIDE.md)。
 
 开发模式：
 
@@ -357,7 +357,8 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 | `NODE_ENV` | `development` | 运行环境标识 |
 | `PORT` | `4173` | HTTP 端口 |
 | `DATA_FILE` | `data/evaluations.json` | 评测持久化文件 |
-| `ALLOW_PRIVATE_AGENT_URLS` | `false` | 是否允许 localhost/私网 Agent URL，仅建议本地开发开启 |
+| `ALLOW_PRIVATE_AGENT_URLS` | `false` | 是否为测试入口、Card 发现和正式测评 A2A 请求统一允许平台服务器可达的 localhost/私网地址；仅私人或受控部署开启 |
+| `ALLOW_PRIVATE_DIAGNOSTICS_URLS` | `false` | 是否仅为 `/agent-check` 的 Card 获取和 A2A 调用允许内网/本机地址 |
 | `AGENT_DIAGNOSTICS_ACCESS_KEY` | 空 | 保护一次性 Agent Card JSON 技术预检 API；为空时接口关闭 |
 | `AGENT_DIAGNOSTICS_RATE_LIMIT` | `6` | 每个诊断访问密钥每分钟的调用上限 |
 | `AGENT_DIAGNOSTICS_CONCURRENCY` | `4` | Agent 诊断全局并发上限 |

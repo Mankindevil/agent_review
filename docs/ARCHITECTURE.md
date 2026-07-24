@@ -261,7 +261,7 @@ SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日
 
 - 请求体限制为 1 MB；前端也限制上传文件大小。
 - A2A endpoint 只允许 HTTP(S)。
-- 默认拒绝 localhost、`.local` 与常见私有 IPv4 地址，减少 SSRF 风险；开发环境可显式设置 `ALLOW_PRIVATE_AGENT_URLS=true`。
+- 默认拒绝 localhost、`.local` 与常见私有地址，减少 SSRF 风险；私人或受控部署可显式设置 `ALLOW_PRIVATE_AGENT_URLS=true`，让测试入口、Card 发现和正式测评 A2A 请求统一访问平台服务器可达的内网/本机 Agent。只需放行测试入口时使用 `ALLOW_PRIVATE_DIAGNOSTICS_URLS=true`。
 - Runtime 使用受限本地 CLI、方舟模型 API 或远程 HTTP adapter，均不执行用户提交的命令。
 - API key 只从环境变量读取，不写入评测记录或返回前端。
 - 生产版仍需补充 DNS 重绑定防护、出网 allowlist、容器隔离、租户鉴权、配额、审计日志和敏感输出脱敏。

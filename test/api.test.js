@@ -20,6 +20,7 @@ process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-test-${process.pid}.jso
 process.env.AGENT_DIAGNOSTICS_ACCESS_KEY = 'test-diagnostics-key';
 process.env.AGENT_DIAGNOSTICS_RATE_LIMIT = '100';
 process.env.ALLOW_PRIVATE_AGENT_URLS = 'true';
+process.env.ALLOW_PRIVATE_DIAGNOSTICS_URLS = 'true';
 const { server } = await import('../server.js');
 
 let origin;
@@ -163,6 +164,7 @@ test('serves an Agent Card upload readiness console with isolated credentials an
     'diagnostics-form', 'platform-key', 'agent-card-file', 'agent-card-json',
     'card-source-json', 'card-source-card-url', 'card-source-service-url',
     'json-source-panel', 'url-source-panel', 'agent-card-url',
+    'private-network-note',
     'card-drop-zone', 'card-summary', 'auth-method', 'agent-token',
     'auth-target-origin', 'confirm-auth-target', 'diagnostic-prompt',
     'timeout-ms', 'attestation-deepseek', 'attestation-authorized',
@@ -275,6 +277,7 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
   ]);
   for (const term of [
     'AGENT_DIAGNOSTICS_ACCESS_KEY',
+    'ALLOW_PRIVATE_DIAGNOSTICS_URLS',
     '平台访问密钥',
     'Agent Card JSON',
     '完整 Agent Card URL',
@@ -302,6 +305,7 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
   }
   assert.match(envExample, /AGENT_DIAGNOSTICS_RATE_LIMIT=6/);
   assert.match(envExample, /AGENT_DIAGNOSTICS_CONCURRENCY=4/);
+  assert.match(envExample, /ALLOW_PRIVATE_DIAGNOSTICS_URLS=false/);
   assert.match(readme, /AGENT_DIAGNOSTICS_GUIDE\.md/);
   assert.match(readme, /\/agent-check\b/);
   assert.doesNotMatch(readme, /\/agent-check\.html/);
