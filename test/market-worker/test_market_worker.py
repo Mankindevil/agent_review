@@ -1,15 +1,457 @@
 import importlib.util
+import io
+import json
 import math
+import os
 import pathlib
+import sys
+import tempfile
 import unittest
+from datetime import date, timedelta
+from unittest import mock
 
 WORKER = pathlib.Path("agents/market-analyst/tools/panda_market_worker.py")
+SNAPSHOT = pathlib.Path("test/fixtures/market-worker/snapshot.json")
 spec = importlib.util.spec_from_file_location("panda_market_worker", WORKER)
 worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
 
 
+class FakeFrame:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def to_dict(self, orient="records"):
+        if orient != "records":
+            raise ValueError("FakeFrame only supports record output")
+        return [dict(row) for row in self.rows]
+
+
+class FakePanda:
+    __version__ = "0.0.12"
+    symbols = [f"00000{value}.SZ" for value in range(1, 7)]
+
+    @staticmethod
+    def _weekdays(start, end):
+        current = start
+        output = []
+        while current <= end:
+            if current.weekday() < 5:
+                output.append(current)
+            current += timedelta(days=1)
+        return output
+
+    def get_trade_cal(self, start_date=None, end_date=None, exchange="SH",
+                      is_trading_day=None, fields=None):
+        start = date.fromisoformat(f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}")
+        end = date.fromisoformat(f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}")
+        rows = [
+            {"nature_date": day.strftime("%Y%m%d"), "exchange": exchange, "is_trade": 1}
+            for day in self._weekdays(start, end)
+        ]
+        return FakeFrame(rows)
+
+    def get_last_trade_date(self, exchange="SH"):
+        return FakeFrame([{"date": "20260723" if exchange == "SH" else "20260722"}])
+
+    def get_trade_list(self, date, exchange="SH"):
+        return FakeFrame([{"symbol": symbol, "date": date} for symbol in self.symbols])
+
+    def get_stock_daily(self, start_date, end_date, symbol=None, fields=None,
+                        indicator=None, st=True):
+        days = self._weekdays(
+            date.fromisoformat(f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"),
+            date.fromisoformat(f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"),
+        )[-60:]
+        rows = []
+        for symbol_index, stock_symbol in enumerate(symbol or self.symbols):
+            previous = 10.0 + symbol_index
+            for day_index, day in enumerate(days):
+                close = previous * (1.0 + (symbol_index + 1) / 1000.0)
+                rows.append({
+                    "symbol": stock_symbol,
+                    "date": day.strftime("%Y%m%d"),
+                    "name": f"股票{symbol_index + 1}",
+                    "open": previous,
+                    "close": close,
+                    "high": close * 1.01,
+                    "low": previous * .99,
+                    "volume": 3_000_000 + day_index,
+                    "amount": 30_000_000 + symbol_index * 1_000_000,
+                    "pre_close": previous,
+                    "limit_up": previous * 1.1,
+                    "limit_down": previous * .9,
+                    "trade_status": 0,
+                })
+                previous = close
+        return FakeFrame(rows)
+
+    def get_industry_constituents(self, industry_code=None, stock_symbol=None,
+                                  level="L1", fields=None):
+        return FakeFrame([
+            {"stock_symbol": symbol, "l1_code": "801010", "l1_name": "农林牧渔",
+             "in_date": "20200101", "out_date": None}
+            for symbol in self.symbols
+        ])
+
+    def get_concept_list(self, concept=None, start_date=None, end_date=None):
+        return FakeFrame([{"name": "人工智能", "date": "20200101"}])
+
+    def get_concept_constituents(self, concept=None, concept_stock=None, date=None, fields=None):
+        return FakeFrame([
+            {"concept": "人工智能", "concept_stock": symbol, "date": "20200101"}
+            for symbol in self.symbols
+        ])
+
+    def get_lhb_list(self, symbol=None, type=None, start_date=None, end_date=None, fields=None):
+        return FakeFrame([
+            {"symbol": stock_symbol, "date": end_date, "type": "G0007", "amount": 1_000_000}
+            for stock_symbol in (symbol or self.symbols[:2])
+        ])
+
+    def get_fina_reports(self, symbol=None, start_quarter=None, end_quarter=None, date=None,
+                         is_latest=True, fields=None):
+        return FakeFrame([
+            {"symbol": stock_symbol, "date": date, "quarter": "2026q2",
+             "roe": 10 + index, "net_profit_yoy": 20 + index}
+            for index, stock_symbol in enumerate(symbol or [])
+        ])
+
+    def get_us_daily(self, start_date, end_date, symbol=None, fields=None):
+        return FakeFrame([
+            {"symbol": stock_symbol, "date": end_date, "close": 100 + index,
+             "pre_close": 99 + index, "name": stock_symbol}
+            for index, stock_symbol in enumerate(symbol or [])
+        ])
+
+
 class MarketWorkerTests(unittest.TestCase):
+    def test_build_evidence_pack_uses_completed_trade_date_and_traces_every_call(self):
+        trace = []
+        collector = worker.PandaCollector(FakePanda(), trace.append, None, 0)
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000, "cacheDir": None},
+            collector,
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(pack["schemaVersion"], "1.0")
+        self.assertEqual(pack["reportDate"], "2026-07-23")
+        self.assertIn("hotIndustries", pack["leaderboards"])
+        self.assertTrue(all("durationMs" in item and "rowCount" in item for item in trace))
+        self.assertNotIn("password", json.dumps(pack).lower())
+
+    def test_future_report_date_is_rejected(self):
+        collector = worker.PandaCollector(FakePanda(), lambda _: None, None, 0)
+        with self.assertRaisesRegex(ValueError, "未完成"):
+            worker.build_evidence_pack(
+                {"operation": "daily-market-report", "date": "2026-07-25", "topN": 10,
+                 "minLiquidityCny": 20_000_000, "cacheDir": None},
+                collector,
+                now="2026-07-24T10:30:00Z",
+            )
+
+    def test_open_shanghai_session_is_rejected(self):
+        collector = worker.PandaCollector(FakePanda(), lambda _: None, None, 0)
+        with self.assertRaisesRegex(ValueError, "未完成"):
+            worker.build_evidence_pack(
+                {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+                 "minLiquidityCny": 20_000_000},
+                collector,
+                now="2026-07-23T02:30:00Z",
+            )
+
+    def test_empty_candidate_set_does_not_expand_optional_calls_to_all_stocks(self):
+        class NoUnboundedEnrichmentPanda(FakePanda):
+            def get_lhb_list(self, **params):
+                raise AssertionError("empty symbol list must not call provider")
+
+            def get_fina_reports(self, **params):
+                raise AssertionError("empty symbol list must not call provider")
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 999_000_000_000},
+            worker.PandaCollector(NoUnboundedEnrichmentPanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertFalse(any(
+            item["method"] in {"get_lhb_list", "get_fina_reports"}
+            for item in pack["missingData"]
+        ))
+
+    def test_concept_membership_after_report_date_is_excluded(self):
+        class LateConceptPanda(FakePanda):
+            def get_concept_list(self, concept=None, start_date=None, end_date=None):
+                return FakeFrame([
+                    {"name": "人工智能", "date": "20200101"},
+                    {"name": "未来概念", "date": "20260724"},
+                ])
+
+            def get_concept_constituents(self, concept=None, concept_stock=None,
+                                         date=None, fields=None):
+                return FakeFrame([
+                    {"concept": name, "concept_stock": symbol,
+                     "date": "20200101" if name == "人工智能" else "20260724"}
+                    for name in ("人工智能", "未来概念")
+                    for symbol in self.symbols
+                ])
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(LateConceptPanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(
+            [item["id"] for item in pack["leaderboards"]["hotConcepts"]],
+            ["人工智能"],
+        )
+
+    def test_financial_publication_after_report_date_is_excluded(self):
+        class LateFinancialPanda(FakePanda):
+            def get_fina_reports(self, symbol=None, start_quarter=None, end_quarter=None,
+                                 date=None, is_latest=True, fields=None):
+                return FakeFrame([
+                    {"symbol": stock_symbol, "date": publication, "quarter": "2026q2",
+                     "roe": 10 if publication == "20260722" else 99,
+                     "net_profit_yoy": 20 if publication == "20260722" else 999}
+                    for stock_symbol in (symbol or [])
+                    for publication in ("20260722", "20260724")
+                ])
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(LateFinancialPanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertTrue(pack["leaderboards"]["potentialWatchlist"])
+        self.assertTrue(all(
+            item["financialEvidenceDate"] == "2026-07-22"
+            for item in pack["leaderboards"]["potentialWatchlist"]
+        ))
+
+    def test_undated_financial_rows_do_not_contribute_quality_evidence(self):
+        class UndatedFinancialPanda(FakePanda):
+            def get_fina_reports(self, symbol=None, start_quarter=None, end_quarter=None,
+                                 date=None, is_latest=True, fields=None):
+                return FakeFrame([
+                    {"symbol": stock_symbol, "date": None, "quarter": "2026q2",
+                     "roe": 99, "net_profit_yoy": 999}
+                    for stock_symbol in (symbol or [])
+                ])
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(UndatedFinancialPanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertTrue(pack["leaderboards"]["potentialWatchlist"])
+        self.assertTrue(all(
+            "quality" not in item["componentsUsed"]
+            for item in pack["leaderboards"]["potentialWatchlist"]
+        ))
+
+    def test_truncated_broad_daily_data_fails_instead_of_ranking(self):
+        class TruncatedPanda(FakePanda):
+            def get_stock_daily(self, start_date, end_date, symbol=None, fields=None,
+                                indicator=None, st=True):
+                return super().get_stock_daily(
+                    start_date, end_date, (symbol or [])[:1], fields, indicator, st
+                )
+
+        with self.assertRaisesRegex(ValueError, "覆盖不足|截断"):
+            worker.build_evidence_pack(
+                {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+                 "minLiquidityCny": 20_000_000},
+                worker.PandaCollector(TruncatedPanda(), lambda _: None, None, 0),
+                now="2026-07-24T10:30:00Z",
+            )
+
+    def test_hot_topic_coverage_under_eighty_percent_is_excluded(self):
+        class LowCoveragePanda(FakePanda):
+            def get_industry_constituents(self, industry_code=None, stock_symbol=None,
+                                          level="L1", fields=None):
+                symbols = self.symbols + ["900001.SZ", "900002.SZ"]
+                return FakeFrame([
+                    {"stock_symbol": symbol, "l1_code": "801010", "l1_name": "农林牧渔",
+                     "in_date": "20200101", "out_date": None}
+                    for symbol in symbols
+                ])
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(LowCoveragePanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(pack["leaderboards"]["hotIndustries"], [])
+        self.assertEqual(
+            pack["excluded"]["hotIndustries"],
+            [{"id": "801010", "reason": "MIN_COVERAGE"}],
+        )
+
+    def test_theme_component_applies_to_all_group_members_not_only_representatives(self):
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(FakePanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        last_member = next(
+            item for item in pack["leaderboards"]["potentialWatchlist"]
+            if item["symbol"] == "000006.SZ"
+        )
+        self.assertIn("theme", last_member["componentsUsed"])
+
+    def test_optional_lhb_failure_redistributes_weight_and_lowers_confidence(self):
+        class NoLhbPanda(FakePanda):
+            def get_lhb_list(self, **params):
+                raise RuntimeError("password=hunter2")
+
+        trace = []
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(NoLhbPanda(), trace.append, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        top = pack["leaderboards"]["hotIndustries"][0]
+        self.assertAlmostEqual(top["weightCoverage"], .95)
+        self.assertAlmostEqual(top["confidence"], .95)
+        lhb_missing = next(item for item in pack["missingData"]
+                           if item["method"] == "get_lhb_list")
+        self.assertEqual(lhb_missing["weightRemoved"], .05)
+        self.assertNotIn("hunter2", json.dumps(trace))
+
+    def test_us_data_date_is_previous_completed_us_session(self):
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(FakePanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(pack["markets"]["us"]["dataDate"], "2026-07-22")
+        self.assertEqual(pack["markets"]["us"]["sessionRule"], "previous-completed-session")
+
+    def test_fixed_query_plan_batches_broad_daily_requests(self):
+        class ManyStocksPanda(FakePanda):
+            symbols = [f"{value:06d}.SZ" for value in range(1, 402)]
+
+            def __init__(self):
+                self.daily_batch_sizes = []
+
+            def get_stock_daily(self, start_date, end_date, symbol=None, fields=None,
+                                indicator=None, st=True):
+                self.daily_batch_sizes.append(len(symbol or []))
+                return FakeFrame([
+                    {"symbol": stock_symbol, "date": end_date, "name": stock_symbol,
+                     "open": 10, "close": 10.1, "high": 10.2, "low": 9.9,
+                     "volume": 3_000_000, "amount": 30_000_000, "pre_close": 10,
+                     "limit_up": 11, "limit_down": 9, "trade_status": 0}
+                    for stock_symbol in (symbol or [])
+                ])
+
+        provider = ManyStocksPanda()
+        worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(provider, lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(provider.daily_batch_sizes, [200, 200, 1])
+
+    def test_collector_traces_exception_paths_without_secrets(self):
+        class FailingPanda:
+            def get_lhb_list(self, **params):
+                raise RuntimeError("password=hunter2")
+
+        trace = []
+        collector = worker.PandaCollector(FailingPanda(), trace.append, None, 0)
+        with self.assertRaises(RuntimeError):
+            collector.call("get_lhb_list", start_date="20260701", end_date="20260723")
+        self.assertEqual(trace[0]["status"], "error")
+        self.assertIsNone(trace[0]["rowCount"])
+        self.assertIn("durationMs", trace[0])
+        self.assertNotIn("hunter2", json.dumps(trace))
+
+    def test_parquet_cache_has_metadata_and_prevents_repeat_provider_call(self):
+        class CountingPanda(FakePanda):
+            def __init__(self):
+                self.calls = 0
+
+            def get_trade_list(self, date, exchange="SH"):
+                self.calls += 1
+                return super().get_trade_list(date, exchange)
+
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.cwd()) as cache_dir:
+            provider = CountingPanda()
+            first_trace = []
+            first = worker.PandaCollector(provider, first_trace.append, cache_dir, 30)
+            first.report_date = "20260723"
+            expected = first.call("get_trade_list", date="20260723", exchange="SH")
+
+            metadata_files = list(pathlib.Path(cache_dir).glob("*.json"))
+            parquet_files = list(pathlib.Path(cache_dir).glob("*.parquet"))
+            self.assertEqual(len(metadata_files), 1)
+            self.assertEqual(len(parquet_files), 1)
+            metadata = json.loads(metadata_files[0].read_text(encoding="utf-8"))
+            self.assertEqual(metadata["rowCount"], len(expected))
+            self.assertEqual(metadata["dataAsOf"], "2026-07-23")
+            self.assertEqual(metadata["fields"], ["date", "symbol"])
+            self.assertEqual(len(metadata["contentHash"]), 64)
+
+            second_trace = []
+            second = worker.PandaCollector(provider, second_trace.append, cache_dir, 30)
+            second.report_date = "20260723"
+            self.assertEqual(
+                second.call("get_trade_list", date="20260723", exchange="SH"),
+                expected,
+            )
+            self.assertEqual(provider.calls, 1)
+            self.assertEqual(second_trace[0]["cacheStatus"], "hit")
+
+    def test_worker_protocol_stdout_only_json_and_stderr_only_trace_lines(self):
+        class ProtocolPanda(FakePanda):
+            def __init__(self):
+                self.auth = None
+
+            def init_token(self, username, password, base_url):
+                self.auth = (username, password, base_url)
+
+        fixture = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+        provider = ProtocolPanda()
+        stdin = io.StringIO(json.dumps(fixture["request"], ensure_ascii=False))
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        environment = {
+            "PANDA_DATA_USERNAME": "8613800000000",
+            "PANDA_DATA_PASSWORD": "protocol-secret",
+            "PANDA_DATA_BASE_URL": "http://panda.invalid",
+        }
+        with mock.patch.dict(sys.modules, {"panda_data": provider}), \
+                mock.patch.dict(os.environ, environment, clear=False), \
+                mock.patch.object(sys, "stdin", stdin), \
+                mock.patch.object(sys, "stdout", stdout), \
+                mock.patch.object(sys, "stderr", stderr):
+            worker.main()
+
+        output_lines = stdout.getvalue().splitlines()
+        self.assertEqual(len(output_lines), 1)
+        pack = json.loads(output_lines[0])
+        self.assertEqual(pack["schemaVersion"], fixture["expected"]["schemaVersion"])
+        self.assertEqual(pack["reportDate"], fixture["expected"]["reportDate"])
+        trace_lines = stderr.getvalue().splitlines()
+        self.assertTrue(trace_lines)
+        self.assertTrue(all(line.startswith("TRACE ") for line in trace_lines))
+        self.assertTrue(all(json.loads(line[6:]) for line in trace_lines))
+        self.assertNotIn("protocol-secret", stdout.getvalue() + stderr.getvalue())
+        self.assertEqual(provider.auth, (
+            "8613800000000", "protocol-secret", "http://panda.invalid"
+        ))
+
     def test_effective_weights_renormalize_without_treating_missing_as_zero(self):
         values = {"downside_volume": 90.0, "lhb_net_sell": None, "northbound_reduction": 70.0,
                   "margin_contraction": 50.0, "discount_event": None}
