@@ -421,6 +421,8 @@ def compute_hot_topics(groups, lhb_available=True):
             excluded.append({"id": group["id"], "reason": "MIN_CONSTITUENTS"})
         elif not _is_finite(coverage) or float(coverage) < .80:
             excluded.append({"id": group["id"], "reason": "MIN_COVERAGE"})
+        elif not all(_is_finite(group.get(key)) for key in HOT_REQUIRED_COMPONENTS):
+            excluded.append({"id": group["id"], "reason": "INSUFFICIENT_REQUIRED_COMPONENTS"})
         else:
             eligible.append(group)
     ranked_rows = _percentile_components(eligible, HOT_WEIGHTS)
@@ -429,12 +431,7 @@ def compute_hot_topics(groups, lhb_available=True):
         values = {key: row.get(key) for key in HOT_WEIGHTS}
         if not lhb_available:
             values["lhb_activity"] = None
-        if all(_is_finite(values.get(key)) for key in HOT_REQUIRED_COMPONENTS):
-            score, coverage, used = effective_weights(values, HOT_WEIGHTS, 5)
-        else:
-            used = [key for key in HOT_WEIGHTS if _is_finite(values.get(key))]
-            coverage = sum(HOT_WEIGHTS[key] for key in used)
-            score = None
+        score, coverage, used = effective_weights(values, HOT_WEIGHTS, 5)
         ranked.append({**row, "score": score, "weightCoverage": coverage, "componentsUsed": used})
     ranked.sort(key=lambda item: (-(item["score"] if item["score"] is not None else -1), _identity(item)))
     return {"ranked": ranked, "excluded": excluded}

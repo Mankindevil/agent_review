@@ -1337,7 +1337,12 @@ class MarketWorkerTests(unittest.TestCase):
              "acceleration": .03, "lhb_activity": 4},
         ])
 
-        self.assertIsNone(result["ranked"][0]["score"])
+        self.assertEqual(result["ranked"], [])
+        self.assertEqual(worker._public_ranked(result["ranked"], 5), [])
+        self.assertEqual(
+            result["excluded"],
+            [{"id": "missing-ret1", "reason": "INSUFFICIENT_REQUIRED_COMPONENTS"}],
+        )
 
     def test_sell_pressure_requires_three_independent_components(self):
         result = worker.compute_sell_pressure([
