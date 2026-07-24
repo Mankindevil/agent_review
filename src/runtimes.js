@@ -1,15 +1,26 @@
 import { stableNumber, safeJson, withTimeout } from './utils.js';
 import { runtimeBuildSkillPrompt, runtimeRunSkillPrompt } from './prompts.js';
-import { applyArkClaudeEnv, applyDeepSeekClaudeEnv, shouldUseArkClaude } from './claude-env.js';
+import {
+  applyArkClaudeEnv,
+  applyDeepSeekClaudeEnv,
+  hasClaudeCredential,
+  resolveClaudeBackend,
+  shouldUseArkClaude
+} from './claude-env.js';
 import { startArkAnthropicProxy } from './ark-anthropic-proxy.js';
-import { execFile } from 'node:child_process';
+import { prepareRuntimeWorkspace } from './runtime-sandbox.js';
+import { resolveRuntimeConfig } from './runtime-config.js';
+import { localCliEnv } from './runtime-environment.js';
+import { runLocalCliProcess } from './runtime-process.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 
-const execFileAsync = promisify(execFile);
-const CLAUDE_RUNTIME_SYSTEM_PROMPT = '你是 Agent 盲测平台中的隔离执行器。严格完成用户给出的单一任务并直接返回最终内容。当前会话没有任何工具，不得浏览文件、探索代码库、启动子代理，也不得输出或模拟 tool_call、Bash、Explore 等工具调用。';
+const CLAUDE_RUNTIME_SYSTEM_PROMPT = '你是 Agent 盲测平台中的隔离执行器。严格完成用户给出的单一任务，只输出最终内容。当前会话没有任何工具，不得浏览文件、探索代码库、启动子代理，也不得输出或模拟 tool_call、Bash、Explore 等工具调用。';
+const RUNTIME_READINESS_PROMPT =
+  'Output exactly the five ASCII letters READY with no punctuation or other text.';
+const DEFAULT_LOCAL_RUNTIME_TIMEOUT_MS = 180_000;
+const MAX_LOCAL_RUNTIME_TIMEOUT_MS = 1_200_000;
 
 export const RUNTIMES = [
   { id: 'claude-code', name: 'Claude Code', model: 'Claude Sonnet', badge: 'CC' },
@@ -60,7 +71,7 @@ export function createSkillBundle(build, description) {
 
 export async function buildSkill(runtime, description, mode, { signal, seed, temperature = 0 } = {}) {
   const sourceDescription = normalizeSourceDescription(description);
-  const config = runtimeConfig(runtime.id);
+  const config = resolveRuntimeConfig(runtime.id);
   if (mode === 'live' && config?.kind === 'local-cli') {
     const { skill, result } = await generateValidatedSkill(
       (prompt) => callLocalCli(runtime.id, prompt, signal, { seed, temperature }),
@@ -75,7 +86,7 @@ export async function buildSkill(runtime, description, mode, { signal, seed, tem
     );
     return { runtime: runtime.name, runtimeId: runtime.id, model: config.model, mode: 'live', adapterKind: 'model-api', baselineInput: 'description-only', skill, seed };
   }
-  if (mode === 'live' && config?.url) {
+  if (mode === 'live' && config?.kind === 'remote-http') {
     const response = await fetch(config.url, {
       method: 'POST',
       headers: runtimeAdapterHeaders(config),
@@ -137,14 +148,14 @@ export async function generateValidatedSkill(generate, prompt, attempts = 2) {
 }
 
 export async function runSkill(build, testCase, mode, { signal, seed, temperature = 0 } = {}) {
-  const config = runtimeConfig(build.runtimeId);
+  const config = resolveRuntimeConfig(build.runtimeId);
   if (mode === 'live' && config?.kind === 'local-cli') {
     return (await callLocalCli(build.runtimeId, runtimeRunSkillPrompt(build.skill, testCase.prompt), signal, { seed, temperature })).text;
   }
   if (mode === 'live' && config?.kind === 'model-api') {
     return callRuntimeModel(config, runtimeRunSkillPrompt(build.skill, testCase.prompt), signal, { seed, temperature });
   }
-  if (mode === 'live' && config?.url) {
+  if (mode === 'live' && config?.kind === 'remote-http') {
     const response = await fetch(config.url, {
       method: 'POST',
       headers: runtimeAdapterHeaders(config),
@@ -160,50 +171,106 @@ export async function runSkill(build, testCase, mode, { signal, seed, temperatur
   return `${lead}\n\n1. 任务理解：${testCase.prompt}\n2. 执行依据：使用 ${build.skill.tools.join('、') || '文本推理'}，按技能边界逐项处理。\n3. 结果：已形成结构化交付，并标出需要人工确认的假设。\n4. 风险：真实文件或外部系统未提供时，不声称已经修改。`;
 }
 
-function runtimeConfig(runtimeId) {
-  try {
-    const remote = JSON.parse(process.env.RUNTIME_ADAPTERS_JSON || '{}')[runtimeId];
-    if (remote) return remote;
-  } catch { return null; }
-  if (runtimeId === 'claude-code' && process.env.ENABLE_LOCAL_CLAUDE_CODE === 'true') return { kind: 'local-cli', command: 'claude' };
-  if (runtimeId === 'cursor' && process.env.ENABLE_LOCAL_CURSOR_AGENT === 'true') return { kind: 'local-cli', command: 'cursor-agent' };
-  if (runtimeId === 'doubao' && process.env.ARK_BASE_URL && process.env.ARK_API_KEY) {
-    return { kind: 'model-api', baseUrl: process.env.ARK_BASE_URL, apiKeyEnv: 'ARK_API_KEY', model: process.env.REVIEW_MODEL_DOUBAO || 'ep-20260720110725-5rbml', thinking: { type: 'disabled' } };
+function runtimeAdapterHeaders(config, env = process.env) {
+  if (!Object.hasOwn(config, 'apiKeyEnv')) return { 'content-type': 'application/json' };
+  const apiKey = Object.hasOwn(env, config.apiKeyEnv) ? env[config.apiKeyEnv] : null;
+  if (typeof apiKey !== 'string' || !apiKey.trim()) {
+    throw new Error(`Runtime adapter 缺少环境变量 ${config.apiKeyEnv}`);
   }
-  return null;
-}
-
-function runtimeAdapterHeaders(config) {
-  if (!config.apiKeyEnv) return { 'content-type': 'application/json' };
-  const apiKey = process.env[config.apiKeyEnv];
-  if (!apiKey) throw new Error(`Runtime adapter 缺少环境变量 ${config.apiKeyEnv}`);
   return { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` };
 }
 
 function localRuntimeModel(runtime) {
   if (runtime.id !== 'claude-code') return runtime.model;
-  if (shouldUseArkClaude(process.env)) return process.env.CLAUDE_ARK_MODEL || process.env.REVIEW_MODEL_DEEPSEEK;
-  if (process.env.DEEPSEEK_API_KEY) return process.env.DEEPSEEK_CLAUDE_MODEL || 'deepseek-v4-pro[1m]';
+  const backend = resolveClaudeBackend(process.env);
+  if (backend === 'ark' && shouldUseArkClaude(process.env)) return process.env.CLAUDE_ARK_MODEL;
+  if (backend === 'deepseek' && hasClaudeCredential(process.env)) {
+    return process.env.DEEPSEEK_CLAUDE_MODEL || 'deepseek-v4-pro[1m]';
+  }
   return runtime.model;
 }
 
-async function callLocalCli(runtimeId, prompt, signal, sampling = {}) {
-  const workspace = await mkdtemp(path.join(tmpdir(), `agent-roast-${runtimeId}-`));
+export function localCliArgs(runtimeId, prompt, { budget = '0.25' } = {}) {
+  if (runtimeId === 'claude-code') {
+    return [
+      '-p', prompt,
+      '--system-prompt', CLAUDE_RUNTIME_SYSTEM_PROMPT,
+      '--output-format', 'json',
+      '--tools', '',
+      '--permission-mode', 'plan',
+      '--safe-mode',
+      '--no-session-persistence',
+      '--max-turns', '1',
+      '--max-budget-usd', budget
+    ];
+  }
+  if (runtimeId === 'cursor') {
+    return ['-p', prompt, '--output-format', 'json', '--trust'];
+  }
+  throw new Error(`Unsupported local Runtime: ${runtimeId}`);
+}
+
+export { localCliEnv } from './runtime-environment.js';
+
+export function localRuntimeTimeout(value) {
+  const timeout = Number(value);
+  if (!Number.isFinite(timeout) || !Number.isInteger(timeout) || timeout <= 0) {
+    return DEFAULT_LOCAL_RUNTIME_TIMEOUT_MS;
+  }
+  return Math.min(timeout, MAX_LOCAL_RUNTIME_TIMEOUT_MS);
+}
+
+export async function withRuntimeWorkspace(runtimeId, run, {
+  createWorkspace = mkdtemp,
+  prepareWorkspace = prepareRuntimeWorkspace,
+  removeWorkspace = rm,
+  parentEnv = process.env
+} = {}) {
+  const workspace = await createWorkspace(path.join(tmpdir(), `agent-roast-${runtimeId}-`));
+  try {
+    await prepareWorkspace(runtimeId, workspace, {
+      cursorAuthConfigHome: parentEnv.CURSOR_AUTH_CONFIG_HOME
+    });
+    return await run(workspace);
+  } finally {
+    await removeWorkspace(workspace, { recursive: true, force: true });
+  }
+}
+
+async function callLocalCli(runtimeId, prompt, signal, sampling = {}, parentEnv = process.env) {
   let arkProxy;
   const startedAt = Date.now();
-  const timeout = Number(process.env.LOCAL_RUNTIME_TIMEOUT_MS || 180_000);
-  const budget = process.env.CLAUDE_MAX_BUDGET_USD || '0.25';
+  const timeout = localRuntimeTimeout(parentEnv.LOCAL_RUNTIME_TIMEOUT_MS);
+  const budget = parentEnv.CLAUDE_MAX_BUDGET_USD || '0.25';
   const command = runtimeId === 'claude-code' ? 'claude' : 'cursor-agent';
-  const args = runtimeId === 'claude-code'
-    ? ['-p', prompt, '--system-prompt', CLAUDE_RUNTIME_SYSTEM_PROMPT, '--output-format', 'json', '--tools', '', '--permission-mode', 'plan', '--safe-mode', '--no-session-persistence', '--max-turns', '1', '--max-budget-usd', budget]
-    : ['-p', prompt, '--output-format', 'json', '--mode', 'ask', '--sandbox', 'enabled', '--trust', '--workspace', workspace];
-  try {
-    const commandEnv = { ...process.env, NO_COLOR: '1' };
-    if (runtimeId === 'claude-code' && shouldUseArkClaude(commandEnv)) {
-      arkProxy = await startArkAnthropicProxy({ baseUrl: commandEnv.ARK_BASE_URL, apiKey: commandEnv.ARK_API_KEY, model: commandEnv.CLAUDE_ARK_MODEL || commandEnv.REVIEW_MODEL_DEEPSEEK, signal, ...sampling });
-      applyArkClaudeEnv(commandEnv, arkProxy.baseUrl);
-    } else if (runtimeId === 'claude-code') applyDeepSeekClaudeEnv(commandEnv);
-    const { stdout, stderr } = await execFileAsync(command, args, { cwd: workspace, timeout, maxBuffer: 5_000_000, env: commandEnv, signal });
+  const args = localCliArgs(runtimeId, prompt, { budget });
+  return withRuntimeWorkspace(runtimeId, async (workspace) => {
+    try {
+    const claudeBackend = runtimeId === 'claude-code'
+      ? resolveClaudeBackend(parentEnv)
+      : null;
+    if (runtimeId === 'claude-code' && (!claudeBackend || !hasClaudeCredential(parentEnv))) {
+      throw new Error('AUTH_REQUIRED: selected Claude backend is unsupported or incomplete');
+    }
+    const commandEnv = localCliEnv(runtimeId, workspace, parentEnv);
+    if (runtimeId === 'claude-code' && claudeBackend === 'ark') {
+      const model = parentEnv.CLAUDE_ARK_MODEL;
+      arkProxy = await startArkAnthropicProxy({ baseUrl: parentEnv.ARK_BASE_URL, apiKey: parentEnv.ARK_API_KEY, model, signal, ...sampling });
+      applyArkClaudeEnv(commandEnv, arkProxy.baseUrl, model);
+    } else if (
+      runtimeId === 'claude-code'
+      && claudeBackend === 'deepseek'
+      && !applyDeepSeekClaudeEnv(commandEnv, parentEnv)
+    ) {
+      throw new Error('AUTH_REQUIRED: selected DeepSeek backend is incomplete');
+    }
+    const { stdout, stderr } = await runLocalCliProcess(command, args, {
+      cwd: workspace,
+      timeoutMs: timeout,
+      maxBuffer: 5_000_000,
+      env: commandEnv,
+      signal
+    });
     const text = extractCliText(stdout);
     if (!text.trim()) throw new Error(`${command} 没有返回可见结果`);
     return { text, trace: { command, durationMs: Date.now() - startedAt, stdoutBytes: Buffer.byteLength(stdout), stderr: String(stderr || '').trim().slice(0, 500), seed: sampling.seed } };
@@ -213,27 +280,95 @@ async function callLocalCli(runtimeId, prompt, signal, sampling = {}) {
     if (/not logged|login|auth|unauthorized|api key/i.test(detail)) throw new Error(`AUTH_REQUIRED: ${command} 尚未完成账号授权`);
     if (error.killed || error.signal) throw new Error(`${command} 超过 ${timeout}ms 执行时限`);
     throw new Error(`${command} 执行失败：${String(detail).slice(0, 800)}`);
-  } finally {
-    await arkProxy?.close();
-    await rm(workspace, { recursive: true, force: true });
-  }
+    } finally {
+      await arkProxy?.close();
+    }
+  }, { parentEnv });
 }
 
-async function callRuntimeModel(config, prompt, signal, sampling = {}) {
+async function callRuntimeModel(
+  config,
+  prompt,
+  signal,
+  sampling = {},
+  env = process.env,
+  maxTokens = 2400,
+  fetchImpl = globalThis.fetch
+) {
   const baseUrl = config.baseUrl.replace(/\/$/, '');
   const endpoint = baseUrl.endsWith('/chat/completions') ? baseUrl : baseUrl + '/chat/completions';
-  const response = await fetch(endpoint, {
+  const timeout = localRuntimeTimeout(env.LOCAL_RUNTIME_TIMEOUT_MS);
+  const response = await fetchImpl(endpoint, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env[config.apiKeyEnv]}` },
-    body: JSON.stringify({ model: config.model, temperature: sampling.temperature ?? 0, ...(Number.isInteger(sampling.seed) ? { seed: sampling.seed } : {}), max_tokens: 2400, ...(config.thinking ? { thinking: config.thinking } : {}), messages: [{ role: 'user', content: prompt }] }),
-    signal: withTimeout(signal, Number(process.env.LOCAL_RUNTIME_TIMEOUT_MS || 180_000))
+    headers: runtimeAdapterHeaders(config, env),
+    body: JSON.stringify({ model: config.model, temperature: sampling.temperature ?? 0, ...(Number.isInteger(sampling.seed) ? { seed: sampling.seed } : {}), max_tokens: maxTokens, ...(config.thinking ? { thinking: config.thinking } : {}), messages: [{ role: 'user', content: prompt }] }),
+    signal: withTimeout(signal, timeout)
   });
-  if (!response.ok) throw new Error(`Doubao runtime 返回 HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`Model API runtime 返回 HTTP ${response.status}`);
   const payload = await response.json();
   const content = payload.choices?.[0]?.message?.content;
   const text = Array.isArray(content) ? content.map((part) => typeof part === 'string' ? part : part?.text || '').filter(Boolean).join('\n') : content;
-  if (!text) throw new Error('Doubao runtime 没有返回可见结果');
+  if (!text) throw new Error('Model API runtime 没有返回可见结果');
   return text;
+}
+
+export async function probeRuntimeReadiness(runtimeId, config, {
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  localCall = callLocalCli,
+  signal
+} = {}) {
+  const probeTimeout = Math.min(
+    localRuntimeTimeout(env.RUNTIME_PROBE_TIMEOUT_MS || '30000'),
+    60_000
+  );
+  const probeSignal = withTimeout(signal, probeTimeout);
+  try {
+    if (config.kind === 'local-cli') {
+      const probeEnv = { ...env, LOCAL_RUNTIME_TIMEOUT_MS: String(probeTimeout) };
+      const result = await localCall(runtimeId, RUNTIME_READINESS_PROMPT, probeSignal, {}, probeEnv);
+      return isReadinessSentinel(result.text);
+    }
+    if (config.kind === 'model-api') {
+      return isReadinessSentinel(
+        await callRuntimeModel(
+          config,
+          RUNTIME_READINESS_PROMPT,
+          probeSignal,
+          {},
+          env,
+          8,
+          fetchImpl
+        )
+      );
+    }
+    if (config.kind === 'remote-http') {
+      const response = await fetchImpl(config.url, {
+        method: 'POST',
+        headers: runtimeAdapterHeaders(config, env),
+        body: JSON.stringify({
+          action: 'build_skill',
+          description: 'Runtime readiness probe',
+          inputPolicy: 'description-only',
+          probe: true,
+          seed: 0,
+          temperature: 0
+        }),
+        signal: probeSignal
+      });
+      if (!response.ok) return false;
+      const payload = await response.json();
+      validateGeneratedSkill(payload.skill);
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function isReadinessSentinel(value) {
+  return typeof value === 'string' && value.trim().toUpperCase() === 'READY';
 }
 
 function extractCliText(stdout) {

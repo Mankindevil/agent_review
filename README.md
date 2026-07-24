@@ -113,7 +113,23 @@ Runtime Probe 与“Description 直出记录”会显示实际后端：Ark 模�
 
 Key 只应写入本机 `.env` 或密钥管理系统，不要写入 `.env.example`。如需恢复 DeepSeek 官方 Anthropic-compatible API，可设置 `CLAUDE_BACKEND=deepseek` 并填写 `DEEPSEEK_API_KEY`。
 
-本地 Runtime 使用只读模式：Claude Code 采用 `--tools "" --permission-mode plan --safe-mode`，Cursor Agent 采用 `--mode ask --sandbox enabled`。每次调用都在独立临时目录运行并在结束后删除。Claude 单次调用默认设置 `$0.25` 预算上限，可通过 `CLAUDE_MAX_BUDGET_USD` 调整。
+本地 Runtime 使用受限非交互模式：Claude Code 采用 `--tools "" --permission-mode plan --safe-mode`；Cursor Agent 只使用官方支持的 `-p <prompt> --output-format json --trust`，其中 `--trust` 仅确认平台刚创建的一次性空工作区，并由该工作区内的 `.cursor/cli.json` 禁止 Shell、WebFetch、WebSearch、全部 MCP、全部相对文件读写及 `/proc`、`/run`、`/tmp`、`/var` 等绝对路径读取。两个 CLI 都在独立进程组与一次性 HOME/cache/data/state/TMP 中运行，超时后依次向整个进程组发送 `SIGTERM` 和 `SIGKILL`。Claude 单次调用默认设置 `$0.25` 预算上限，可通过 `CLAUDE_MAX_BUDGET_USD` 调整。Cursor 仍需访问其模型服务，因此生产网络层还应把该服务账户的出口限制为业务所需目标；CLI 权限文件不是网络命名空间或防火墙的替代品。
+
+### 生产 Runtime 工具、凭据与模型边界
+
+生产主机将 Claude 固定版本放在 `/opt/agent-review/tools/claude/releases/2.1.218/`，将 Cursor Agent 固定版本放在 `/opt/agent-review/tools/cursor-agent/releases/2026.07.23-e383d2b/`，均由 `root` 安装和维护；`/opt/agent-review/tools/bin` 仅放受控启动器并加入服务的 `PATH`。服务运行账户不得写入工具发布目录，也不要把 `PATH` 指向用户可写的 Node、npm 或临时安装目录。升级时先安装新的固定 release，再原子切换启动器；不要让应用自行下载或替换 CLI。
+
+模板默认保持 `ENABLE_LOCAL_CLAUDE_CODE=false` 和 `ENABLE_LOCAL_CURSOR_AGENT=false`。在当前受控单机生产部署中，只有完成 root 管理的固定版本安装、systemd 文件系统隔离、持久认证目录权限和最小调用验收后，才设置 `ENABLE_LOCAL_CLAUDE_CODE=true` 与 `ENABLE_LOCAL_CURSOR_AGENT=true`；更强隔离需求仍可通过 `RUNTIME_ADAPTERS_JSON` 使用独立 Runtime 服务。
+
+#### 评审模型与 Runtime 模型独立配置
+
+评审模型、Runtime 模型、参赛 Agent 资格是三件事。评审模型由 `OPENAI_*`、`ARK_*`、`REVIEW_MODEL_*` 或 `MODEL_REVIEWERS_JSON` 配置；Runtime 模型由本地 CLI、方舟豆包 adapter 或 `RUNTIME_ADAPTERS_JSON` 配置；它们可以分别启用、分别使用各自的凭据。只有参赛 Agent Card 与最终报名表的声明要求 DeepSeek V4 Pro；这是参赛资格声明，不会改写平台的评审或 Runtime 配置。评审模型以及 Claude、Cursor、Doubao Runtime 不受该底模限制。
+
+- Claude Code 继续使用既有的 Ark 协议桥：`CLAUDE_BACKEND=ark` 时只通过 `ARK_BASE_URL`、`ARK_API_KEY` 和 `CLAUDE_ARK_MODEL` 访问方舟 DeepSeek endpoint，方舟 Key 不传入 Claude 子进程。后端选择严格失败关闭：`ark` 或 `deepseek` 的专属配置不完整时，不会回退到另一供应商或继承的 `ANTHROPIC_*` 凭据。
+- Cursor Agent 只使用持久账户登录，不接收 API Key。把 `CURSOR_AUTH_CONFIG_HOME` 设为仅服务账户可访问的绝对目录（生产为 `/var/lib/agent-review/cursor-auth`）；平台为 CLI 设置 `AGENT_CLI_CREDENTIAL_STORE=file`，仅将 `XDG_CONFIG_HOME` 指向该目录，其余 HOME/XDG/TMP 仍是一次性目录。登录凭据位于 `$CURSOR_AUTH_CONFIG_HOME/cursor/auth.json`，模型工具权限同时显式禁止读取该路径。
+- Doubao Runtime 维持原有方舟 API adapter：同时提供 `ARK_BASE_URL`、`ARK_API_KEY` 与 `REVIEW_MODEL_DOUBAO` 即可就绪，或由隔离的 `RUNTIME_ADAPTERS_JSON` adapter 覆盖。
+
+`GET /api/runtimes` 只报告运行时可用性，不判断参赛资格。每个条目的 `installed` 表示 CLI 是否可执行且能读取版本，`authenticated` 表示相应凭据或隔离环境中的登录状态有效，`enabled` 表示本地开关或远程 adapter 已启用；`runtimeReady` 还要求真实的最小非交互调用成功。四个状态独立计算，因此“已安装”“已登录”或“已配置”都不等于平台会真实调用它。
 
 随后在页面选择样本，把评测模式切换为“真实对测”。三个 Agent 分别监听：
 
@@ -230,7 +246,7 @@ Content-Type: application/json
 
 提交页的 `SEED` 默认是 `20260720`。同一个 seed 会为每位评审、每个 Runtime 构建和每个“用例 × 选手”派生不同但稳定的整数 seed；单步重试继续使用原来的子 seed。OpenAI-compatible、方舟豆包以及 Claude Code 的方舟协议桥会实际发送 `seed`，同时默认把 `temperature` 设为 `0`。原生 Anthropic Messages、Cursor Agent CLI 与用户提交的外部 A2A Agent 不保证支持 seed，因此这是“尽力确定性”，不能承诺底层服务升级、并发调度或模型权重变化后逐字节一致。
 
-“本机已安装”不等于“平台已真实调用”。`GET /api/runtimes` 会分别检查 Claude/Cursor 的 CLI、鉴权与启用开关；豆包既可以来自 `doubao` CLI，也可以在 `ARK_BASE_URL`、`ARK_API_KEY` 和豆包 endpoint 同时存在时直接使用方舟 API。远程隔离 adapter 仍可通过 `RUNTIME_ADAPTERS_JSON` 覆盖。主服务不会把 Cursor Desktop 的 `cursor` 命令误认成 `cursor-agent`。
+“本机已安装”不等于“平台已真实调用”。`GET /api/runtimes` 会分别检查 Claude/Cursor 的可执行版本、隔离鉴权、启用开关与真实最小调用；昂贵的最小调用会短暂缓存并合并并发探针。豆包真实执行来自已配置的方舟 API、model-api 或远程隔离 adapter；本机 `doubao` CLI 只作安装信息展示。主服务不会把 Cursor Desktop 的 `cursor` 命令误认成 `cursor-agent`。
 
 ## A2A 提交方式
 
@@ -348,19 +364,22 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 
 ## Runtime adapter 契约
 
-生产环境中的 Cursor / Claude Code 等执行器应运行在独立隔离服务中，Web 服务通过 `RUNTIME_ADAPTERS_JSON` 指向它们。开发机可显式启用受限的本地 CLI；豆包也可直接使用已配置的火山方舟 endpoint：
+高风险或多租户生产环境应把 Cursor / Claude Code 执行器放入独立隔离服务，并通过 `RUNTIME_ADAPTERS_JSON` 接入。当前受控单机部署也可在满足前述固定版本、systemd、凭据目录和最小调用验收后显式启用本地 CLI；豆包可直接使用已配置的火山方舟 endpoint：
 
 ```json
 {
   "claude-code": {
+    "kind": "remote-http",
     "url": "https://runtime.example.com/claude-code",
     "apiKeyEnv": "RUNTIME_API_KEY"
   },
   "cursor": {
+    "kind": "remote-http",
     "url": "https://runtime.example.com/cursor",
     "apiKeyEnv": "RUNTIME_API_KEY"
   },
   "doubao": {
+    "kind": "remote-http",
     "url": "https://runtime.example.com/doubao",
     "apiKeyEnv": "RUNTIME_API_KEY"
   }
@@ -433,13 +452,16 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 | `RUNTIME_ADAPTERS_JSON` | 内置三种 demo runtime | 隔离 runtime adapter 配置 |
 | `ENABLE_LOCAL_CLAUDE_CODE` | `false` | 允许真实调用已登录的本机 Claude Code |
 | `ENABLE_LOCAL_CURSOR_AGENT` | `false` | 允许真实调用已登录的本机 Cursor Agent CLI |
+| `CURSOR_AUTH_CONFIG_HOME` | `/var/lib/agent-review/cursor-auth` | Cursor Agent 专用持久登录目录；只把 `XDG_CONFIG_HOME` 指向这里，内部文件凭据不得暴露给模型工具 |
 | `CLAUDE_MAX_BUDGET_USD` | `0.25` | Claude Code 单次无头调用预算上限 |
 | `LOCAL_RUNTIME_TIMEOUT_MS` | `180000` | 本地 CLI 单次执行时限 |
-| `CLAUDE_BACKEND` | `ark` | Claude Code 的 DeepSeek 后端：`ark` 或 `deepseek` |
+| `RUNTIME_PROBE_TIMEOUT_MS` | `30000` | Runtime 最小非交互就绪探针时限，上限 60 秒 |
+| `CLAUDE_BACKEND` | `ark` | Claude Code 的 DeepSeek 后端：仅支持 `ark` 或 `deepseek`；缺失、未知或对应凭据不完整时失败关闭 |
 | `CLAUDE_ARK_MODEL` | `ep-20260708162855-pcf9x` | Claude Code 使用的方舟 DeepSeek 接入点 |
 | `DEEPSEEK_API_KEY` | 空 | 仅供 `CLAUDE_BACKEND=deepseek` 直连回退使用 |
-| `DEEPSEEK_CLAUDE_MODEL` | `deepseek-v4-pro[1m]` | DeepSeek 官方直连回退模型 |
-| `ANTHROPIC_*` / `CLAUDE_CODE_*` | 见模板 | Anthropic-compatible endpoint 与 Claude Code 模型映射 |
+| `DEEPSEEK_CLAUDE_MODEL` | `deepseek-v4-pro[1m]` | `CLAUDE_BACKEND=deepseek` 时的官方直连模型 |
+| `ANTHROPIC_API_KEY` | 空 | 仅在 `MODEL_REVIEWERS_JSON` / `RUNTIME_ADAPTERS_JSON` 显式引用时使用；本地 Claude Runtime 不继承 |
+| `CLAUDE_CODE_EFFORT_LEVEL` | `max` | 本地 Claude Runtime 的推理强度；不参与后端或凭据选择 |
 | `ENV_FILE` | 项目根目录 `.env` | 从进程环境指定另一份 env 文件 |
 | `ENV_FALLBACK_FILE` | 空 | 共享基础 env 文件；只补充当前分支未定义的变量 |
 
@@ -455,6 +477,6 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 
 ## 当前边界
 
-这是工程化 MVP，不是已经具备科学效度的排行榜。单次输出分数不代表稳定能力；真实生产评测必须增加重复运行、匿名随机排序、独立 judge、规则校验、人工抽查、成本/耗时统计和置信区间。本地 Claude/Cursor adapter 仅用于受信任开发机，使用只读参数和随机临时目录；生产环境仍应改用隔离 runtime 服务。
+这是工程化 MVP，不是已经具备科学效度的排行榜。单次输出分数不代表稳定能力；真实生产评测必须增加重复运行、匿名随机排序、独立 judge、规则校验、人工抽查、成本/耗时统计和置信区间。本地 Claude/Cursor adapter 只允许在受控主机上启用：工具发布物由 root 固定、服务账户无写权限、Cursor 认证目录独立、文件工具全局拒绝且 CLI 运行在一次性目录与独立进程组中；更高风险场景应使用独立 Runtime 服务。
 
 协议实现参考 A2A 官方 1.0 规范：`https://a2a-protocol.org/latest/specification`。

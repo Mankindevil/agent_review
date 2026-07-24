@@ -115,11 +115,11 @@ A2A 1.0 JSON-RPC 使用 `SendMessage`，0.3 兼容调用使用 `message/send`。
 
 演示模式会生成确定性 skill 与输出。真实模式按优先级使用 `RUNTIME_ADAPTERS_JSON` 外部隔离服务、显式启用的本地 Claude/Cursor CLI，或火山方舟豆包 model API。所有实现只接收平台生成的 prompt，不执行用户提交的 shell 命令。
 
-开发机也支持显式启用本地 CLI adapter。Claude Code 被限制为无工具、plan、安全模式和单次预算；Cursor Agent 被限制为 ask/read-only 与内置 sandbox。两个 CLI 都在随机临时目录执行，不接触仓库文件。只有安装、登录和环境开关同时满足时，Runtime Probe 才显示 `READY`。生产环境仍应使用远程容器 adapter，本地 CLI 仅用于受信任开发机验收。
+本地 CLI adapter 必须显式启用。Claude Code 被限制为无工具、plan、安全模式和单次预算；Cursor Agent 使用官方 print JSON 参数，并仅以 `--trust` 确认平台创建的一次性空工作区，再由临时 `.cursor/cli.json` 拒绝 Shell、网络工具、MCP、相对文件与敏感绝对路径访问。两个 CLI 都使用一次性 HOME/cache/data/state/TMP 和独立 Linux 进程组；Cursor 仅把 `XDG_CONFIG_HOME` 指向专用的持久账户认证目录。Runtime Probe 会在隔离环境中验证可执行版本、开关、鉴权并执行最小非交互调用，四项满足才显示 `READY`。受控单机生产可在 root 固定工具版本和 systemd 隔离后启用本地 adapter；其他场景使用远程隔离服务。
 
-Claude Code 默认通过火山方舟 DeepSeek endpoint 运行。由于方舟在线推理是 OpenAI Chat Completions 协议，而 Claude Code 是 Anthropic Messages 协议，`src/ark-anthropic-proxy.js` 会为单次 CLI 调用启动仅监听 loopback 随机端口的短生命周期协议桥。桥接器负责消息块、非流式响应、合成 SSE 事件和 token-count 请求的转换；方舟 Key 仅由父进程持有，不传入 Claude 子进程。无头调用通过 `--system-prompt` 覆盖 Claude Code 默认代码代理提示，明确禁止 Bash、Explore、子代理等虚构工具调用。`CLAUDE_BACKEND=deepseek` 仍可回退到 DeepSeek 官方 Anthropic-compatible endpoint。
+Claude Code 默认通过火山方舟 DeepSeek endpoint 运行。由于方舟在线推理是 OpenAI Chat Completions 协议，而 Claude Code 是 Anthropic Messages 协议，`src/ark-anthropic-proxy.js` 会为单次 CLI 调用启动仅监听 loopback 随机端口的短生命周期协议桥。桥接器负责消息块、非流式响应、合成 SSE 事件和 token-count 请求的转换；方舟 Key 仅由父进程持有，不传入 Claude 子进程。无头调用通过 `--system-prompt` 覆盖 Claude Code 默认代码代理提示，明确禁止 Bash、Explore、子代理等虚构工具调用。`CLAUDE_BACKEND` 只接受 `ark` 或 `deepseek`；所选后端的专属配置不完整时失败关闭，不回退到另一供应商或继承的 `ANTHROPIC_*` 凭据。
 
-Doubao Runtime 不要求本机存在 `doubao` CLI。当 `ARK_BASE_URL`、`ARK_API_KEY` 与 `REVIEW_MODEL_DOUBAO` 同时存在时，它会通过方舟 Chat Completions API 先构建结构化 Skill，再使用完全相同的用户 prompt 执行该 Skill；Runtime Probe 此时直接显示 `READY`。
+Doubao Runtime 不要求本机存在 `doubao` CLI。当 `ARK_BASE_URL`、`ARK_API_KEY` 与 `REVIEW_MODEL_DOUBAO` 同时存在时，它会通过方舟 Chat Completions API 先构建结构化 Skill，再使用完全相同的用户 prompt 执行该 Skill；Runtime Probe 只有在最小 Chat Completions 调用成功后才显示 `READY`。
 
 #### Skill 目录快照
 
