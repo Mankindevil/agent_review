@@ -64,6 +64,44 @@ test('ships a closed JSON Schema for the normalized example contract', async () 
   assert.deepEqual(schema.$defs.criterion.properties.type.enum, [...CRITERION_TYPES]);
 });
 
+test('keeps schema base64 and URL-userinfo constraints aligned with runtime normalization', async () => {
+  const schema = JSON.parse(await readFile(
+    new URL('../schemas/agent-use-examples-v1.schema.json', import.meta.url),
+    'utf8'
+  ));
+  const rawSchema = schema.$defs.part.oneOf.find((entry) => entry.properties.type.const === 'raw')
+    .properties.raw;
+  const urlSchema = schema.$defs.part.oneOf.find((entry) => entry.properties.type.const === 'url')
+    .properties.url;
+  const base64Pattern = new RegExp(rawSchema.pattern, 'u');
+  const urlPattern = new RegExp(urlSchema.pattern, 'u');
+
+  assert.equal(rawSchema.minLength, 4);
+  assert.equal(base64Pattern.test('SGVsbG8='), true);
+  assert.equal(base64Pattern.test('not base64!'), false);
+  assert.equal(base64Pattern.test('abc'), false);
+
+  assert.equal(urlPattern.test('https://files.example/input.csv'), true);
+  assert.equal(urlPattern.test('https://user:pass@files.example/input.csv'), false);
+  assert.match(urlSchema.$comment, /validateSafeUrl/);
+  assert.match(urlSchema.$comment, /private|SSRF/i);
+
+  const validRaw = clone();
+  validRaw[0].turns[0].input.parts[0] = {
+    type: 'raw',
+    raw: 'SGVsbG8=',
+    mediaType: 'application/octet-stream'
+  };
+  assert.doesNotThrow(() => normalizeAgentExamples(validRaw));
+
+  const credentialUrl = clone();
+  credentialUrl[0].turns[0].input.parts[0] = {
+    type: 'url',
+    url: 'https://user:pass@files.example/input.csv'
+  };
+  assert.throws(() => normalizeAgentExamples(credentialUrl), /URL/i);
+});
+
 test('normalizes typed example parts and required criteria without retaining unknown fields', () => {
   const raw = clone();
   raw[0].skillId = 'hidden-skill';
@@ -90,6 +128,43 @@ test('exports the explicit submission limits and supported type sets', () => {
   });
   assert.deepEqual([...PART_TYPES], ['text', 'data', 'raw', 'url']);
   assert.deepEqual([...CRITERION_TYPES], ['model', 'contains', 'exact', 'json-schema', 'numeric']);
+});
+
+test('freezes every exported submission limit against caller mutation', () => {
+  assert.equal(Object.isFrozen(SUBMISSION_LIMITS), true);
+  for (const key of Object.keys(SUBMISSION_LIMITS)) {
+    assert.throws(() => {
+      SUBMISSION_LIMITS[key] += 1;
+    }, TypeError);
+  }
+});
+
+test('does not use caller-mutable exported type sets for normalization decisions', () => {
+  PART_TYPES.add('file');
+  PART_TYPES.delete('text');
+  CRITERION_TYPES.add('regex');
+  CRITERION_TYPES.delete('contains');
+  try {
+    assert.equal(normalizeAgentExamples(clone())[0].turns[0].input.parts[0].type, 'text');
+
+    const badPart = clone();
+    badPart[0].turns[0].input.parts[0] = {
+      type: 'file',
+      url: 'https://files.example/input.txt'
+    };
+    assert.throws(() => normalizeAgentExamples(badPart), /part type/i);
+
+    const badCriterion = clone();
+    badCriterion[0].turns[0].acceptanceCriteria[0].type = 'regex';
+    assert.throws(() => normalizeAgentExamples(badCriterion), /criterion type/i);
+  } finally {
+    PART_TYPES.clear();
+    for (const type of ['text', 'data', 'raw', 'url']) PART_TYPES.add(type);
+    CRITERION_TYPES.clear();
+    for (const type of ['model', 'contains', 'exact', 'json-schema', 'numeric']) {
+      CRITERION_TYPES.add(type);
+    }
+  }
 });
 
 test('normalizes every declared part and criterion contract', () => {
@@ -250,6 +325,35 @@ test('freezes canonical snapshots with hashes, selected interface, and version m
   assert.equal(Object.isFrozen(snapshot), true);
 });
 
+test('revalidates the actual Agent Card instead of trusting a mismatched or stale validation result', () => {
+  const trustedValidation = validateAgentCard(card);
+  const invalidCard = { ...card, skills: [] };
+  assert.throws(
+    () => freezeSubmission({
+      agentCard: invalidCard,
+      agentExamples: examples,
+      validation: trustedValidation,
+      config: { rubricVersion: 'a2a-black-box-v1' },
+      frozenAt: '2026-07-24T10:00:00.000Z'
+    }),
+    /valid Agent Card/i
+  );
+
+  const modifiedCard = structuredClone(card);
+  const staleValidation = validateAgentCard(modifiedCard);
+  modifiedCard.supportedInterfaces[0].url = 'https://user:secret@agent.example/a2a';
+  assert.throws(
+    () => freezeSubmission({
+      agentCard: modifiedCard,
+      agentExamples: examples,
+      validation: staleValidation,
+      config: { rubricVersion: 'a2a-black-box-v1' },
+      frozenAt: '2026-07-24T10:00:00.000Z'
+    }),
+    /valid Agent Card/i
+  );
+});
+
 test('canonical hashes ignore object insertion order while preserving array order', () => {
   const firstCard = {
     name: card.name,
@@ -292,4 +396,35 @@ test('canonical hashes ignore object insertion order while preserving array orde
     validation: validateAgentCard(card)
   });
   assert.notEqual(first.agentExamples.sha256, third.agentExamples.sha256);
+});
+
+test('preserves prototype-named JSON keys during canonical hashing and deep freezing', () => {
+  const prototypeNamedJson = JSON.parse(
+    '{"__proto__":{"polluted":"no"},"constructor":{"prototype":{"owned":false}},"prototype":{"safe":true}}'
+  );
+  const rawExamples = clone();
+  rawExamples[0].turns[0].input.parts[1].data = prototypeNamedJson;
+
+  const normalized = normalizeAgentExamples(rawExamples);
+  const normalizedData = normalized[0].turns[0].input.parts[1].data;
+  for (const key of ['__proto__', 'constructor', 'prototype']) {
+    assert.equal(Object.hasOwn(normalizedData, key), true);
+  }
+  assert.equal(normalizedData.__proto__.polluted, 'no');
+  assert.equal(Object.isFrozen(normalizedData.constructor.prototype), true);
+  assert.equal(Object.prototype.polluted, undefined);
+  assert.equal(Object.prototype.owned, undefined);
+
+  const cardWithExtension = { ...card, extensionPayload: prototypeNamedJson };
+  const snapshot = freezeSubmission({
+    agentCard: cardWithExtension,
+    agentExamples: rawExamples,
+    validation: validateAgentCard(cardWithExtension),
+    config: { rubricVersion: 'a2a-black-box-v1' },
+    frozenAt: '2026-07-24T10:00:00.000Z'
+  });
+  assert.match(snapshot.agentCard.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(Object.hasOwn(snapshot.agentCard.value.extensionPayload, '__proto__'), true);
+  assert.equal(Object.isFrozen(snapshot.agentCard.value.extensionPayload.__proto__), true);
+  assert.equal(Object.prototype.polluted, undefined);
 });

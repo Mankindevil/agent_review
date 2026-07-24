@@ -97,7 +97,11 @@ function validateV1Interfaces(value, errors) {
     }
     const url = validateDeclaredUrl(item.url, `${path}.url`, errors);
     const binding = validateRequiredString(item.protocolBinding, `${path}.protocolBinding`, errors);
-    const version = validateRequiredString(item.protocolVersion, `${path}.protocolVersion`, errors);
+    let version = validateRequiredString(item.protocolVersion, `${path}.protocolVersion`, errors);
+    if (version && !/^1\./u.test(version)) {
+      errors.push(`${path}.protocolVersion 必须是 1.x 版本`);
+      version = null;
+    }
     if (item.tenant !== undefined && !isNonEmptyString(item.tenant)) {
       errors.push(`${path}.tenant 必须是非空字符串`);
     }
@@ -116,7 +120,13 @@ function validateV1Interfaces(value, errors) {
 
 function validateV03Interface(card, errors) {
   const url = validateDeclaredUrl(card?.url, 'url', errors);
-  const version = validateRequiredString(card?.protocolVersion, 'protocolVersion', errors);
+  let version = card?.protocolVersion === undefined
+    ? '0.3'
+    : validateRequiredString(card.protocolVersion, 'protocolVersion', errors);
+  if (version && !/^0\.3(?:\.|$)/u.test(version)) {
+    errors.push('protocolVersion 必须是 0.3 兼容版本');
+    version = null;
+  }
   const transport = card?.preferredTransport === undefined
     ? 'JSONRPC'
     : validateRequiredString(card.preferredTransport, 'preferredTransport', errors);

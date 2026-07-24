@@ -1,18 +1,22 @@
 import { createHash } from 'node:crypto';
+import { validateAgentCard } from './a2a.js';
 import { validateSafeUrl } from './safe-http.js';
 
-export const SUBMISSION_LIMITS = {
+const INTERNAL_SUBMISSION_LIMITS = Object.freeze({
   examples: 20,
   turnsPerExample: 20,
   partsPerTurn: 50,
   criteriaPerTurn: 50,
   totalCanonicalBytes: 2 * 1024 * 1024
-};
-
-export const PART_TYPES = new Set(['text', 'data', 'raw', 'url']);
-export const CRITERION_TYPES = new Set([
+});
+const PART_TYPE_VALUES = Object.freeze(['text', 'data', 'raw', 'url']);
+const CRITERION_TYPE_VALUES = Object.freeze([
   'model', 'contains', 'exact', 'json-schema', 'numeric'
 ]);
+
+export const SUBMISSION_LIMITS = Object.freeze({ ...INTERNAL_SUBMISSION_LIMITS });
+export const PART_TYPES = new Set(PART_TYPE_VALUES);
+export const CRITERION_TYPES = new Set(CRITERION_TYPE_VALUES);
 
 export function normalizeAgentExamples(rawExamples) {
   if (!Array.isArray(rawExamples)) {
@@ -21,8 +25,8 @@ export function normalizeAgentExamples(rawExamples) {
     }
     throw new TypeError('agentExamples must be an array');
   }
-  if (rawExamples.length === 0 || rawExamples.length > SUBMISSION_LIMITS.examples) {
-    throw new RangeError(`agentExamples exceeds examples limit of ${SUBMISSION_LIMITS.examples}`);
+  if (rawExamples.length === 0 || rawExamples.length > INTERNAL_SUBMISSION_LIMITS.examples) {
+    throw new RangeError(`agentExamples exceeds examples limit of ${INTERNAL_SUBMISSION_LIMITS.examples}`);
   }
 
   const exampleIds = new Set();
@@ -35,8 +39,8 @@ export function normalizeAgentExamples(rawExamples) {
     if (!Array.isArray(example.turns) || example.turns.length === 0) {
       throw new TypeError(`agentExamples[${exampleIndex}].turns must be a non-empty array`);
     }
-    if (example.turns.length > SUBMISSION_LIMITS.turnsPerExample) {
-      throw new RangeError(`turns exceeds limit of ${SUBMISSION_LIMITS.turnsPerExample}`);
+    if (example.turns.length > INTERNAL_SUBMISSION_LIMITS.turnsPerExample) {
+      throw new RangeError(`turns exceeds limit of ${INTERNAL_SUBMISSION_LIMITS.turnsPerExample}`);
     }
 
     const result = {
@@ -66,13 +70,10 @@ export function freezeSubmission({
   config,
   frozenAt
 }) {
-  if (!validation?.valid || !validation.selectedInterface && !validation.interfaces?.length) {
-    throw new TypeError('A valid Agent Card validation result is required');
-  }
-  const selectedInterface = validation.selectedInterface ||
-    validation.interfaces.find(isSupportedInterface) ||
-    null;
-  if (!selectedInterface) throw new TypeError('Agent Card has no supported interface');
+  void validation;
+  const actualValidation = validateAgentCard(agentCard);
+  if (!actualValidation.valid) throw new TypeError('A valid Agent Card is required');
+  const selectedInterface = actualValidation.selectedInterface;
 
   const canonicalCard = canonicalClone(agentCard, 'agentCard');
   const canonicalExamples = normalizeAgentExamples(agentExamples);
@@ -81,7 +82,7 @@ export function freezeSubmission({
     submissionVersion: '1.0',
     frozenAt: requireString(frozenAt, 'frozenAt'),
     agentCard: {
-      schemaVersion: validation.schemaVersion || validation.version,
+      schemaVersion: actualValidation.schemaVersion || actualValidation.version,
       value: canonicalCard,
       sha256: hashCanonical(canonicalCard)
     },
@@ -106,14 +107,14 @@ function normalizeTurn(turn, path) {
   if (!Array.isArray(turn.input.parts) || turn.input.parts.length === 0) {
     throw new TypeError(`${path}.input.parts must be a non-empty array`);
   }
-  if (turn.input.parts.length > SUBMISSION_LIMITS.partsPerTurn) {
-    throw new RangeError(`parts exceeds limit of ${SUBMISSION_LIMITS.partsPerTurn}`);
+  if (turn.input.parts.length > INTERNAL_SUBMISSION_LIMITS.partsPerTurn) {
+    throw new RangeError(`parts exceeds limit of ${INTERNAL_SUBMISSION_LIMITS.partsPerTurn}`);
   }
   if (!Array.isArray(turn.acceptanceCriteria) || turn.acceptanceCriteria.length === 0) {
     throw new TypeError(`${path}.acceptanceCriteria must be a non-empty array`);
   }
-  if (turn.acceptanceCriteria.length > SUBMISSION_LIMITS.criteriaPerTurn) {
-    throw new RangeError(`criteria exceeds limit of ${SUBMISSION_LIMITS.criteriaPerTurn}`);
+  if (turn.acceptanceCriteria.length > INTERNAL_SUBMISSION_LIMITS.criteriaPerTurn) {
+    throw new RangeError(`criteria exceeds limit of ${INTERNAL_SUBMISSION_LIMITS.criteriaPerTurn}`);
   }
 
   const criterionIds = new Set();
@@ -138,7 +139,7 @@ function normalizeTurn(turn, path) {
 
 function normalizePart(part, path) {
   requireObject(part, path);
-  if (!PART_TYPES.has(part.type)) throw new TypeError(`${path} has unsupported part type`);
+  if (!PART_TYPE_VALUES.includes(part.type)) throw new TypeError(`${path} has unsupported part type`);
   let result;
   if (part.type === 'text') {
     result = { type: 'text', text: requireString(part.text, `${path}.text`) };
@@ -169,7 +170,7 @@ function normalizePart(part, path) {
 function normalizeCriterion(criterion, path) {
   requireObject(criterion, path);
   const id = requireString(criterion.id, `${path}.id`);
-  if (!CRITERION_TYPES.has(criterion.type)) {
+  if (!CRITERION_TYPE_VALUES.includes(criterion.type)) {
     throw new TypeError(`${path} has unsupported criterion type`);
   }
   const result = {
@@ -237,7 +238,12 @@ function canonicalClone(value, path, ancestors = new Set()) {
   const result = {};
   for (const key of Object.keys(value).sort()) {
     if (value[key] === undefined) throw new TypeError(`${path}.${key} must contain only JSON values`);
-    result[key] = canonicalClone(value[key], `${path}.${key}`, nextAncestors);
+    Object.defineProperty(result, key, {
+      value: canonicalClone(value[key], `${path}.${key}`, nextAncestors),
+      enumerable: true,
+      writable: true,
+      configurable: true
+    });
   }
   return result;
 }
@@ -248,8 +254,8 @@ function hashCanonical(value) {
 
 function assertCanonicalSize(value) {
   const size = Buffer.byteLength(JSON.stringify(canonicalClone(value, 'agentExamples')), 'utf8');
-  if (size > SUBMISSION_LIMITS.totalCanonicalBytes) {
-    throw new RangeError(`agentExamples exceeds total canonical bytes limit of ${SUBMISSION_LIMITS.totalCanonicalBytes}`);
+  if (size > INTERNAL_SUBMISSION_LIMITS.totalCanonicalBytes) {
+    throw new RangeError(`agentExamples exceeds total canonical bytes limit of ${INTERNAL_SUBMISSION_LIMITS.totalCanonicalBytes}`);
   }
 }
 
@@ -303,9 +309,4 @@ function isObject(value) {
 function isValidBase64(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length % 4 !== 0) return false;
   return /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value);
-}
-
-function isSupportedInterface(value) {
-  return ['HTTP+JSON', 'JSONRPC'].includes(value?.binding) &&
-    (/^1\./u.test(String(value?.version)) || /^0\.3(?:\.|$)/u.test(String(value?.version)));
 }

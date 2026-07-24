@@ -204,6 +204,50 @@ test('selects and validates the declared 0.3 Agent Card shape', () => {
   });
 });
 
+test('defaults an unversioned top-level URL Card to protocol 0.3', () => {
+  const legacy = validateAgentCard({
+    name: 'Unversioned Legacy Agent',
+    description: 'Uses the legacy top-level URL shape.',
+    url: 'https://example.com/a2a',
+    skills: [{ id: 'legacy', name: 'Legacy', description: 'Legacy skill.' }]
+  });
+
+  assert.equal(legacy.valid, true);
+  assert.equal(legacy.schemaVersion, '0.3');
+  assert.equal(legacy.selectedInterface.version, '0.3');
+});
+
+test('rejects a top-level URL Card that claims a 1.x protocol version', () => {
+  const result = validateAgentCard({
+    name: 'Shape Mismatch',
+    description: 'Legacy shape with a modern version.',
+    url: 'https://example.com/a2a',
+    protocolVersion: '1.0',
+    skills: [{ id: 'mismatch', name: 'Mismatch', description: 'Invalid shape.' }]
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.schemaVersion, '0.3');
+  assert.equal(result.selectedInterface, null);
+  assert.match(result.errors.join('\n'), /protocolVersion/);
+});
+
+test('rejects a 0.3 endpoint declared inside the 1.x supportedInterfaces shape', () => {
+  const result = validateAgentCard({
+    ...card,
+    supportedInterfaces: [{
+      url: 'https://example.com/a2a',
+      protocolBinding: 'JSONRPC',
+      protocolVersion: '0.3'
+    }]
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.schemaVersion, '1.x');
+  assert.equal(result.selectedInterface, null);
+  assert.match(result.errors.join('\n'), /protocolVersion/);
+});
+
 test('does not let a valid legacy URL bypass an invalid declared 1.x shape', () => {
   const result = validateAgentCard({
     ...card,
