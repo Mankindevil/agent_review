@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { callA2AAgent, resolveAgentCard } from '../src/a2a.js';
+import { executeA2AExample } from '../src/a2a-executor.js';
 import { startExampleAgents, stopExampleAgents } from '../examples/agents/server.js';
 import { EvaluationPipeline } from '../src/pipeline.js';
 import { EvaluationStore } from '../src/store.js';
@@ -36,6 +37,30 @@ test('calls the A2A 1.0 HTTP+JSON factor researcher', async () => {
   const result = await callA2AAgent(card, '检验经营现金流收益率因子的 Rank IC 与五分组表现');
   assert.match(result.text, /Rank IC/);
   assert.match(result.text, /不构成投资建议/);
+  assert.equal(result.run.outcome.status, 'succeeded');
+});
+
+test('returns and consumes a real context ID across turns without using message IDs', async () => {
+  const card = (await resolveAgentCard('service-url', agents[0].origin)).card;
+  const result = await executeA2AExample({
+    card,
+    example: {
+      id: 'factor-follow-up',
+      turns: [
+        { input: { parts: [{ type: 'text', text: 'start research' }] } },
+        { input: { parts: [{ type: 'text', text: 'continue research' }] } }
+      ]
+    },
+    repeatIndex: 0,
+    policy: { timeoutMs: 5_000 }
+  });
+
+  assert.equal(result.contextCheck.status, 'passed');
+  assert.equal(result.runs[0].response.normalized.contextId, result.runs[1].response.normalized.contextId);
+  assert.notEqual(
+    result.runs[0].response.normalized.contextId,
+    result.runs[0].response.normalized.messages[0].messageId
+  );
 });
 
 test('calls the A2A 1.0 JSON-RPC strategy backtester with SendMessage', async () => {

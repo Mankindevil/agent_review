@@ -260,6 +260,19 @@ test('reports a failed ordinary call in both diagnostics and readiness results',
   );
 });
 
+test('reports timing hook failures as platform instrumentation errors', async () => {
+  const report = await runAgentDiagnostics(baseInput, {
+    request: async () => {
+      throw Object.assign(new Error('platform instrumentation error'), { code: 'instrumentation' });
+    }
+  });
+
+  assert.equal(report.checks[2].status, 'failed');
+  assert.equal(report.checks[2].details.category, 'instrumentation');
+  assert.match(report.checks[2].summary, /instrumentation/i);
+  assert.match(report.checks[2].suggestion, /instrumentation/i);
+});
+
 test('uses an independent full timeout for an explicitly confirmed streaming call', async () => {
   const timeouts = [];
   const request = async (_url, options) => {

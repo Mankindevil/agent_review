@@ -234,27 +234,22 @@ export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000) {
 }
 
 export async function callA2AAgent(card, prompt, timeoutMs = 45_000, signal) {
-  const target = selectInterface(card);
-  if (!target) throw new Error('没有可调用的 A2A 接口');
-  assertSafeAgentUrl(target.url);
-  const requestId = crypto.randomUUID();
-  const request = buildA2ARequest(target, prompt, { requestId, messageId: crypto.randomUUID() });
-  const response = await safeHttpRequest(request.url, {
-    method: 'POST',
-    headers: request.headers,
-    body: JSON.stringify(request.body),
-    signal,
+  const { executeA2ATurn } = await import('./a2a-executor.js');
+  const run = await executeA2ATurn({
+    card,
+    input: { parts: [{ type: 'text', text: String(prompt) }] },
     timeoutMs,
-    maxBytes: 2_000_000
+    signal
   });
-  if (response.status < 200 || response.status >= 300) throw new Error(`A2A 返回 HTTP ${response.status}`);
-  let payload;
-  try { payload = JSON.parse(response.body.toString('utf8')); } catch { throw new Error('A2A 返回的不是合法 JSON'); }
-  const parsed = parseA2AResponse(target, payload, requestId);
-  return { raw: payload, text: extractAgentText(parsed) };
+  if (run.outcome.status !== 'succeeded') throw new Error(run.error?.message || 'A2A execution failed');
+  return {
+    raw: run.response.rawObjects.at(-1),
+    text: run.response.normalized.text,
+    run
+  };
 }
 
-export function buildA2ARequest(target, prompt, options = {}) {
+export function buildA2ARequest(target, input, options = {}) {
   const requestId = options.requestId || crypto.randomUUID();
   const messageId = options.messageId || crypto.randomUUID();
   const streaming = options.streaming === true;
@@ -264,8 +259,10 @@ export function buildA2ARequest(target, prompt, options = {}) {
   const message = {
     role: isV1 ? 'ROLE_USER' : 'user',
     messageId,
-    parts: [isV1 ? { text: String(prompt) } : { kind: 'text', text: String(prompt) }]
+    parts: normalizedInputParts(input).map((part) => serializePart(part, isV1))
   };
+  if (options.contextId) message.contextId = options.contextId;
+  if (options.taskId) message.taskId = options.taskId;
   const params = { message };
   if (target.tenant) params.tenant = target.tenant;
   if (isJsonRpc) {
@@ -295,6 +292,105 @@ export function buildA2ARequest(target, prompt, options = {}) {
   };
 }
 
+export function buildGetTaskRequest(target, { taskId, requestId = crypto.randomUUID(), historyLength = 50 }) {
+  const isJsonRpc = target.binding === 'JSONRPC';
+  const isV1 = !String(target.version).startsWith('0.');
+  if (!['JSONRPC', 'HTTP+JSON'].includes(target.binding)) {
+    throw new Error(`Unsupported A2A binding: ${target.binding}`);
+  }
+  if (isJsonRpc) {
+    const params = { id: taskId, historyLength };
+    if (target.tenant) params.tenant = target.tenant;
+    return {
+      url: assertSafeAgentUrl(target.url).toString(),
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'a2a-version': target.version },
+      body: {
+        jsonrpc: '2.0',
+        id: requestId,
+        method: isV1 ? 'GetTask' : 'tasks/get',
+        params
+      },
+      requestId
+    };
+  }
+  const url = assertSafeAgentUrl(target.url);
+  url.pathname = `${url.pathname.replace(/\/+$/u, '')}/tasks/${encodeURIComponent(taskId)}`;
+  url.searchParams.set('historyLength', String(historyLength));
+  if (target.tenant) url.searchParams.set('tenant', target.tenant);
+  return {
+    url: url.toString(),
+    method: 'GET',
+    headers: {
+      accept: isV1 ? 'application/a2a+json' : 'application/json',
+      'a2a-version': target.version
+    },
+    body: null,
+    requestId
+  };
+}
+
+function normalizedInputParts(input) {
+  if (typeof input === 'string' || input === null || input === undefined) {
+    return [{ type: 'text', text: String(input ?? '') }];
+  }
+  if (!input || !Array.isArray(input.parts) || input.parts.length === 0) {
+    throw new TypeError('A2A input.parts must be a non-empty array');
+  }
+  return input.parts;
+}
+
+function serializePart(part, isV1) {
+  if (!part || typeof part !== 'object') throw new TypeError('A2A Part must be an object');
+  if (part.type === 'text') {
+    return copyPartMetadata(
+      isV1 ? { text: String(part.text) } : { kind: 'text', text: String(part.text) },
+      part,
+      isV1
+    );
+  }
+  if (part.type === 'data') {
+    return copyPartMetadata(
+      isV1 ? { data: part.data } : { kind: 'data', data: part.data },
+      part,
+      isV1
+    );
+  }
+  if (part.type === 'raw') {
+    const source = String(part.raw);
+    if (
+      !source ||
+      source.length % 4 !== 0 ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(source)
+    ) {
+      throw new TypeError('A2A raw Part must contain valid base64');
+    }
+    const raw = Buffer.from(source, 'base64').toString('base64');
+    if (raw !== source) throw new TypeError('A2A raw Part must contain canonical base64');
+    if (isV1) return copyPartMetadata({ raw }, part, true);
+    return { kind: 'file', file: copyLegacyFileMetadata({ bytes: raw }, part) };
+  }
+  if (part.type === 'url') {
+    const url = assertSafeAgentUrl(String(part.url)).toString();
+    if (isV1) return copyPartMetadata({ url }, part, true);
+    return { kind: 'file', file: copyLegacyFileMetadata({ uri: url }, part) };
+  }
+  throw new TypeError(`Unsupported A2A Part type: ${part.type}`);
+}
+
+function copyPartMetadata(target, source, isV1) {
+  if (!isV1) return target;
+  if (source.mediaType) target.mediaType = source.mediaType;
+  if (source.filename) target.filename = source.filename;
+  return target;
+}
+
+function copyLegacyFileMetadata(target, source) {
+  if (source.mediaType) target.mimeType = source.mediaType;
+  if (source.filename) target.name = source.filename;
+  return target;
+}
+
 export function parseA2AResponse(target, payload, requestId) {
   let root = payload;
   if (target.binding === 'JSONRPC') {
@@ -303,8 +399,8 @@ export function parseA2AResponse(target, payload, requestId) {
     if (payload.error) throw new Error(`A2A 协议错误：${payload.error.message || payload.error.code || 'unknown'}`);
     root = payload.result;
   }
-  const legacyPayload = String(target.version).startsWith('0.') && (isMessageLike(root) || isTaskLike(root));
-  if (!root || typeof root !== 'object' || (!root.message && !root.task && !legacyPayload)) {
+  const directPayload = isMessageLike(root) || isTaskLike(root);
+  if (!root || typeof root !== 'object' || (!root.message && !root.task && !directPayload)) {
     throw new Error('A2A 响应缺少 Message 或 Task');
   }
   if (root.message && !isMessageLike(root.message)) throw new Error('A2A Message 响应结构无效');
@@ -369,18 +465,25 @@ function appendOperation(rawUrl, operation) {
 }
 
 function isTerminalState(value) {
-  const normalized = String(value || '').toUpperCase().replace(/^TASK_STATE_/, '');
+  const normalized = String(value || '')
+    .toUpperCase()
+    .replace(/^TASK_STATE_/, '')
+    .replace(/-/g, '_');
   return ['COMPLETED', 'FAILED', 'CANCELED', 'CANCELLED', 'REJECTED', 'INTERRUPTED', 'INPUT_REQUIRED', 'AUTH_REQUIRED'].includes(normalized);
 }
 
 function isMessageLike(value) {
-  return value?.kind === 'message' ||
-    (typeof value?.messageId === 'string' && typeof value?.role === 'string' && Array.isArray(value?.parts));
+  return typeof value?.messageId === 'string' &&
+    typeof value?.role === 'string' &&
+    Array.isArray(value?.parts) &&
+    (value.kind === undefined || value.kind === 'message');
 }
 
 function isTaskLike(value) {
-  return value?.kind === 'task' ||
-    (typeof value?.id === 'string' && value?.status && typeof value.status === 'object');
+  return typeof value?.id === 'string' &&
+    value?.status &&
+    typeof value.status === 'object' &&
+    (value.kind === undefined || value.kind === 'task');
 }
 
 export function extractAgentText(payload) {
@@ -396,6 +499,11 @@ export function extractAgentText(payload) {
     root?.artifactUpdate?.artifact?.parts,
     task?.artifacts?.flatMap((artifact) => artifact.parts || [])
   ].flat().filter(Boolean);
-  const text = candidates.map((part) => part.text || part?.data?.text || '').filter(Boolean).join('\n');
-  return text || JSON.stringify(root);
+  const text = [...new Set(candidates)].map((part) => {
+    if (part.text) return part.text;
+    if (part?.data?.text) return part.data.text;
+    if (Object.hasOwn(part || {}, 'data')) return JSON.stringify(part.data);
+    return '';
+  }).filter(Boolean).join('\n');
+  return text;
 }

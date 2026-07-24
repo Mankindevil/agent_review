@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   assertSafeAgentUrl,
   buildA2ARequest,
+  buildGetTaskRequest,
   extractAgentText,
   getInterfaces,
   parseA2AResponse,
@@ -301,6 +302,103 @@ test('builds versioned A2A requests with tenant and binding-specific endpoints',
   assert.equal(legacyRest.headers['content-type'], 'application/json');
 });
 
+test('serializes normalized multipart input for A2A 1.x and keeps turn context', () => {
+  const request = buildA2ARequest(
+    { url: 'https://example.com/a2a/v1', binding: 'HTTP+JSON', version: '1.0' },
+    {
+      parts: [
+        { type: 'text', text: 'continue', mediaType: 'text/plain' },
+        { type: 'data', data: { holdings: ['000001.SZ'] }, filename: 'holdings.json' },
+        { type: 'raw', raw: 'UERG', mediaType: 'application/pdf', filename: 'input.pdf' },
+        { type: 'url', url: 'https://files.example/input.csv', mediaType: 'text/csv', filename: 'input.csv' }
+      ]
+    },
+    {
+      requestId: 'req-multipart-v1',
+      messageId: 'msg-multipart-v1',
+      contextId: 'ctx-1',
+      taskId: 'task-1'
+    }
+  );
+
+  assert.equal(request.body.message.contextId, 'ctx-1');
+  assert.equal(request.body.message.taskId, 'task-1');
+  assert.deepEqual(request.body.message.parts, [
+    { text: 'continue', mediaType: 'text/plain' },
+    { data: { holdings: ['000001.SZ'] }, filename: 'holdings.json' },
+    { raw: 'UERG', mediaType: 'application/pdf', filename: 'input.pdf' },
+    { url: 'https://files.example/input.csv', mediaType: 'text/csv', filename: 'input.csv' }
+  ]);
+});
+
+test('serializes normalized multipart input for A2A 0.3 JSON-RPC', () => {
+  const request = buildA2ARequest(
+    { url: 'https://example.com/a2a', binding: 'JSONRPC', version: '0.3' },
+    {
+      parts: [
+        { type: 'text', text: 'continue' },
+        { type: 'data', data: { portfolio: 7 } },
+        { type: 'raw', raw: 'UERG', mediaType: 'application/pdf', filename: 'input.pdf' },
+        { type: 'url', url: 'https://files.example/input.csv', mediaType: 'text/csv', filename: 'input.csv' }
+      ]
+    },
+    {
+      requestId: 'req-multipart-v03',
+      messageId: 'msg-multipart-v03',
+      contextId: 'ctx-legacy',
+      taskId: 'task-legacy'
+    }
+  );
+
+  assert.equal(request.body.params.message.contextId, 'ctx-legacy');
+  assert.equal(request.body.params.message.taskId, 'task-legacy');
+  assert.deepEqual(request.body.params.message.parts, [
+    { kind: 'text', text: 'continue' },
+    { kind: 'data', data: { portfolio: 7 } },
+    { kind: 'file', file: { bytes: 'UERG', mimeType: 'application/pdf', name: 'input.pdf' } },
+    { kind: 'file', file: { uri: 'https://files.example/input.csv', mimeType: 'text/csv', name: 'input.csv' } }
+  ]);
+});
+
+test('rejects invalid normalized raw bytes at the A2A serialization boundary', () => {
+  assert.throws(
+    () => buildA2ARequest(
+      { url: 'https://example.com/a2a', binding: 'JSONRPC', version: '1.0' },
+      { parts: [{ type: 'raw', raw: 'not-base64', mediaType: 'application/pdf' }] }
+    ),
+    /base64/i
+  );
+});
+
+test('builds versioned GetTask requests for JSON-RPC and HTTP+JSON', () => {
+  const modernRpc = buildGetTaskRequest(
+    { url: 'https://example.com/rpc', binding: 'JSONRPC', version: '1.0', tenant: 'desk-7' },
+    { taskId: 'task/1', requestId: 'poll-1', historyLength: 50 }
+  );
+  assert.equal(modernRpc.body.method, 'GetTask');
+  assert.deepEqual(modernRpc.body.params, { id: 'task/1', historyLength: 50, tenant: 'desk-7' });
+
+  const legacyRpc = buildGetTaskRequest(
+    { url: 'https://example.com/rpc', binding: 'JSONRPC', version: '0.3' },
+    { taskId: 'task-2', requestId: 'poll-2', historyLength: 50 }
+  );
+  assert.equal(legacyRpc.body.method, 'tasks/get');
+
+  const rest = buildGetTaskRequest(
+    { url: 'https://example.com/a2a/v1', binding: 'HTTP+JSON', version: '1.0' },
+    { taskId: 'task/1', requestId: 'poll-3', historyLength: 50 }
+  );
+  assert.equal(rest.method, 'GET');
+  assert.equal(rest.body, null);
+  assert.equal(rest.url, 'https://example.com/a2a/v1/tasks/task%2F1?historyLength=50');
+
+  const restWithQuery = buildGetTaskRequest(
+    { url: 'https://example.com/a2a/v1?signature=keep', binding: 'HTTP+JSON', version: '1.0' },
+    { taskId: 'task-2', requestId: 'poll-4', historyLength: 50 }
+  );
+  assert.equal(restWithQuery.url, 'https://example.com/a2a/v1/tasks/task-2?signature=keep&historyLength=50');
+});
+
 test('rejects JSON-RPC errors and mismatched response ids', () => {
   const target = { url: 'https://example.com/rpc', binding: 'JSONRPC', version: '1.0' };
   assert.throws(
@@ -407,6 +505,8 @@ test('blocks loopback and private IPv6 Agent URLs by default', () => {
 
 test('extracts text from A2A artifacts', () => {
   assert.equal(extractAgentText({ task: { artifacts: [{ parts: [{ text: 'done' }] }] } }), 'done');
+  assert.equal(extractAgentText({ message: { parts: [{ data: { answer: 42 } }] } }), '{"answer":42}');
+  assert.equal(extractAgentText({ task: { id: 'task-1', status: { state: 'working' } } }), '');
 });
 
 test('complex workflows score above trivial transforms', () => {
