@@ -5,7 +5,7 @@ import path from 'node:path';
 import { normalizeOwnerScope } from './owner-scope.js';
 import { readVerifiedArtifact } from './orchestrator.js';
 import { sanitizeTraceValue } from './run-trace.js';
-import { validateOperation } from './schemas.js';
+import { validateEvidencePack, validateOperation } from './schemas.js';
 
 const TERMINAL_STATES = new Set([
   'TASK_STATE_COMPLETED',
@@ -14,7 +14,6 @@ const TERMINAL_STATES = new Set([
   'TASK_STATE_REJECTED'
 ]);
 const MAX_HISTORY = 32;
-const MAX_CONTINUATIONS = 32;
 const MAX_ARTIFACTS = 16;
 const MAX_SUBSCRIBERS = 64;
 const MAX_STREAM_ARTIFACT_BYTES = 48 * 1024;
@@ -34,6 +33,8 @@ const SUPPORTED_OUTPUT_MODES = Object.freeze([
   'text/markdown',
   'application/json'
 ]);
+const UTC_INSTANT_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/;
 const ANALYTICAL_PROJECTIONS = Object.freeze({
   'hot-topic-analysis': {
     sectionId: 'hot-topics',
@@ -87,13 +88,6 @@ function unsupportedOperation(message = 'The requested operation is not supporte
   });
 }
 
-function resourceExhausted(message) {
-  return marketA2AError('RESOURCE_EXHAUSTED', message, {
-    statusCode: 429,
-    status: 'RESOURCE_EXHAUSTED'
-  });
-}
-
 function parseHistoryLength(value, field = 'historyLength') {
   if (value === undefined) return MAX_HISTORY;
   if (!Number.isSafeInteger(value) || value < 0 || value > MAX_HISTORY) {
@@ -116,6 +110,21 @@ function parseAcceptedOutputModes(value) {
     );
   }
   return [...new Set(value)];
+}
+
+function isValidUtcInstant(value) {
+  if (typeof value !== 'string') return false;
+  const match = value.match(UTC_INSTANT_PATTERN);
+  if (!match) return false;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return false;
+  const [, year, month, day, hour, minute, second] = match.map(Number);
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() + 1 === month
+    && date.getUTCDate() === day
+    && date.getUTCHours() === hour
+    && date.getUTCMinutes() === minute
+    && date.getUTCSeconds() === second;
 }
 
 function taskNotFound(id) {
@@ -289,9 +298,14 @@ function parseSendRequest(body) {
       ? 'text/plain'
       : 'application/json';
     if (part.mediaType !== undefined && part.mediaType !== expectedMediaType) {
-      throw invalidRequest(
+      throw marketA2AError(
+        'CONTENT_TYPE_NOT_SUPPORTED',
         `${contentKeys[0]} parts must use ${expectedMediaType}`,
-        { field: `message.parts[${index}].mediaType` }
+        {
+          statusCode: 400,
+          status: 'INVALID_ARGUMENT',
+          metadata: { field: `message.parts[${index}].mediaType` }
+        }
       );
     }
   }
@@ -303,7 +317,9 @@ function parseSendRequest(body) {
     runId: parsed.runId,
     contextId: typeof message.contextId === 'string' && message.contextId
       ? message.contextId.slice(0, 200)
-      : randomUUID(),
+      : message.taskId
+        ? undefined
+        : randomUUID(),
     returnImmediately: configuration.returnImmediately === true,
     responseOptions: {
       historyLength: parseHistoryLength(
@@ -461,11 +477,14 @@ function projectedMetadata(artifact) {
   return { ...metadata, projected: true };
 }
 
-function projectAnalyticalArtifacts(operation, artifacts) {
+function projectAnalyticalArtifacts(operation, artifacts, expectedRunId) {
   const projection = ANALYTICAL_PROJECTIONS[operation];
   if (!projection) return artifacts;
   const evidenceArtifact = artifacts.find(({ name }) => name === 'evidence-pack.json');
   const sourceEvidence = partData(evidenceArtifact) || {};
+  if (expectedRunId && sourceEvidence.runId !== expectedRunId) {
+    throw new TypeError('Projected Evidence Pack identity does not match the authorized run');
+  }
   const conclusions = Array.isArray(sourceEvidence.conclusions)
     ? sourceEvidence.conclusions.filter((item) => {
         const leaderboards = String(item?.leaderboard || '')
@@ -485,6 +504,7 @@ function projectAnalyticalArtifacts(operation, artifacts) {
     runId: sourceEvidence.runId,
     reportDate: sourceEvidence.reportDate,
     status: sourceEvidence.status,
+    markets: {},
     ...(sourceEvidence.skipReason === undefined
       ? {}
       : { skipReason: clone(sourceEvidence.skipReason) }),
@@ -509,6 +529,7 @@ function projectAnalyticalArtifacts(operation, artifacts) {
         ))
       : []
   };
+  validateEvidencePack(evidence);
   return artifacts.map((artifact) => {
     if (artifact.name === 'market-report.md') {
       return {
@@ -630,37 +651,31 @@ export class MarketTaskService {
     this.#prune(Date.parse(now));
     if (parsed.taskId) {
       const record = this.#visibleRecord(parsed.taskId, safeOwner);
-      if (TERMINAL_STATES.has(record.status.state)) {
-        throw unsupportedOperation('A terminal task cannot accept a continuation message');
+      if (
+        parsed.contextId !== undefined
+        && parsed.contextId !== record.contextId
+      ) {
+        throw invalidRequest('message.contextId must match the specified task', {
+          field: 'message.contextId'
+        });
       }
       const duplicateId = this.idempotency.get(key);
-      if (duplicateId && duplicateId !== record.id) {
+      if (duplicateId === record.id) {
+        return {
+          task: this.#publicTask(record, parsed.responseOptions),
+          duplicate: true,
+          returnImmediately: parsed.returnImmediately,
+          responseOptions: parsed.responseOptions
+        };
+      }
+      if (duplicateId) {
         throw invalidRequest('message.messageId is already associated with another task', {
           field: 'message.messageId'
         });
       }
-      if (!duplicateId) {
-        if (record.idempotencyKeys.length - 1 >= MAX_CONTINUATIONS) {
-          throw resourceExhausted(
-            `The task has reached its limit of ${MAX_CONTINUATIONS} continuation messages`
-          );
-        }
-        const continuation = {
-          ...parsed.message,
-          taskId: record.id,
-          contextId: record.contextId
-        };
-        record.history = [...record.history, continuation].slice(-MAX_HISTORY);
-        record.idempotencyKeys.push(key);
-        this.idempotency.set(key, record.id);
-        this.#touch(record);
-      }
-      return {
-        task: this.#publicTask(record, parsed.responseOptions),
-        duplicate: Boolean(duplicateId),
-        returnImmediately: parsed.returnImmediately,
-        responseOptions: parsed.responseOptions
-      };
+      throw unsupportedOperation(
+        'Deterministic market operations cannot be changed after submission'
+      );
     }
     const duplicateId = this.idempotency.get(key);
     if (duplicateId) {
@@ -746,13 +761,13 @@ export class MarketTaskService {
     if (filters.status) {
       records = records.filter((record) => record.status.state === filters.status);
     }
-    if (filters.statusTimestampAfter) {
-      const after = new Date(filters.statusTimestampAfter);
-      if (!Number.isFinite(after.getTime())) {
-        throw invalidRequest('statusTimestampAfter must be an ISO 8601 timestamp', {
+    if (filters.statusTimestampAfter !== undefined) {
+      if (!isValidUtcInstant(filters.statusTimestampAfter)) {
+        throw invalidRequest('statusTimestampAfter must be a valid UTC instant', {
           field: 'statusTimestampAfter'
         });
       }
+      const after = new Date(filters.statusTimestampAfter);
       records = records.filter((record) =>
         new Date(record.status.timestamp).getTime() >= after.getTime()
       );
@@ -762,8 +777,18 @@ export class MarketTaskService {
       || right.id.localeCompare(left.id)
     );
     const totalSize = records.length;
-    const requestedPageSize = filters.pageSize === undefined ? 50 : Number(filters.pageSize);
+    const requestedPageSize = filters.pageSize === undefined
+      ? 50
+      : typeof filters.pageSize === 'string'
+        && /^[1-9][0-9]*$/.test(filters.pageSize)
+        ? Number(filters.pageSize)
+        : filters.pageSize;
     if (
+      (
+        typeof filters.pageSize === 'string'
+        && !/^[1-9][0-9]*$/.test(filters.pageSize)
+      )
+      ||
       !Number.isSafeInteger(requestedPageSize)
       || requestedPageSize < 1
       || requestedPageSize > 100
@@ -834,6 +859,17 @@ export class MarketTaskService {
   }
 
   async loadRun(runId, owner) {
+    const { run, safeOwner } = await this.#loadOwnedRun(runId, owner);
+    const artifacts = await this.#materializeProjectedRunArtifacts(run, safeOwner);
+    return this.#publicRun({ ...run, artifacts });
+  }
+
+  async loadRunArtifacts(runId, owner) {
+    const { run, safeOwner } = await this.#loadOwnedRun(runId, owner);
+    return this.#materializeProjectedRunArtifacts(run, safeOwner);
+  }
+
+  async #loadOwnedRun(runId, owner) {
     if (!RUN_ID_PATTERN.test(String(runId || ''))) throw taskNotFound(runId);
     const safeOwner = cleanOwner(owner);
     let run;
@@ -851,15 +887,30 @@ export class MarketTaskService {
     if (!run || !ownerAttested) {
       throw taskNotFound(runId);
     }
-    return this.#publicRun(run);
+    return { run, safeOwner };
   }
 
-  async loadRunArtifacts(runId, owner) {
-    const run = await this.loadRun(runId, owner);
-    return this.#materializeArtifacts(run, {
-      id: `run-${runId}`,
-      contextId: runId
+  async #materializeProjectedRunArtifacts(run, safeOwner) {
+    const requestedOperation = run.requestedOperation || run.operation;
+    const artifacts = await this.#materializeArtifacts(run, {
+      id: `run-${run.runId}`,
+      contextId: run.runId,
+      owner: safeOwner,
+      operation: requestedOperation ? { operation: requestedOperation } : undefined
+    }, {
+      requestedOperation
     });
+    return projectAnalyticalArtifacts(
+      requestedOperation,
+      artifacts,
+      run.runId
+    ).filter((artifact) =>
+      A2A_ARTIFACT_MEDIA_TYPES[artifact.name]
+      && artifact.parts?.length
+      && artifact.parts.every((part) =>
+        part?.mediaType === A2A_ARTIFACT_MEDIA_TYPES[artifact.name]
+      )
+    );
   }
 
   #visibleRecord(id, owner) {
@@ -964,8 +1015,11 @@ export class MarketTaskService {
     this.#updateStatus(record, 'TASK_STATE_WORKING', 'Market analysis is running');
     try {
       let summary;
+      let requestedOperation = record.operation.operation;
       if (record.operation.operation === 'inspect-run-trace') {
-        summary = await this.loadRun(record.requestedRunId, record.owner);
+        const loaded = await this.#loadOwnedRun(record.requestedRunId, record.owner);
+        summary = this.#publicRun(loaded.run);
+        requestedOperation = loaded.run.requestedOperation || loaded.run.operation;
       } else {
         summary = await this.orchestrator.run({
           owner: record.owner,
@@ -978,12 +1032,18 @@ export class MarketTaskService {
       }
       if (record.settled) return;
       record.summary = sanitizeTraceValue(summary);
-      let artifacts = await this.#materializeArtifacts(summary, record);
+      let artifacts = await this.#materializeArtifacts(summary, record, {
+        requestedOperation
+      });
       if (record.settled || record.controller.signal.aborted) return;
       if (record.operation.operation === 'inspect-run-trace') {
         artifacts = artifacts.filter((artifact) => artifact.name === 'run-trace.json');
       }
-      artifacts = projectAnalyticalArtifacts(record.operation.operation, artifacts);
+      artifacts = projectAnalyticalArtifacts(
+        requestedOperation,
+        artifacts,
+        summary?.runId
+      );
       artifacts = artifacts.filter((artifact) =>
         A2A_ARTIFACT_MEDIA_TYPES[artifact.name]
         && artifact.parts?.length
@@ -1042,11 +1102,17 @@ export class MarketTaskService {
     }
   }
 
-  async #materializeArtifacts(summary, record) {
+  async #materializeArtifacts(summary, record, context = {}) {
     if (typeof this.artifactLoader === 'function') {
+      const requestedOperation = context.requestedOperation
+        || summary?.requestedOperation
+        || record.operation?.operation;
       const loaded = await this.artifactLoader(summary, {
         owner: record.owner,
-        taskId: record.id
+        ownerScope: record.owner,
+        taskId: record.id,
+        runId: summary?.runId,
+        requestedOperation
       });
       return this.#buildArtifacts(record, loaded);
     }

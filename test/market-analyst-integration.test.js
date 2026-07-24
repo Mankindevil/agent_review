@@ -419,6 +419,10 @@ test('advertised analytical operations map only the trusted worker boundary to d
     persisted.map(({ operation }) => operation),
     operations
   );
+  assert.deepEqual(
+    persisted.map(({ requestedOperation }) => requestedOperation),
+    operations
+  );
 });
 
 test('accepted attempt without a final receipt suppresses automatic crash-window resend', async (t) => {

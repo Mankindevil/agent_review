@@ -262,18 +262,26 @@ function streamTaskSnapshot(task) {
     return snapshot;
   }
   if (Array.isArray(snapshot.artifacts) && snapshot.artifacts.length) {
-    snapshot.artifacts = snapshot.artifacts.map((artifact) => ({
-      artifactId: artifact.artifactId,
-      name: artifact.name,
-      parts: [{
-        data: {
-          truncated: true,
-          message: 'Fetch the protected task or run detail for the complete artifact'
-        },
-        mediaType: 'application/json'
-      }],
-      metadata: { truncatedForStream: true }
-    }));
+    snapshot.artifacts = snapshot.artifacts.map((artifact) => {
+      const projected = artifact.metadata?.projected === true;
+      return {
+        artifactId: artifact.artifactId,
+        name: artifact.name,
+        parts: [{
+          data: {
+            truncated: true,
+            message: projected
+              ? `Fetch /a2a/v1/tasks/${encodeURIComponent(snapshot.id)} for the complete projected artifact`
+              : 'Fetch the protected task or run detail for the complete artifact'
+          },
+          mediaType: 'application/json'
+        }],
+        metadata: {
+          ...(projected ? { projected: true } : {}),
+          truncatedForStream: true
+        }
+      };
+    });
   }
   if (fits(snapshot)) return snapshot;
   snapshot.artifacts = [];
@@ -346,6 +354,7 @@ function queryOptions(url) {
   const historyValue = url.searchParams.get('historyLength');
   const status = url.searchParams.get('status');
   const includeArtifactsValue = url.searchParams.get('includeArtifacts');
+  const statusTimestampAfter = url.searchParams.get('statusTimestampAfter');
   let historyLength;
   if (historyValue !== null) {
     if (!/^(?:0|[1-9]\d*)$/.test(historyValue)) {
@@ -369,9 +378,11 @@ function queryOptions(url) {
   return {
     contextId: url.searchParams.get('contextId') || undefined,
     status: status || undefined,
-    statusTimestampAfter: url.searchParams.get('statusTimestampAfter') || undefined,
+    statusTimestampAfter: statusTimestampAfter === null
+      ? undefined
+      : statusTimestampAfter,
     pageToken: url.searchParams.get('pageToken') || undefined,
-    pageSize: pageSize === null ? undefined : Number(pageSize),
+    pageSize: pageSize === null ? undefined : pageSize,
     historyLength,
     includeArtifacts: includeArtifactsValue === 'true'
   };
