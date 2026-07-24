@@ -21,6 +21,7 @@ test('maps a DeepSeek key into an isolated Claude Code environment', () => {
   assert.equal(env.ANTHROPIC_BASE_URL, 'https://api.deepseek.com/anthropic');
   assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'test-key');
   assert.equal(env.ANTHROPIC_MODEL, 'test-model');
+  assert.equal(env.DEEPSEEK_API_KEY, undefined);
   assert.equal(hasClaudeCredential(env), true);
 });
 

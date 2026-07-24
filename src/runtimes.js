@@ -210,21 +210,27 @@ export function localCliArgs(runtimeId, prompt, { budget = '0.25' } = {}) {
   throw new Error(`Unsupported local Runtime: ${runtimeId}`);
 }
 
-const CURSOR_EXECUTION_ENV_KEYS = [
+const LOCAL_RUNTIME_SYSTEM_ENV_KEYS = [
   'PATH', 'Path', 'PATHEXT',
   'SystemRoot', 'SYSTEMROOT', 'WINDIR',
   'ComSpec', 'COMSPEC',
   'LANG', 'LANGUAGE', 'LC_ALL', 'TERM'
 ];
 
-export function localCliEnv(runtimeId, workspace, parentEnv = process.env) {
-  if (runtimeId !== 'cursor') return { ...parentEnv, NO_COLOR: '1' };
+const CLAUDE_EXECUTION_ENV_KEYS = [
+  ...LOCAL_RUNTIME_SYSTEM_ENV_KEYS,
+  'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'CLAUDE_CODE_SUBAGENT_MODEL', 'CLAUDE_CODE_EFFORT_LEVEL'
+];
 
+export function localCliEnv(runtimeId, workspace, parentEnv = process.env) {
   const env = { NO_COLOR: '1' };
-  for (const key of CURSOR_EXECUTION_ENV_KEYS) {
+  const allowedKeys = runtimeId === 'claude-code' ? CLAUDE_EXECUTION_ENV_KEYS : LOCAL_RUNTIME_SYSTEM_ENV_KEYS;
+  for (const key of allowedKeys) {
     if (typeof parentEnv[key] === 'string' && parentEnv[key]) env[key] = parentEnv[key];
   }
-  if (typeof parentEnv.CURSOR_API_KEY === 'string' && parentEnv.CURSOR_API_KEY) {
+  if (runtimeId === 'cursor' && typeof parentEnv.CURSOR_API_KEY === 'string' && parentEnv.CURSOR_API_KEY) {
     env.CURSOR_API_KEY = parentEnv.CURSOR_API_KEY;
   }
   return {
@@ -274,11 +280,13 @@ async function callLocalCli(runtimeId, prompt, signal, sampling = {}) {
   const args = localCliArgs(runtimeId, prompt, { budget });
   return withRuntimeWorkspace(runtimeId, async (workspace) => {
     try {
-    const commandEnv = localCliEnv(runtimeId, workspace);
-    if (runtimeId === 'claude-code' && shouldUseArkClaude(commandEnv)) {
-      arkProxy = await startArkAnthropicProxy({ baseUrl: commandEnv.ARK_BASE_URL, apiKey: commandEnv.ARK_API_KEY, model: commandEnv.CLAUDE_ARK_MODEL || commandEnv.REVIEW_MODEL_DEEPSEEK, signal, ...sampling });
-      applyArkClaudeEnv(commandEnv, arkProxy.baseUrl);
-    } else if (runtimeId === 'claude-code') applyDeepSeekClaudeEnv(commandEnv);
+    const parentEnv = process.env;
+    const commandEnv = localCliEnv(runtimeId, workspace, parentEnv);
+    if (runtimeId === 'claude-code' && shouldUseArkClaude(parentEnv)) {
+      const model = parentEnv.CLAUDE_ARK_MODEL || parentEnv.REVIEW_MODEL_DEEPSEEK;
+      arkProxy = await startArkAnthropicProxy({ baseUrl: parentEnv.ARK_BASE_URL, apiKey: parentEnv.ARK_API_KEY, model, signal, ...sampling });
+      applyArkClaudeEnv(commandEnv, arkProxy.baseUrl, model);
+    } else if (runtimeId === 'claude-code') applyDeepSeekClaudeEnv(commandEnv, parentEnv);
     const { stdout, stderr } = await execFileAsync(command, args, { cwd: workspace, timeout, maxBuffer: 5_000_000, env: commandEnv, signal });
     const text = extractCliText(stdout);
     if (!text.trim()) throw new Error(`${command} 没有返回可见结果`);

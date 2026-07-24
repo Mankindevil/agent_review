@@ -6,6 +6,7 @@ import path from 'node:path';
 import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, localRuntimeTimeout, runSkill, withRuntimeWorkspace } from '../src/runtimes.js';
 import { prepareRuntimeWorkspace } from '../src/runtime-sandbox.js';
 import { runtimeBuildSkillPrompt } from '../src/prompts.js';
+import { applyArkClaudeEnv } from '../src/claude-env.js';
 
 test('uses supported read-only Claude Code arguments', () => {
   const args = localCliArgs('claude-code', 'build a skill', { budget: '0.25' });
@@ -116,17 +117,56 @@ test('isolates Cursor Agent from host secrets and persistent user directories', 
   assert.equal(env.NO_COLOR, '1');
 });
 
-test('preserves the Claude Code environment behavior', () => {
-  const env = localCliEnv('claude-code', '/tmp/agent-roast-claude', {
-    DEEPSEEK_API_KEY: 'available-to-claude',
+test('isolates Claude Code from unrelated production secrets and persistent user directories', () => {
+  const workspace = '/tmp/agent-roast-claude';
+  const env = localCliEnv('claude-code', workspace, {
+    PATH: '/safe/bin',
+    SystemRoot: 'C:\\Windows',
+    ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+    LANG: 'C.UTF-8',
+    ANTHROPIC_AUTH_TOKEN: 'claude-only-token',
+    ANTHROPIC_MODEL: 'claude-only-model',
+    CURSOR_API_KEY: 'must-not-leak',
+    ARK_API_KEY: 'must-not-leak',
+    REVIEW_MODEL_DEEPSEEK: 'must-not-leak',
+    DEEPSEEK_API_KEY: 'must-not-leak',
+    AWS_SECRET_ACCESS_KEY: 'must-not-leak',
     HOME: '/persistent/home'
   });
 
-  assert.deepEqual(env, {
-    DEEPSEEK_API_KEY: 'available-to-claude',
-    HOME: '/persistent/home',
-    NO_COLOR: '1'
+  assert.equal(env.PATH, '/safe/bin');
+  assert.equal(env.SystemRoot, 'C:\\Windows');
+  assert.equal(env.ComSpec, 'C:\\Windows\\System32\\cmd.exe');
+  assert.equal(env.LANG, 'C.UTF-8');
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'claude-only-token');
+  assert.equal(env.ANTHROPIC_MODEL, 'claude-only-model');
+  for (const name of ['CURSOR_API_KEY', 'ARK_API_KEY', 'REVIEW_MODEL_DEEPSEEK', 'DEEPSEEK_API_KEY', 'AWS_SECRET_ACCESS_KEY']) {
+    assert.equal(env[name], undefined, `${name} must not reach Claude`);
+  }
+  for (const name of ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'TMPDIR', 'TMP', 'TEMP']) {
+    assert.equal(env[name], workspace, `${name} must be workspace-scoped`);
+  }
+});
+
+test('derives Ark bridge variables for Claude without preserving Ark credentials', () => {
+  const workspace = '/tmp/agent-roast-claude-ark';
+  const env = localCliEnv('claude-code', workspace, {
+    PATH: '/safe/bin',
+    ARK_BASE_URL: 'https://ark.example/api/v3',
+    ARK_API_KEY: 'ark-secret',
+    CLAUDE_ARK_MODEL: 'ep-deepseek',
+    REVIEW_MODEL_DEEPSEEK: 'reviewer-model',
+    CURSOR_API_KEY: 'cursor-secret'
   });
+  applyArkClaudeEnv(env, 'http://127.0.0.1:45678', 'ep-deepseek');
+
+  assert.equal(env.ANTHROPIC_BASE_URL, 'http://127.0.0.1:45678');
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'local-ark-proxy');
+  assert.equal(env.ANTHROPIC_MODEL, 'ep-deepseek');
+  assert.equal(env.CLAUDE_CODE_SUBAGENT_MODEL, 'ep-deepseek');
+  for (const name of ['ARK_BASE_URL', 'ARK_API_KEY', 'CLAUDE_ARK_MODEL', 'REVIEW_MODEL_DEEPSEEK', 'CURSOR_API_KEY']) {
+    assert.equal(env[name], undefined, `${name} must not reach Claude`);
+  }
 });
 
 test('normalizes local runtime timeout values with a 20-minute ceiling', () => {
