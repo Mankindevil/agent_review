@@ -357,7 +357,7 @@ os.chown(staged_path, 0, 0)
 os.chmod(staged_path, 0o600)
 PY
 validate_env_key() {
-  sudo python3 - "$1" "$key_next" <<'PY'
+  sudo python3 - "$1" "$2" <<'PY'
 import hmac, pathlib, re, sys
 env_path, key_path = map(pathlib.Path, sys.argv[1:])
 key = key_path.read_text(encoding='utf-8').strip()
@@ -366,13 +366,13 @@ values = [match.group(1) for line in env_path.read_text(encoding='utf-8').splitl
 raise SystemExit(0 if len(values) == 1 and hmac.compare_digest(values[0], key) else 1)
 PY
 }
-validate_env_key "$env_stage"
+validate_env_key "$env_stage" "$key_next"
 sudo cp -p "$env_file" "$env_backup"
 sudo cp -p "$key_file" "$key_backup"
 live_replacements_started=1
 sudo mv -Tf "$env_stage" "$env_file"
 sudo mv -Tf "$key_next" "$key_file"
-validate_env_key "$env_file"
+validate_env_key "$env_file" "$key_file"
 sudo systemctl restart agent-review
 wait_for_health
 sudo python3 - "$key_file" <<'PY'
