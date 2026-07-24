@@ -312,6 +312,135 @@ test('structured candidate discovery requires own data descriptors and never inv
   assert.equal(kindReads, 0);
 });
 
+test('structured candidate containers require own data descriptors without invoking getters', () => {
+  const schemaCriterion = criterion('json-schema', {
+    schema: {
+      type: 'object',
+      required: ['ok'],
+      properties: { ok: { const: true } }
+    }
+  });
+
+  let artifactReads = 0;
+  const artifactAccessorOutput = { text: '', data: null };
+  Object.defineProperty(artifactAccessorOutput, 'artifacts', {
+    enumerable: true,
+    get() {
+      artifactReads += 1;
+      return [{ parts: [{ data: { ok: true } }] }];
+    }
+  });
+  assert.equal(
+    evaluateAcceptance([schemaCriterion], artifactAccessorOutput).checks[0].status,
+    'failed'
+  );
+  assert.equal(artifactReads, 0);
+
+  let partReads = 0;
+  const artifactWithAccessor = {};
+  Object.defineProperty(artifactWithAccessor, 'parts', {
+    enumerable: true,
+    get() {
+      partReads += 1;
+      return [{ data: { ok: true } }];
+    }
+  });
+  assert.equal(
+    evaluateAcceptance(
+      [schemaCriterion],
+      output({ artifacts: [artifactWithAccessor] })
+    ).checks[0].status,
+    'failed'
+  );
+  assert.equal(partReads, 0);
+});
+
+test('structured candidate containers reject inherited artifacts and parts', () => {
+  const schemaCriterion = criterion('json-schema', {
+    schema: {
+      type: 'object',
+      required: ['ok'],
+      properties: { ok: { const: true } }
+    }
+  });
+  const inheritedArtifacts = Object.create({
+    artifacts: [{ parts: [{ data: { ok: true } }] }]
+  });
+  Object.assign(inheritedArtifacts, { text: '', data: null });
+  assert.equal(
+    evaluateAcceptance([schemaCriterion], inheritedArtifacts).checks[0].status,
+    'failed'
+  );
+
+  const inheritedParts = Object.create({
+    parts: [{ data: { ok: true } }]
+  });
+  assert.equal(
+    evaluateAcceptance(
+      [schemaCriterion],
+      output({ artifacts: [inheritedParts] })
+    ).checks[0].status,
+    'failed'
+  );
+});
+
+test('structured candidates reject executable nested accessors before Ajv sees them', () => {
+  let reads = 0;
+  const candidate = {};
+  Object.defineProperty(candidate, 'ok', {
+    enumerable: true,
+    get() {
+      reads += 1;
+      return true;
+    }
+  });
+  const result = evaluateAcceptance(
+    [criterion('json-schema', {
+      schema: {
+        type: 'object',
+        required: ['ok'],
+        properties: { ok: { const: true } }
+      }
+    })],
+    output({ data: candidate })
+  );
+
+  assert.equal(result.checks[0].status, 'failed');
+  assert.equal(reads, 0);
+});
+
+test('structured candidates accept only inert plain JSON values', () => {
+  const cyclic = {};
+  cyclic.self = cyclic;
+  const withSymbol = { ok: true };
+  withSymbol[Symbol('hidden')] = true;
+  const withHidden = { ok: true };
+  Object.defineProperty(withHidden, 'hidden', {
+    value: true,
+    enumerable: false
+  });
+  class Candidate {
+    constructor() {
+      this.ok = true;
+    }
+  }
+
+  for (const candidate of [
+    cyclic,
+    withSymbol,
+    withHidden,
+    new Candidate(),
+    new Date('2026-07-25T00:00:00.000Z'),
+    { ok: Number.NaN }
+  ]) {
+    const result = evaluateAcceptance(
+      [criterion('json-schema', { schema: { type: 'object' } })],
+      output({ data: candidate })
+    );
+    assert.equal(result.checks[0].status, 'failed');
+  }
+});
+
 test('Ajv options neither coerce, default, nor remove candidate properties', () => {
   const fixtures = [
     {

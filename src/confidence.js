@@ -11,6 +11,12 @@ const CONFIDENCE_STATUSES = new Set([
   'pending-human-review',
   'unavailable'
 ]);
+const STATUS_PRIORITY = Object.freeze({
+  complete: 0,
+  unavailable: 1,
+  'pending-human-review': 2,
+  'pending-model-review': 3
+});
 const DIMENSION_IDS = Object.freeze([
   'scenarioValue',
   'professionalism',
@@ -117,12 +123,11 @@ export function computeDimensionConfidence(items) {
   });
   const applicable = normalized.filter((item) => item.applicable);
   if (applicable.length === 0) return { status: 'unavailable', value: null };
-  const pending = applicable.find((item) => item.confidence.status !== 'complete');
-  if (pending) {
-    return {
-      status: pending.confidence.status,
-      value: null
-    };
+  const status = highestPriorityStatus(
+    applicable.map((item) => item.confidence.status)
+  );
+  if (status !== 'complete') {
+    return { status, value: null };
   }
   const totalWeight = applicable.reduce((sum, item) => sum + item.weight, 0);
   if (totalWeight === 0) return { status: 'unavailable', value: null };
@@ -142,20 +147,24 @@ export function computeTotalConfidence(dimensions) {
       throw new TypeError(`unknown confidence dimension: ${key}`);
     }
   }
-  const values = [];
+  const confidences = [];
   for (const id of DIMENSION_IDS) {
     if (!Object.hasOwn(dimensions, id)) {
-      return { status: 'unavailable', value: null };
+      confidences.push({ status: 'unavailable', value: null });
+      continue;
     }
-    const confidence = normalizeTaggedConfidence(
+    confidences.push(normalizeTaggedConfidence(
       dimensions[id],
       `dimensions.${id}`
-    );
-    if (confidence.status !== 'complete') {
-      return { status: confidence.status, value: null };
-    }
-    values.push(confidence.value);
+    ));
   }
+  const status = highestPriorityStatus(
+    confidences.map((confidence) => confidence.status)
+  );
+  if (status !== 'complete') {
+    return { status, value: null };
+  }
+  const values = confidences.map((confidence) => confidence.value);
   return {
     status: 'complete',
     value: Math.cbrt(values[0] * values[1] * values[2])
@@ -190,7 +199,7 @@ function normalizeEvidenceChecks(value) {
 }
 
 function normalizeTaggedConfidence(value, path) {
-  assertClosedObject(value, new Set(['status', 'value']), path);
+  assertClosedObject(value, new Set(['status', 'value', 'components']), path);
   assertRequiredFields(value, ['status', 'value'], path);
   if (!CONFIDENCE_STATUSES.has(value.status)) {
     throw new TypeError(`${path}.status is invalid`);
@@ -201,6 +210,12 @@ function normalizeTaggedConfidence(value, path) {
     throw new TypeError(`${path}.value must be null while confidence is pending`);
   }
   return { status: value.status, value: value.value };
+}
+
+function highestPriorityStatus(statuses) {
+  return statuses.reduce((highest, status) =>
+    STATUS_PRIORITY[status] > STATUS_PRIORITY[highest] ? status : highest
+  , 'complete');
 }
 
 function numericSample(value, minimum, maximum, field) {

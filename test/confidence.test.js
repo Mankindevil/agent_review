@@ -132,6 +132,47 @@ test('computes applicable rubric-weighted dimension confidence and excludes N/A'
   assert.deepEqual(result, { status: 'complete', value: 0.68 });
 });
 
+test('composes subcriterion confidence directly into dimension confidence', () => {
+  const subcriterion = computeSubcriterionConfidence(mainInput('model'));
+  const result = computeDimensionConfidence([
+    confidenceItem('composed', 1, true, subcriterion)
+  ]);
+
+  assert.deepEqual(result, {
+    status: 'complete',
+    value: subcriterion.value
+  });
+  assert.equal(Object.hasOwn(result, 'components'), false);
+});
+
+test('dimension status precedence is deterministic across every input permutation', () => {
+  const statuses = [
+    { status: 'complete', value: 0.8 },
+    { status: 'unavailable', value: null },
+    { status: 'pending-human-review', value: null },
+    { status: 'pending-model-review', value: null }
+  ];
+  for (const order of permutations(statuses)) {
+    const result = computeDimensionConfidence(order.map((confidence, index) =>
+      confidenceItem(`item-${index}`, 1, true, confidence)
+    ));
+    assert.deepEqual(result, {
+      status: 'pending-model-review',
+      value: null
+    });
+  }
+
+  for (const order of permutations(statuses.slice(0, 3))) {
+    const result = computeDimensionConfidence(order.map((confidence, index) =>
+      confidenceItem(`human-item-${index}`, 1, true, confidence)
+    ));
+    assert.deepEqual(result, {
+      status: 'pending-human-review',
+      value: null
+    });
+  }
+});
+
 test('dimension confidence propagates pending, preserves zero, and tags no applicable items', () => {
   assert.deepEqual(computeDimensionConfidence([
     confidenceItem('pending', 30, true, {
@@ -222,6 +263,32 @@ test('total confidence propagates pending or unavailable named dimensions', () =
   });
 });
 
+test('total status precedence is deterministic across dimension assignments', () => {
+  const statuses = [
+    { status: 'pending-model-review', value: null },
+    { status: 'pending-human-review', value: null },
+    { status: 'unavailable', value: null }
+  ];
+  for (const order of permutations(statuses)) {
+    assert.deepEqual(computeTotalConfidence({
+      scenarioValue: order[0],
+      professionalism: order[1],
+      agentCapability: order[2]
+    }), {
+      status: 'pending-model-review',
+      value: null
+    });
+  }
+
+  assert.deepEqual(computeTotalConfidence({
+    professionalism: { status: 'pending-model-review', value: null },
+    agentCapability: { status: 'complete', value: 0.8 }
+  }), {
+    status: 'pending-model-review',
+    value: null
+  });
+});
+
 function confidenceItem(id, weight, applicable, confidence) {
   return { id, weight, applicable, confidence };
 }
@@ -232,4 +299,12 @@ function deepFreeze(value) {
     for (const child of Object.values(value)) deepFreeze(child);
   }
   return value;
+}
+
+function permutations(values) {
+  if (values.length <= 1) return [values];
+  return values.flatMap((value, index) =>
+    permutations(values.filter((_, candidate) => candidate !== index))
+      .map((tail) => [value, ...tail])
+  );
 }

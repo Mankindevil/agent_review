@@ -7,9 +7,24 @@ const CLAIM_STATUSES = new Set([
   'passed', 'failed', 'unavailable', 'not-applicable'
 ]);
 const CONTEXT_KINDS = new Set(['retention', 'correction', 'isolation']);
+const ACCEPTANCE_TYPES = new Set([
+  'model', 'contains', 'exact', 'json-schema', 'numeric'
+]);
 const METRIC_IDS = Object.freeze(
   Object.keys(RUBRIC_V1.dimensions.agentCapability)
 );
+const METRIC_FIELDS = Object.freeze([
+  'id',
+  'weight',
+  'applicable',
+  'coverage',
+  'score',
+  'numerator',
+  'denominator',
+  'evidenceIds',
+  'gaps'
+]);
+const METRIC_FIELD_SET = new Set(METRIC_FIELDS);
 
 export function durationScore(durationMs, targetMs, timeoutMs) {
   requireNonNegativeFinite(durationMs, 'durationMs');
@@ -83,12 +98,16 @@ export function aggregateObjectiveCapability(metrics, rubric = RUBRIC_V1) {
 
   const byId = new Map();
   for (const item of metrics) {
-    if (!isPlainObject(item)) throw new TypeError('metric must be an object');
+    assertClosedObject(item, METRIC_FIELD_SET, 'metric');
+    assertRequiredFields(item, METRIC_FIELDS, 'metric');
     assertSafeId(item.id, 'metric id');
     if (!METRIC_IDS.includes(item.id)) {
       throw new TypeError(`unknown objective metric: ${item.id}`);
     }
     if (byId.has(item.id)) throw new TypeError(`duplicate objective metric: ${item.id}`);
+    if (item.weight !== metricWeight(item.id)) {
+      throw new TypeError(`metric ${item.id} must use its canonical weight`);
+    }
     validateMetric(item);
     byId.set(item.id, item);
   }
@@ -99,8 +118,13 @@ export function aggregateObjectiveCapability(metrics, rubric = RUBRIC_V1) {
   const canonicalMetrics = METRIC_IDS.map((id) => {
     const item = byId.get(id);
     return {
-      ...item,
+      id: item.id,
       weight: metricWeight(id),
+      applicable: item.applicable,
+      coverage: item.coverage,
+      score: item.score,
+      numerator: item.numerator,
+      denominator: item.denominator,
       evidenceIds: stableEvidenceIds(item.evidenceIds),
       gaps: [...item.gaps]
     };
@@ -484,23 +508,25 @@ function normalizeAcceptance(value, path) {
   if (!Array.isArray(value.checks)) throw new TypeError(`${path}.checks must be an array`);
   const checkIds = new Set();
   const checks = value.checks.map((check, index) => {
+    const checkPath = `${path}.checks[${index}]`;
     assertClosedObject(check, new Set([
       'id', 'type', 'required', 'status'
-    ]), `${path}.checks[${index}]`);
-    assertSafeId(check.id, `${path}.checks[${index}].id`);
+    ]), checkPath);
+    assertRequiredFields(check, ['id', 'type', 'required', 'status'], checkPath);
+    assertSafeId(check.id, `${checkPath}.id`);
     if (checkIds.has(check.id)) throw new TypeError(`${path} has duplicate check id: ${check.id}`);
     checkIds.add(check.id);
-    if (typeof check.type !== 'string' || typeof check.required !== 'boolean') {
-      throw new TypeError(`${path}.checks[${index}] is invalid`);
+    if (!ACCEPTANCE_TYPES.has(check.type) || typeof check.required !== 'boolean') {
+      throw new TypeError(`${checkPath} is invalid`);
     }
     if (!['passed', 'failed', 'not-executable'].includes(check.status)) {
-      throw new TypeError(`${path}.checks[${index}].status is invalid`);
+      throw new TypeError(`${checkPath}.status is invalid`);
     }
     if (
       (check.type === 'model' && check.status !== 'not-executable') ||
       (check.type !== 'model' && check.status === 'not-executable')
     ) {
-      throw new TypeError(`${path}.checks[${index}] has an inconsistent executable status`);
+      throw new TypeError(`${checkPath} has an inconsistent executable status`);
     }
     return {
       id: check.id,
@@ -582,14 +608,35 @@ function validateMetric(item) {
   if (typeof item.applicable !== 'boolean') throw new TypeError('metric applicable must be boolean');
   requireRange(item.coverage, 0, 1, 'metric coverage');
   if (item.score !== null) requireRange(item.score, 0, 100, 'metric score');
-  if (!item.applicable && item.score !== null) {
-    throw new TypeError('non-applicable metric score must be null');
-  }
-  if (!item.applicable && item.coverage !== 0) {
-    throw new TypeError('non-applicable metric coverage must be zero');
-  }
   requireNonNegativeFinite(item.numerator, 'metric numerator');
   requireNonNegativeFinite(item.denominator, 'metric denominator');
+  if (
+    !item.applicable &&
+    (
+      item.score !== null ||
+      item.coverage !== 0 ||
+      item.numerator !== 0 ||
+      item.denominator !== 0
+    )
+  ) {
+    throw new TypeError('non-applicable metric values must be null or zero');
+  }
+  if (item.denominator === 0) {
+    if (item.numerator !== 0 || item.score !== null) {
+      throw new TypeError('zero-denominator metric must have zero numerator and null score');
+    }
+  } else {
+    if (item.score === null) {
+      throw new TypeError('scorable metric must have a finite score');
+    }
+    const expectedScore = item.id === 'efficiency'
+      ? item.numerator / item.denominator
+      : item.numerator / item.denominator * 100;
+    const tolerance = 1e-12 * Math.max(1, Math.abs(expectedScore));
+    if (Math.abs(item.score - expectedScore) > tolerance) {
+      throw new TypeError('metric score is incoherent with its numerator and denominator');
+    }
+  }
   if (!Array.isArray(item.gaps)) throw new TypeError('metric gaps must be an array');
   for (const gap of item.gaps) {
     if (typeof gap !== 'string') throw new TypeError('metric gap must be a string');

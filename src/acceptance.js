@@ -90,7 +90,9 @@ function evaluateJsonSchema(schema, candidate) {
       cause: error
     });
   }
-  return candidate.found ? validate(candidate.value) === true : false;
+  return candidate.found && candidate.valid
+    ? validate(candidate.value) === true
+    : false;
 }
 
 function assertLocalReferences(value) {
@@ -118,7 +120,7 @@ function evaluateNumeric(criterion, candidate) {
   ) {
     throw new TypeError('numeric criterion requires finite expected and non-negative tolerance');
   }
-  if (!candidate.found) return false;
+  if (!candidate.found || !candidate.valid) return false;
   const resolved = resolveOwnPath(candidate.value, criterion.path);
   return resolved.found &&
     typeof resolved.value === 'number' &&
@@ -150,40 +152,160 @@ function resolveOwnPath(value, path) {
 }
 
 function selectStructuredCandidate(normalizedOutput) {
-  const direct = Object.getOwnPropertyDescriptor(normalizedOutput, 'data');
+  const direct = ownDataProperty(normalizedOutput, 'data');
+  if (direct.status === 'invalid') return invalidCandidate();
   if (
-    direct &&
-    Object.hasOwn(direct, 'value') &&
+    direct.status === 'value' &&
     direct.value !== null &&
     direct.value !== undefined
   ) {
-    return { found: true, value: direct.value };
+    return cloneCandidate(direct.value);
   }
-  for (const artifact of Array.isArray(normalizedOutput.artifacts)
-    ? normalizedOutput.artifacts
-    : []) {
-    if (!isObject(artifact) || !Array.isArray(artifact.parts)) continue;
-    for (const part of artifact.parts) {
-      if (!isObject(part) || !Object.hasOwn(part, 'data')) continue;
-      const descriptor = Object.getOwnPropertyDescriptor(part, 'data');
-      const kind = Object.getOwnPropertyDescriptor(part, 'kind');
-      const type = Object.getOwnPropertyDescriptor(part, 'type');
-      const nativeV1 = kind === undefined && type === undefined;
-      const nativeV03 = kind &&
-        Object.hasOwn(kind, 'value') &&
-        kind.value === 'data';
-      if (
-        descriptor &&
-        Object.hasOwn(descriptor, 'value') &&
-        (nativeV1 || nativeV03)
-      ) {
-        return { found: true, value: descriptor.value };
+
+  const artifactsProperty = ownDataProperty(normalizedOutput, 'artifacts', {
+    inheritedIsInvalid: true
+  });
+  if (artifactsProperty.status === 'invalid') return invalidCandidate();
+  if (artifactsProperty.status === 'missing') return missingCandidate();
+  const artifacts = denseArrayValues(artifactsProperty.value);
+  if (!artifacts.valid) return invalidCandidate();
+
+  for (const artifact of artifacts.values) {
+    if (!isPlainObject(artifact)) return invalidCandidate();
+    const partsProperty = ownDataProperty(artifact, 'parts', {
+      inheritedIsInvalid: true
+    });
+    if (partsProperty.status === 'invalid') return invalidCandidate();
+    if (partsProperty.status === 'missing') continue;
+    const parts = denseArrayValues(partsProperty.value);
+    if (!parts.valid) return invalidCandidate();
+    for (const part of parts.values) {
+      if (!isPlainObject(part)) return invalidCandidate();
+      const data = ownDataProperty(part, 'data');
+      if (data.status === 'invalid') return invalidCandidate();
+      if (data.status === 'missing') continue;
+      const kind = ownDataProperty(part, 'kind');
+      const type = ownDataProperty(part, 'type');
+      if (kind.status === 'invalid' || type.status === 'invalid') {
+        return invalidCandidate();
       }
+      const nativeV1 = kind.status === 'missing' && type.status === 'missing';
+      const nativeV03 = kind.status === 'value' && kind.value === 'data';
+      if (nativeV1 || nativeV03) return cloneCandidate(data.value);
     }
   }
-  return { found: false, value: undefined };
+  return missingCandidate();
 }
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function ownDataProperty(value, key, { inheritedIsInvalid = false } = {}) {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor) {
+    return inheritedIsInvalid && key in value
+      ? { status: 'invalid' }
+      : { status: 'missing' };
+  }
+  if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
+    return { status: 'invalid' };
+  }
+  return { status: 'value', value: descriptor.value };
+}
+
+function denseArrayValues(value) {
+  if (!Array.isArray(value)) return { valid: false, values: [] };
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key === 'symbol')) {
+    return { valid: false, values: [] };
+  }
+  const expected = new Set([
+    'length',
+    ...Array.from({ length: value.length }, (_, index) => String(index))
+  ]);
+  if (keys.some((key) => !expected.has(key)) || keys.length !== expected.size) {
+    return { valid: false, values: [] };
+  }
+  const values = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (
+      !descriptor?.enumerable ||
+      !Object.hasOwn(descriptor, 'value')
+    ) {
+      return { valid: false, values: [] };
+    }
+    values.push(descriptor.value);
+  }
+  return { valid: true, values };
+}
+
+function cloneCandidate(value) {
+  const cloned = cloneInertJson(value, new Set());
+  return cloned.valid
+    ? { found: true, valid: true, value: cloned.value }
+    : invalidCandidate();
+}
+
+function cloneInertJson(value, ancestors) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return { valid: true, value };
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value)
+      ? { valid: true, value }
+      : { valid: false };
+  }
+  if (!value || typeof value !== 'object' || ancestors.has(value)) {
+    return { valid: false };
+  }
+  const nextAncestors = new Set(ancestors).add(value);
+  if (Array.isArray(value)) {
+    const array = denseArrayValues(value);
+    if (!array.valid) return { valid: false };
+    const result = [];
+    for (const item of array.values) {
+      const cloned = cloneInertJson(item, nextAncestors);
+      if (!cloned.valid) return { valid: false };
+      result.push(cloned.value);
+    }
+    return { valid: true, value: result };
+  }
+  if (!isPlainObject(value)) return { valid: false };
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key === 'symbol')) return { valid: false };
+  const result = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (
+      !descriptor?.enumerable ||
+      !Object.hasOwn(descriptor, 'value')
+    ) {
+      return { valid: false };
+    }
+    const cloned = cloneInertJson(descriptor.value, nextAncestors);
+    if (!cloned.valid) return { valid: false };
+    Object.defineProperty(result, key, {
+      value: cloned.value,
+      enumerable: true,
+      writable: true,
+      configurable: true
+    });
+  }
+  return { valid: true, value: result };
+}
+
+function isPlainObject(value) {
+  if (!isObject(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function missingCandidate() {
+  return { found: false, valid: true, value: undefined };
+}
+
+function invalidCandidate() {
+  return { found: true, valid: false, value: undefined };
 }

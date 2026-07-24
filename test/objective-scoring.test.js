@@ -578,6 +578,24 @@ test('rejects contradictory acceptance observations and plan mismatches', () => 
   );
 });
 
+test('rejects unknown or missing acceptance check types', () => {
+  for (const mutate of [
+    (check) => { check.type = 'bogus'; },
+    (check) => { delete check.type; }
+  ]) {
+    const observed = acceptance();
+    mutate(observed.checks[0]);
+    assert.throws(
+      () => buildObjectiveMetrics(metricInput({
+        plannedTests: [plannedTest({
+          runs: [run({ acceptance: observed })]
+        })]
+      })),
+      /acceptance|check|type/i
+    );
+  }
+});
+
 test('validates safe observation IDs and stably deduplicates prevalidated evidence IDs', () => {
   const metrics = buildObjectiveMetrics(metricInput({
     a2aChecks: [
@@ -627,7 +645,7 @@ test('aggregates exact canonical weights, N/A redistribution, and original cover
     metric('testSuccess', false, null, 0),
     metric('robustness', true, 80, 1),
     metric('contextContinuity', false, null, 0),
-    metric('a2aCompliance', true, 100, 1, { weight: 999 }),
+    metric('a2aCompliance', true, 100, 1),
     metric('efficiency', true, 50, 1),
     metric('claimErrorHandling', true, 60, 0.5)
   ];
@@ -696,15 +714,120 @@ test('aggregate uses an exact 0.70 provisional boundary and rejects metric set d
   );
 });
 
+test('aggregate rejects unknown fields and non-canonical caller weights', () => {
+  const complete = [
+    metric('testSuccess', true, 100, 1),
+    metric('robustness', true, 100, 1),
+    metric('contextContinuity', true, 100, 1),
+    metric('a2aCompliance', true, 100, 1),
+    metric('efficiency', true, 100, 1),
+    metric('claimErrorHandling', true, 100, 1)
+  ];
+
+  const injected = structuredClone(complete);
+  injected[0].extra = { callerOwned: true };
+  assert.throws(
+    () => aggregateObjectiveCapability(injected, RUBRIC_V1),
+    /unknown|metric|field/i
+  );
+
+  const reweighted = structuredClone(complete);
+  byId(reweighted, 'a2aCompliance').weight = 999;
+  assert.throws(
+    () => aggregateObjectiveCapability(reweighted, RUBRIC_V1),
+    /weight|canonical|metric/i
+  );
+});
+
+test('aggregate rejects incoherent metric arithmetic and non-applicable values', () => {
+  const complete = [
+    metric('testSuccess', true, 100, 1),
+    metric('robustness', true, 100, 1),
+    metric('contextContinuity', true, 100, 1),
+    metric('a2aCompliance', true, 100, 1),
+    metric('efficiency', true, 100, 1),
+    metric('claimErrorHandling', true, 100, 1)
+  ];
+  const incoherent = [
+    { id: 'testSuccess', overrides: { score: 100, numerator: 0, denominator: 0 } },
+    { id: 'robustness', overrides: { score: null, numerator: 1, denominator: 0 } },
+    { id: 'a2aCompliance', overrides: { score: null, numerator: 1, denominator: 2 } },
+    { id: 'efficiency', overrides: { score: 40, numerator: 50, denominator: 1 } }
+  ];
+  for (const { id, overrides } of incoherent) {
+    const metrics = structuredClone(complete);
+    Object.assign(byId(metrics, id), overrides);
+    assert.throws(
+      () => aggregateObjectiveCapability(metrics, RUBRIC_V1),
+      /metric|score|numerator|denominator|coherent/i
+    );
+  }
+
+  for (const overrides of [
+    { coverage: 0.1 },
+    { score: 0 },
+    { numerator: 0.1 },
+    { denominator: 1 }
+  ]) {
+    const metrics = structuredClone(complete);
+    Object.assign(
+      byId(metrics, 'contextContinuity'),
+      { applicable: false, score: null, coverage: 0, numerator: 0, denominator: 0 },
+      overrides
+    );
+    assert.throws(
+      () => aggregateObjectiveCapability(metrics, RUBRIC_V1),
+      /non-applicable|metric|zero|null/i
+    );
+  }
+});
+
+test('aggregate returns a canonical result without aliasing frozen caller metrics', () => {
+  const metrics = [
+    metric('testSuccess', true, 100, 1, {
+      evidenceIds: ['ev_first'],
+      gaps: ['gap:first']
+    }),
+    metric('robustness', true, 80, 1),
+    metric('contextContinuity', false, null, 0),
+    metric('a2aCompliance', true, 100, 1),
+    metric('efficiency', true, 50, 1),
+    metric('claimErrorHandling', true, 60, 0.5)
+  ];
+  const before = structuredClone(metrics);
+  deepFreeze(metrics);
+
+  const result = aggregateObjectiveCapability(metrics, RUBRIC_V1);
+  const output = byId(result.metrics, 'testSuccess');
+  assert.deepEqual(Object.keys(output), [
+    'id', 'weight', 'applicable', 'coverage', 'score',
+    'numerator', 'denominator', 'evidenceIds', 'gaps'
+  ]);
+  assert.notStrictEqual(output, metrics[0]);
+  assert.notStrictEqual(output.evidenceIds, metrics[0].evidenceIds);
+  assert.notStrictEqual(output.gaps, metrics[0].gaps);
+
+  output.evidenceIds.push('ev_second');
+  output.gaps.push('gap:second');
+  output.coverage = 0;
+  assert.deepEqual(metrics, before);
+});
+
 function metric(id, applicable, score, coverage, overrides = {}) {
+  const denominator = score === null ? 0 : 1;
+  const numerator = score === null
+    ? 0
+    : id === 'efficiency'
+      ? score
+      : score / 100;
   return {
     id,
     weight: RUBRIC_V1.dimensions.agentCapability[id],
     applicable,
     coverage,
     score,
-    numerator: score ?? 0,
-    denominator: score === null ? 0 : 1,
+    numerator,
+    denominator,
     evidenceIds: [],
     gaps: [],
     ...overrides
