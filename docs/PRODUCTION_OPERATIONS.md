@@ -114,9 +114,11 @@ test -d "$release_dir"
 test -f "$release_dir/package.json"
 release_dir="$(readlink -f "$release_dir")"
 stage_link="/opt/agent-review/app.next.$$"
+trap 'sudo rm -f -- "$stage_link"' EXIT
 sudo ln -s "$release_dir" "$stage_link"
 test "$(readlink -f "$stage_link")" = "$release_dir"
 sudo mv -Tf "$stage_link" /opt/agent-review/app
+trap - EXIT
 sudo systemctl restart agent-review
 wait_for_health
 ```
@@ -142,9 +144,11 @@ test -d "$rollback_dir"
 test -f "$rollback_dir/package.json"
 rollback_dir="$(readlink -f "$rollback_dir")"
 stage_link="/opt/agent-review/app.next.$$"
+trap 'sudo rm -f -- "$stage_link"' EXIT
 sudo ln -s "$rollback_dir" "$stage_link"
 test "$(readlink -f "$stage_link")" = "$rollback_dir"
 sudo mv -Tf "$stage_link" /opt/agent-review/app
+trap - EXIT
 sudo systemctl restart agent-review
 wait_for_health
 ```
@@ -163,7 +167,7 @@ sudo cp -p /var/lib/agent-review/evaluations.json "$backup_dir/evaluations.json.
 sudo sha256sum "$backup_dir"/evaluations.json.*
 ```
 
-Restore only an explicit, named backup. The selected backup and the pre-restore preservation copy are validated before state is modified. The temporary restored state is owned by the service account and atomically renamed only after the service stops:
+Restore only an explicit, named backup. Validate it first, then stop the service before preserving live state or creating a state-directory temporary file. The failure trap removes only its exact temporary file and restarts the service. The temporary restored state is owned by the service account and atomically renamed while the service remains stopped:
 
 ```bash
 set -euo pipefail
@@ -184,14 +188,25 @@ sudo python3 - "$restore_file" <<'PY'
 import json, pathlib, sys
 json.load(pathlib.Path(sys.argv[1]).open(encoding='utf-8'))
 PY
+sudo systemctl stop agent-review
+restore_tmp=''
+restore_cleanup() {
+  status=$?
+  if [ -n "$restore_tmp" ]; then sudo rm -f -- "$restore_tmp" || true; fi
+  sudo systemctl start agent-review || true
+  exit "$status"
+}
+trap restore_cleanup EXIT
 preserved_file="/var/backups/agent-review/evaluations.json.pre-restore.$(date -u +%Y%m%dT%H%M%SZ)"
+preserved_hash="$preserved_file.sha256"
 sudo cp -p /var/lib/agent-review/evaluations.json "$preserved_file"
 sudo test -s "$preserved_file"
 sudo python3 - "$preserved_file" <<'PY'
 import json, pathlib, sys
 json.load(pathlib.Path(sys.argv[1]).open(encoding='utf-8'))
 PY
-restore_tmp="/var/lib/agent-review/evaluations.json.restore.$$"
+sudo sh -c 'sha256sum "$1" > "$2"; sha256sum -c "$2" >/dev/null' sh "$preserved_file" "$preserved_hash"
+restore_tmp="$(sudo mktemp -p /var/lib/agent-review 'evaluations.json.restore.XXXXXXXX')"
 sudo cp -- "$restore_file" "$restore_tmp"
 sudo python3 - "$restore_tmp" <<'PY'
 import json, pathlib, sys
@@ -199,9 +214,10 @@ json.load(pathlib.Path(sys.argv[1]).open(encoding='utf-8'))
 PY
 sudo chown agent-review:agent-review "$restore_tmp"
 sudo chmod 0600 "$restore_tmp"
-sudo systemctl stop agent-review
 sudo mv -Tf "$restore_tmp" /var/lib/agent-review/evaluations.json
+restore_tmp=''
 sudo systemctl start agent-review
+trap - EXIT
 wait_for_health
 ```
 
@@ -215,7 +231,7 @@ sudo stat -c '%U:%G %a %n' /etc/agent-review/agent-review.env
 
 Expected metadata is `root:root 600`. The browser diagnostics retrieval copy is `/root/agent-review-access-key.txt`, also `root:root` mode `0600`. Authorized operators retrieve it only through their approved privileged-access procedure.
 
-Rotation creates a protected `.next` key, updates exactly one environment entry through a root Python script and atomic replacement, validates equality without output, then replaces the retrieval copy. If environment update or validation fails, the old retrieval copy remains intact.
+Rotation creates protected staged key and environment files, validates the staged environment without output, then makes exact root-only backups before either live replacement. Its failure trap restores both live files after a failed promotion or post-promotion validation and cleans only the exact generated paths. The old retrieval copy remains intact until the new live environment validates.
 
 ```bash
 set -euo pipefail
@@ -233,12 +249,26 @@ wait_for_health() {
 env_file=/etc/agent-review/agent-review.env
 key_file=/root/agent-review-access-key.txt
 key_next=/root/agent-review-access-key.next
-sudo sh -c 'umask 077; openssl rand -hex 32 > "$1"' sh "$key_next"
+env_stage="/etc/agent-review/agent-review.env.next.$$"
+env_backup="/etc/agent-review/agent-review.env.backup.$$"
+key_backup="/root/agent-review-access-key.backup.$$"
+live_replacements_started=0
+rotation_cleanup() {
+  status=$?
+  if [ "$live_replacements_started" -eq 1 ]; then
+    sudo mv -Tf "$env_backup" "$env_file" || true
+    sudo mv -Tf "$key_backup" "$key_file" || true
+  fi
+  sudo rm -f -- "$env_stage" "$key_next" "$env_backup" "$key_backup" || true
+  exit "$status"
+}
+trap rotation_cleanup EXIT
+sudo sh -c 'umask 077; test ! -e "$1"; openssl rand -hex 32 > "$1"' sh "$key_next"
 sudo chown root:root "$key_next"
 sudo chmod 0600 "$key_next"
-sudo python3 - "$env_file" "$key_next" <<'PY'
+sudo python3 - "$env_file" "$key_next" "$env_stage" <<'PY'
 import os, pathlib, re, sys
-env_path, key_path = map(pathlib.Path, sys.argv[1:])
+env_path, key_path, staged_path = map(pathlib.Path, sys.argv[1:])
 key = key_path.read_text(encoding='utf-8').strip()
 if not key:
     raise SystemExit('replacement key is empty')
@@ -250,17 +280,16 @@ if len(matches) != 1:
 index = matches[0]
 prefix = pattern.match(lines[index]).group(1)
 lines[index] = f'{prefix}{key}\n'
-temporary = env_path.with_name(f'{env_path.name}.next.{os.getpid()}')
-fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+fd = os.open(staged_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(fd, 'w', encoding='utf-8') as handle:
     handle.writelines(lines)
     handle.flush()
     os.fsync(handle.fileno())
-os.chown(temporary, 0, 0)
-os.chmod(temporary, 0o600)
-os.replace(temporary, env_path)
+os.chown(staged_path, 0, 0)
+os.chmod(staged_path, 0o600)
 PY
-sudo python3 - "$env_file" "$key_next" <<'PY'
+validate_env_key() {
+  sudo python3 - "$1" "$key_next" <<'PY'
 import hmac, pathlib, re, sys
 env_path, key_path = map(pathlib.Path, sys.argv[1:])
 key = key_path.read_text(encoding='utf-8').strip()
@@ -268,7 +297,16 @@ pattern = re.compile(r'^\s*(?:export\s+)?AGENT_DIAGNOSTICS_ACCESS_KEY\s*=\s*(.*?
 values = [match.group(1) for line in env_path.read_text(encoding='utf-8').splitlines() if (match := pattern.match(line))]
 raise SystemExit(0 if len(values) == 1 and hmac.compare_digest(values[0], key) else 1)
 PY
+}
+validate_env_key "$env_stage"
+sudo cp -p "$env_file" "$env_backup"
+sudo cp -p "$key_file" "$key_backup"
+live_replacements_started=1
+sudo mv -Tf "$env_stage" "$env_file"
 sudo mv -Tf "$key_next" "$key_file"
+validate_env_key "$env_file"
+trap - EXIT
+sudo rm -f -- "$env_backup" "$key_backup"
 sudo systemctl restart agent-review
 wait_for_health
 sudo python3 - "$key_file" <<'PY'
