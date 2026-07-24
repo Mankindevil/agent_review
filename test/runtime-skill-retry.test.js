@@ -120,6 +120,7 @@ test('cleans the temporary workspace when Cursor runtime startup fails', async (
 test('isolates Cursor Agent from host secrets and persistent user directories', () => {
   const workspace = '/tmp/agent-roast-cursor';
   const authConfigHome = '/var/lib/agent-review/cursor-auth';
+  const sessionConfigHome = '/tmp/agent-roast-cursor/cursor-xdg-session';
   const env = localCliEnv('cursor', workspace, {
     CURSOR_AUTH_CONFIG_HOME: authConfigHome,
     CURSOR_API_KEY: 'must-not-leak',
@@ -132,7 +133,7 @@ test('isolates Cursor Agent from host secrets and persistent user directories', 
     XDG_CONFIG_HOME: '/persistent/config',
     XDG_CACHE_HOME: '/persistent/cache',
     TMPDIR: '/persistent/tmp'
-  });
+  }, { cursorConfigHome: sessionConfigHome });
 
   assert.equal(env.CURSOR_API_KEY, undefined);
   assert.equal(env.AGENT_CLI_CREDENTIAL_STORE, 'file');
@@ -145,7 +146,8 @@ test('isolates Cursor Agent from host secrets and persistent user directories', 
   assert.equal(env.USERPROFILE, workspace);
   assert.equal(env.APPDATA, workspace);
   assert.equal(env.LOCALAPPDATA, workspace);
-  assert.equal(env.XDG_CONFIG_HOME, authConfigHome);
+  assert.equal(env.XDG_CONFIG_HOME, sessionConfigHome);
+  assert.notEqual(env.XDG_CONFIG_HOME, authConfigHome);
   assert.equal(env.XDG_CACHE_HOME, workspace);
   assert.equal(env.XDG_DATA_HOME, workspace);
   assert.equal(env.XDG_STATE_HOME, workspace);
@@ -153,6 +155,12 @@ test('isolates Cursor Agent from host secrets and persistent user directories', 
   assert.equal(env.TMP, workspace);
   assert.equal(env.TEMP, workspace);
   assert.equal(env.NO_COLOR, '1');
+
+  const envWithoutSessionConfigHome = localCliEnv('cursor', workspace, {
+    CURSOR_AUTH_CONFIG_HOME: authConfigHome,
+    PATH: '/safe/bin'
+  });
+  assert.equal(envWithoutSessionConfigHome.XDG_CONFIG_HOME, workspace);
 });
 
 test('terminates the whole Linux CLI process group with TERM then KILL at the hard timeout', async () => {

@@ -12,15 +12,20 @@ const CLAUDE_ENV_KEYS = [
   'CLAUDE_CODE_EFFORT_LEVEL'
 ];
 
-export function localCliEnv(runtimeId, workspace, parentEnv = process.env) {
+export function localCliEnv(
+  runtimeId,
+  workspace,
+  parentEnv = process.env,
+  { cursorConfigHome } = {}
+) {
   const env = { NO_COLOR: '1' };
   const allowedKeys = runtimeId === 'claude-code' ? CLAUDE_ENV_KEYS : SYSTEM_ENV_KEYS;
   for (const key of allowedKeys) {
     if (typeof parentEnv[key] === 'string' && parentEnv[key]) env[key] = parentEnv[key];
   }
 
-  const cursorAuthHome = runtimeId === 'cursor'
-    ? normalizedAbsolutePath(parentEnv.CURSOR_AUTH_CONFIG_HOME)
+  const disposableCursorConfigHome = runtimeId === 'cursor'
+    ? normalizedAbsolutePath(cursorConfigHome)
     : null;
   if (runtimeId === 'cursor') env.AGENT_CLI_CREDENTIAL_STORE = 'file';
 
@@ -30,7 +35,7 @@ export function localCliEnv(runtimeId, workspace, parentEnv = process.env) {
     USERPROFILE: workspace,
     APPDATA: workspace,
     LOCALAPPDATA: workspace,
-    XDG_CONFIG_HOME: cursorAuthHome || workspace,
+    XDG_CONFIG_HOME: disposableCursorConfigHome || workspace,
     XDG_CACHE_HOME: workspace,
     XDG_DATA_HOME: workspace,
     XDG_STATE_HOME: workspace,

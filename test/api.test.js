@@ -467,7 +467,7 @@ test('does not call a failed version probe installed', async () => {
   assert.deepEqual(result, { installed: false, version: null, executable: null });
 });
 
-test('probes Cursor login with the same minimal persistent auth directory as execution', async () => {
+test('probes Cursor login with a disposable config directory', async () => {
   assert.equal(typeof probeCursorAuthentication, 'function');
   let options;
   const authenticated = await probeCursorAuthentication('/runtime/bin/cursor-agent', {
@@ -486,7 +486,7 @@ test('probes Cursor login with the same minimal persistent auth directory as exe
   });
   assert.equal(authenticated, true);
   assert.equal(options.env.HOME, '/tmp/cursor-status-probe');
-  assert.equal(options.env.XDG_CONFIG_HOME, '/var/lib/agent-review/cursor-auth');
+  assert.equal(options.env.XDG_CONFIG_HOME, '/tmp/cursor-status-probe');
   assert.equal(options.env.XDG_CACHE_HOME, '/tmp/cursor-status-probe');
   assert.equal(options.env.AGENT_CLI_CREDENTIAL_STORE, 'file');
   assert.equal(options.env.CURSOR_API_KEY, undefined);
