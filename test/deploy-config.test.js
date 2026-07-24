@@ -21,11 +21,13 @@ test('nginx keeps ACME on HTTP and proxies production through TLS', async () => 
   assert.match(production, /proxy_send_timeout 1260s/);
   assert.match(production, /proxy_read_timeout 1260s/);
   assert.match(production, /ssl_certificate \/etc\/letsencrypt\/live\/__PUBLIC_IP__\/fullchain\.pem/);
+  assert.match(production, /return 301 https:\/\/__PUBLIC_IP__\$request_uri;/);
 });
 
 test('certbot timer renews twice daily and reloads nginx', async () => {
   const service = await read('agent-review-certbot.service');
   const timer = await read('agent-review-certbot.timer');
   assert.match(service, /certbot renew --quiet --deploy-hook/);
+  assert.match(service, /\/usr\/sbin\/nginx -s reload/);
   assert.match(timer, /OnUnitActiveSec=12h/);
 });

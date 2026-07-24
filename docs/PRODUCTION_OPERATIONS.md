@@ -20,12 +20,12 @@ Manage the app only through systemd; do not start an additional Node process. Ng
 ```bash
 set -euo pipefail
 health_ok() {
-  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+  curl --fail --silent --show-error --max-redirs 0 --connect-timeout 5 --max-time 15 https://14.103.143.171/api/health |
     python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
 }
 require_200() {
   local url="$1" status
-  status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-redirs 0 "$url")"
+  status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-redirs 0 --connect-timeout 5 --max-time 15 "$url")"
   test "$status" = '200'
 }
 sudo systemctl status agent-review --no-pager
@@ -47,7 +47,7 @@ Do not assume a restart is immediately ready. Restart, then condition-poll the h
 ```bash
 set -euo pipefail
 health_ok() {
-  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+  curl --fail --silent --show-error --max-redirs 0 --connect-timeout 5 --max-time 15 https://14.103.143.171/api/health |
     python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
 }
 wait_for_health() {
@@ -74,7 +74,7 @@ After a reboot verify application, release target, endpoint, proxy, and firewall
 ```bash
 set -euo pipefail
 health_ok() {
-  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+  curl --fail --silent --show-error --max-redirs 0 --connect-timeout 5 --max-time 15 https://14.103.143.171/api/health |
     python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
 }
 wait_for_health() {
@@ -98,7 +98,7 @@ Release directories are immutable and named with a full Git SHA. Validate a cand
 ```bash
 set -euo pipefail
 health_ok() {
-  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+  curl --fail --silent --show-error --max-redirs 0 --connect-timeout 5 --max-time 15 https://14.103.143.171/api/health |
     python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
 }
 wait_for_health() {
@@ -109,18 +109,39 @@ wait_for_health() {
   return 1
 }
 release_sha='<approved full Git SHA>'
-release_dir="/opt/agent-review/releases/$release_sha"
+[[ "$release_sha" =~ ^[0-9a-fA-F]{40}$ ]]
+expected_release_dir="/opt/agent-review/releases/$release_sha"
+release_dir="$(readlink -f "$expected_release_dir")"
+test "$release_dir" = "$expected_release_dir"
 test -d "$release_dir"
 test -f "$release_dir/package.json"
-release_dir="$(readlink -f "$release_dir")"
+sudo -u agent-review -- sh -c 'cd "$1" && npm test && npm run check' sh "$release_dir"
+previous_dir="$(readlink -f /opt/agent-review/app)"
+test -d "$previous_dir"
 stage_link="/opt/agent-review/app.next.$$"
-trap 'sudo rm -f -- "$stage_link"' EXIT
+recovery_link="/opt/agent-review/app.recovery.$$"
+release_switched=0
+release_cleanup() {
+  status=$?
+  sudo rm -f -- "$stage_link" "$recovery_link" || true
+  if [ "$release_switched" -eq 1 ]; then
+    sudo ln -s "$previous_dir" "$recovery_link" || true
+    if [ "$(readlink -f "$recovery_link" 2>/dev/null || true)" = "$previous_dir" ]; then
+      sudo mv -Tf "$recovery_link" /opt/agent-review/app || true
+      sudo systemctl restart agent-review || true
+      wait_for_health || true
+    fi
+  fi
+  exit "$status"
+}
+trap release_cleanup EXIT
 sudo ln -s "$release_dir" "$stage_link"
 test "$(readlink -f "$stage_link")" = "$release_dir"
 sudo mv -Tf "$stage_link" /opt/agent-review/app
-trap - EXIT
+release_switched=1
 sudo systemctl restart agent-review
 wait_for_health
+trap - EXIT
 ```
 
 If validation fails, switch only to a known retained directory. The documented active SHA is a rollback target while it remains present:
@@ -128,7 +149,7 @@ If validation fails, switch only to a known retained directory. The documented a
 ```bash
 set -euo pipefail
 health_ok() {
-  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+  curl --fail --silent --show-error --max-redirs 0 --connect-timeout 5 --max-time 15 https://14.103.143.171/api/health |
     python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
 }
 wait_for_health() {
@@ -139,18 +160,38 @@ wait_for_health() {
   return 1
 }
 rollback_sha='29324596a665206ff273bdba94e9a98f0a131acd'
-rollback_dir="/opt/agent-review/releases/$rollback_sha"
+[[ "$rollback_sha" =~ ^[0-9a-fA-F]{40}$ ]]
+expected_rollback_dir="/opt/agent-review/releases/$rollback_sha"
+rollback_dir="$(readlink -f "$expected_rollback_dir")"
+test "$rollback_dir" = "$expected_rollback_dir"
 test -d "$rollback_dir"
 test -f "$rollback_dir/package.json"
-rollback_dir="$(readlink -f "$rollback_dir")"
+previous_dir="$(readlink -f /opt/agent-review/app)"
+test -d "$previous_dir"
 stage_link="/opt/agent-review/app.next.$$"
-trap 'sudo rm -f -- "$stage_link"' EXIT
+recovery_link="/opt/agent-review/app.recovery.$$"
+rollback_switched=0
+rollback_cleanup() {
+  status=$?
+  sudo rm -f -- "$stage_link" "$recovery_link" || true
+  if [ "$rollback_switched" -eq 1 ]; then
+    sudo ln -s "$previous_dir" "$recovery_link" || true
+    if [ "$(readlink -f "$recovery_link" 2>/dev/null || true)" = "$previous_dir" ]; then
+      sudo mv -Tf "$recovery_link" /opt/agent-review/app || true
+      sudo systemctl restart agent-review || true
+      wait_for_health || true
+    fi
+  fi
+  exit "$status"
+}
+trap rollback_cleanup EXIT
 sudo ln -s "$rollback_dir" "$stage_link"
 test "$(readlink -f "$stage_link")" = "$rollback_dir"
 sudo mv -Tf "$stage_link" /opt/agent-review/app
-trap - EXIT
+rollback_switched=1
 sudo systemctl restart agent-review
 wait_for_health
+trap - EXIT
 ```
 
 If a switch is interrupted, inspect the explicit `app` and uniquely named `app.next.<PID>` paths before acting. Do not remove release directories during an incident.
@@ -172,7 +213,7 @@ Restore only an explicit, named backup. Validate it first, then stop the service
 ```bash
 set -euo pipefail
 health_ok() {
-  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+  curl --fail --silent --show-error --max-redirs 0 --connect-timeout 5 --max-time 15 https://14.103.143.171/api/health |
     python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
 }
 wait_for_health() {
@@ -190,10 +231,30 @@ json.load(pathlib.Path(sys.argv[1]).open(encoding='utf-8'))
 PY
 sudo systemctl stop agent-review
 restore_tmp=''
+recovery_tmp=''
+preserved_file=''
+restore_applied=0
 restore_cleanup() {
   status=$?
   if [ -n "$restore_tmp" ]; then sudo rm -f -- "$restore_tmp" || true; fi
+  if [ "$restore_applied" -eq 1 ] && [ -n "$preserved_file" ]; then
+    sudo systemctl stop agent-review || true
+    recovery_tmp="$(sudo mktemp -p /var/lib/agent-review 'evaluations.json.recovery.XXXXXXXX')" || true
+    if [ -n "$recovery_tmp" ]; then
+      if sudo cp -- "$preserved_file" "$recovery_tmp" && sudo python3 - "$recovery_tmp" <<'PY'
+import json, pathlib, sys
+json.load(pathlib.Path(sys.argv[1]).open(encoding='utf-8'))
+PY
+      then
+        sudo chown agent-review:agent-review "$recovery_tmp" || true
+        sudo chmod 0600 "$recovery_tmp" || true
+        sudo mv -Tf "$recovery_tmp" /var/lib/agent-review/evaluations.json || true
+      fi
+    fi
+  fi
+  if [ -n "$recovery_tmp" ]; then sudo rm -f -- "$recovery_tmp" || true; fi
   sudo systemctl start agent-review || true
+  wait_for_health || true
   exit "$status"
 }
 trap restore_cleanup EXIT
@@ -216,9 +277,14 @@ sudo chown agent-review:agent-review "$restore_tmp"
 sudo chmod 0600 "$restore_tmp"
 sudo mv -Tf "$restore_tmp" /var/lib/agent-review/evaluations.json
 restore_tmp=''
+restore_applied=1
 sudo systemctl start agent-review
-trap - EXIT
 wait_for_health
+sudo -u agent-review -- python3 - /var/lib/agent-review/evaluations.json <<'PY'
+import json, pathlib, sys
+json.load(pathlib.Path(sys.argv[1]).open(encoding='utf-8'))
+PY
+trap - EXIT
 ```
 
 ## Configuration and secret rotation
@@ -236,7 +302,7 @@ Rotation creates protected staged key and environment files, validates the stage
 ```bash
 set -euo pipefail
 health_ok() {
-  curl --fail --silent --show-error --max-redirs 0 https://14.103.143.171/api/health |
+  curl --fail --silent --show-error --max-redirs 0 --connect-timeout 5 --max-time 15 https://14.103.143.171/api/health |
     python3 -c 'import json, sys; raise SystemExit(0 if json.load(sys.stdin).get("ok") is True else 1)'
 }
 wait_for_health() {
@@ -258,6 +324,8 @@ rotation_cleanup() {
   if [ "$live_replacements_started" -eq 1 ]; then
     sudo mv -Tf "$env_backup" "$env_file" || true
     sudo mv -Tf "$key_backup" "$key_file" || true
+    sudo systemctl restart agent-review || true
+    wait_for_health || true
   fi
   sudo rm -f -- "$env_stage" "$key_next" "$env_backup" "$key_backup" || true
   exit "$status"
@@ -305,8 +373,6 @@ live_replacements_started=1
 sudo mv -Tf "$env_stage" "$env_file"
 sudo mv -Tf "$key_next" "$key_file"
 validate_env_key "$env_file"
-trap - EXIT
-sudo rm -f -- "$env_backup" "$key_backup"
 sudo systemctl restart agent-review
 wait_for_health
 sudo python3 - "$key_file" <<'PY'
@@ -322,6 +388,8 @@ except urllib.error.HTTPError as error:
     raise SystemExit(0 if error.code == 400 else 1)
 raise SystemExit(1)
 PY
+trap - EXIT
+sudo rm -f -- "$env_backup" "$key_backup"
 ```
 
 `PANDA_DATA_ACCESS_KEY` is absent, so the public Panda query gateway remains closed. Internal auto-verification is configured. Do not open the public gateway as an incident workaround without an approved change and separate access key.
