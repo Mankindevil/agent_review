@@ -192,6 +192,10 @@ test('rejects V2 schema downgrades and changes to frozen record identity', async
           value: { supportedInterfaces: [{ binding: 'HTTP+JSON' }] }
         }
       },
+      participantAccess: {
+        tokenHash: 'b'.repeat(64),
+        createdAt: '2026-07-20T00:00:00.000Z'
+      },
       evaluationWindow: { firstRunAt: null, lastRunAt: null },
       rawEvidence: { secret: 'original-secret' }
     };
@@ -227,7 +231,26 @@ test('rejects V2 schema downgrades and changes to frozen record identity', async
       (current) => {
         current.submission.agentCard.value.supportedInterfaces[0].binding = 'JSONRPC';
         return current;
-      }
+      },
+      (current) => {
+        current.participantAccess.tokenHash = 'c'.repeat(64);
+        return current;
+      },
+      (current) => {
+        current.participantAccess.createdAt = '2026-07-21T00:00:00.000Z';
+        return current;
+      },
+      (current) => {
+        delete current.participantAccess;
+        return current;
+      },
+      (current) => ({
+        ...current,
+        participantAccess: {
+          ...current.participantAccess,
+          extra: true
+        }
+      })
     ];
 
     for (const mutate of mutations) {
@@ -242,6 +265,7 @@ test('rejects V2 schema downgrades and changes to frozen record identity', async
     assert.equal(stored.schemaVersion, 2);
     assert.equal(stored.createdAt, original.createdAt);
     assert.deepEqual(stored.submission, original.submission);
+    assert.deepEqual(stored.participantAccess, original.participantAccess);
     assert.deepEqual(stored.evaluationWindow, started.evaluationWindow);
     assert.equal(stored.rawEvidence.secret, 'original-secret');
     assert.equal(stored.revision, 1);

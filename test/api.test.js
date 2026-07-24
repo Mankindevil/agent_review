@@ -80,11 +80,39 @@ test('health endpoint responds', async () => {
   assert.equal(response.status, 200);
   const health = await response.json();
   assert.equal(health.ok, true);
+  assert.equal(health.a2aBlackBoxV1Enabled, false);
   assert.equal(Number.isInteger(health.evaluationSeed), true);
   assert.equal(health.modelTemperature, 0);
   assert.equal(health.dataSource.provider, 'pandaai');
   assert.equal(typeof health.dataSource.configured, 'boolean');
   assert.equal(typeof health.dataSource.autoVerify, 'boolean');
+});
+
+test('keeps disabled V2 resume behind the feature flag', async () => {
+  const response = await fetch(
+    `${origin}/api/evaluations/${v2Fixture.id}/resume`,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${'T'.repeat(43)}`,
+        'content-type': 'application/json',
+        'idempotency-key': 'resume-api-key-00001'
+      },
+      body: JSON.stringify({})
+    }
+  );
+  const result = await response.json();
+  assert.equal(response.status, 409);
+  assert.match(result.error, /V2|black-box|disabled/i);
+});
+
+test('preserves the legacy evaluation request body limit while V2 is disabled', async () => {
+  const response = await fetch(`${origin}/api/evaluations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ padding: 'x'.repeat(1_000_000) })
+  });
+  assert.equal(response.status, 413);
 });
 
 test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes', async () => {
@@ -117,6 +145,17 @@ test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes'
   const createProjectionText = JSON.stringify(createProjection);
   assert.equal(createProjection.schemaVersion, 2);
   for (const secret of forbidden) assert.equal(createProjectionText.includes(secret), false, `create: ${secret}`);
+
+  const participantAccessToken = 'T'.repeat(43);
+  const createResponse = serializeEvaluationForResponse({
+    evaluation: v2Fixture,
+    participantAccessToken
+  });
+  const createResponseText = JSON.stringify(createResponse);
+  assert.equal(createResponse.participantAccessToken, participantAccessToken);
+  assert.equal(createResponse.schemaVersion, 2);
+  assert.equal(Object.hasOwn(createResponse, 'evaluation'), false);
+  for (const secret of forbidden) assert.equal(createResponseText.includes(secret), false, `create wrapper: ${secret}`);
 
   for (const action of ['cancel', 'retry']) {
     const response = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/${action}`, {
@@ -246,8 +285,98 @@ test('serves localized loading effects with reduced-motion support', async () =>
   assert.match(app, /review-card-queued/);
   const indexResponse = await fetch(`${origin}/`);
   const index = await indexResponse.text();
-  assert.match(index, /app\.js\?v=20260721-finance2/);
-  assert.match(index, /styles\.css\?v=20260721-finance2/);
+  assert.match(index, /app\.js\?v=20260725-a2a1/);
+  assert.match(index, /styles\.css\?v=20260725-a2a1/);
+});
+
+test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
+  const [pageResponse, scriptResponse, styleResponse] = await Promise.all([
+    fetch(`${origin}/`),
+    fetch(`${origin}/app.js`),
+    fetch(`${origin}/styles.css`)
+  ]);
+  const [html, script, css] = await Promise.all([
+    pageResponse.text(),
+    scriptResponse.text(),
+    styleResponse.text()
+  ]);
+  assert.equal(pageResponse.status, 200);
+  assert.equal(scriptResponse.status, 200);
+  assert.equal(styleResponse.status, 200);
+
+  assert.match(html, /id="start-evaluation"[^>]*disabled/);
+  assert.match(html, /id="legacy-intake"/);
+  assert.match(html, /id="v2-intake"[^>]*class="[^"]*hidden/);
+  assert.match(html, />A2A Agent Card</);
+  assert.match(html, />Agent 使用示例</);
+  assert.match(html, /id="v2-example-list"/);
+  assert.match(html, /id="add-v2-example"/);
+  assert.match(html, /id="agent-authorization"[^>]*type="password"/);
+  assert.match(html, /id="participant-token-receipt"[^>]*class="[^"]*hidden/);
+  assert.match(html, /id="participant-token-output"/);
+  assert.doesNotMatch(html, /Skill 使用示例|skillId/);
+
+  for (const level of ['example', 'turn', 'part', 'criterion']) {
+    assert.match(script, new RegExp(`data-a2a-${level}`), level);
+  }
+  for (const partType of ['text', 'data', 'raw', 'url']) {
+    assert.match(script, new RegExp(`value="${partType}"`), partType);
+  }
+  for (const criterionType of ['contains', 'exact', 'json-schema', 'numeric', 'model']) {
+    assert.match(script, new RegExp(`value="${criterionType}"`), criterionType);
+  }
+  assert.match(script, /expectedDeliverable/);
+  assert.match(script, /acceptanceCriteria/);
+  assert.match(script, /constraints/);
+  assert.match(script, /evaluationModeFromHealth\(payload\)/);
+  assert.match(script, /function setBlackBoxMode/);
+  assert.match(script, /function setBlackBoxModeUnavailable/);
+  assert.match(script, /nextAvailableEditorId\(/);
+  assert.match(script, /data-record-kind="v2"/);
+  assert.match(script, /recordActionCopy\(isV2\)/);
+  assert.match(script, /recordActionFailure\(isV2, payload\.error\)/);
+  assert.match(script, /recordActionFailure\(isV2, error\.message\)/);
+
+  assert.match(css, /\.a2a-custody-rail/);
+  assert.match(css, /\.agent-auth-panel/);
+  assert.match(css, /\.participant-token-receipt/);
+  for (const selector of [
+    'a2a-example-list',
+    'a2a-custody-rail',
+    'a2a-turn-list',
+    'a2a-turn'
+  ]) {
+    assert.match(
+      css,
+      new RegExp(`\\.${selector}\\s*\\{[^}]*min-width:0;`),
+      `${selector} must shrink inside the intake card`
+    );
+  }
+  assert.match(css, /\.a2a-part\s*\{[^}]*grid-template-columns:[^;}]*minmax\(0,/);
+  assert.match(css, /\.a2a-criterion\s*\{[^}]*grid-template-columns:[^;}]*minmax\(0,/);
+  assert.match(css, /\.a2a-check input\s*\{[^}]*min-width:16px;[^}]*height:16px;/);
+  assert.match(css, /@media \(max-width: 700px\)/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+});
+
+test('keeps V2 browser secrets memory-only and renders nested projections safely', async () => {
+  const response = await fetch(`${origin}/app.js`);
+  const script = await response.text();
+  assert.equal(response.status, 200);
+
+  assert.match(script, /participantTokens:\s*new Map\(\)/);
+  assert.match(script, /function statusOf\(item\)/);
+  assert.match(script, /function stageOf\(item\)/);
+  assert.match(script, /function progressOf\(item\)/);
+  assert.match(script, /function renderV2Result\(item\)/);
+  assert.match(script, /function renderV2HistoryItem\(item\)/);
+  assert.match(script, /schemaVersion:\s*2,\s*agentCard,\s*agentExamples/);
+  assert.match(script, /participantAccessToken/);
+  assert.match(script, /participant-token-output'\)\.textContent/);
+  assert.match(script, /agent-authorization'\)\.value = ''/);
+  assert.match(script, /authorization:\s*`Bearer \$\{participantToken\}`/);
+  assert.match(script, /'idempotency-key':\s*crypto\.randomUUID\(\)/);
+  assert.doesNotMatch(script, /localStorage|sessionStorage|indexedDB|document\.cookie|console\./);
 });
 
 test('lets the final verdict use the available desktop width', async () => {
@@ -343,6 +472,20 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
   assert.match(readme, /agent-check\.html/);
   assert.match(readme, /Agent Card JSON 技术预检/);
   assert.match(readme, /20 分钟/);
+});
+
+test('documents the opt-in V2 create, one-time participant token, and resume contract', async () => {
+  const readme = await readFile(path.join(process.cwd(), 'README.md'), 'utf8');
+  assert.match(readme, /A2A_BLACK_BOX_V1_ENABLED=true/u);
+  assert.match(readme, /POST \/api\/evaluations\b/u);
+  assert.match(readme, /participantAccessToken/u);
+  assert.match(readme, /POST \/api\/evaluations\/:id\/resume/u);
+  assert.match(readme, /Idempotency-Key/u);
+  assert.match(readme, /only once|one-time/iu);
+  assert.match(readme, /non-idempotent/iu);
+  assert.match(readme, /lost response|response is lost/iu);
+  assert.match(readme, /public Agent[\s\S]*\{\}/iu);
+  assert.match(readme, /fresh Agent authorization/iu);
 });
 
 test('protects diagnostics before parsing its request body', async () => {

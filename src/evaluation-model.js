@@ -15,6 +15,17 @@ export function createEvaluationRecord(snapshot, options) {
     execution: { status: 'queued', stage: 'qualification', progress: 0 },
     governance: { phase: 'waiting_model' },
     submission: snapshot,
+    participantAccess: options.participantAccess,
+    connection: { authorizationRequired: options.authorizationRequired },
+    resumeReceipts: [],
+    runtimeState: {
+      version: 'phase1-runtime/v1',
+      endpointHash: options.endpointHash,
+      agentVersion: options.agentVersion ?? null,
+      serviceBuildId: options.serviceBuildId ?? null,
+      responseFingerprints: [],
+      runIndex: options.runIndex
+    },
     evaluationWindow: { firstRunAt: null, lastRunAt: null },
     qualification: { status: 'pending', attemptRunIds: [] },
     evidenceManifest: { version: '1.0', items: [] },

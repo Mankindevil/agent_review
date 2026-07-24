@@ -1,4 +1,11 @@
-const state = { mode: 'demo', sourceType: 'direct', current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), skillRequestToken: 0 };
+import {
+  evaluationModeFromHealth,
+  nextAvailableEditorId,
+  recordActionCopy,
+  recordActionFailure
+} from './a2a-ui-helpers.js?v=20260725-a2a1';
+
+const state = { mode: 'demo', sourceType: 'direct', blackBoxEnabled: false, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), participantTokens: new Map(), pendingEvaluationId: null, skillRequestToken: 0 };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const DEFAULT_REVIEW_PLAN = [
@@ -53,6 +60,7 @@ async function init() {
   requestAnimationFrame(() => document.body.classList.add('ready'));
   const initialCase = exampleCatalog.factor.cases[0];
   addCase(initialCase.name, initialCase.prompt, initialCase.dataQueries);
+  addV2Example();
   bindEvents();
   loadEvaluationDefaults();
   loadDataSourceHealth();
@@ -69,6 +77,10 @@ function bindEvents() {
   }));
   $$('.source-switch button').forEach((button) => button.addEventListener('click', () => setSourceType(button.dataset.source)));
   $('#add-case').addEventListener('click', () => addCase('', ''));
+  $('#add-v2-example').addEventListener('click', () => addV2Example());
+  $('#copy-participant-token').addEventListener('click', copyParticipantToken);
+  $('#dismiss-participant-token').addEventListener('click', dismissParticipantTokenReceipt);
+  $('#resume-evaluation').addEventListener('click', resumeEvaluation);
   $$('[data-example]').forEach((button) => button.addEventListener('click', () => loadSample(button.dataset.example)));
   $('#resolve-agent').addEventListener('click', resolveRemoteCard);
   $('#agent-url').addEventListener('input', () => {
@@ -84,6 +96,8 @@ function bindEvents() {
   ['dragleave','drop'].forEach((name) => drop.addEventListener(name, (event) => { event.preventDefault(); drop.classList.remove('dragging'); }));
   drop.addEventListener('drop', (event) => readFile(event.dataTransfer.files[0]));
   document.addEventListener('click', (event) => {
+    const a2aAction = event.target.closest('[data-a2a-action]');
+    if (a2aAction) { handleA2AEditorAction(a2aAction); return; }
     const retry = event.target.closest('[data-retry-type]');
     if (retry) { retryStep(retry); return; }
     const deleteControl = event.target.closest('[data-delete-evaluation]');
@@ -100,6 +114,10 @@ function bindEvents() {
     if (action === 'close-history') closeHistory();
     const historyItem = event.target.closest('[data-evaluation-id]');
     if (historyItem) { closeHistory(); openEvaluation(historyItem.dataset.evaluationId); }
+  });
+  document.addEventListener('change', (event) => {
+    if (event.target.matches('.a2a-part-type')) updatePartEditor(event.target.closest('[data-a2a-part]'));
+    if (event.target.matches('.a2a-criterion-type')) updateCriterionEditor(event.target.closest('[data-a2a-criterion]'));
   });
   window.addEventListener('hashchange', () => {
     const match = location.hash.match(/^#\/evaluation\/(.+)$/);
@@ -123,6 +141,251 @@ function addCase(name, prompt, dataQueries) {
 }
 
 function updateCaseNumbers() { $$('.case-row').forEach((row, index) => $('.case-index', row).textContent = String(index + 1).padStart(2, '0')); }
+
+function addV2Example() {
+  const root = $('#v2-example-list');
+  const nextId = nextAvailableEditorId(
+    $$('.a2a-example-id', root).map((input) => input.value.trim()),
+    'example'
+  );
+  const example = document.createElement('article');
+  example.className = 'a2a-custody-rail a2a-example';
+  example.dataset.a2aExample = '';
+  example.innerHTML = `
+    <header class="a2a-node-head">
+      <span class="a2a-rail-index">E01</span>
+      <div><small>EXAMPLE / PUBLIC CONTRACT</small><b>公开使用示例</b></div>
+      <button type="button" data-a2a-action="remove-example" aria-label="删除 Example">×</button>
+    </header>
+    <div class="a2a-node-fields a2a-example-fields">
+      <label>Example ID<input class="a2a-example-id" value="${nextId}" autocomplete="off"></label>
+      <label>Example 名称<input class="a2a-example-name" value="公开研究任务 ${root.children.length + 1}" autocomplete="off"></label>
+      <label class="a2a-field-wide">可选约束（每行一项）<textarea class="a2a-example-constraints" placeholder="例如：不得编造缺失数据"></textarea></label>
+    </div>
+    <div class="a2a-turn-list"></div>
+    <button class="text-button a2a-nested-add" type="button" data-a2a-action="add-turn">＋ 添加 Turn</button>`;
+  root.append(example);
+  addV2Turn(example);
+  updateA2AEditorNumbers();
+}
+
+function addV2Turn(example) {
+  const list = $('.a2a-turn-list', example);
+  const turn = document.createElement('section');
+  turn.className = 'a2a-turn';
+  turn.dataset.a2aTurn = '';
+  turn.innerHTML = `
+    <header class="a2a-node-head">
+      <span class="a2a-rail-index">T01</span>
+      <div><small>TURN / ORDERED REQUEST</small><b>对话轮次</b></div>
+      <button type="button" data-a2a-action="remove-turn" aria-label="删除 Turn">×</button>
+    </header>
+    <div class="a2a-node-fields">
+      <label class="a2a-field-wide">可选预期交付物<input class="a2a-expected-deliverable" placeholder="例如：结构化研究结论与风险提示"></label>
+    </div>
+    <div class="a2a-subhead"><span>PARTS / 输入组成</span><button type="button" data-a2a-action="add-part">＋ Part</button></div>
+    <div class="a2a-part-list"></div>
+    <div class="a2a-subhead"><span>CRITERIA / 可选验收</span><button type="button" data-a2a-action="add-criterion">＋ Criterion</button></div>
+    <div class="a2a-criterion-list"></div>`;
+  list.append(turn);
+  addV2Part(turn);
+  updateA2AEditorNumbers();
+}
+
+function addV2Part(turn) {
+  const list = $('.a2a-part-list', turn);
+  const part = document.createElement('div');
+  part.className = 'a2a-part';
+  part.dataset.a2aPart = '';
+  part.innerHTML = `
+    <span class="a2a-rail-index">P01</span>
+    <label>Part 类型<select class="a2a-part-type">
+      <option value="text">text</option>
+      <option value="data">data</option>
+      <option value="raw">raw</option>
+      <option value="url">url</option>
+    </select></label>
+    <label class="a2a-part-value-field">文本<textarea class="a2a-part-value" placeholder="输入发送给 Agent 的文本"></textarea></label>
+    <label>可选 media type<input class="a2a-part-media-type" placeholder="text/plain"></label>
+    <label>可选 filename<input class="a2a-part-filename" placeholder="brief.txt"></label>
+    <button type="button" data-a2a-action="remove-part" aria-label="删除 Part">×</button>`;
+  list.append(part);
+  updatePartEditor(part);
+  updateA2AEditorNumbers();
+}
+
+function addV2Criterion(turn) {
+  const list = $('.a2a-criterion-list', turn);
+  const nextId = nextAvailableEditorId(
+    $$('.a2a-criterion-id', list).map((input) => input.value.trim()),
+    'criterion'
+  );
+  const criterion = document.createElement('div');
+  criterion.className = 'a2a-criterion';
+  criterion.dataset.a2aCriterion = '';
+  criterion.innerHTML = `
+    <span class="a2a-rail-index">C01</span>
+    <label>Criterion ID<input class="a2a-criterion-id" value="${nextId}"></label>
+    <label>类型<select class="a2a-criterion-type">
+      <option value="contains">contains</option>
+      <option value="exact">exact</option>
+      <option value="json-schema">json-schema</option>
+      <option value="numeric">numeric</option>
+      <option value="model">model</option>
+    </select></label>
+    <label class="a2a-field-wide">说明<input class="a2a-criterion-description" value="验证公开交付物"></label>
+    <label class="a2a-criterion-expected-field a2a-field-wide">预期值<textarea class="a2a-criterion-expected" placeholder="contains 每行一项；其余类型按字段提示"></textarea></label>
+    <label class="a2a-criterion-path-field hidden">JSON path<input class="a2a-criterion-path" placeholder="$.score"></label>
+    <label class="a2a-criterion-tolerance-field hidden">容差<input class="a2a-criterion-tolerance" type="number" min="0" step="any" value="0"></label>
+    <label class="a2a-check"><input class="a2a-criterion-required" type="checkbox" checked> 必须满足</label>
+    <label class="a2a-check a2a-criterion-case-field"><input class="a2a-criterion-case-sensitive" type="checkbox"> 区分大小写</label>
+    <button type="button" data-a2a-action="remove-criterion" aria-label="删除 Criterion">×</button>`;
+  list.append(criterion);
+  updateCriterionEditor(criterion);
+  updateA2AEditorNumbers();
+}
+
+function handleA2AEditorAction(control) {
+  const action = control.dataset.a2aAction;
+  const example = control.closest('[data-a2a-example]');
+  const turn = control.closest('[data-a2a-turn]');
+  if (action === 'add-turn') addV2Turn(example);
+  if (action === 'add-part') addV2Part(turn);
+  if (action === 'add-criterion') addV2Criterion(turn);
+  if (action === 'remove-example' && $$('#v2-example-list > [data-a2a-example]').length > 1) example.remove();
+  if (action === 'remove-turn' && $$('[data-a2a-turn]', example).length > 1) turn.remove();
+  if (action === 'remove-part' && $$('[data-a2a-part]', turn).length > 1) control.closest('[data-a2a-part]').remove();
+  if (action === 'remove-criterion') control.closest('[data-a2a-criterion]').remove();
+  updateA2AEditorNumbers();
+}
+
+function updateA2AEditorNumbers() {
+  $$('#v2-example-list > [data-a2a-example]').forEach((example, exampleIndex) => {
+    $('.a2a-node-head > .a2a-rail-index', example).textContent = `E${String(exampleIndex + 1).padStart(2, '0')}`;
+    $$('[data-a2a-turn]', example).forEach((turn, turnIndex) => {
+      $('.a2a-node-head > .a2a-rail-index', turn).textContent = `T${String(turnIndex + 1).padStart(2, '0')}`;
+      $$('[data-a2a-part]', turn).forEach((part, partIndex) => {
+        $('.a2a-rail-index', part).textContent = `P${String(partIndex + 1).padStart(2, '0')}`;
+      });
+      $$('[data-a2a-criterion]', turn).forEach((criterion, criterionIndex) => {
+        $('.a2a-rail-index', criterion).textContent = `C${String(criterionIndex + 1).padStart(2, '0')}`;
+      });
+    });
+  });
+}
+
+function updatePartEditor(part) {
+  const type = $('.a2a-part-type', part).value;
+  const label = $('.a2a-part-value-field', part);
+  const input = $('.a2a-part-value', part);
+  const copy = {
+    text: ['文本', '输入发送给 Agent 的文本'],
+    data: ['JSON data', '{"symbol":"000300.SH"}'],
+    raw: ['Base64 raw', 'SGVsbG8='],
+    url: ['HTTPS URL', 'https://example.com/research.pdf']
+  }[type];
+  label.childNodes[0].textContent = copy[0];
+  input.placeholder = copy[1];
+  $('.a2a-part-media-type', part).placeholder = type === 'raw' ? '必填，例如 application/pdf' : '可选';
+}
+
+function updateCriterionEditor(criterion) {
+  const type = $('.a2a-criterion-type', criterion).value;
+  $('.a2a-criterion-expected-field', criterion).classList.toggle('hidden', type === 'model');
+  $('.a2a-criterion-path-field', criterion).classList.toggle('hidden', type !== 'numeric');
+  $('.a2a-criterion-tolerance-field', criterion).classList.toggle('hidden', type !== 'numeric');
+  $('.a2a-criterion-case-field', criterion).classList.toggle('hidden', type !== 'contains');
+  const expected = $('.a2a-criterion-expected', criterion);
+  expected.placeholder = type === 'contains'
+    ? '每行一个必须包含的文本'
+    : type === 'json-schema'
+      ? '{"type":"object","required":["answer"]}'
+      : type === 'numeric'
+        ? '预期数值'
+        : '预期完整文本';
+}
+
+function collectAgentExamples() {
+  return $$('#v2-example-list > [data-a2a-example]').map((example, exampleIndex) => {
+    const id = $('.a2a-example-id', example).value.trim();
+    const name = $('.a2a-example-name', example).value.trim();
+    if (!id || !name) throw new Error(`Example ${exampleIndex + 1} 需要 ID 和名称。`);
+    const constraints = linesOf($('.a2a-example-constraints', example).value);
+    const turns = $$('[data-a2a-turn]', example).map((turn, turnIndex) => {
+      const parts = $$('[data-a2a-part]', turn).map((part, partIndex) =>
+        collectA2APart(part, exampleIndex, turnIndex, partIndex));
+      const acceptanceCriteria = $$('[data-a2a-criterion]', turn).map((criterion, criterionIndex) =>
+        collectA2ACriterion(criterion, exampleIndex, turnIndex, criterionIndex));
+      const expectedDeliverable = $('.a2a-expected-deliverable', turn).value.trim();
+      return {
+        input: { parts },
+        ...(expectedDeliverable ? { expectedDeliverable } : {}),
+        ...(acceptanceCriteria.length ? { acceptanceCriteria } : {})
+      };
+    });
+    return { id, name, turns, ...(constraints.length ? { constraints } : {}) };
+  });
+}
+
+function collectA2APart(part, exampleIndex, turnIndex, partIndex) {
+  const path = `Example ${exampleIndex + 1} / Turn ${turnIndex + 1} / Part ${partIndex + 1}`;
+  const type = $('.a2a-part-type', part).value;
+  const value = $('.a2a-part-value', part).value.trim();
+  if (!value) throw new Error(`${path} 不能为空。`);
+  const result = { type };
+  if (type === 'text') result.text = value;
+  if (type === 'data') result.data = parseEditorJson(value, `${path} 的 data`);
+  if (type === 'raw') result.raw = value;
+  if (type === 'url') result.url = value;
+  const mediaType = $('.a2a-part-media-type', part).value.trim();
+  const filename = $('.a2a-part-filename', part).value.trim();
+  if (type === 'raw' && !mediaType) throw new Error(`${path} 的 raw Part 需要 media type。`);
+  if (mediaType) result.mediaType = mediaType;
+  if (filename) result.filename = filename;
+  return result;
+}
+
+function collectA2ACriterion(criterion, exampleIndex, turnIndex, criterionIndex) {
+  const path = `Example ${exampleIndex + 1} / Turn ${turnIndex + 1} / Criterion ${criterionIndex + 1}`;
+  const type = $('.a2a-criterion-type', criterion).value;
+  const id = $('.a2a-criterion-id', criterion).value.trim();
+  const description = $('.a2a-criterion-description', criterion).value.trim();
+  if (!id || !description) throw new Error(`${path} 需要 ID 和说明。`);
+  const result = { id, type, description, required: $('.a2a-criterion-required', criterion).checked };
+  const expected = $('.a2a-criterion-expected', criterion).value.trim();
+  if (type === 'contains') {
+    result.expected = linesOf(expected);
+    if (!result.expected.length) throw new Error(`${path} 至少需要一个预期文本。`);
+    if ($('.a2a-criterion-case-sensitive', criterion).checked) result.caseSensitive = true;
+  }
+  if (type === 'exact') {
+    if (!expected) throw new Error(`${path} 需要预期文本。`);
+    result.expected = expected;
+  }
+  if (type === 'json-schema') result.schema = parseEditorJson(expected, `${path} 的 JSON Schema`);
+  if (type === 'numeric') {
+    const numeric = Number(expected);
+    const tolerance = Number($('.a2a-criterion-tolerance', criterion).value);
+    const numericPath = $('.a2a-criterion-path', criterion).value.trim();
+    if (!numericPath || !Number.isFinite(numeric) || !Number.isFinite(tolerance) || tolerance < 0) {
+      throw new Error(`${path} 需要 path、有限预期数值和非负容差。`);
+    }
+    result.path = numericPath;
+    result.expected = numeric;
+    result.tolerance = tolerance;
+  }
+  return result;
+}
+
+function linesOf(value) {
+  return String(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function parseEditorJson(value, label) {
+  try { return JSON.parse(value); }
+  catch { throw new Error(`${label} 不是合法 JSON。`); }
+}
+
 function loadSample(id = 'contract') {
   const example = exampleCatalog[id];
   setSourceType('direct');
@@ -180,6 +443,7 @@ async function submitEvaluation() {
   } else {
     try { agentCard = state.resolvedCard || await resolveRemoteCard(); } catch { return; }
   }
+  if (state.blackBoxEnabled) return submitV2Evaluation(agentCard);
   const cases = $$('.case-row').map((row, index) => ({
     name: $('.case-name', row).value.trim() || `案例 ${index + 1}`,
     prompt: $('.case-prompt', row).value.trim(),
@@ -201,6 +465,70 @@ async function submitEvaluation() {
   finally { button.disabled = false; $('span', button).textContent = '送进评测舱'; }
 }
 
+async function submitV2Evaluation(agentCard) {
+  let agentExamples;
+  try { agentExamples = collectAgentExamples(); }
+  catch (error) { return showError(error.message); }
+  const authorizationInput = $('#agent-authorization');
+  const agentAuthorization = authorizationInput.value.trim();
+  const request = {
+    schemaVersion: 2, agentCard, agentExamples,
+    ...(agentAuthorization ? { agentAuthorization } : {})
+  };
+  const requestBody = JSON.stringify(request);
+  $('#agent-authorization').value = '';
+  const button = $('#start-evaluation');
+  button.disabled = true;
+  $('span', button).textContent = '正在建立证据链';
+  let created = false;
+  try {
+    const response = await fetch('/api/evaluations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: requestBody
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || '创建 V2 评测失败');
+    if (!payload.participantAccessToken) throw new Error('创建响应缺少 participant access token');
+    created = true;
+    state.participantTokens.set(payload.id, payload.participantAccessToken);
+    state.pendingEvaluationId = payload.id;
+    $('#participant-token-output').textContent = payload.participantAccessToken;
+    $('#participant-token-receipt').classList.remove('hidden');
+    $('span', button).textContent = '评测已创建 · 先保存 token';
+    await loadHistory();
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    if (!created) {
+      button.disabled = false;
+      $('span', button).textContent = '启动 A2A 证据评测';
+    }
+  }
+}
+
+async function copyParticipantToken() {
+  const id = state.pendingEvaluationId;
+  const token = id ? state.participantTokens.get(id) : undefined;
+  const button = $('#copy-participant-token');
+  if (!token) return;
+  try {
+    await navigator.clipboard.writeText(token);
+    button.textContent = '已复制';
+  } catch {
+    button.textContent = '复制失败，请手动选择';
+  }
+}
+
+function dismissParticipantTokenReceipt() {
+  const id = state.pendingEvaluationId;
+  $('#participant-token-output').textContent = '';
+  $('#participant-token-receipt').classList.add('hidden');
+  $('#copy-participant-token').textContent = '复制 token';
+  state.pendingEvaluationId = null;
+  if (id) openEvaluation(id);
+}
+
 async function openEvaluation(id) {
   const token = ++state.openEvaluationToken;
   if (state.eventSource) { state.eventSource.close(); state.eventSource = null; }
@@ -210,7 +538,7 @@ async function openEvaluation(id) {
     const item = await response.json();
     if (token !== state.openEvaluationToken) return;
     showEvaluation(item);
-    if (!isTerminal(item.status)) subscribe(id);
+    if (shouldSubscribe(item)) subscribe(id);
   } catch (error) {
     if (token !== state.openEvaluationToken) return;
     showError(error.message);
@@ -225,7 +553,7 @@ function subscribe(id) {
     if (state.current?.id !== id) return;
     const item = JSON.parse(event.data);
     showEvaluation(item);
-    if (isTerminal(item.status)) {
+    if (!shouldSubscribe(item)) {
       source.close();
       if (state.eventSource === source) state.eventSource = null;
       loadHistory();
@@ -235,7 +563,7 @@ function subscribe(id) {
 
 async function stopEvaluation() {
   const item = state.current;
-  if (!item || isTerminal(item.status) || state.stopping) return;
+  if (!item || isTerminalEvaluation(item) || state.stopping) return;
   const button = $('#stop-evaluation');
   state.stopping = true;
   button.disabled = true;
@@ -249,7 +577,7 @@ async function stopEvaluation() {
     loadHistory();
   } catch (error) {
     $('span', button).textContent = error.message;
-    setTimeout(() => { if (!isTerminal(state.current?.status)) $('span', button).textContent = '停止本次评测'; }, 2200);
+    setTimeout(() => { if (!isTerminalEvaluation(state.current)) $('span', button).textContent = '停止本次评测'; }, 2200);
   } finally {
     state.stopping = false;
     button.disabled = false;
@@ -258,7 +586,7 @@ async function stopEvaluation() {
 
 async function retryStep(button) {
   const item = state.current;
-  if (!item || !isTerminal(item.status) || button.disabled) return;
+  if (!item || item.schemaVersion === 2 || !isTerminal(item.status) || button.disabled) return;
   const original = button.innerHTML;
   $$('[data-retry-type]').forEach((control) => { control.disabled = true; });
   button.innerHTML = '<i>↻</i> 正在派发';
@@ -284,37 +612,47 @@ async function retryStep(button) {
 
 function showEvaluation(item) {
   const changedEvaluation = state.current?.id !== item.id;
-  const changedStage = state.lastStage !== item.stage;
+  const stage = stageOf(item);
+  const status = statusOf(item);
+  const progress = progressOf(item);
+  const isV2 = item.schemaVersion === 2;
+  const changedStage = state.lastStage !== stage;
   state.current = item;
-  state.lastStage = item.stage;
+  state.lastStage = stage;
   if (location.hash !== `#/evaluation/${item.id}`) history.replaceState(null, '', `#/evaluation/${item.id}`);
   $('#landing-view').classList.add('hidden'); $('#evaluation-view').classList.remove('hidden');
   $('#run-id').textContent = `RUN / ${item.id.toUpperCase()}`;
-  $('#agent-name').textContent = item.agentCard.name;
-  $('#agent-description').textContent = item.agentCard.description;
-  const modeLabel = item.overallMode === 'live' ? 'LIVE / 全链路真实' : item.mode === 'live' ? 'MIXED / Agent 实调' : 'DEMO / 演示模拟';
-  $('#run-mode').textContent = `${modeLabel} · SEED ${item.seed ?? 'LEGACY'}`;
-  $('#current-stage').textContent = item.stage;
-  $('#latest-log').textContent = item.logs?.at(-1)?.text || '等待评测信号';
-  $('#progress-number').textContent = item.progress;
-  $('#pulse-progress').style.height = `${item.progress}%`;
-  $('#pulse-dot').style.top = `calc(${Math.min(item.progress, 96)}% - 2px)`;
-  $('#live-deck').classList.toggle('running', ['running','retrying'].includes(item.status));
+  $('#agent-name').textContent = isV2 ? 'A2A 证据链评测' : item.agentCard.name;
+  $('#agent-description').textContent = isV2
+    ? `公开黑盒能力基础 · ${item.archivedAt ? '已归档，证据仍可查阅' : '仅展示可公开投影'}`
+    : item.agentCard.description;
+  const modeLabel = isV2 ? 'V2 / BLACK-BOX' : item.overallMode === 'live' ? 'LIVE / 全链路真实' : item.mode === 'live' ? 'MIXED / Agent 实调' : 'DEMO / 演示模拟';
+  $('#run-mode').textContent = isV2 ? modeLabel : `${modeLabel} · SEED ${item.seed ?? 'LEGACY'}`;
+  $('#current-stage').textContent = stage || status || '等待评测舱';
+  $('#latest-log').textContent = isV2 ? v2StatusCopy(item) : item.logs?.at(-1)?.text || '等待评测信号';
+  $('#progress-number').textContent = progress;
+  $('#pulse-progress').style.height = `${progress}%`;
+  $('#pulse-dot').style.top = `calc(${Math.min(progress, 96)}% - 2px)`;
+  $('#live-deck').classList.toggle('running', ['running','retrying'].includes(status));
   const stopButton = $('#stop-evaluation');
-  stopButton.classList.toggle('hidden', !['queued','running','retrying'].includes(item.status));
+  stopButton.classList.toggle('hidden', !['queued','running','retrying','credentials-required','interrupted'].includes(status));
   stopButton.disabled = state.stopping;
   if (!state.stopping) $('span', stopButton).textContent = '停止本次评测';
   if (changedStage) {
     $('.stage-copy').classList.remove('flash');
     requestAnimationFrame(() => $('.stage-copy').classList.add('flash'));
   }
-  $$('.stage-list li').forEach((li) => li.classList.toggle('done', item.progress >= Number(li.dataset.threshold)));
-  renderLogs(item.logs || []);
+  $('.stage-list').classList.toggle('hidden', isV2);
+  $('.telemetry-panel').classList.toggle('hidden', isV2);
+  $$('.stage-list li').forEach((li) => li.classList.toggle('done', progress >= Number(li.dataset.threshold)));
+  if (!isV2) renderLogs(item.logs || []);
+  renderResumePanel(item);
   const revealingVerdict = renderResult(item);
   if (changedEvaluation && !revealingVerdict) scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 function renderResult(item) {
+  if (item.schemaVersion === 2) return renderV2Result(item);
   const root = $('#result-content');
   if (item.status !== 'completed') {
     state.verdictRevealToken += 1;
@@ -358,6 +696,97 @@ function renderResult(item) {
   `;
   revealVerdictInView(root, item.id);
   return true;
+}
+
+function renderV2Result(item) {
+  const root = $('#result-content');
+  const qualification = item.qualification || {};
+  const objective = item.objectiveCapability || {};
+  const status = statusOf(item);
+  const evidenceCount = item.evidenceManifest?.items?.length || 0;
+  const objectiveReady = Number.isFinite(objective.score);
+  const waitingModel = status === 'completed' && qualification.status === 'eligible';
+  const ineligible = status === 'completed' && qualification.status === 'ineligible';
+  root.classList.remove('streaming', 'reveal', 'verdict-pending');
+  root.innerHTML = `
+    <section class="v2-docket-result">
+      <header>
+        <div><small>CHAIN OF CUSTODY / PUBLIC PROJECTION</small><h3>${item.archivedAt ? '证据卷宗已归档' : '黑盒证据卷宗'}</h3></div>
+        <span>${escapeHtml(status || 'queued')}</span>
+      </header>
+      <dl class="v2-docket-grid">
+        <div><dt>Evaluation ID</dt><dd>${escapeHtml(item.id)}</dd></div>
+        <div><dt>Qualification</dt><dd>${escapeHtml(qualification.status || 'pending')}</dd><small>${escapeHtml(qualification.reason || '等待可调用性证明')}</small></div>
+        <div><dt>Execution</dt><dd>${escapeHtml(stageOf(item) || status || 'queued')}</dd><small>${progressOf(item)}% committed</small></div>
+        <div><dt>Evidence manifest</dt><dd>${evidenceCount}</dd><small>仅公开承诺与脱敏摘要</small></div>
+        ${objectiveReady ? `<div><dt>Objective capability</dt><dd>${escapeHtml(objective.score)}</dd><small>coverage ${escapeHtml(objective.coverage ?? '—')} · ${objective.provisional ? 'provisional' : 'committed'}</small></div>` : ''}
+      </dl>
+      ${waitingModel ? '<p class="v2-state-notice waiting">等待模型评审 · Phase 1 不生成最终评分、置信度或副本对战结果。</p>' : ''}
+      ${ineligible ? `<p class="v2-state-notice ineligible">不具备正式评测资格 · ${escapeHtml(qualification.reason || 'endpoint-not-callable')}</p>` : ''}
+      ${['credentials-required','interrupted'].includes(status) ? '<p class="v2-state-notice paused">证据采集已暂停，请使用 participant access token 恢复。</p>' : ''}
+      ${status === 'cancelled' ? '<p class="v2-state-notice cancelled">本次证据采集已取消；已提交的证据承诺保持不变。</p>' : ''}
+    </section>`;
+  return false;
+}
+
+function v2StatusCopy(item) {
+  const status = statusOf(item);
+  if (item.archivedAt) return '卷宗已软归档；已提交的证据清单仍可查阅。';
+  if (status === 'credentials-required') return '进程恢复需要新的 Agent connection authorization。';
+  if (status === 'interrupted') return '公开端点采集已中断，可由 participant 恢复。';
+  if (status === 'cancelled') return '证据采集已取消。';
+  if (item.qualification?.status === 'ineligible') return `资格检查未通过：${item.qualification.reason || 'endpoint-not-callable'}`;
+  if (status === 'completed') return 'Phase 1 客观能力已提交，等待模型评审。';
+  return '正在提交可验证的 A2A 证据与清单承诺。';
+}
+
+function renderResumePanel(item) {
+  const panel = $('#v2-resume-panel');
+  const resumable = item.schemaVersion === 2 && ['credentials-required','interrupted'].includes(statusOf(item)) && !item.archivedAt;
+  panel.classList.toggle('hidden', !resumable);
+  if (!resumable) {
+    $('#resume-participant-token').value = '';
+    $('#resume-agent-authorization').value = '';
+    $('#resume-error').textContent = '';
+  }
+}
+
+async function resumeEvaluation() {
+  const item = state.current;
+  if (!item || item.schemaVersion !== 2 || !['credentials-required','interrupted'].includes(statusOf(item))) return;
+  const participantInput = $('#resume-participant-token');
+  const authorizationInput = $('#resume-agent-authorization');
+  const participantToken = state.participantTokens.get(item.id) || participantInput.value.trim();
+  const agentAuthorization = authorizationInput.value.trim();
+  if (!participantToken) {
+    $('#resume-error').textContent = '请输入保存的 participant access token。';
+    return;
+  }
+  const body = agentAuthorization ? { agentAuthorization } : {};
+  participantInput.value = '';
+  authorizationInput.value = '';
+  const button = $('#resume-evaluation');
+  button.disabled = true;
+  $('#resume-error').textContent = '';
+  try {
+    const response = await fetch(`/api/evaluations/${item.id}/resume`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${participantToken}`,
+        'idempotency-key': crypto.randomUUID()
+      },
+      body: JSON.stringify(body)
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || '恢复评测失败');
+    state.participantTokens.set(item.id, participantToken);
+    await openEvaluation(item.id);
+  } catch (error) {
+    $('#resume-error').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderPartialResults(item) {
@@ -697,10 +1126,36 @@ async function loadEvaluationDefaults() {
   try {
     const response = await fetch('/api/health');
     const payload = await response.json();
+    if (!response.ok) throw new Error('health unavailable');
+    const mode = evaluationModeFromHealth(payload);
+    if (!mode.resolved) throw new Error('health capability unavailable');
     const input = $('#evaluation-seed');
     if (!input.dataset.edited && Number.isInteger(payload.evaluationSeed)) input.value = payload.evaluationSeed;
     input.title = `服务默认 seed：${payload.evaluationSeed} · temperature：${payload.modelTemperature}`;
-  } catch { $('#evaluation-seed').placeholder = '20260720'; }
+    setBlackBoxMode(mode.enabled);
+  } catch {
+    $('#evaluation-seed').placeholder = '20260720';
+    setBlackBoxModeUnavailable();
+  }
+}
+
+function setBlackBoxMode(enabled) {
+  state.blackBoxEnabled = enabled;
+  state.healthResolved = true;
+  $$('.legacy-only').forEach((element) => element.classList.toggle('hidden', enabled));
+  $('#v2-card-heading').classList.toggle('hidden', !enabled);
+  $('#v2-intake').classList.toggle('hidden', !enabled);
+  const button = $('#start-evaluation');
+  button.disabled = false;
+  $('span', button).textContent = enabled ? '启动 A2A 证据评测' : '送进研究终审台';
+}
+
+function setBlackBoxModeUnavailable() {
+  state.healthResolved = false;
+  const button = $('#start-evaluation');
+  button.disabled = true;
+  $('span', button).textContent = '无法确认评测模式';
+  showError('无法从服务确认评测模式，请稍后刷新重试。');
 }
 
 function animateCounters(root) {
@@ -801,35 +1256,52 @@ async function loadHistory() {
     if (!response.ok) throw new Error(items.error || '历史记录读取失败');
     if (token !== state.historyLoadToken) return;
     $('#history-count').textContent = items.length;
-    $('#history-list').innerHTML = items.length ? items.map(item=>{ const tier = item.tier ? normalizeTier(item.tier) : null; const canDelete = isTerminal(item.status); return `<article class="history-item"><button class="history-open" type="button" data-evaluation-id="${item.id}"><header><span>${formatTime(item.createdAt)}</span><span>${item.progress}%</span></header><h3>${escapeHtml(item.name)}</h3><p>${tier?`最终锐评：<span class="history-tier">${escapeHtml(tier.label)}</span> · 实战 ${item.score} 分`:escapeHtml(item.status)}</p></button><button class="history-delete" type="button" data-delete-evaluation="${item.id}" aria-label="${canDelete ? '删除' : '运行中，暂不可删除'} ${escapeHtml(item.name)} 的评测记录" title="${canDelete ? '删除这条战绩' : '请先停止本次评测'}"${canDelete ? '' : ' disabled'}><i aria-hidden="true">×</i><span>删除</span></button></article>`; }).join('') : '<p class="history-empty">还没有战绩。第一个被公开处刑的 Agent 会是谁？</p>';
+    $('#history-list').innerHTML = items.length
+      ? items.map((item) => item.schemaVersion === 2 ? renderV2HistoryItem(item) : renderLegacyHistoryItem(item)).join('')
+      : '<p class="history-empty">还没有战绩。第一个被公开处刑的 Agent 会是谁？</p>';
   } catch { if (token === state.historyLoadToken) $('#history-list').innerHTML = '<p>历史记录暂时读取失败。</p>'; }
+}
+
+function renderLegacyHistoryItem(item) {
+  const tier = item.tier ? normalizeTier(item.tier) : null;
+  const canDelete = isTerminal(item.status);
+  return `<article class="history-item"><button class="history-open" type="button" data-evaluation-id="${item.id}"><header><span>${formatTime(item.createdAt)}</span><span>${item.progress}%</span></header><h3>${escapeHtml(item.name)}</h3><p>${tier?`最终锐评：<span class="history-tier">${escapeHtml(tier.label)}</span> · 实战 ${item.score} 分`:escapeHtml(item.status)}</p></button><button class="history-delete" type="button" data-delete-evaluation="${item.id}" aria-label="${canDelete ? '删除' : '运行中，暂不可删除'} ${escapeHtml(item.name)} 的评测记录" title="${canDelete ? '删除这条战绩' : '请先停止本次评测'}"${canDelete ? '' : ' disabled'}><i aria-hidden="true">×</i><span>删除</span></button></article>`;
+}
+
+function renderV2HistoryItem(item) {
+  const archived = Boolean(item.archivedAt);
+  const label = archived ? '已归档' : statusOf(item);
+  return `<article class="history-item history-item-v2"><button class="history-open" type="button" data-evaluation-id="${item.id}"><header><span>${formatTime(item.createdAt)}</span><span>${progressOf(item)}%</span></header><h3>A2A 证据卷宗</h3><p>${escapeHtml(label)} · ${escapeHtml(stageOf(item) || 'qualification')} · ${item.evidenceManifest?.items?.length || 0} evidence</p></button><button class="history-delete" type="button" data-delete-evaluation="${item.id}" data-record-kind="v2" aria-label="归档 ${escapeHtml(item.id)} 的评测记录" title="软归档；证据仍可查阅"${archived ? ' disabled' : ''}><i aria-hidden="true">×</i><span>归档</span></button></article>`;
 }
 
 async function deleteEvaluation(button) {
   const id = button.dataset.deleteEvaluation;
   if (!id || button.disabled) return;
+  const isV2 = button.dataset.recordKind === 'v2';
+  const copy = recordActionCopy(isV2);
   if (button.dataset.confirm !== 'true') {
     button.dataset.confirm = 'true';
     button.classList.add('confirming');
-    $('span', button).textContent = '再点一次确认';
+    $('span', button).textContent = copy.confirm;
     setTimeout(() => {
       if (!button.isConnected || button.disabled) return;
       delete button.dataset.confirm;
       button.classList.remove('confirming');
-      $('span', button).textContent = '删除';
+      $('span', button).textContent = copy.idle;
     }, 3500);
     return;
   }
   button.disabled = true;
   button.classList.add('deleting');
-  $('span', button).textContent = '删除中';
+  $('span', button).textContent = copy.pending;
   try {
     const response = await fetch(`/api/evaluations/${id}`, { method: 'DELETE' });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || '删除失败');
+    if (!response.ok) throw new Error(recordActionFailure(isV2, payload.error));
     if (state.current?.id === id) {
       closeHistory();
-      showLanding();
+      if (state.current.schemaVersion === 2) await openEvaluation(id);
+      else showLanding();
     }
     await loadHistory();
   } catch (error) {
@@ -837,8 +1309,8 @@ async function deleteEvaluation(button) {
     button.classList.remove('deleting');
     button.classList.remove('confirming');
     delete button.dataset.confirm;
-    $('span', button).textContent = error.message;
-    setTimeout(() => { if (button.isConnected) $('span', button).textContent = '删除'; }, 2400);
+    $('span', button).textContent = recordActionFailure(isV2, error.message);
+    setTimeout(() => { if (button.isConnected) $('span', button).textContent = copy.idle; }, 2400);
   }
 }
 
@@ -846,6 +1318,18 @@ function showLanding() { if(state.eventSource)state.eventSource.close(); state.e
 function openHistory() { $('#history-drawer').classList.add('open'); $('#drawer-backdrop').classList.add('open'); $('#history-drawer').setAttribute('aria-hidden','false'); loadHistory(); }
 function closeHistory() { $('#history-drawer').classList.remove('open'); $('#drawer-backdrop').classList.remove('open'); $('#history-drawer').setAttribute('aria-hidden','true'); }
 function showError(text) { $('#form-error').textContent = text; }
+function statusOf(item) { return item?.schemaVersion === 2 ? item.execution?.status : item?.status; }
+function stageOf(item) { return item?.schemaVersion === 2 ? item.execution?.stage : item?.stage; }
+function progressOf(item) {
+  const progress = item?.schemaVersion === 2 ? item.execution?.progress : item?.progress;
+  return Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0;
+}
+function shouldSubscribe(item) {
+  return item?.schemaVersion === 2 ? ['queued','running'].includes(statusOf(item)) : !isTerminal(statusOf(item));
+}
+function isTerminalEvaluation(item) {
+  return item?.schemaVersion === 2 ? ['completed','cancelled'].includes(statusOf(item)) : isTerminal(statusOf(item));
+}
 function isTerminal(status) { return ['completed','failed','cancelled','interrupted'].includes(status); }
 function normalizeTier(tier = {}) {
   if (tier.code === 'OVERKILL' || tier.code === 'FLOP' || tier.label === '大炮打蚊子' || tier.label === '拉完了') return { ...tier, code: 'FLOP', label: '拉', stamp: '拉' };

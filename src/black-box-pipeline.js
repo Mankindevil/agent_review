@@ -1,0 +1,1736 @@
+import {
+  createHash,
+  hkdfSync,
+  randomUUID
+} from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { decodeEvidenceEncryptionKey } from './evidence-vault.js';
+import {
+  canonicalJson,
+  createEvidenceManifestItem,
+  createEvidenceRecord
+} from './evidence.js';
+import { executeA2ATurn } from './a2a-executor.js';
+import { evaluateAcceptance as evaluateAcceptanceDefault } from './acceptance.js';
+import {
+  aggregateObjectiveCapability as aggregateObjectiveCapabilityDefault,
+  buildObjectiveMetrics as buildObjectiveMetricsDefault
+} from './objective-scoring.js';
+import { validateAgentCard } from './a2a.js';
+import { RUBRIC_V1 } from './rubric.js';
+
+const MODULE_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..'
+);
+const RESUME_MAC_KEYS = new WeakMap();
+const EVIDENCE_ENCRYPTION_KEYS = new WeakMap();
+const RUN_EVIDENCE_KINDS = Object.freeze(new Map([
+  ['protocol-request', 'B'],
+  ['protocol-response', 'B'],
+  ['platform-timing', 'A'],
+  ['transport-fact', 'A'],
+  ['agent-output', 'C']
+]));
+
+export const PHASE1_EXECUTION_POLICY = deepFreeze({
+  version: 'phase1-public-examples/v1',
+  repeatCount: 3,
+  targetMs: 15_000,
+  timeoutMs: 45_000,
+  streaming: false,
+  platformReplacementLimit: 1,
+  qualificationRetryDelaysMs: [250, 1000]
+});
+
+export function readBlackBoxRuntimeConfig(env = {}, options = {}) {
+  const enabled = env.A2A_BLACK_BOX_V1_ENABLED === 'true';
+  if (!enabled) {
+    return Object.freeze({
+      enabled: false,
+      evidenceRoot: null,
+      resumeMacKey: null
+    });
+  }
+
+  const decoded = decodeEvidenceEncryptionKey(env.EVIDENCE_ENCRYPTION_KEY);
+  const evidenceEncryptionKey = Buffer.from(decoded);
+  let resumeMacKey;
+  try {
+    resumeMacKey = Buffer.from(hkdfSync(
+      'sha256',
+      decoded,
+      Buffer.alloc(0),
+      'agent-roast/resume-idempotency/v1',
+      32
+    ));
+  } finally {
+    decoded.fill(0);
+  }
+  const serverRoot = path.resolve(options.serverRoot || MODULE_ROOT);
+  const evidenceRoot = path.resolve(
+    serverRoot,
+    env.EVIDENCE_ROOT || 'data/evidence'
+  );
+  const config = Object.freeze({
+    enabled: true,
+    evidenceRoot
+  });
+  EVIDENCE_ENCRYPTION_KEYS.set(config, Buffer.from(evidenceEncryptionKey));
+  RESUME_MAC_KEYS.set(config, Buffer.from(resumeMacKey));
+  evidenceEncryptionKey.fill(0);
+  resumeMacKey.fill(0);
+  return config;
+}
+
+export function copyEvidenceEncryptionKey(config) {
+  if (!config?.enabled) return null;
+  const key = EVIDENCE_ENCRYPTION_KEYS.get(config);
+  if (!key) throw new TypeError('invalid black-box runtime configuration');
+  return Buffer.from(key);
+}
+
+export function copyResumeMacKey(config) {
+  if (!config?.enabled) return null;
+  const key = RESUME_MAC_KEYS.get(config);
+  if (!key) throw new TypeError('invalid black-box runtime configuration');
+  return Buffer.from(key);
+}
+
+export function compileBlackBoxRunPlan(snapshot, options = {}) {
+  const policy = options.policy || PHASE1_EXECUTION_POLICY;
+  const createId = options.createId || defaultId;
+  const examples = snapshot.agentExamples.value;
+  const timingPolicyHash = hashCanonical({
+    targetMs: policy.targetMs,
+    timeoutMs: policy.timeoutMs,
+    streaming: policy.streaming,
+    platformReplacementLimit: policy.platformReplacementLimit,
+    repeatCount: policy.repeatCount
+  });
+  const protocolConfigHash = hashCanonical({
+    binding: snapshot.selectedInterface.binding,
+    version: snapshot.selectedInterface.version,
+    endpointHash: hashText(snapshot.selectedInterface.url)
+  });
+  const cells = [];
+  for (const [exampleIndex, example] of examples.entries()) {
+    const testId = `test_${hashCanonical({
+      submissionExamplesHash: snapshot.agentExamples.sha256,
+      exampleIndex,
+      submittedExampleId: example.id
+    }).slice(0, 32)}`;
+    const requiredExecutable = countRequiredExecutable(example);
+    for (let repeatIndex = 0; repeatIndex < policy.repeatCount; repeatIndex += 1) {
+      const identity = {
+        testId,
+        repeatIndex,
+        inputHash: hashCanonical(example.turns.map((turn) => turn.input)),
+        testContractHash: hashCanonical(example),
+        timingPolicyHash,
+        seed: null,
+        protocolConfigHash,
+        rubricVersion: RUBRIC_V1.version
+      };
+      cells.push({
+        cellId: `cell_${hashCanonical(identity).slice(0, 32)}`,
+        exampleIndex,
+        requiredExecutable,
+        policy: {
+          version: policy.version,
+          repeatCount: policy.repeatCount,
+          targetMs: policy.targetMs,
+          timeoutMs: policy.timeoutMs,
+          streaming: policy.streaming,
+          platformReplacementLimit: policy.platformReplacementLimit
+        },
+        identity,
+        status: 'planned',
+        selectedAttemptIndex: null,
+        attempts: [],
+        turns: example.turns.map((_turn, turnIndex) => ({
+          turnIndex,
+          runId: createId('run'),
+          status: 'planned'
+        }))
+      });
+    }
+  }
+  return cells;
+}
+
+export async function runBlackBoxFoundation(evaluation, services = {}) {
+  const store = requiredService(services.store, 'store');
+  const events = services.events;
+  const credentialVault = requiredService(
+    services.credentialVault,
+    'credentialVault'
+  );
+  const executeTurn = services.executeTurn || executeA2ATurn;
+  const evaluateAcceptance =
+    services.evaluateAcceptance || evaluateAcceptanceDefault;
+  const buildObjectiveMetrics =
+    services.buildObjectiveMetrics || buildObjectiveMetricsDefault;
+  const aggregateObjectiveCapability =
+    services.aggregateObjectiveCapability || aggregateObjectiveCapabilityDefault;
+  const rubric = services.rubric || RUBRIC_V1;
+  const policy = services.policy || PHASE1_EXECUTION_POLICY;
+  const now = services.now || (() => new Date().toISOString());
+  const clock = services.clock || (() => Date.now());
+  const sleep = services.sleep || abortableSleep;
+  const createId = services.createId || defaultId;
+  let context = null;
+
+  try {
+    const evidenceVault = requiredService(
+      services.evidenceVaultFactory,
+      'evidenceVaultFactory'
+    )(evaluation.id);
+    const authorization = credentialVault.get(evaluation.id);
+    context = {
+      store,
+      events,
+      evidenceVault,
+      evaluationId: evaluation.id,
+      now,
+      clock,
+      policy,
+      executeTurn,
+      evaluateAcceptance,
+      attributeFormalRun: services.attributeFormalRun,
+      snapshotRequest: services.snapshotRequest,
+      signal: services.signal,
+      createId,
+      authorization,
+      worker: true
+    };
+    let current = store.get(evaluation.id);
+    await persistSubmissionProvenance(current, context);
+    current = store.get(evaluation.id);
+
+    const firstTurn = current.submission.agentExamples.value[0].turns[0];
+    let qualified = current.qualification.status === 'eligible';
+    if (!qualified) {
+      await mutateCurrent(context, (record) => ({
+        ...record,
+        execution: {
+          ...record.execution,
+          status: 'running',
+          stage: 'qualification',
+          progress: 5,
+          startedAt: record.execution.startedAt || now()
+        }
+      }));
+    }
+    const qualificationStart =
+      current.qualification.attemptRunIds.length;
+    for (
+      let attemptIndex = qualificationStart;
+      !qualified && attemptIndex < 3;
+      attemptIndex += 1
+    ) {
+      const runId = createId('run_qualification');
+      const snapshotPersistence = createSnapshotPersistence(context, {
+        runId,
+        testId: 'test_qualification'
+      });
+      await markFirstDispatch(context);
+      const run = await executeTurn({
+        card: current.submission.agentCard.value,
+        input: firstTurn.input,
+        streaming: policy.streaming,
+        timeoutMs: policy.timeoutMs,
+        authorization,
+        signal: services.signal,
+        runId,
+        testId: 'test_qualification',
+        requestId: createId('request'),
+        persistSnapshot: snapshotPersistence.persistSnapshot,
+        ...(context.snapshotRequest
+          ? { snapshotRequest: context.snapshotRequest }
+          : {})
+      });
+      const evidence = await persistRunEvidence(run, {
+        ...context,
+        testId: 'test_qualification'
+      });
+      mergeEvidenceBundle(evidence, snapshotPersistence);
+      qualified = isVersionValidObservation(run);
+      await mutateCurrent(context, (record) => {
+        const attemptRunIds = [
+          ...record.qualification.attemptRunIds,
+          runId
+        ];
+        return {
+          ...record,
+          qualification: qualified
+            ? {
+                status: 'eligible',
+                reason: 'version-valid-a2a-response',
+                attemptRunIds,
+                selectedInterface: publicSelectedInterface(record.submission),
+                completedAt: now()
+              }
+            : {
+                ...record.qualification,
+                attemptRunIds
+              },
+          evaluationWindow: {
+            ...record.evaluationWindow,
+            lastRunAt: now()
+          },
+          evidenceManifest: appendManifest(
+            record.evidenceManifest,
+            evidence.manifestItems
+          ),
+          runtimeState: appendFingerprint(record.runtimeState, run),
+          auditEvents: qualified
+            ? appendAudit(record.auditEvents, {
+                id: createId('audit'),
+                type: 'qualification-eligible',
+                occurredAt: now(),
+                summary: 'A version-valid A2A response established callability'
+              })
+            : record.auditEvents
+        };
+      });
+      if (qualified) {
+        break;
+      }
+      if (attemptIndex < 2) {
+        await sleep(policy.qualificationRetryDelaysMs[attemptIndex], services.signal);
+      }
+    }
+
+    if (!qualified) {
+      await mutateCurrent(context, (record) => ({
+        ...record,
+        qualification: {
+          status: 'ineligible',
+          reason: 'endpoint-not-callable',
+          attemptRunIds: record.qualification.attemptRunIds,
+          selectedInterface: publicSelectedInterface(record.submission),
+          completedAt: now()
+        },
+        execution: {
+          status: 'completed',
+          stage: 'ineligible',
+          progress: 100,
+          completedAt: now()
+        },
+        objectiveCapability: {
+          status: 'not-applicable',
+          score: null,
+          coverage: 0,
+          provisional: true,
+          metrics: []
+        },
+        absoluteReview: { status: 'not-applicable' },
+        replicaArena: { status: 'disabled' },
+        resultV2: null,
+        auditEvents: appendAudit(record.auditEvents, {
+          id: createId('audit'),
+          type: 'qualification-ineligible',
+          occurredAt: now(),
+          summary: 'The endpoint did not produce a version-valid A2A response'
+        })
+      }));
+      return store.get(evaluation.id);
+    }
+
+    await mutateCurrent(context, (record) => ({
+      ...record,
+      execution: {
+        ...record.execution,
+        status: 'running',
+        stage: 'public-examples',
+        progress: 20
+      }
+    }));
+    await executeFormalCells(context);
+
+    current = store.get(evaluation.id);
+    const objectiveInput = await buildObjectiveInput(
+      current,
+      evidenceVault
+    );
+    const objectiveMetrics = buildObjectiveMetrics(objectiveInput);
+    const objectiveCapability =
+      aggregateObjectiveCapability(objectiveMetrics, rubric);
+    await mutateCurrent(context, (record) => ({
+      ...record,
+      execution: {
+        status: 'completed',
+        stage: 'waiting-model',
+        progress: 100,
+        completedAt: now()
+      },
+      governance: { ...record.governance, phase: 'waiting_model' },
+      objectiveCapability,
+      absoluteReview: {
+        status: 'pending-model-review',
+        confidence: {
+          status: 'pending-model-review',
+          value: null
+        }
+      },
+      replicaArena: { status: 'disabled' },
+      resultV2: {
+        absolute: { status: 'pending-model-review' },
+        replica: { status: 'disabled' },
+        rating: {
+          status: 'pending-model-and-human',
+          code: null,
+          label: null
+        }
+      },
+      auditEvents: appendAudit(record.auditEvents, {
+        id: createId('audit'),
+        type: 'phase1-completed',
+        occurredAt: now(),
+        summary: 'Phase 1 objective capability calculation completed'
+      })
+    }));
+    return store.get(evaluation.id);
+  } catch (error) {
+    if (context) await interruptEvaluation(context);
+    throw error;
+  } finally {
+    credentialVault.delete(evaluation.id);
+  }
+}
+
+async function executeFormalCells(context) {
+  const initial = context.store.get(context.evaluationId);
+  const cells = initial.runtimeState.runIndex;
+  for (const plannedCell of cells) {
+    while (true) {
+      const current = context.store.get(context.evaluationId);
+      const cell = findCell(current, plannedCell.cellId);
+      if (!['planned', 'running'].includes(cell.status)) break;
+      const example =
+        current.submission.agentExamples.value[cell.exampleIndex];
+      let attempt = cell.status === 'running'
+        ? cell.attempts.findLast((item) => item.attribution === null)
+        : null;
+      if (cell.status === 'running' && !attempt) break;
+      if (!attempt) {
+        const lastAttempt = cell.attempts.at(-1);
+        if (lastAttempt && lastAttempt.attribution !== 'platform') break;
+        const attemptIndex = lastAttempt ? lastAttempt.attemptIndex + 1 : 0;
+        if (attemptIndex > context.policy.platformReplacementLimit) break;
+        attempt = createFormalAttempt(cell, attemptIndex, context);
+        await mutateCurrent(context, (record) =>
+          updateCell(record, cell.cellId, {
+            status: 'running',
+            attempts: [...findCell(record, cell.cellId).attempts, attempt]
+          }));
+      }
+      const attemptIndex = attempt.attemptIndex;
+      const plannedTurns = attempt.turns.filter(
+        (turn) => turn.status === 'planned'
+      );
+      const committedDurationMs = committedActiveElapsedMs(attempt);
+      let activeElapsedMs = committedDurationMs;
+      const cellStartedAt = context.clock();
+      const deadline = cellStartedAt +
+        Math.max(0, context.policy.timeoutMs - committedDurationMs);
+      const priorCompleted = attempt.turns
+        .filter((turn) => turn.status === 'completed')
+        .at(-1);
+      let returnedContextId = priorCompleted?.contextId || undefined;
+      let continuationTaskId =
+        priorCompleted?.continuationTaskId || undefined;
+      let terminalSuccess = priorCompleted
+        ? isCommittedTerminalSuccess(priorCompleted)
+        : true;
+      let attribution = priorCompleted?.attribution ||
+        attributionForCommittedTurn(priorCompleted);
+      let cellTimedOut = committedDurationMs >= context.policy.timeoutMs;
+      for (const plannedTurn of plannedTurns) {
+        const remainingMs = deadline - context.clock();
+        if (remainingMs <= 0) {
+          cellTimedOut = true;
+          terminalSuccess = false;
+          await skipRemainingTurns(
+            context,
+            cell.cellId,
+            attemptIndex,
+            plannedTurn.turnIndex - 1,
+            example,
+            cell.identity.testId
+          );
+          break;
+        }
+        const sentContextId = returnedContextId || null;
+        const sentTaskId = continuationTaskId || null;
+        await mutateCurrent(context, (record) =>
+          updateAttemptTurn(record, cell.cellId, attemptIndex, plannedTurn.turnIndex, {
+            status: 'dispatched',
+            sentContextId,
+            sentTaskId
+          }));
+        const snapshotPersistence = createSnapshotPersistence(context, {
+          runId: plannedTurn.runId,
+          testId: cell.identity.testId,
+          turnIndex: plannedTurn.turnIndex,
+          repeatIndex: cell.identity.repeatIndex
+        });
+        const run = await context.executeTurn({
+          card: current.submission.agentCard.value,
+          input: example.turns[plannedTurn.turnIndex].input,
+          ...(sentContextId ? { contextId: sentContextId } : {}),
+          ...(sentTaskId ? { taskId: sentTaskId } : {}),
+          streaming: context.policy.streaming,
+          timeoutMs: remainingMs,
+          authorization: context.authorization,
+          signal: context.signal,
+          runId: plannedTurn.runId,
+          testId: cell.identity.testId,
+          turnIndex: plannedTurn.turnIndex,
+          repeatIndex: cell.identity.repeatIndex,
+          persistSnapshot: snapshotPersistence.persistSnapshot,
+          ...(context.snapshotRequest
+            ? { snapshotRequest: context.snapshotRequest }
+            : {})
+        });
+        const evidence = await persistRunEvidence(run, {
+          ...context,
+          testId: cell.identity.testId,
+          turnIndex: plannedTurn.turnIndex,
+          repeatIndex: cell.identity.repeatIndex
+        });
+        mergeEvidenceBundle(evidence, snapshotPersistence);
+        const rawAcceptance = context.evaluateAcceptance(
+          example.turns[plannedTurn.turnIndex].acceptanceCriteria,
+          run.response.currentOutput
+        );
+        const acceptance = safeAcceptance(
+          rawAcceptance,
+          cell.identity.testId,
+          plannedTurn.turnIndex
+        );
+        attribution = await attributeRun(run, context.attributeFormalRun);
+        const succeeded = run.outcome?.status === 'succeeded' &&
+          run.outcome?.lifecycle === 'completed';
+        terminalSuccess = succeeded;
+        const nextContextId = run.response?.normalized?.contextId || null;
+        const nextTaskId = run.response?.normalized?.taskId || null;
+        activeElapsedMs = Math.max(
+          activeElapsedMs,
+          committedDurationMs +
+            Math.max(0, context.clock() - cellStartedAt)
+        );
+        await mutateCurrent(context, (record) => {
+          let next = updateAttemptTurn(
+            record,
+            cell.cellId,
+            attemptIndex,
+            plannedTurn.turnIndex,
+            {
+              status: 'completed',
+              contextId: nextContextId,
+              continuationTaskId:
+                run.outcome?.lifecycle === 'interrupted' ? nextTaskId : null,
+              outcome: run.outcome,
+              timing: run.timing,
+              acceptance,
+              attribution,
+              protocolObservation: protocolObservationFor(run),
+              evidenceIds: evidence.evidenceIds
+            }
+          );
+          next = updateAttempt(next, cell.cellId, attemptIndex, {
+            activeElapsedMs
+          });
+          next = {
+            ...next,
+            evidenceManifest: appendManifest(
+              next.evidenceManifest,
+              evidence.manifestItems
+            ),
+            evaluationWindow: {
+              ...next.evaluationWindow,
+              lastRunAt: context.now()
+            },
+            runtimeState: {
+              ...next.runtimeState,
+              responseFingerprints: appendUnique(
+                next.runtimeState.responseFingerprints,
+                { runId: run.runId, rawHash: run.response.rawHash }
+              )
+            }
+          };
+          return next;
+        });
+        returnedContextId = nextContextId || undefined;
+        continuationTaskId =
+          run.outcome?.lifecycle === 'interrupted' && nextTaskId
+            ? nextTaskId
+            : undefined;
+        if (run.outcome?.status !== 'succeeded' || attribution !== 'agent') {
+          await skipRemainingTurns(
+            context,
+            cell.cellId,
+            attemptIndex,
+            plannedTurn.turnIndex,
+            example,
+            cell.identity.testId
+          );
+          break;
+        }
+      }
+      const cellDurationMs = Math.max(
+        activeElapsedMs,
+        committedDurationMs +
+          Math.max(0, context.clock() - cellStartedAt)
+      );
+      if (cellDurationMs >= context.policy.timeoutMs) {
+        cellTimedOut = true;
+        terminalSuccess = false;
+        attribution = 'agent';
+      }
+      const latest = context.store.get(context.evaluationId);
+      const completedAttempt =
+        findCell(latest, cell.cellId).attempts[attemptIndex];
+      const summarized = summarizeAttempt(
+        completedAttempt,
+        cell.requiredExecutable,
+        example,
+        terminalSuccess,
+        attribution,
+        cellTimedOut,
+        cellDurationMs
+      );
+      const status = attribution === 'agent'
+        ? 'completed'
+        : attribution === 'platform' && attemptIndex <
+            context.policy.platformReplacementLimit
+          ? 'planned'
+          : attribution === 'platform'
+            ? 'unavailable-platform'
+            : 'attribution-pending';
+      await mutateCurrent(context, (record) => {
+        const next = updateAttempt(record, cell.cellId, attemptIndex, summarized);
+        return updateCell(next, cell.cellId, {
+          status,
+          selectedAttemptIndex: attribution === 'agent' ? attemptIndex : null
+        });
+      });
+      if (
+        attribution !== 'platform' ||
+        attemptIndex >= context.policy.platformReplacementLimit
+      ) break;
+    }
+  }
+}
+
+function createFormalAttempt(cell, attemptIndex, context) {
+  return {
+    attemptIndex,
+    kind: attemptIndex === 0 ? 'planned' : 'platform-replacement',
+    sampleRunId: context.createId('sample'),
+    attribution: null,
+    terminalSuccess: null,
+    acceptance: null,
+    schemaFingerprint: null,
+    timing: null,
+    activeElapsedMs: 0,
+    evidenceIds: [],
+    turns: cell.turns.map((turn) => ({
+      turnIndex: turn.turnIndex,
+      runId: attemptIndex === 0 ? turn.runId : context.createId('run'),
+      status: 'planned',
+      sentContextId: null,
+      sentTaskId: null,
+      contextId: null,
+      continuationTaskId: null,
+      outcome: null,
+      timing: null,
+      acceptance: null,
+      attribution: null,
+      protocolObservation: null,
+      evidenceIds: []
+    }))
+  };
+}
+
+async function persistSubmissionProvenance(evaluation, context) {
+  const runId = 'run_submission_provenance';
+  const claims = [{
+    testId: `test_${hashCanonical({ kind: 'agent-card-claim' }).slice(0, 32)}`,
+    kind: 'agent-card-claim',
+    payload: {
+      agentCard: evaluation.submission.agentCard.value,
+      sha256: evaluation.submission.agentCard.sha256
+    },
+    summary: 'Submitted Agent Card claim'
+  }, ...evaluation.submission.agentExamples.value.map((example, index) => ({
+    testId: `test_${hashCanonical({
+      kind: 'agent-example-claim',
+      index
+    }).slice(0, 32)}`,
+    kind: 'agent-example-claim',
+    payload: { example },
+    summary: 'Submitted Agent example claim'
+  }))];
+  for (const claim of claims) {
+    const alreadyCommitted = evaluation.evidenceManifest.items.some(
+      (item) => item.runId === runId &&
+        item.testId === claim.testId &&
+        item.kind === claim.kind &&
+        item.grade === 'C' &&
+        item.turnIndex === null &&
+        item.repeatIndex === null
+    );
+    if (alreadyCommitted) continue;
+    await persistEvidence({
+      ...context,
+      runId,
+      testId: claim.testId,
+      grade: 'C',
+      kind: claim.kind,
+      payload: claim.payload,
+      summary: claim.summary
+    });
+  }
+}
+
+async function persistRunEvidence(run, context) {
+  const definitions = [
+    ['B', 'protocol-request', run.request, 'Captured protocol request'],
+    ['B', 'protocol-response', {
+      rawObjects: run.response.rawObjects,
+      rawHash: run.response.rawHash,
+      normalized: run.response.normalized,
+      snapshots: run.response.snapshots
+    }, 'Captured protocol response'],
+    ['A', 'platform-timing', run.timing, 'Captured platform timing'],
+    ['A', 'transport-fact', {
+      protocol: run.protocol,
+      httpStatus: run.response.httpStatus,
+      mediaType: run.response.mediaType,
+      byteLength: run.response.byteLength,
+      outcome: run.outcome,
+      error: run.error
+    }, 'Captured transport facts'],
+    ['C', 'agent-output', run.response.currentOutput, 'Captured current Agent output']
+  ];
+  const evidenceIds = [];
+  const manifestItems = [];
+  for (const [grade, kind, payload, summary] of definitions) {
+    const evidence = await storeEvidence({
+      ...context,
+      runId: run.runId,
+      grade,
+      kind,
+      payload,
+      summary
+    });
+    evidenceIds.push(evidence.record.evidenceId);
+    manifestItems.push(evidence.manifestItem);
+  }
+  return { evidenceIds, manifestItems };
+}
+
+function createSnapshotPersistence(context, coordinates) {
+  const bundle = {
+    evidenceIds: [],
+    manifestItems: [],
+    async persistSnapshot(snapshot) {
+      const evidence = await storeEvidence({
+        ...context,
+        ...coordinates,
+        grade: 'C',
+        kind: 'agent-output',
+        payload: {
+          bytesBase64: Buffer.from(snapshot.bytes).toString('base64'),
+          mediaType: snapshot.mediaType,
+          size: snapshot.size,
+          sha256: snapshot.sha256,
+          sourceUrl: snapshot.sourceUrl
+        },
+        summary: 'Captured Agent URL Part snapshot'
+      });
+      bundle.evidenceIds.push(evidence.record.evidenceId);
+      bundle.manifestItems.push(evidence.manifestItem);
+      return { evidenceId: evidence.record.evidenceId };
+    }
+  };
+  return bundle;
+}
+
+function mergeEvidenceBundle(target, source) {
+  target.evidenceIds.push(...source.evidenceIds);
+  target.manifestItems.push(...source.manifestItems);
+  return target;
+}
+
+async function persistEvidence(input) {
+  const evidence = await storeEvidence(input);
+  await mutateCurrent(input, (evaluation) => ({
+    ...evaluation,
+    evidenceManifest: appendManifest(
+      evaluation.evidenceManifest,
+      [evidence.manifestItem]
+    )
+  }));
+  return evidence.record.evidenceId;
+}
+
+async function storeEvidence(input) {
+  const record = createEvidenceRecord({
+    evidenceId: input.createId('ev'),
+    runId: input.runId,
+    grade: input.grade,
+    kind: input.kind,
+    testId: input.testId,
+    ...(input.turnIndex === undefined ? {} : { turnIndex: input.turnIndex }),
+    ...(input.repeatIndex === undefined ? {} : { repeatIndex: input.repeatIndex }),
+    capturedAt: input.now(),
+    payload: input.payload
+  });
+  await input.evidenceVault.put(record);
+  const manifestItem = createEvidenceManifestItem(record, {
+    summary: input.summary,
+    visibility: 'public',
+    secrets: input.authorization ? [input.authorization] : []
+  });
+  return { record, manifestItem };
+}
+
+async function buildObjectiveInput(evaluation, evidenceVault) {
+  const examples = evaluation.submission.agentExamples.value;
+  const trustedEvidence = await loadTrustedFormalEvidence(
+    evaluation,
+    evidenceVault
+  );
+  const plannedTests = examples.map((example, exampleIndex) => {
+    const cells = evaluation.runtimeState.runIndex.filter(
+      (cell) => cell.exampleIndex === exampleIndex
+    );
+    return {
+      testId: cells[0].identity.testId,
+      weight: 1,
+      repeatCount: cells[0].policy.repeatCount,
+      requiredExecutable: cells[0].requiredExecutable,
+      requiresState: example.turns.length > 1,
+      timingPolicy: {
+        targetMs: cells[0].policy.targetMs,
+        timeoutMs: cells[0].policy.timeoutMs,
+        streaming: cells[0].policy.streaming
+      },
+      runs: cells.map((cell) => objectiveRunForCell(cell))
+    };
+  });
+  return {
+    plannedTests,
+    contextChecks: buildContextChecks(evaluation, trustedEvidence),
+    a2aChecks: buildA2AChecks(evaluation, trustedEvidence),
+    claimChecks: buildClaimChecks(evaluation, trustedEvidence),
+    errorHandlingChecks: [{
+      id: 'core_error_handling',
+      status: 'unavailable',
+      weight: 1,
+      evidenceIds: []
+    }]
+  };
+}
+
+async function loadTrustedFormalEvidence(evaluation, evidenceVault) {
+  const manifestById = new Map(
+    evaluation.evidenceManifest.items.map((item) => [item.evidenceId, item])
+  );
+  const trustedEvidence = new Map();
+  await loadTrustedSubmissionEvidence(
+    evaluation,
+    evidenceVault,
+    manifestById,
+    trustedEvidence
+  );
+  for (const cell of evaluation.runtimeState.runIndex) {
+    const attempt = cell.selectedAttemptIndex === null
+      ? cell.attempts.at(-1)
+      : cell.attempts[cell.selectedAttemptIndex];
+    if (!attempt) throw new Error('trusted evidence formal attempt is missing');
+    const projectedAttemptIds = stableUnique(
+      attempt.turns.flatMap((turn) => turn.evidenceIds)
+    );
+    if (
+      attempt.evidenceIds.length !== projectedAttemptIds.length ||
+      attempt.evidenceIds.some(
+        (evidenceId, index) => evidenceId !== projectedAttemptIds[index]
+      )
+    ) {
+      throw new Error('trusted evidence attempt projection mismatch');
+    }
+    for (const turn of attempt.turns) {
+      const turnRecords = [];
+      for (const evidenceId of turn.evidenceIds) {
+        const item = manifestById.get(evidenceId);
+        if (!item) throw new Error('trusted evidence manifest item is missing');
+        const record = await evidenceVault.get(
+          item.evidenceId,
+          item.recordHash
+        );
+        if (
+          item.runId !== turn.runId ||
+          item.testId !== cell.identity.testId ||
+          item.turnIndex !== turn.turnIndex ||
+          item.repeatIndex !== cell.identity.repeatIndex ||
+          record.evidenceId !== item.evidenceId ||
+          record.recordHash !== item.recordHash ||
+          record.runId !== turn.runId ||
+          record.testId !== cell.identity.testId ||
+          record.turnIndex !== turn.turnIndex ||
+          record.repeatIndex !== cell.identity.repeatIndex ||
+          record.kind !== item.kind ||
+          record.grade !== item.grade ||
+          RUN_EVIDENCE_KINDS.get(record.kind) !== record.grade
+        ) {
+          throw new Error('trusted evidence provenance mismatch');
+        }
+        trustedEvidence.set(evidenceId, record);
+        turnRecords.push(record);
+      }
+      if (turn.status === 'completed') {
+        assertCompleteTurnEvidence(turnRecords);
+      }
+    }
+  }
+  return trustedEvidence;
+}
+
+async function loadTrustedSubmissionEvidence(
+  evaluation,
+  evidenceVault,
+  manifestById,
+  trustedEvidence
+) {
+  const expectedClaims = [{
+    kind: 'agent-card-claim',
+    testId: `test_${hashCanonical({
+      kind: 'agent-card-claim'
+    }).slice(0, 32)}`,
+    payloadMatches: (payload) =>
+      payload?.sha256 === evaluation.submission.agentCard.sha256 &&
+      hashCanonical(payload.agentCard) ===
+        evaluation.submission.agentCard.sha256
+  }, ...evaluation.submission.agentExamples.value.map(
+    (example, index) => ({
+      kind: 'agent-example-claim',
+      testId: `test_${hashCanonical({
+        kind: 'agent-example-claim',
+        index
+      }).slice(0, 32)}`,
+      payloadMatches: (payload) =>
+        hashCanonical(payload?.example) === hashCanonical(example)
+    })
+  )];
+  for (const expected of expectedClaims) {
+    const items = [...manifestById.values()].filter(
+      (item) => item.runId === 'run_submission_provenance' &&
+        item.testId === expected.testId &&
+        item.kind === expected.kind &&
+        item.grade === 'C' &&
+        item.turnIndex === null &&
+        item.repeatIndex === null
+    );
+    if (items.length !== 1) {
+      throw new Error('trusted evidence submission provenance is incomplete');
+    }
+    const item = items[0];
+    const record = await evidenceVault.get(item.evidenceId, item.recordHash);
+    if (
+      record.evidenceId !== item.evidenceId ||
+      record.recordHash !== item.recordHash ||
+      record.runId !== item.runId ||
+      record.testId !== item.testId ||
+      record.kind !== item.kind ||
+      record.grade !== item.grade ||
+      record.turnIndex !== undefined ||
+      record.repeatIndex !== undefined ||
+      !expected.payloadMatches(record.payload)
+    ) {
+      throw new Error('trusted evidence submission provenance mismatch');
+    }
+    trustedEvidence.set(item.evidenceId, record);
+  }
+}
+
+function assertCompleteTurnEvidence(records) {
+  const counts = new Map();
+  for (const record of records) {
+    counts.set(record.kind, (counts.get(record.kind) || 0) + 1);
+  }
+  for (const kind of [
+    'protocol-request',
+    'protocol-response',
+    'platform-timing',
+    'transport-fact'
+  ]) {
+    if (counts.get(kind) !== 1) {
+      throw new Error('trusted evidence core turn set is incomplete');
+    }
+  }
+  if ((counts.get('agent-output') || 0) < 1) {
+    throw new Error('trusted evidence core turn set is incomplete');
+  }
+  if ([...counts].some(([kind]) => !RUN_EVIDENCE_KINDS.has(kind))) {
+    throw new Error('trusted evidence core turn set has unknown evidence');
+  }
+}
+
+function buildA2AChecks(evaluation, trustedEvidence) {
+  const checks = [];
+  const cardEvidence = [...trustedEvidence].find(
+    ([, record]) => record.kind === 'agent-card-claim'
+  );
+  const cardValidation = validateAgentCard(
+    evaluation.submission.agentCard.value
+  );
+  const cardValid = cardValidation.valid &&
+    hashCanonical(cardValidation.selectedInterface) ===
+      hashCanonical(evaluation.submission.selectedInterface);
+  checks.push({
+    id: 'a2a_card_validity',
+    status: cardValid ? 'passed' : 'failed',
+    weight: 1,
+    evidenceIds: cardEvidence ? [cardEvidence[0]] : []
+  });
+  const transportFacts = evaluation.runtimeState.runIndex.flatMap((cell) => {
+    if (cell.selectedAttemptIndex === null) return [];
+    const attempt = cell.attempts[cell.selectedAttemptIndex];
+    return attempt.turns.flatMap((turn) =>
+      turn.evidenceIds
+        .map((evidenceId) => [evidenceId, trustedEvidence.get(evidenceId)])
+        .filter(([, record]) => record?.kind === 'transport-fact')
+    );
+  });
+  const frozenInterface = evaluation.submission.selectedInterface;
+  const interfaceMatches = transportFacts.length > 0 &&
+    transportFacts.every(([, record]) => {
+      const protocol = record.payload?.protocol;
+      return protocol?.binding === frozenInterface.binding &&
+        protocol.version === frozenInterface.version &&
+        protocol.endpointHash === hashText(frozenInterface.url);
+    });
+  checks.push({
+    id: 'a2a_frozen_interface',
+    status: transportFacts.length === 0
+      ? 'unavailable'
+      : interfaceMatches ? 'passed' : 'failed',
+    weight: 1,
+    evidenceIds: transportFacts.map(([evidenceId]) => evidenceId)
+  });
+  for (const cell of evaluation.runtimeState.runIndex) {
+    const selected = cell.selectedAttemptIndex !== null;
+    const attempt = !selected
+      ? cell.attempts.at(-1)
+      : cell.attempts[cell.selectedAttemptIndex];
+    for (const turn of attempt?.turns || []) {
+      const entries = turn.evidenceIds.map(
+        (evidenceId) => [evidenceId, trustedEvidence.get(evidenceId)]
+      );
+      const transportEntry = entries.find(
+        ([, record]) => record?.kind === 'transport-fact'
+      );
+      const responseEntry = entries.find(
+        ([, record]) => record?.kind === 'protocol-response'
+      );
+      const observation = selected && responseEntry && transportEntry
+        ? {
+            validated:
+              transportEntry[1].payload?.protocol?.validated === true,
+            rawObjects: responseEntry[1].payload?.rawObjects,
+            normalized: responseEntry[1].payload?.normalized
+          }
+        : null;
+      const evidenceIds = observation
+        ? [responseEntry[0], transportEntry[0]]
+        : [];
+      const normalized = observation?.normalized;
+      const responseValid = observation?.validated === true &&
+        Array.isArray(observation.rawObjects) &&
+        observation.rawObjects.length > 0 &&
+        ['message', 'task'].includes(normalized?.responseKind);
+      checks.push({
+        id: `a2a_response_${cell.cellId}_${turn.turnIndex}`,
+        status: observation
+          ? responseValid ? 'passed' : 'failed'
+          : 'unavailable',
+        weight: 1,
+        evidenceIds
+      });
+      const lifecycleValid = responseValid &&
+        normalized.terminal === true &&
+        (
+          normalized.responseKind === 'message' ||
+          isTerminalTaskState(normalized.terminalState)
+        );
+      checks.push({
+        id: `a2a_lifecycle_${cell.cellId}_${turn.turnIndex}`,
+        status: observation
+          ? lifecycleValid ? 'passed' : 'failed'
+          : 'unavailable',
+        weight: 1,
+        evidenceIds
+      });
+      const statusSequenceValid = lifecycleValid &&
+        validStatusSequence(normalized);
+      checks.push({
+        id: `a2a_status_sequence_${cell.cellId}_${turn.turnIndex}`,
+        status: observation
+          ? statusSequenceValid ? 'passed' : 'failed'
+          : 'unavailable',
+        weight: 1,
+        evidenceIds
+      });
+      const partsValid = responseValid &&
+        Array.isArray(normalized.parts) &&
+        normalized.parts.every(isObservedPart);
+      checks.push({
+        id: `a2a_parts_${cell.cellId}_${turn.turnIndex}`,
+        status: observation
+          ? partsValid ? 'passed' : 'failed'
+          : 'unavailable',
+        weight: 1,
+        evidenceIds
+      });
+      const artifactsValid = responseValid &&
+        Array.isArray(normalized.artifacts) &&
+        normalized.artifacts.every(isObservedArtifact);
+      checks.push({
+        id: `a2a_artifacts_${cell.cellId}_${turn.turnIndex}`,
+        status: observation
+          ? artifactsValid ? 'passed' : 'failed'
+          : 'unavailable',
+        weight: 1,
+        evidenceIds
+      });
+    }
+  }
+  return checks;
+}
+
+function buildClaimChecks(evaluation, trustedEvidence) {
+  if (evaluation.submission.agentCard.value.capabilities?.streaming !== true) {
+    return [];
+  }
+  const checks = [];
+  for (const cell of evaluation.runtimeState.runIndex) {
+    if (cell.policy.streaming !== true) continue;
+    const selected = cell.selectedAttemptIndex !== null;
+    const attempt = selected
+      ? cell.attempts[cell.selectedAttemptIndex]
+      : cell.attempts.at(-1);
+    for (const turn of attempt?.turns || []) {
+      const entries = turn.evidenceIds.map(
+        (evidenceId) => [evidenceId, trustedEvidence.get(evidenceId)]
+      );
+      const responseEntry = entries.find(
+        ([, record]) => record?.kind === 'protocol-response'
+      );
+      const transportEntry = entries.find(
+        ([, record]) => record?.kind === 'transport-fact'
+      );
+      const timingEntry = entries.find(
+        ([, record]) => record?.kind === 'platform-timing'
+      );
+      const observation = selected &&
+        responseEntry && transportEntry && timingEntry;
+      const passed = observation &&
+        transportEntry[1].payload?.protocol?.validated === true &&
+        contentTypeBase(transportEntry[1].payload?.mediaType) ===
+          'text/event-stream' &&
+        Number.isFinite(timingEntry[1].payload?.firstEventMs) &&
+        Array.isArray(responseEntry[1].payload?.rawObjects) &&
+        responseEntry[1].payload.rawObjects.length > 0;
+      checks.push({
+        id: `claim_streaming_${cell.cellId}_${turn.turnIndex}`,
+        status: !observation
+          ? 'unavailable'
+          : passed ? 'passed' : 'failed',
+        weight: 1,
+        evidenceIds: observation
+          ? [responseEntry[0], transportEntry[0], timingEntry[0]]
+          : []
+      });
+    }
+  }
+  return checks;
+}
+
+function validStatusSequence(normalized) {
+  if (!Array.isArray(normalized.statusSequence)) return false;
+  if (normalized.responseKind === 'message') {
+    return normalized.statusSequence.length === 0 &&
+      normalized.terminalState === null;
+  }
+  if (
+    normalized.responseKind !== 'task' ||
+    normalized.statusSequence.length === 0
+  ) {
+    return false;
+  }
+  return normalizeTaskState(normalized.statusSequence.at(-1)) ===
+    normalizeTaskState(normalized.terminalState);
+}
+
+function isTerminalTaskState(value) {
+  return new Set([
+    'COMPLETED',
+    'FAILED',
+    'CANCELED',
+    'CANCELLED',
+    'REJECTED',
+    'INTERRUPTED',
+    'INPUT_REQUIRED',
+    'AUTH_REQUIRED'
+  ]).has(normalizeTaskState(value));
+}
+
+function normalizeTaskState(value) {
+  return String(value || '')
+    .toUpperCase()
+    .replace(/^TASK_STATE_/u, '')
+    .replace(/-/gu, '_');
+}
+
+function isObservedArtifact(value) {
+  return isRecord(value) &&
+    typeof (value.artifactId || value.id) === 'string' &&
+    (value.artifactId || value.id).length > 0 &&
+    Array.isArray(value.parts) &&
+    value.parts.length > 0 &&
+    value.parts.every(isObservedPart);
+}
+
+function isObservedPart(value) {
+  if (!isRecord(value)) return false;
+  if (value.kind === undefined) {
+    const choices = ['text', 'data', 'raw', 'url'].filter(
+      (key) => Object.hasOwn(value, key)
+    );
+    if (choices.length !== 1) return false;
+    if (choices[0] === 'text') return typeof value.text === 'string';
+    if (choices[0] === 'raw' || choices[0] === 'url') {
+      return typeof value[choices[0]] === 'string';
+    }
+    return value.data !== undefined;
+  }
+  if (value.kind === 'text') return typeof value.text === 'string';
+  if (value.kind === 'data') return isRecord(value.data);
+  if (value.kind !== 'file' || !isRecord(value.file)) return false;
+  return ['uri', 'bytes'].filter(
+    (key) => Object.hasOwn(value.file, key)
+  ).length === 1;
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' &&
+    !Array.isArray(value);
+}
+
+function contentTypeBase(value) {
+  return typeof value === 'string'
+    ? value.split(';', 1)[0].trim().toLowerCase()
+    : '';
+}
+
+function objectiveRunForCell(cell) {
+  const attempt = cell.selectedAttemptIndex === null
+    ? cell.attempts.at(-1)
+    : cell.attempts[cell.selectedAttemptIndex];
+  return {
+    runId: attempt.sampleRunId,
+    repeatIndex: cell.identity.repeatIndex,
+    attribution: attempt.attribution,
+    terminalSuccess: attempt.terminalSuccess,
+    acceptance: attempt.acceptance,
+    schemaFingerprint: attempt.schemaFingerprint,
+    timing: attempt.timing,
+    evidenceIds: attempt.evidenceIds
+  };
+}
+
+function buildContextChecks(evaluation, trustedEvidence) {
+  const cells = evaluation.runtimeState.runIndex;
+  const examples = evaluation.submission.agentExamples.value;
+  const checks = [];
+  const contexts = [];
+  for (const cell of cells) {
+    const selected = cell.selectedAttemptIndex !== null;
+    const attempt = !selected
+      ? cell.attempts.at(-1)
+      : cell.attempts[cell.selectedAttemptIndex];
+    if (!attempt) {
+      contexts.push({
+        cell,
+        values: [],
+        initialClean: false,
+        hasInitialContext: false,
+        attempt: null,
+        observable: false
+      });
+      continue;
+    }
+    for (let index = 1; index < attempt.turns.length; index += 1) {
+      const current = attempt.turns[index];
+      checks.push({
+        id: `context_retention_${cell.cellId}_${index}`,
+        kind: 'retention',
+        status: !selected
+          ? 'unavailable'
+          : current.sentContextId && current.contextId
+          ? current.sentContextId === current.contextId ? 'passed' : 'failed'
+          : 'unavailable',
+        weight: 1,
+        evidenceIds: current.evidenceIds.filter((id) => trustedEvidence.has(id))
+      });
+      const criteria =
+        examples[cell.exampleIndex].turns[index].acceptanceCriteria;
+      if (criteria.some(
+        (criterion) => criterion.required !== false &&
+          criterion.type !== 'model'
+      )) {
+        checks.push({
+          id: `context_correction_${cell.cellId}_${index}`,
+          kind: 'correction',
+          status: !selected
+            ? 'unavailable'
+            : current.acceptance?.semanticSuccess === true
+            ? 'passed'
+            : current.acceptance?.semanticSuccess === false
+              ? 'failed'
+              : 'unavailable',
+          weight: 1,
+          evidenceIds: current.evidenceIds.filter(
+            (id) => trustedEvidence.has(id)
+          )
+        });
+      }
+    }
+    const firstTurn = attempt.turns[0];
+    contexts.push({
+      cell,
+      values: selected
+        ? attempt.turns.map((turn) => turn.contextId).filter(Boolean)
+        : [],
+      initialClean: selected &&
+        firstTurn?.sentContextId === null &&
+        firstTurn?.sentTaskId === null,
+      hasInitialContext: selected && Boolean(firstTurn?.contextId),
+      attempt,
+      observable: selected
+    });
+  }
+  for (const item of contexts) {
+    const duplicate = item.values.some((value) => contexts.some(
+      (other) => other.cell.cellId !== item.cell.cellId &&
+        other.values.includes(value)
+    ));
+    checks.push({
+      id: `context_isolation_${item.cell.cellId}`,
+      kind: 'isolation',
+      status: !item.observable
+        ? 'unavailable'
+        : !item.initialClean
+          ? 'failed'
+          : duplicate
+            ? 'failed'
+            : !item.hasInitialContext
+              ? 'unavailable'
+              : 'passed',
+      weight: 1,
+      evidenceIds: (item.attempt?.evidenceIds || []).filter(
+        (id) => trustedEvidence.has(id)
+      )
+    });
+  }
+  return checks;
+}
+
+function summarizeAttempt(
+  attempt,
+  requiredExecutable,
+  example,
+  terminalSuccess,
+  attribution,
+  cellTimedOut,
+  cellDurationMs
+) {
+  const completedTurns = attempt.turns.filter((turn) => turn.status === 'completed');
+  const closedTurns = attempt.turns.filter(
+    (turn) => ['completed', 'skipped'].includes(turn.status)
+  );
+  const checks = closedTurns.flatMap((turn) => turn.acceptance?.checks || []);
+  const passedRequiredExecutable = closedTurns.reduce(
+    (sum, turn) => sum + (turn.acceptance?.passedRequiredExecutable || 0),
+    0
+  );
+  return {
+    attribution,
+    terminalSuccess,
+    acceptance: {
+      requiredExecutable,
+      passedRequiredExecutable,
+      semanticSuccess: requiredExecutable === 0
+        ? null
+        : passedRequiredExecutable === requiredExecutable,
+      checks
+    },
+    schemaFingerprint: schemaFingerprintForExample(example),
+    activeElapsedMs: cellDurationMs,
+    timing: {
+      durationMs: attribution === 'agent' ? cellDurationMs : null,
+      firstEventMs: null,
+      timedOut: cellTimedOut || completedTurns.some(
+        (turn) => turn.outcome?.status === 'timeout' ||
+          turn.outcome?.lifecycle === 'timeout'
+      )
+    },
+    evidenceIds: stableUnique(
+      completedTurns.flatMap((turn) => turn.evidenceIds)
+    )
+  };
+}
+
+function committedActiveElapsedMs(attempt) {
+  if (
+    typeof attempt.activeElapsedMs === 'number' &&
+    Number.isFinite(attempt.activeElapsedMs) &&
+    attempt.activeElapsedMs >= 0
+  ) {
+    return attempt.activeElapsedMs;
+  }
+  return attempt.turns.reduce(
+    (sum, turn) => sum + (
+      turn.status === 'completed'
+        ? Math.max(0, turn.timing?.durationMs || 0)
+        : 0
+    ),
+    0
+  );
+}
+
+function safeAcceptance(acceptance, testId, turnIndex) {
+  const checks = acceptance.checks.map((check, index) => ({
+    ...check,
+    id: `check_${hashCanonical({
+      testId,
+      turnIndex,
+      index,
+      submittedCriterionId: check.id
+    }).slice(0, 32)}`
+  }));
+  return { ...acceptance, checks };
+}
+
+function closedAcceptance(criteria, testId, turnIndex) {
+  const checks = criteria.map((criterion) => ({
+    id: criterion.id,
+    type: criterion.type,
+    required: criterion.required !== false,
+    status: criterion.type === 'model' ? 'not-executable' : 'failed'
+  }));
+  const requiredExecutable = checks.filter(
+    (check) => check.required && check.status !== 'not-executable'
+  ).length;
+  return safeAcceptance({
+    checks,
+    requiredExecutable,
+    passedRequiredExecutable: 0,
+    semanticSuccess: requiredExecutable === 0 ? null : false
+  }, testId, turnIndex);
+}
+
+function schemaFingerprintForExample(example) {
+  const contracts = example.turns.flatMap((turn, turnIndex) =>
+    turn.acceptanceCriteria
+      .filter((criterion) => criterion.type === 'json-schema')
+      .map((criterion) => ({
+        turnIndex,
+        criterionId: criterion.id,
+        schema: criterion.schema
+      }))
+  );
+  return contracts.length > 0 ? hashCanonical(contracts) : null;
+}
+
+function protocolObservationFor(run) {
+  const normalized = run.response?.normalized || {};
+  return {
+    validated: run.protocol?.validated === true,
+    binding: run.protocol?.binding || null,
+    version: run.protocol?.version || null,
+    responseKind: normalized.responseKind || 'unknown',
+    terminal: normalized.terminal === true,
+    terminalState: normalized.terminalState || null,
+    statusSequence: Array.isArray(normalized.statusSequence)
+      ? [...normalized.statusSequence]
+      : [],
+    partCount: Array.isArray(normalized.parts) ? normalized.parts.length : 0,
+    artifactCount: Array.isArray(normalized.artifacts)
+      ? normalized.artifacts.length
+      : 0
+  };
+}
+
+async function attributeRun(run, attributeFormalRun) {
+  if (typeof attributeFormalRun === 'function') {
+    return await attributeFormalRun(run);
+  }
+  if (run.outcome?.status === 'agent-error' ||
+      run.outcome?.status === 'succeeded') {
+    return 'agent';
+  }
+  if (run.error?.category === 'transport') return 'pending';
+  if (['instrumentation', 'configuration'].includes(run.error?.category)) {
+    return 'platform';
+  }
+  return 'agent';
+}
+
+function attributionForCommittedTurn(turn) {
+  if (!turn) return 'agent';
+  if (turn.attribution) return turn.attribution;
+  if (['succeeded', 'agent-error'].includes(turn.outcome?.status)) {
+    return 'agent';
+  }
+  return turn.outcome?.status === 'platform-error' ? 'platform' : 'pending';
+}
+
+function isCommittedTerminalSuccess(turn) {
+  const lifecycle = turn?.outcome?.committedLifecycle ??
+    turn?.outcome?.lifecycle;
+  return turn?.outcome?.status === 'succeeded' &&
+    lifecycle === 'completed';
+}
+
+function isVersionValidObservation(run) {
+  return run.protocol?.validated === true &&
+    ['message', 'task'].includes(
+    run.response?.normalized?.responseKind
+  ) && Array.isArray(run.response?.rawObjects) &&
+    run.response.rawObjects.length > 0;
+}
+
+async function markFirstDispatch(context) {
+  await mutateCurrent(context, (record) => ({
+    ...record,
+    evaluationWindow: {
+      firstRunAt: record.evaluationWindow.firstRunAt || context.now(),
+      lastRunAt: record.evaluationWindow.lastRunAt
+    }
+  }));
+}
+
+async function mutateCurrent(context, updater) {
+  const current = context.store.get(context.evaluationId);
+  if (context.worker && current.execution?.status === 'cancelled') {
+    const error = new Error('V2 evaluation was cancelled');
+    error.name = 'AbortError';
+    throw error;
+  }
+  const committed = await context.store.mutate(
+    context.evaluationId,
+    current.revision,
+    updater
+  );
+  context.events?.emit?.(context.evaluationId, committed);
+  return committed;
+}
+
+async function interruptEvaluation(context) {
+  try {
+    const current = context.store.get(context.evaluationId);
+    if (
+      current.execution.status === 'completed' ||
+      current.execution.status === 'cancelled'
+    ) return;
+    await mutateCurrent(context, (record) => ({
+      ...record,
+      execution: {
+        status: 'interrupted',
+        stage: 'evidence',
+        progress: record.execution.progress,
+        interruptedAt: context.now()
+      },
+      resultV2: null,
+      auditEvents: appendAudit(record.auditEvents, {
+        id: context.createId('audit'),
+        type: 'execution-interrupted',
+        occurredAt: context.now(),
+        summary: 'Execution paused before a trustworthy evidence commit'
+      })
+    }));
+  } catch {
+    // Preserve the original infrastructure failure when interruption cannot commit.
+  }
+}
+
+function appendManifest(manifest, items) {
+  return {
+    ...manifest,
+    items: [...manifest.items, ...items]
+  };
+}
+
+function updateCell(record, cellId, patch) {
+  return {
+    ...record,
+    runtimeState: {
+      ...record.runtimeState,
+      runIndex: record.runtimeState.runIndex.map((cell) =>
+        cell.cellId === cellId ? { ...cell, ...patch } : cell
+      )
+    }
+  };
+}
+
+function updateAttempt(record, cellId, attemptIndex, patch) {
+  const cell = findCell(record, cellId);
+  const attempts = cell.attempts.map((attempt) =>
+    attempt.attemptIndex === attemptIndex
+      ? { ...attempt, ...patch }
+      : attempt
+  );
+  return updateCell(record, cellId, { attempts });
+}
+
+function updateAttemptTurn(record, cellId, attemptIndex, turnIndex, patch) {
+  const cell = findCell(record, cellId);
+  const attempt = cell.attempts.find(
+    (item) => item.attemptIndex === attemptIndex
+  );
+  return updateAttempt(record, cellId, attemptIndex, {
+    turns: attempt.turns.map((turn) =>
+      turn.turnIndex === turnIndex ? { ...turn, ...patch } : turn
+    )
+  });
+}
+
+async function skipRemainingTurns(
+  context,
+  cellId,
+  attemptIndex,
+  turnIndex,
+  example,
+  testId
+) {
+  await mutateCurrent(context, (record) => {
+    const cell = findCell(record, cellId);
+    const attempt = cell.attempts.find(
+      (item) => item.attemptIndex === attemptIndex
+    );
+    return updateAttempt(record, cellId, attemptIndex, {
+      turns: attempt.turns.map((turn) =>
+        turn.turnIndex > turnIndex && turn.status === 'planned'
+          ? {
+              ...turn,
+              status: 'skipped',
+              acceptance: closedAcceptance(
+                example.turns[turn.turnIndex].acceptanceCriteria,
+                testId,
+                turn.turnIndex
+              )
+            }
+          : turn
+      )
+    });
+  });
+}
+
+function findCell(record, cellId) {
+  const cell = record.runtimeState.runIndex.find(
+    (item) => item.cellId === cellId
+  );
+  if (!cell) throw new Error('formal run cell is missing');
+  return cell;
+}
+
+function appendFingerprint(runtimeState, run) {
+  return {
+    ...runtimeState,
+    responseFingerprints: appendUnique(
+      runtimeState.responseFingerprints,
+      { runId: run.runId, rawHash: run.response.rawHash }
+    )
+  };
+}
+
+function appendUnique(values, item) {
+  return values.some((value) => value.runId === item.runId)
+    ? values
+    : [...values, item];
+}
+
+function appendAudit(values, event) {
+  return values.some((value) => value.id === event.id)
+    ? values
+    : [...values, event];
+}
+
+function publicSelectedInterface(submission) {
+  return {
+    binding: submission.selectedInterface.binding,
+    version: submission.selectedInterface.version,
+    endpointHash: hashText(submission.selectedInterface.url)
+  };
+}
+
+function countRequiredExecutable(example) {
+  return example.turns.reduce(
+    (sum, turn) => sum + turn.acceptanceCriteria.filter(
+      (criterion) => criterion.required !== false && criterion.type !== 'model'
+    ).length,
+    0
+  );
+}
+
+function stableUnique(values) {
+  return [...new Set(values)];
+}
+
+function hashCanonical(value) {
+  return createHash('sha256').update(canonicalJson(value)).digest('hex');
+}
+
+function hashText(value) {
+  return createHash('sha256').update(String(value)).digest('hex');
+}
+
+function defaultId(prefix = 'id') {
+  return `${prefix}_${randomUUID().replaceAll('-', '')}`;
+}
+
+function requiredService(value, name) {
+  if (!value) throw new TypeError(`${name} service is required`);
+  return value;
+}
+
+function abortableSleep(delay, signal) {
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason || new Error('cancelled'));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, delay);
+    const abort = () => {
+      clearTimeout(timer);
+      reject(signal.reason || new Error('cancelled'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+function deepFreeze(value) {
+  Object.freeze(value);
+  for (const child of Object.values(value)) {
+    if (child && typeof child === 'object' && !Object.isFrozen(child)) {
+      deepFreeze(child);
+    }
+  }
+  return value;
+}

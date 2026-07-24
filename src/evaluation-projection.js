@@ -37,15 +37,13 @@ export function projectEvaluation(evaluation, { audience = 'public', secrets = [
       'phase', 'modelLockedAt', 'humanLockedAt', 'absoluteLockedAt',
       'replicaReleasedAt'
     ], secrets),
-    qualification: pickResult(evaluation.qualification, [
-      'status', 'attemptRunIds', 'completedAt', 'failureCode'
-    ], secrets),
+    qualification: projectQualification(evaluation.qualification, secrets),
     evidenceManifest: projectManifest(evaluation.evidenceManifest, audience, secrets),
     objectiveCapability: pickResult(evaluation.objectiveCapability, COMMON_RESULT_FIELDS, secrets),
-    absoluteReview: pickResult(evaluation.absoluteReview, COMMON_RESULT_FIELDS, secrets),
+    absoluteReview: projectAbsoluteReview(evaluation.absoluteReview, secrets),
     resultV2: evaluation.resultV2 === null
       ? null
-      : pickResult(evaluation.resultV2, COMMON_RESULT_FIELDS, secrets)
+      : projectResultV2(evaluation.resultV2, secrets)
   };
   if (evaluation.archivedAt !== undefined) {
     projection.archivedAt = projectPrimitive(evaluation.archivedAt, secrets);
@@ -57,6 +55,45 @@ export function projectEvaluation(evaluation, { audience = 'public', secrets = [
       .map((event) => projectAuditEvent(event, secrets));
   }
   return projection;
+}
+
+function projectQualification(value, secrets) {
+  return pick(value, [
+    'status', 'reason', 'attemptRunIds', 'selectedInterface', 'completedAt',
+    'failureCode'
+  ], {
+    attemptRunIds: projectPrimitiveArray,
+    selectedInterface: (selected, nestedSecrets) => pick(
+      selected,
+      ['binding', 'version', 'endpointHash'],
+      {},
+      nestedSecrets
+    )
+  }, secrets);
+}
+
+function projectAbsoluteReview(value, secrets) {
+  return pick(value, ['status', 'confidence'], {
+    confidence: (confidence, nestedSecrets) => pick(
+      confidence,
+      ['status', 'value'],
+      {},
+      nestedSecrets
+    )
+  }, secrets);
+}
+
+function projectResultV2(value, secrets) {
+  return pick(value, ['absolute', 'replica', 'rating'], {
+    absolute: (item, nestedSecrets) => pick(item, ['status'], {}, nestedSecrets),
+    replica: (item, nestedSecrets) => pick(item, ['status'], {}, nestedSecrets),
+    rating: (item, nestedSecrets) => pick(
+      item,
+      ['status', 'code', 'label'],
+      {},
+      nestedSecrets
+    )
+  }, secrets);
 }
 
 function projectManifest(manifest, audience, secrets) {

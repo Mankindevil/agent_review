@@ -1,11 +1,64 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { EvaluationPipeline } from '../src/pipeline.js';
+import { runBlackBoxFoundation } from '../src/black-box-pipeline.js';
 import { EvaluationStore } from '../src/store.js';
+
+const V2_EXAMPLES = [{
+  id: 'example-one',
+  name: 'Example one',
+  turns: [{
+    input: { parts: [{ type: 'text', text: 'ping' }] },
+    acceptanceCriteria: []
+  }]
+}];
+
+function v2Input(overrides = {}) {
+  return {
+    schemaVersion: 2,
+    agentCard: evaluation('v2-template').agentCard,
+    agentExamples: V2_EXAMPLES,
+    ...overrides
+  };
+}
+
+function v2Options(overrides = {}) {
+  const calls = {
+    puts: [],
+    deletes: [],
+    runs: []
+  };
+  const credentialVault = {
+    put: (id, authorization) => calls.puts.push([id, authorization]),
+    get: () => undefined,
+    delete: (id) => {
+      calls.deletes.push(id);
+      return true;
+    }
+  };
+  return {
+    calls,
+    options: {
+      blackBoxEnabled: true,
+      credentialVault,
+      resumeMacKey: Buffer.alloc(32, 9),
+      runBlackBox: async (item, services) => {
+        calls.runs.push([item.id, services.signal]);
+      },
+      now: (() => {
+        let index = 0;
+        return () =>
+          `2026-07-24T10:00:${String(index++).padStart(2, '0')}.000Z`;
+      })(),
+      ...overrides
+    }
+  };
+}
 
 function evaluation(id, status = 'running') {
   return {
@@ -13,6 +66,85 @@ function evaluation(id, status = 'running') {
     agentCard: { name: 'Test Agent', description: 'test', supportedInterfaces: [{ url: 'https://example.com/a2a', protocolBinding: 'HTTP+JSON', protocolVersion: '1.0' }], skills: [{ id: 'test', name: 'Test', description: 'test' }] },
     cases: [{ name: 'case', prompt: 'test prompt' }], validation: { valid: true, interfaces: [{ url: 'https://example.com/a2a', binding: 'HTTP+JSON', version: '1.0' }] }
   };
+}
+
+function pipelineMemoryVault() {
+  const records = new Map();
+  return {
+    async put(record) {
+      records.set(record.evidenceId, record);
+      return record;
+    },
+    async get(evidenceId, recordHash) {
+      const record = records.get(evidenceId);
+      assert.equal(record?.recordHash, recordHash);
+      return record;
+    }
+  };
+}
+
+function pipelineSuccessfulRun(options, selectedInterface) {
+  return {
+    runId: options.runId,
+    testId: options.testId,
+    turnIndex: options.turnIndex,
+    repeatIndex: options.repeatIndex,
+    protocol: {
+      binding: selectedInterface.binding,
+      version: selectedInterface.version,
+      endpointHash: createHash('sha256')
+        .update(selectedInterface.url)
+        .digest('hex'),
+      validated: true
+    },
+    request: {
+      requestId: `request-${options.runId}`,
+      messageId: `message-${options.runId}`,
+      body: {},
+      bodyHash: 'c'.repeat(64)
+    },
+    response: {
+      httpStatus: 200,
+      mediaType: 'application/json',
+      byteLength: 10,
+      rawObjects: [{
+        messageId: 'response',
+        role: 'ROLE_AGENT',
+        parts: [{ text: 'done' }]
+      }],
+      rawHash: 'd'.repeat(64),
+      normalized: {
+        responseKind: 'message',
+        terminal: true,
+        terminalState: null,
+        contextId: `ctx-${options.repeatIndex}`,
+        taskId: null,
+        statusSequence: [],
+        parts: [{ text: 'done' }],
+        artifacts: []
+      },
+      currentOutput: { text: 'done', data: null, artifacts: [] },
+      snapshots: []
+    },
+    timing: {
+      startedAt: 1,
+      headersAt: 2,
+      firstByteAt: 2,
+      firstEventAt: null,
+      endedAt: 3,
+      firstByteMs: 1,
+      firstEventMs: null,
+      durationMs: 2
+    },
+    outcome: { status: 'succeeded', lifecycle: 'completed' },
+    error: null
+  };
+}
+
+function pipelineMonotonicIso() {
+  let index = 0;
+  const start = Date.parse('2026-07-24T10:00:00.000Z');
+  return () => new Date(start + index++ * 1000).toISOString();
 }
 
 async function waitFor(store, id, predicate, attempts = 120) {
@@ -65,6 +197,1079 @@ test('rejects V2 cancel and retry before they can enter the legacy mutation path
   assert.equal(Object.hasOwn(store.get(item.id), 'status'), false);
   assert.equal(store.get(item.id).execution.status, 'running');
   assert.equal(store.get(item.id).rawEvidence.secret, 'pipeline-v2-secret');
+});
+
+test('routes numeric V2 only when enabled and keeps V2 retry disabled in both modes', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-route-${process.pid}.json`
+  ));
+  const disabled = new EvaluationPipeline(store, new EventEmitter());
+  await assert.rejects(
+    disabled.create(v2Input()),
+    (error) => error.statusCode === 409 && /V2|black-box/i.test(error.message)
+  );
+
+  const { options } = v2Options();
+  const enabled = new EvaluationPipeline(store, new EventEmitter(), options);
+  const created = await enabled.create(v2Input());
+  await new Promise(setImmediate);
+  await assert.rejects(
+    enabled.retry(created.evaluation.id, {}),
+    (error) => error.statusCode === 409 && /V2/i.test(error.message)
+  );
+});
+
+test('rejects closed V2 intake and invalid Cards before store, token, credential, or worker side effects', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-intake-${process.pid}.json`
+  ));
+  let setCalls = 0;
+  const originalSet = store.set.bind(store);
+  store.set = async (...args) => {
+    setCalls += 1;
+    return originalSet(...args);
+  };
+  let participantCalls = 0;
+  const { calls, options } = v2Options({
+    createParticipantAccess: () => {
+      participantCalls += 1;
+      return { token: 'A'.repeat(43), hash: 'a'.repeat(64) };
+    }
+  });
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
+
+  await assert.rejects(
+    pipeline.create(v2Input({ cases: [{ prompt: 'legacy' }] })),
+    (error) => error.statusCode === 400 && /agentExamples|cases/i.test(error.message)
+  );
+  await assert.rejects(
+    pipeline.create(v2Input({ agentCard: { name: 'invalid' } })),
+    (error) => error.statusCode === 422 && /Agent Card/i.test(error.message)
+  );
+  for (const suffix of [
+    '?token=sentinel-connection-secret',
+    '#sentinel-connection-secret'
+  ]) {
+    for (const credentialCard of [
+      (() => {
+        const value = structuredClone(v2Input().agentCard);
+        value.supportedInterfaces[0].url += suffix;
+        return value;
+      })(),
+      (() => {
+        const value = structuredClone(v2Input().agentCard);
+        value.supportedInterfaces.push({
+          url: `https://secondary.agent.example/a2a${suffix}`,
+          protocolBinding: 'HTTP+JSON',
+          protocolVersion: '1.0'
+        });
+        return value;
+      })(),
+      (() => {
+        const value = structuredClone(v2Input().agentCard);
+        value.supportedInterfaces.push({
+          url: `https://secondary.agent.example/a2a${suffix}`,
+          protocolBinding: 'CUSTOM',
+          protocolVersion: '1.0'
+        });
+        return value;
+      })(),
+      {
+        ...structuredClone(v2Input().agentCard),
+        url: `https://legacy.agent.example/a2a${suffix}`
+      }
+    ]) {
+      await assert.rejects(
+        pipeline.create(v2Input({ agentCard: credentialCard })),
+        (error) =>
+          error.statusCode === 400 &&
+          /agentAuthorization|query|fragment|endpoint/iu.test(error.message) &&
+          !error.message.includes('sentinel-connection-secret')
+      );
+    }
+  }
+  assert.equal(setCalls, 0);
+  assert.equal(participantCalls, 0);
+  assert.deepEqual(calls.puts, []);
+  assert.deepEqual(calls.runs, []);
+  assert.deepEqual(store.list(), []);
+});
+
+test('requires participant ownership for V2 cancel with zero unauthorized side effects and idempotent replay', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-cancel-owner-${process.pid}.json`
+  ));
+  const emitted = [];
+  const events = new EventEmitter();
+  const originalEmit = events.emit.bind(events);
+  events.emit = (name, value) => {
+    if (name.startsWith('eval_')) emitted.push(structuredClone(value));
+    return originalEmit(name, value);
+  };
+  let observedSignal;
+  const { calls, options } = v2Options({
+    runBlackBox: async (_item, services) => {
+      observedSignal = services.signal;
+      await new Promise((resolve, reject) => {
+        services.signal.addEventListener('abort', () => {
+          reject(services.signal.reason);
+        }, { once: true });
+      });
+    }
+  });
+  const pipeline = new EvaluationPipeline(store, events, options);
+  const created = await pipeline.create(v2Input({
+    agentAuthorization: 'owned-agent-secret'
+  }));
+  await new Promise(setImmediate);
+  const id = created.evaluation.id;
+  const before = store.get(id);
+  const sideEffectsBefore = {
+    revision: before.revision,
+    audit: before.auditEvents.length,
+    emitted: emitted.length,
+    deletes: calls.deletes.length
+  };
+
+  for (const participantAccessToken of [
+    undefined,
+    'W'.repeat(43)
+  ]) {
+    await assert.rejects(
+      () => pipeline.cancel(id, participantAccessToken),
+      (error) => error.statusCode === 401
+    );
+    assert.equal(store.get(id).revision, sideEffectsBefore.revision);
+    assert.equal(store.get(id).auditEvents.length, sideEffectsBefore.audit);
+    assert.equal(emitted.length, sideEffectsBefore.emitted);
+    assert.equal(calls.deletes.length, sideEffectsBefore.deletes);
+    assert.equal(observedSignal.aborted, false);
+  }
+
+  const cancelled = await pipeline.cancel(
+    id,
+    created.participantAccessToken
+  );
+  assert.equal(cancelled.execution.status, 'cancelled');
+  assert.equal(observedSignal.aborted, true);
+  await new Promise(setImmediate);
+  const afterCancel = {
+    revision: cancelled.revision,
+    audit: cancelled.auditEvents.length,
+    emitted: emitted.length,
+    deletes: calls.deletes.length
+  };
+  const replayed = await pipeline.cancel(
+    id,
+    created.participantAccessToken
+  );
+  assert.equal(replayed.revision, afterCancel.revision);
+  assert.equal(store.get(id).auditEvents.length, afterCancel.audit);
+  assert.equal(emitted.length, afterCancel.emitted);
+  assert.equal(calls.deletes.length, afterCancel.deletes);
+  await assert.rejects(
+    () => pipeline.cancel(id, 'W'.repeat(43)),
+    (error) => error.statusCode === 401
+  );
+});
+
+test('requires participant ownership for V2 archive and coalesces concurrent or replayed requests', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-archive-owner-${process.pid}.json`
+  ));
+  const emitted = [];
+  const events = new EventEmitter();
+  const originalEmit = events.emit.bind(events);
+  events.emit = (name, value) => {
+    if (name.startsWith('eval_')) emitted.push(structuredClone(value));
+    return originalEmit(name, value);
+  };
+  const { calls, options } = v2Options();
+  const pipeline = new EvaluationPipeline(store, events, options);
+  const created = await pipeline.create(v2Input());
+  await new Promise(setImmediate);
+  const id = created.evaluation.id;
+  let current = store.get(id);
+  current = await store.mutate(id, current.revision, (record) => ({
+    ...record,
+    execution: {
+      status: 'completed',
+      stage: 'waiting-model',
+      progress: 100,
+      completedAt: '2026-07-24T10:30:00.000Z'
+    }
+  }));
+  const before = {
+    revision: current.revision,
+    audit: current.auditEvents.length,
+    emitted: emitted.length,
+    deletes: calls.deletes.length
+  };
+
+  for (const participantAccessToken of [
+    undefined,
+    'W'.repeat(43)
+  ]) {
+    await assert.rejects(
+      () => pipeline.archive(id, participantAccessToken),
+      (error) => error.statusCode === 401
+    );
+    assert.equal(store.get(id).revision, before.revision);
+    assert.equal(store.get(id).auditEvents.length, before.audit);
+    assert.equal(emitted.length, before.emitted);
+    assert.equal(calls.deletes.length, before.deletes);
+  }
+
+  const [first, second] = await Promise.all([
+    pipeline.archive(id, created.participantAccessToken),
+    pipeline.archive(id, created.participantAccessToken)
+  ]);
+  assert.equal(first.revision, before.revision + 1);
+  assert.equal(second.revision, before.revision + 1);
+  assert.equal(store.get(id).revision, before.revision + 1);
+  assert.equal(emitted.length, before.emitted + 1);
+  const replayed = await pipeline.archive(
+    id,
+    created.participantAccessToken
+  );
+  assert.equal(replayed.revision, before.revision + 1);
+  assert.equal(emitted.length, before.emitted + 1);
+  await assert.rejects(
+    () => pipeline.archive(id, 'W'.repeat(43)),
+    (error) => error.statusCode === 401
+  );
+});
+
+test('creates non-idempotent V2 records with one store set and returns each participant token out of band', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-create-${process.pid}.json`
+  ));
+  const emitted = [];
+  const events = new EventEmitter();
+  events.on('newListener', () => {});
+  const originalEmit = events.emit.bind(events);
+  events.emit = (name, value) => {
+    if (name.startsWith('eval_')) emitted.push(structuredClone(value));
+    return originalEmit(name, value);
+  };
+  let setCalls = 0;
+  const originalSet = store.set.bind(store);
+  store.set = async (...args) => {
+    setCalls += 1;
+    return originalSet(...args);
+  };
+  const { calls, options } = v2Options();
+  const pipeline = new EvaluationPipeline(store, events, options);
+  const input = v2Input({ agentAuthorization: 'agent-create-secret' });
+  const first = await pipeline.create(input);
+  const second = await pipeline.create(input);
+  await new Promise(setImmediate);
+
+  assert.notEqual(first.evaluation.id, second.evaluation.id);
+  assert.notEqual(first.participantAccessToken, second.participantAccessToken);
+  assert.match(first.participantAccessToken, /^[A-Za-z0-9_-]{43}$/u);
+  assert.equal(setCalls, 2);
+  assert.equal(calls.runs.length, 2);
+  assert.equal(calls.puts.length, 2);
+  for (const created of [first, second]) {
+    assert.equal(created.evaluation.schemaVersion, 2);
+    assert.equal(created.evaluation.execution.status, 'queued');
+    assert.equal(created.evaluation.runtimeState.runIndex.length, 3);
+    const stored = JSON.stringify(store.get(created.evaluation.id));
+    assert.equal(stored.includes(created.participantAccessToken), false);
+    assert.equal(stored.includes('agent-create-secret'), false);
+  }
+  assert.equal(
+    JSON.stringify(emitted).includes(first.participantAccessToken),
+    false
+  );
+});
+
+test('authenticates and reserves resume once, replays exactly, and rejects changed bodies without side effects', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-resume-${process.pid}.json`
+  ));
+  const { calls, options } = v2Options();
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
+  const created = await pipeline.create(v2Input({
+    agentAuthorization: 'agent-initial-secret'
+  }));
+  await new Promise(setImmediate);
+  const before = store.get(created.evaluation.id);
+  await store.mutate(before.id, before.revision, (record) => ({
+    ...record,
+    execution: {
+      status: 'credentials-required',
+      stage: 'paused',
+      progress: 10,
+      interruptedAt: '2026-07-24T10:00:10.000Z'
+    }
+  }));
+  const putsBefore = calls.puts.length;
+  const runsBefore = calls.runs.length;
+  const request = {
+    participantAccessToken: created.participantAccessToken,
+    idempotencyKey: 'resume-key-00001',
+    body: { agentAuthorization: 'agent-resume-secret' }
+  };
+  const accepted = await pipeline.resume(created.evaluation.id, request);
+  await new Promise(setImmediate);
+  const replayed = await pipeline.resume(created.evaluation.id, request);
+
+  assert.equal(accepted.statusCode, 202);
+  assert.deepEqual(replayed, accepted);
+  assert.equal(calls.puts.length, putsBefore + 1);
+  assert.equal(calls.runs.length, runsBefore + 1);
+  const stored = store.get(created.evaluation.id);
+  assert.equal(stored.resumeReceipts.length, 1);
+  assert.equal(stored.execution.status, 'queued');
+  assert.equal(
+    JSON.stringify(stored).includes('resume-key-00001'),
+    false
+  );
+  assert.equal(
+    JSON.stringify(stored).includes('agent-resume-secret'),
+    false
+  );
+
+  await assert.rejects(
+    pipeline.resume(created.evaluation.id, {
+      ...request,
+      body: { agentAuthorization: 'different-agent-secret' }
+    }),
+    (error) => error.statusCode === 409
+  );
+  await assert.rejects(
+    pipeline.resume(created.evaluation.id, {
+      ...request,
+      participantAccessToken: 'B'.repeat(43),
+      idempotencyKey: 'another-key-00001'
+    }),
+    (error) => error.statusCode === 401
+  );
+  assert.equal(calls.puts.length, putsBefore + 1);
+  assert.equal(calls.runs.length, runsBefore + 1);
+});
+
+test('replays an accepted resume receipt after archive but rejects a new key without side effects', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-archived-resume-replay-${process.pid}.json`
+  ));
+  const { calls, options } = v2Options();
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
+  const created = await pipeline.create(v2Input());
+  await new Promise(setImmediate);
+  let current = store.get(created.evaluation.id);
+  current = await store.mutate(current.id, current.revision, (record) => ({
+    ...record,
+    execution: {
+      status: 'interrupted',
+      stage: 'recovery',
+      progress: record.execution.progress,
+      interruptedAt: '2026-07-24T10:00:10.000Z'
+    }
+  }));
+  const request = {
+    participantAccessToken: created.participantAccessToken,
+    idempotencyKey: 'archived-replay-key-00001',
+    body: {}
+  };
+  const accepted = await pipeline.resume(current.id, request);
+  await new Promise(setImmediate);
+  current = store.get(current.id);
+  current = await store.mutate(current.id, current.revision, (record) => ({
+    ...record,
+    archivedAt: '2026-07-24T11:00:00.000Z'
+  }));
+  const before = {
+    revision: current.revision,
+    puts: calls.puts.length,
+    deletes: calls.deletes.length,
+    runs: calls.runs.length
+  };
+
+  const replayed = await pipeline.resume(current.id, request);
+  assert.deepEqual(replayed, accepted);
+  await assert.rejects(
+    () => pipeline.resume(current.id, {
+      ...request,
+      idempotencyKey: 'archived-replay-key-00002'
+    }),
+    (error) => error.statusCode === 409 && /archived/iu.test(error.message)
+  );
+
+  assert.equal(store.get(current.id).revision, before.revision);
+  assert.equal(calls.puts.length, before.puts);
+  assert.equal(calls.deletes.length, before.deletes);
+  assert.equal(calls.runs.length, before.runs);
+});
+
+test('rejects explicit non-object resume bodies without reserving or dispatching', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-resume-body-${process.pid}.json`
+  ));
+  const { calls, options } = v2Options();
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
+  const created = await pipeline.create(v2Input());
+  await new Promise(setImmediate);
+  let current = store.get(created.evaluation.id);
+  current = await store.mutate(current.id, current.revision, (record) => ({
+    ...record,
+    execution: {
+      status: 'interrupted',
+      stage: 'recovery',
+      progress: record.execution.progress,
+      interruptedAt: '2026-07-24T10:00:10.000Z'
+    }
+  }));
+  const before = {
+    revision: current.revision,
+    receipts: current.resumeReceipts.length,
+    puts: calls.puts.length,
+    runs: calls.runs.length
+  };
+
+  for (const [index, body] of [null, [], 0, 'invalid'].entries()) {
+    await assert.rejects(
+      () => pipeline.resume(current.id, {
+        participantAccessToken: created.participantAccessToken,
+        idempotencyKey: `resume-body-key-0000${index}`,
+        body
+      }),
+      (error) => error.statusCode === 400
+    );
+  }
+
+  const after = store.get(current.id);
+  assert.equal(after.revision, before.revision);
+  assert.equal(after.resumeReceipts.length, before.receipts);
+  assert.equal(calls.puts.length, before.puts);
+  assert.equal(calls.runs.length, before.runs);
+});
+
+test('rejects resume of an archived interrupted V2 record without side effects', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-archived-resume-${process.pid}.json`
+  ));
+  const { calls, options } = v2Options();
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
+  const created = await pipeline.create(v2Input());
+  await new Promise(setImmediate);
+  let current = store.get(created.evaluation.id);
+  current = await store.mutate(current.id, current.revision, (record) => ({
+    ...record,
+    archivedAt: '2026-07-24T11:00:00.000Z',
+    execution: {
+      status: 'interrupted',
+      stage: 'recovery',
+      progress: record.execution.progress,
+      interruptedAt: '2026-07-24T10:59:00.000Z'
+    }
+  }));
+  const before = {
+    revision: current.revision,
+    receipts: current.resumeReceipts.length,
+    puts: calls.puts.length,
+    deletes: calls.deletes.length,
+    runs: calls.runs.length
+  };
+
+  await assert.rejects(
+    () => pipeline.resume(current.id, {
+      participantAccessToken: created.participantAccessToken,
+      idempotencyKey: 'archived-resume-key-00001',
+      body: {}
+    }),
+    (error) => error.statusCode === 409 && /archived/iu.test(error.message)
+  );
+
+  const after = store.get(current.id);
+  assert.equal(after.revision, before.revision);
+  assert.equal(after.resumeReceipts.length, before.receipts);
+  assert.equal(calls.puts.length, before.puts);
+  assert.equal(calls.deletes.length, before.deletes);
+  assert.equal(calls.runs.length, before.runs);
+
+  const archivedCancel = await pipeline.cancel(current.id);
+  assert.equal(archivedCancel.execution.status, 'interrupted');
+  assert.equal(archivedCancel.revision, before.revision);
+  assert.equal(store.get(current.id).revision, before.revision);
+});
+
+test('records a distinct audit event for each accepted resume request', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-resume-audit-${process.pid}.json`
+  ));
+  const { options } = v2Options();
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
+  const created = await pipeline.create(v2Input());
+  await new Promise(setImmediate);
+  let current = store.get(created.evaluation.id);
+  current = await store.mutate(current.id, current.revision, (record) => ({
+    ...record,
+    execution: { status: 'interrupted', stage: 'recovery', progress: 0 }
+  }));
+  await pipeline.resume(current.id, {
+    participantAccessToken: created.participantAccessToken,
+    idempotencyKey: 'resume-audit-key-00001',
+    body: {}
+  });
+  await new Promise(setImmediate);
+  current = store.get(current.id);
+  await store.mutate(current.id, current.revision, (record) => ({
+    ...record,
+    execution: { status: 'interrupted', stage: 'recovery', progress: 0 }
+  }));
+  await pipeline.resume(current.id, {
+    participantAccessToken: created.participantAccessToken,
+    idempotencyKey: 'resume-audit-key-00002',
+    body: {}
+  });
+
+  const accepted = store.get(current.id).auditEvents.filter(
+    (event) => event.type === 'resume-accepted'
+  );
+  assert.equal(accepted.length, 2);
+  assert.notEqual(accepted[0].id, accepted[1].id);
+});
+
+test('concurrent identical resumes reserve one durable receipt and dispatch only once', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-resume-race-${process.pid}.json`
+  ));
+  const { calls, options } = v2Options();
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
+  const created = await pipeline.create(v2Input({
+    agentAuthorization: 'agent-initial-secret'
+  }));
+  await new Promise(setImmediate);
+  const before = store.get(created.evaluation.id);
+  await store.mutate(before.id, before.revision, (record) => ({
+    ...record,
+    execution: {
+      status: 'credentials-required',
+      stage: 'paused',
+      progress: 10,
+      interruptedAt: '2026-07-24T10:00:10.000Z'
+    }
+  }));
+  const putsBefore = calls.puts.length;
+  const runsBefore = calls.runs.length;
+  const request = {
+    participantAccessToken: created.participantAccessToken,
+    idempotencyKey: 'resume-race-key-00001',
+    body: { agentAuthorization: 'agent-resume-secret' }
+  };
+
+  const results = await Promise.all([
+    pipeline.resume(created.evaluation.id, request),
+    pipeline.resume(created.evaluation.id, request)
+  ]);
+  await new Promise(setImmediate);
+
+  assert.deepEqual(results[1], results[0]);
+  assert.equal(store.get(created.evaluation.id).resumeReceipts.length, 1);
+  assert.equal(calls.puts.length, putsBefore + 1);
+  assert.equal(calls.runs.length, runsBefore + 1);
+});
+
+test('recovers enabled nested V2 state once while disabled recovery leaves it untouched', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-recovery-${process.pid}.json`
+  ));
+  const { options } = v2Options();
+  const creator = new EvaluationPipeline(store, new EventEmitter(), options);
+  const created = await creator.create(v2Input({
+    agentAuthorization: 'agent-recovery-secret'
+  }));
+  await new Promise(setImmediate);
+  let current = store.get(created.evaluation.id);
+  current = await store.mutate(current.id, current.revision, (record) => ({
+    ...record,
+    execution: {
+      status: 'running',
+      stage: 'public-examples',
+      progress: 40
+    }
+  }));
+  const disabled = new EvaluationPipeline(store, new EventEmitter());
+  await disabled.recoverInterrupted();
+  assert.equal(store.get(current.id).revision, current.revision);
+
+  const enabled = new EvaluationPipeline(store, new EventEmitter(), options);
+  await enabled.recoverInterrupted();
+  const recovered = store.get(current.id);
+  assert.equal(recovered.execution.status, 'credentials-required');
+  assert.equal(
+    recovered.auditEvents.filter(
+      (event) => event.type === 'credentials-required'
+    ).length,
+    1
+  );
+  assert.equal(
+    recovered.auditEvents.filter(
+      (event) => event.type === 'execution-interrupted'
+    ).length,
+    0
+  );
+  const revision = recovered.revision;
+  await enabled.recoverInterrupted();
+  assert.equal(store.get(current.id).revision, revision);
+});
+
+test('recovery maps public V2 interruption to one execution-interrupted audit', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-public-recovery-${process.pid}.json`
+  ));
+  const { options } = v2Options();
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
+  const created = await pipeline.create(v2Input());
+  await new Promise(setImmediate);
+  let current = store.get(created.evaluation.id);
+  current = await store.mutate(current.id, current.revision, (record) => ({
+    ...record,
+    execution: {
+      status: 'running',
+      stage: 'public-examples',
+      progress: 40
+    }
+  }));
+
+  await pipeline.recoverInterrupted();
+  const recovered = store.get(current.id);
+  assert.equal(recovered.execution.status, 'interrupted');
+  assert.equal(
+    recovered.auditEvents.filter(
+      (event) => event.type === 'execution-interrupted'
+    ).length,
+    1
+  );
+  assert.equal(
+    recovered.auditEvents.filter(
+      (event) => event.type === 'credentials-required'
+    ).length,
+    0
+  );
+  const revision = recovered.revision;
+  await pipeline.recoverInterrupted();
+  assert.equal(store.get(current.id).revision, revision);
+});
+
+test('dispatched crash recovery closes pending checks and completes objective scoring at lower coverage', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-dispatched-recovery-${process.pid}.json`
+  ));
+  const examples = [{
+    ...V2_EXAMPLES[0],
+    turns: [{
+      ...V2_EXAMPLES[0].turns[0],
+      acceptanceCriteria: [{
+        id: 'must-complete',
+        type: 'contains',
+        expected: ['done'],
+        description: 'Must complete',
+        required: true
+      }]
+    }]
+  }];
+  const { options } = v2Options();
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
+  const created = await pipeline.create(v2Input({ agentExamples: examples }));
+  await new Promise(setImmediate);
+  let current = store.get(created.evaluation.id);
+  const crashedCell = current.runtimeState.runIndex[0];
+  current = await store.mutate(current.id, current.revision, (record) => ({
+    ...record,
+    qualification: {
+      status: 'eligible',
+      reason: 'version-valid-a2a-response',
+      attemptRunIds: ['run_qualification_before_crash'],
+      selectedInterface: {
+        binding: record.submission.selectedInterface.binding,
+        version: record.submission.selectedInterface.version,
+        endpointHash: createHash('sha256')
+          .update(record.submission.selectedInterface.url)
+          .digest('hex')
+      },
+      completedAt: '2026-07-24T10:00:00.000Z'
+    },
+    execution: {
+      status: 'running',
+      stage: 'public-examples',
+      progress: 40
+    },
+    runtimeState: {
+      ...record.runtimeState,
+      runIndex: record.runtimeState.runIndex.map((cell) =>
+        cell.cellId === crashedCell.cellId
+          ? {
+              ...cell,
+              status: 'running',
+              attempts: [{
+                attemptIndex: 0,
+                kind: 'planned',
+                sampleRunId: 'sample_crashed',
+                attribution: null,
+                terminalSuccess: null,
+                acceptance: null,
+                schemaFingerprint: null,
+                timing: null,
+                evidenceIds: [],
+                turns: cell.turns.map((turn) => ({
+                  ...turn,
+                  status: 'dispatched',
+                  sentContextId: null,
+                  sentTaskId: null,
+                  contextId: null,
+                  continuationTaskId: null,
+                  outcome: null,
+                  timing: null,
+                  acceptance: null,
+                  attribution: null,
+                  protocolObservation: null,
+                  evidenceIds: []
+                }))
+              }]
+            }
+          : cell
+      )
+    }
+  }));
+
+  await pipeline.recoverInterrupted();
+  const recovered = store.get(current.id);
+  const recoveredCell = recovered.runtimeState.runIndex[0];
+  assert.equal(recoveredCell.status, 'attribution-pending');
+  assert.equal(recoveredCell.attempts[0].turns[0].status, 'unavailable');
+  assert.equal(recoveredCell.attempts[0].turns[0].evidenceIds.length, 0);
+  assert.equal(recoveredCell.attempts[0].acceptance.checks.length, 1);
+  assert.equal(recoveredCell.attempts[0].acceptance.checks[0].status, 'failed');
+
+  const vault = pipelineMemoryVault();
+  await runBlackBoxFoundation(recovered, {
+    store,
+    events: new EventEmitter(),
+    credentialVault: { get: () => undefined, delete: () => true },
+    evidenceVaultFactory: () => vault,
+    executeTurn: async (turn) => pipelineSuccessfulRun(
+      turn,
+      recovered.submission.selectedInterface
+    ),
+    now: pipelineMonotonicIso(),
+    clock: () => 0,
+    sleep: async () => {},
+    createId: (() => {
+      let index = 0;
+      return (prefix = 'id') =>
+        `${prefix}_${String(index += 1).padStart(4, '0')}`;
+    })()
+  });
+
+  const completed = store.get(current.id);
+  assert.equal(completed.execution.status, 'completed');
+  assert.equal(
+    completed.runtimeState.runIndex[0].status,
+    'attribution-pending'
+  );
+  assert.equal(completed.objectiveCapability.coverage < 1, true);
+  assert.notEqual(completed.objectiveCapability.score, null);
+});
+
+test('same-process resume closes a dispatched unknown turn instead of selecting or rerunning it', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-dispatched-resume-${process.pid}.json`
+  ));
+  const vault = pipelineMemoryVault();
+  let executeCalls = 0;
+  const { options } = v2Options({
+    runBlackBox: runBlackBoxFoundation,
+    blackBoxServices: {
+      evidenceVaultFactory: () => vault,
+      executeTurn: async (turn) => {
+        executeCalls += 1;
+        if (executeCalls === 2) {
+          throw new Error('worker crashed after formal dispatch');
+        }
+        return pipelineSuccessfulRun(turn, {
+          binding: 'HTTP+JSON',
+          version: '1.0',
+          url: 'https://example.com/a2a'
+        });
+      },
+      sleep: async () => {},
+      clock: () => 0,
+      createId: (() => {
+        let index = 0;
+        return (prefix = 'id') =>
+          `${prefix}_${String(index += 1).padStart(4, '0')}`;
+      })()
+    }
+  });
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
+  const created = await pipeline.create(v2Input());
+  const interrupted = await waitFor(
+    store,
+    created.evaluation.id,
+    (item) => item.execution.status === 'interrupted'
+  );
+  const unknownCell = interrupted.runtimeState.runIndex[0];
+  const unknownRunId = unknownCell.attempts[0].turns[0].runId;
+  assert.equal(unknownCell.attempts[0].turns[0].status, 'dispatched');
+
+  await pipeline.resume(created.evaluation.id, {
+    participantAccessToken: created.participantAccessToken,
+    idempotencyKey: 'resume-dispatched-unknown-0001',
+    body: {}
+  });
+  const completed = await waitFor(
+    store,
+    created.evaluation.id,
+    (item) => item.execution.status === 'completed'
+  );
+
+  const recoveredCell = completed.runtimeState.runIndex[0];
+  assert.equal(recoveredCell.status, 'attribution-pending');
+  assert.equal(recoveredCell.selectedAttemptIndex, null);
+  assert.equal(recoveredCell.attempts[0].turns[0].status, 'unavailable');
+  assert.equal(
+    completed.runtimeState.runIndex
+      .flatMap((cell) => cell.attempts)
+      .flatMap((attempt) => attempt.turns)
+      .filter((turn) => turn.runId === unknownRunId)
+      .length,
+    1
+  );
+  assert.equal(executeCalls, 4);
+});
+
+test('enabled V2 cancel commits before abort/delete/emit and is revision-idempotent', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-cancel-enabled-${process.pid}.json`
+  ));
+  let releaseRun;
+  const running = new Promise((resolve) => { releaseRun = resolve; });
+  const operations = [];
+  const { calls, options } = v2Options({
+    runBlackBox: async (_item, services) => {
+      operations.push('worker-start');
+      await new Promise((resolve, reject) => {
+        services.signal.addEventListener('abort', () => {
+          operations.push('abort');
+          reject(services.signal.reason);
+        }, { once: true });
+        running.then(resolve);
+      });
+    }
+  });
+  const originalDelete = options.credentialVault.delete;
+  options.credentialVault.delete = (id) => {
+    operations.push('credential-delete');
+    return originalDelete(id);
+  };
+  const events = new EventEmitter();
+  events.on('newListener', () => {});
+  const originalEmit = events.emit.bind(events);
+  events.emit = (name, value) => {
+    if (value?.schemaVersion === 2) {
+      operations.push(`emit-${value.execution.status}`);
+    }
+    return originalEmit(name, value);
+  };
+  const pipeline = new EvaluationPipeline(store, events, options);
+  const created = await pipeline.create(v2Input({
+    agentAuthorization: 'agent-cancel-secret'
+  }));
+  await new Promise(setImmediate);
+  operations.length = 0;
+
+  const cancelled = await pipeline.cancel(created.evaluation.id);
+  const revision = cancelled.revision;
+  assert.equal(cancelled.execution.status, 'cancelled');
+  assert.equal(cancelled.auditEvents.at(-1).type, 'cancelled');
+  assert.ok(operations.indexOf('abort') < operations.indexOf('credential-delete'));
+  assert.ok(
+    operations.indexOf('credential-delete') <
+      operations.indexOf('emit-cancelled')
+  );
+  const again = await pipeline.cancel(created.evaluation.id);
+  assert.equal(again.revision, revision);
+  assert.equal(calls.puts.length, 1);
+  releaseRun();
+});
+
+test('V2 cancel retries a stale worker revision and still aborts and clears credentials', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-cancel-worker-race-${process.pid}.json`
+  ));
+  const operations = [];
+  const { calls, options } = v2Options({
+    runBlackBox: async (_item, services) => {
+      await new Promise((resolve, reject) => {
+        services.signal.addEventListener('abort', () => {
+          operations.push('abort');
+          reject(services.signal.reason);
+        }, { once: true });
+      });
+    }
+  });
+  const pipeline = new EvaluationPipeline(
+    store,
+    new EventEmitter(),
+    options
+  );
+  const created = await pipeline.create(v2Input({
+    agentAuthorization: 'agent-cancel-race-secret'
+  }));
+  await new Promise(setImmediate);
+
+  const mutate = store.mutate.bind(store);
+  let injectedWorkerCommits = 0;
+  store.mutate = async (id, expectedRevision, updater) => {
+    if (injectedWorkerCommits < 17) {
+      injectedWorkerCommits += 1;
+      await mutate(id, expectedRevision, (record) => ({
+        ...record,
+        execution: {
+          ...record.execution,
+          progress: record.execution.progress + 1
+        }
+      }));
+    }
+    return mutate(id, expectedRevision, updater);
+  };
+
+  const cancelled = await pipeline.cancel(created.evaluation.id);
+
+  assert.equal(injectedWorkerCommits, 17);
+  assert.equal(cancelled.execution.status, 'cancelled');
+  assert.equal(
+    cancelled.auditEvents.filter((event) => event.type === 'cancelled').length,
+    1
+  );
+  assert.deepEqual(operations, ['abort']);
+  assert.equal(
+    calls.deletes.filter((id) => id === created.evaluation.id).length >= 1,
+    true
+  );
+});
+
+test('concurrent V2 cancels commit one transition and both return the current record', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-cancel-race-${process.pid}.json`
+  ));
+  let releaseRun;
+  const running = new Promise((resolve) => { releaseRun = resolve; });
+  const { options } = v2Options({
+    runBlackBox: async (_item, services) => {
+      await new Promise((resolve, reject) => {
+        services.signal.addEventListener(
+          'abort',
+          () => reject(services.signal.reason),
+          { once: true }
+        );
+        running.then(resolve);
+      });
+    }
+  });
+  const events = new EventEmitter();
+  const emitted = [];
+  events.on('newListener', () => {});
+  const originalEmit = events.emit.bind(events);
+  events.emit = (name, value) => {
+    if (value?.execution?.status === 'cancelled') emitted.push(value.revision);
+    return originalEmit(name, value);
+  };
+  const pipeline = new EvaluationPipeline(store, events, options);
+  const created = await pipeline.create(v2Input());
+  await new Promise(setImmediate);
+  const revisionBefore = store.get(created.evaluation.id).revision;
+
+  const results = await Promise.all([
+    pipeline.cancel(created.evaluation.id),
+    pipeline.cancel(created.evaluation.id)
+  ]);
+
+  assert.equal(results[0].execution.status, 'cancelled');
+  assert.equal(results[1].execution.status, 'cancelled');
+  assert.equal(results[0].revision, revisionBefore + 1);
+  assert.equal(results[1].revision, revisionBefore + 1);
+  assert.equal(store.get(created.evaluation.id).revision, revisionBefore + 1);
+  assert.deepEqual(emitted, [revisionBefore + 1]);
+  releaseRun();
+});
+
+test('V2 cancel closes a dispatched turn, attempt, and cell without pending attribution', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v2-cancel-dispatched-${process.pid}.json`
+  ));
+  const { options } = v2Options();
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
+  const created = await pipeline.create(v2Input());
+  await new Promise(setImmediate);
+  let current = store.get(created.evaluation.id);
+  current = await store.mutate(current.id, current.revision, (record) => ({
+    ...record,
+    execution: { status: 'running', stage: 'public-examples', progress: 20 },
+    runtimeState: {
+      ...record.runtimeState,
+      runIndex: record.runtimeState.runIndex.map((cell, index) =>
+        index === 0
+          ? {
+              ...cell,
+              status: 'running',
+              attempts: [{
+                attemptIndex: 0,
+                kind: 'planned',
+                sampleRunId: 'sample_cancelled',
+                attribution: null,
+                terminalSuccess: null,
+                acceptance: null,
+                schemaFingerprint: null,
+                timing: null,
+                evidenceIds: [],
+                turns: cell.turns.map((turn) => ({
+                  ...turn,
+                  status: 'dispatched',
+                  attribution: null
+                }))
+              }]
+            }
+          : cell
+      )
+    }
+  }));
+
+  const cancelled = await pipeline.cancel(current.id);
+  const cell = cancelled.runtimeState.runIndex[0];
+  const attempt = cell.attempts[0];
+  assert.equal(cell.status, 'cancelled');
+  assert.equal(attempt.attribution, 'cancelled');
+  assert.equal(attempt.terminalSuccess, false);
+  assert.equal(attempt.turns[0].status, 'cancelled');
+  assert.equal(attempt.turns[0].attribution, 'cancelled');
+  assert.deepEqual(attempt.turns[0].outcome, {
+    status: 'cancelled',
+    lifecycle: 'cancelled'
+  });
 });
 
 test('marks persisted running evaluations as interrupted after a restart', async () => {

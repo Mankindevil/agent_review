@@ -25,7 +25,16 @@ test('exports immutable contract version metadata', () => {
 test('creates the exact queued V2 evaluation record', () => {
   const record = createEvaluationRecord(snapshot, {
     id: 'eval_v2_1',
-    createdAt: '2026-07-24T10:01:00.000Z'
+    createdAt: '2026-07-24T10:01:00.000Z',
+    participantAccess: {
+      tokenHash: 'a'.repeat(64),
+      createdAt: '2026-07-24T10:01:00.000Z'
+    },
+    authorizationRequired: true,
+    endpointHash: 'b'.repeat(64),
+    agentVersion: '1.2.3',
+    serviceBuildId: null,
+    runIndex: [{ cellId: 'cell_one', status: 'planned' }]
   });
 
   assert.deepEqual(record, {
@@ -36,6 +45,20 @@ test('creates the exact queued V2 evaluation record', () => {
     execution: { status: 'queued', stage: 'qualification', progress: 0 },
     governance: { phase: 'waiting_model' },
     submission: snapshot,
+    participantAccess: {
+      tokenHash: 'a'.repeat(64),
+      createdAt: '2026-07-24T10:01:00.000Z'
+    },
+    connection: { authorizationRequired: true },
+    resumeReceipts: [],
+    runtimeState: {
+      version: 'phase1-runtime/v1',
+      endpointHash: 'b'.repeat(64),
+      agentVersion: '1.2.3',
+      serviceBuildId: null,
+      responseFingerprints: [],
+      runIndex: [{ cellId: 'cell_one', status: 'planned' }]
+    },
     evaluationWindow: { firstRunAt: null, lastRunAt: null },
     qualification: { status: 'pending', attemptRunIds: [] },
     evidenceManifest: { version: '1.0', items: [] },

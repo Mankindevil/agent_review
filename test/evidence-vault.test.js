@@ -16,8 +16,32 @@ import {
   createEvidenceManifestItem,
   createEvidenceRecord
 } from '../src/evidence.js';
-import { EvidenceVault } from '../src/evidence-vault.js';
+import {
+  decodeEvidenceEncryptionKey,
+  EvidenceVault
+} from '../src/evidence-vault.js';
 import { projectEvaluation } from '../src/evaluation-projection.js';
+
+test('exports the canonical padded-base64 32-byte evidence key parser', () => {
+  const key = Buffer.alloc(32, 7).toString('base64');
+  const decoded = decodeEvidenceEncryptionKey(key);
+  assert.equal(Buffer.isBuffer(decoded), true);
+  assert.equal(decoded.length, 32);
+  assert.equal(decoded.toString('base64'), key);
+  for (const value of [
+    undefined,
+    '',
+    Buffer.alloc(31).toString('base64'),
+    key.replace(/=$/u, ''),
+    `${key.slice(0, -1)}A`
+  ]) {
+    assert.throws(
+      () => decodeEvidenceEncryptionKey(value),
+      (error) => /EVIDENCE_ENCRYPTION_KEY/u.test(error.message) &&
+        (value === '' || !String(error.message).includes(String(value)))
+    );
+  }
+});
 
 function fixtureRecord(evidenceId = 'ev_vault') {
   return createEvidenceRecord({

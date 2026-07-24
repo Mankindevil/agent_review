@@ -5,6 +5,7 @@ import {
   CRITERION_TYPES,
   PART_TYPES,
   SUBMISSION_LIMITS,
+  assertFrozenSubmissionIntegrity,
   freezeSubmission,
   normalizeAgentExamples
 } from '../src/submission.js';
@@ -66,6 +67,28 @@ test('ships a closed JSON Schema for the normalized example contract', async () 
     (entry) => entry.properties.type.const === 'contains'
   );
   assert.deepEqual(contains.properties.caseSensitive, { type: 'boolean' });
+  assert.deepEqual(schema.$defs.turn.required, ['input']);
+  assert.equal(schema.$defs.turn.properties.acceptanceCriteria.minItems, 0);
+});
+
+test('normalizes optional deliverable, criteria, and constraints without inventing values', () => {
+  const minimal = normalizeAgentExamples([{
+    id: 'minimal',
+    name: 'Minimal',
+    turns: [{ input: { parts: [{ type: 'text', text: 'ping' }] } }]
+  }]);
+  assert.deepEqual(minimal[0].turns[0], {
+    input: { parts: [{ type: 'text', text: 'ping' }] },
+    acceptanceCriteria: []
+  });
+  assert.equal(Object.hasOwn(minimal[0].turns[0], 'expectedDeliverable'), false);
+
+  const explicitEmpty = clone();
+  explicitEmpty[0].turns[0].acceptanceCriteria = [];
+  explicitEmpty[0].constraints = [];
+  const normalized = normalizeAgentExamples(explicitEmpty);
+  assert.deepEqual(normalized[0].turns[0].acceptanceCriteria, []);
+  assert.deepEqual(normalized[0].constraints, []);
 });
 
 test('keeps schema base64 and URL-userinfo constraints aligned with runtime normalization', async () => {
@@ -389,6 +412,122 @@ test('revalidates the actual Agent Card instead of trusting a mismatched or stal
     }),
     /valid Agent Card/i
   );
+});
+
+test('rejects query or fragment credentials in every declared V2 interface without echoing them', () => {
+  const secret = 'sentinel-connection-secret';
+  const args = {
+    agentExamples: examples,
+    config: { rubricVersion: 'a2a-black-box-v1' },
+    frozenAt: '2026-07-24T10:00:00.000Z'
+  };
+  for (const suffix of [`?token=${secret}`, `#${secret}`]) {
+    const credentialCard = structuredClone(card);
+    credentialCard.supportedInterfaces[0].url += suffix;
+    assert.throws(
+      () => freezeSubmission({
+        ...args,
+        agentCard: credentialCard
+      }),
+      (error) =>
+        /agentAuthorization|query|fragment|endpoint/iu.test(error.message) &&
+        !error.message.includes(secret)
+    );
+  }
+  for (const protocolBinding of ['HTTP+JSON', 'CUSTOM']) {
+    for (const suffix of [`?token=${secret}`, `#${secret}`]) {
+      const unselectedCredentialCard = structuredClone(card);
+      unselectedCredentialCard.supportedInterfaces.push({
+        url: `https://secondary.agent.example/a2a${suffix}`,
+        protocolBinding,
+        protocolVersion: '1.0'
+      });
+      assert.throws(
+        () => freezeSubmission({
+          ...args,
+          agentCard: unselectedCredentialCard
+        }),
+        (error) =>
+          /agentAuthorization|query|fragment|endpoint/iu.test(error.message) &&
+          !error.message.includes(secret)
+      );
+    }
+  }
+  for (const suffix of [`?token=${secret}`, `#${secret}`]) {
+    const mixedVersionCard = structuredClone(card);
+    mixedVersionCard.url = `https://legacy.agent.example/a2a${suffix}`;
+    assert.throws(
+      () => freezeSubmission({
+        ...args,
+        agentCard: mixedVersionCard
+      }),
+      (error) =>
+        /agentAuthorization|query|fragment|endpoint/iu.test(error.message) &&
+        !error.message.includes(secret)
+    );
+  }
+
+  const frozen = freezeSubmission({
+    ...args,
+    agentCard: card
+  });
+  const tampered = structuredClone(frozen);
+  tampered.selectedInterface.url += `?token=${secret}`;
+  assert.throws(
+    () => assertFrozenSubmissionIntegrity(tampered, args.config),
+    (error) =>
+      /frozen|integrity|query|fragment|endpoint/iu.test(error.message) &&
+      !error.message.includes(secret)
+  );
+  const unselectedTampered = structuredClone(frozen);
+  unselectedTampered.agentCard.value.supportedInterfaces.push({
+    url: `https://secondary.agent.example/a2a#${secret}`,
+    protocolBinding: 'CUSTOM',
+    protocolVersion: '1.0'
+  });
+  assert.throws(
+    () => assertFrozenSubmissionIntegrity(unselectedTampered, args.config),
+    (error) =>
+      /frozen|integrity|query|fragment|endpoint/iu.test(error.message) &&
+      !error.message.includes(secret)
+  );
+});
+
+test('verifies the frozen submission in place across hashes, interface, and every config version', () => {
+  const config = {
+    rubricVersion: 'a2a-black-box-v1',
+    hiddenTestPackageVersion: null,
+    modelConfigVersion: null,
+    runtimeConfigVersion: 'phase1-black-box-runtime/v1'
+  };
+  const snapshot = freezeSubmission({
+    agentCard: card,
+    agentExamples: examples,
+    config,
+    frozenAt: '2026-07-24T10:00:00.000Z'
+  });
+  assert.equal(assertFrozenSubmissionIntegrity(snapshot, config), true);
+  assert.equal(snapshot.frozenAt, '2026-07-24T10:00:00.000Z');
+
+  const mutations = [
+    (value) => { value.agentCard.value.name = 'Tampered'; },
+    (value) => { value.agentCard.sha256 = '0'.repeat(64); },
+    (value) => { value.agentExamples.value[0].name = 'Tampered'; },
+    (value) => { value.agentExamples.sha256 = '0'.repeat(64); },
+    (value) => { value.selectedInterface.binding = 'JSONRPC'; },
+    (value) => { value.config.rubricVersion = 'other'; },
+    (value) => { value.config.hiddenTestPackageVersion = 'hidden'; },
+    (value) => { value.config.modelConfigVersion = 'model'; },
+    (value) => { value.config.runtimeConfigVersion = 'runtime'; }
+  ];
+  for (const mutate of mutations) {
+    const altered = structuredClone(snapshot);
+    mutate(altered);
+    assert.throws(
+      () => assertFrozenSubmissionIntegrity(altered, config),
+      /frozen|integrity|hash|interface|config|Card|examples/i
+    );
+  }
 });
 
 test('canonical hashes ignore object insertion order while preserving array order', () => {

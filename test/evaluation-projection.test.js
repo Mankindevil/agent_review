@@ -56,20 +56,63 @@ function unsafeEvaluation() {
       agentExamples: { sha256: 'b'.repeat(64), value: [{ hiddenInput: 'hidden-secret' }] },
       config: { rubricVersion: 'rubric-v1', hiddenTestPackageVersion: 'hidden-v1' }
     },
-    qualification: { status: 'passed', attemptRunIds: ['run_1'], hiddenInput: 'hidden-secret' },
+    qualification: {
+      status: 'eligible',
+      reason: 'version-valid-a2a-response',
+      attemptRunIds: ['run_1'],
+      selectedInterface: {
+        binding: 'HTTP+JSON',
+        version: '1.0',
+        endpointHash: 'c'.repeat(64),
+        endpointUrl: 'private-interface-url'
+      },
+      hiddenInput: 'hidden-secret'
+    },
     evidenceManifest: {
       version: '1.0',
       items: [structuredClone(PUBLIC_MANIFEST)]
     },
     objectiveCapability: { status: 'pending', score: null, hiddenTests: ['hidden-secret'] },
-    absoluteReview: { status: 'pending-model-review', authorization: 'review-secret' },
+    absoluteReview: {
+      status: 'pending-model-review',
+      confidence: {
+        status: 'pending-model-review',
+        value: null,
+        privateReason: 'private-confidence-reason'
+      },
+      authorization: 'review-secret'
+    },
     replicaArena: {
       status: 'sealed',
       seal: 'replica-seal-secret',
       anonymousMapping: { A: 'replica-secret' },
       logs: ['sensitive-log-secret']
     },
-    resultV2: { status: 'pending', score: null, rawPayload: 'result-secret' },
+    resultV2: {
+      absolute: { status: 'pending-model-review', private: 'absolute-private' },
+      replica: { status: 'disabled', private: 'replica-private' },
+      rating: {
+        status: 'pending-model-and-human',
+        code: null,
+        label: null,
+        private: 'rating-private'
+      },
+      rawPayload: 'result-secret'
+    },
+    participantAccess: { tokenHash: 'participant-hash-secret' },
+    connection: { authorizationRequired: true, value: 'connection-secret' },
+    resumeReceipts: [{
+      keyHash: 'receipt-key-secret',
+      requestMac: 'receipt-mac-secret',
+      response: { private: 'receipt-response-secret' }
+    }],
+    runtimeState: {
+      endpointHash: 'runtime-endpoint-secret',
+      runIndex: [{
+        contextId: 'context-private-secret',
+        continuationTaskId: 'task-private-secret'
+      }]
+    },
     auditEvents: [{
       id: 'audit_1',
       type: 'created',
@@ -101,6 +144,29 @@ test('constructs a public V2 projection from explicit allow-listed fields', () =
     stage: 'qualification',
     progress: 25
   });
+  assert.deepEqual(projection.qualification, {
+    status: 'eligible',
+    reason: 'version-valid-a2a-response',
+    attemptRunIds: ['run_1'],
+    selectedInterface: {
+      binding: 'HTTP+JSON',
+      version: '1.0',
+      endpointHash: 'c'.repeat(64)
+    }
+  });
+  assert.deepEqual(projection.absoluteReview, {
+    status: 'pending-model-review',
+    confidence: { status: 'pending-model-review', value: null }
+  });
+  assert.deepEqual(projection.resultV2, {
+    absolute: { status: 'pending-model-review' },
+    replica: { status: 'disabled' },
+    rating: {
+      status: 'pending-model-and-human',
+      code: null,
+      label: null
+    }
+  });
   assert.deepEqual(projection.evidenceManifest.items[0], {
     evidenceId: 'ev_public',
     runId: 'run_1',
@@ -119,7 +185,12 @@ test('constructs a public V2 projection from explicit allow-listed fields', () =
   for (const secret of [
     'projection-secret', 'card-secret', 'hidden-secret',
     'review-secret', 'replica-seal-secret', 'replica-secret',
-    'sensitive-log-secret', 'result-secret', 'raw-top-level-secret'
+    'sensitive-log-secret', 'result-secret', 'raw-top-level-secret',
+    'participant-hash-secret', 'connection-secret', 'receipt-key-secret',
+    'receipt-mac-secret', 'receipt-response-secret', 'runtime-endpoint-secret',
+    'context-private-secret', 'task-private-secret', 'private-interface-url',
+    'private-confidence-reason', 'absolute-private', 'replica-private',
+    'rating-private'
   ]) {
     assert.equal(serialized.includes(secret), false, secret);
   }

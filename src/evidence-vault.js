@@ -21,7 +21,7 @@ export class EvidenceVault {
     assertSafeId(evaluationId, 'evaluationId');
     this.root = path.resolve(root);
     this.evaluationId = evaluationId;
-    this.key = decodeKey(key);
+    this.key = decodeEvidenceEncryptionKey(key);
     this.directory = path.resolve(this.root, evaluationId);
     assertContained(this.root, this.directory);
   }
@@ -150,7 +150,13 @@ export class EvidenceVault {
   }
 }
 
-function decodeKey(value) {
+export function decodeEvidenceEncryptionKey(value) {
+  if (Buffer.isBuffer(value)) {
+    if (value.length !== 32) {
+      throw new TypeError('EVIDENCE_ENCRYPTION_KEY must be a base64-encoded 32-byte key');
+    }
+    return Buffer.from(value);
+  }
   if (typeof value !== 'string' || !/^[A-Za-z0-9+/]{43}=$/u.test(value)) {
     throw new TypeError('EVIDENCE_ENCRYPTION_KEY must be a base64-encoded 32-byte key');
   }

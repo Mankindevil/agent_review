@@ -114,7 +114,8 @@ function assertV2Identity(stored, next) {
     next.schemaVersion !== 2 ||
     next.id !== stored.id ||
     next.createdAt !== stored.createdAt ||
-    !isDeepStrictEqual(next.submission, stored.submission)
+    !isDeepStrictEqual(next.submission, stored.submission) ||
+    !isDeepStrictEqual(next.participantAccess, stored.participantAccess)
   ) {
     throw new TypeError('V2 mutation must preserve schemaVersion and frozen record identity');
   }

@@ -54,11 +54,12 @@ export async function executeA2ATurn(options) {
     persistSnapshot,
     clock = () => Date.now(),
     sleep = wait,
-    requestId: suppliedRequestId
+    requestId: suppliedRequestId,
+    runId: suppliedRunId
   } = options || {};
   const startedAt = clock();
   const deadline = startedAt + timeoutMs;
-  const runId = `run_${crypto.randomUUID()}`;
+  const runId = suppliedRunId || `run_${crypto.randomUUID()}`;
   const requestId = suppliedRequestId || crypto.randomUUID();
   const messageId = crypto.randomUUID();
   let target = null;
@@ -71,6 +72,7 @@ export async function executeA2ATurn(options) {
   let mediaType = null;
   let byteLength = 0;
   let snapshots = [];
+  let protocolValidated = false;
   const rawObjects = [];
   let normalized = emptyNormalized();
 
@@ -148,6 +150,7 @@ export async function executeA2ATurn(options) {
       let payload = parseJsonResponse(target, response, requestId);
       rawObjects.push(payload);
       normalized = normalizeA2AResult(target, rawObjects);
+      protocolValidated = true;
       let lockedTaskId = normalized.responseKind === 'task' ? normalized.taskId : null;
       let lockedContextId = normalized.responseKind === 'task' ? normalized.contextId : null;
 
@@ -191,6 +194,7 @@ export async function executeA2ATurn(options) {
       endedAt = clock();
     }
 
+    protocolValidated = true;
     const snapshotParts = collectAgentSnapshotParts(target, rawObjects);
     if (snapshotParts.some((part) => directPartUrl(part))) {
       snapshots = await snapshotUrlParts(snapshotParts, {
@@ -199,7 +203,11 @@ export async function executeA2ATurn(options) {
         authorization,
         signal,
         clock,
-        batchTimeoutMs: remaining(deadline, clock)
+        batchTimeoutMs: remaining(deadline, clock),
+        runId,
+        testId,
+        turnIndex,
+        repeatIndex
       });
     }
     const outcome = outcomeFor(normalized);
@@ -213,7 +221,7 @@ export async function executeA2ATurn(options) {
       rawObjects, normalized, httpStatus, mediaType, byteLength,
       snapshots,
       startedAt, headersAt, firstByteAt, firstEventAt, endedAt: endedAt ?? clock(),
-      outcome, error, authorization
+      outcome, error, authorization, protocolValidated
     });
   } catch (error) {
     endedAt = endedAt ?? clock();
@@ -226,7 +234,7 @@ export async function executeA2ATurn(options) {
       startedAt, headersAt, firstByteAt, firstEventAt, endedAt,
       outcome: { status: classified.outcome },
       error: publicError(error?.message, classified.category, authorization, error),
-      authorization
+      authorization, protocolValidated
     });
   }
 }
@@ -516,6 +524,10 @@ export async function snapshotUrlParts(parts, options = {}) {
           size: body.length,
           sha256: digest,
           sourceUrl,
+          runId: options.runId,
+          testId: options.testId,
+          turnIndex: options.turnIndex,
+          repeatIndex: options.repeatIndex,
           signal,
           remainingMs
         }),
@@ -559,7 +571,8 @@ function buildRun(input) {
     runId, testId, turnIndex, repeatIndex, target, initialRequest, requestId, messageId,
     rawObjects, normalized, httpStatus, mediaType, byteLength,
     snapshots,
-    startedAt, headersAt, firstByteAt, firstEventAt, endedAt, outcome, error, authorization
+    startedAt, headersAt, firstByteAt, firstEventAt, endedAt, outcome, error,
+    authorization, protocolValidated
   } = input;
   const body = redactValue(initialRequest?.body ?? null, authorization);
   const safeRawObjects = redactValue(rawObjects, authorization);
@@ -572,7 +585,8 @@ function buildRun(input) {
     protocol: {
       binding: target?.binding || null,
       version: target?.version || null,
-      endpointHash: target?.url ? sha256(target.url) : null
+      endpointHash: target?.url ? sha256(target.url) : null,
+      validated: protocolValidated === true
     },
     request: {
       requestId,
@@ -587,6 +601,11 @@ function buildRun(input) {
       rawObjects: safeRawObjects,
       rawHash: hashJson(safeRawObjects),
       normalized: safeNormalized,
+      currentOutput: deriveCurrentOutput(
+        safeNormalized,
+        target,
+        safeRawObjects
+      ),
       snapshots: redactValue(snapshots || [], authorization)
     },
     timing: {
@@ -602,6 +621,59 @@ function buildRun(input) {
     outcome,
     error
   };
+}
+
+function deriveCurrentOutput(normalized, target, rawObjects) {
+  if (normalized?.responseKind === 'message') {
+    const message = [...(normalized.messages || [])].reverse().find(
+      (item) => ['agent', 'ROLE_AGENT'].includes(item?.role)
+    );
+    const parts = message?.parts || [];
+    return {
+      text: parts.map(directText).filter(Boolean).join('\n'),
+      data: firstData(parts),
+      artifacts: []
+    };
+  }
+  if (normalized?.responseKind === 'task') {
+    const artifacts = finalTaskArtifacts(target, rawObjects, normalized);
+    const parts = artifacts.flatMap((artifact) => artifact.parts || []);
+    return {
+      text: parts.map(directText).filter(Boolean).join('\n'),
+      data: firstData(parts),
+      artifacts
+    };
+  }
+  return { text: '', data: null, artifacts: [] };
+}
+
+function finalTaskArtifacts(target, rawObjects, normalized) {
+  let finalTask = null;
+  let hasArtifactUpdate = false;
+  for (const raw of rawObjects || []) {
+    const root = protocolRoot(target, raw);
+    const task = root?.task || (isTask(root) ? root : null);
+    if (root?.artifactUpdate || isArtifactUpdate(root)) {
+      hasArtifactUpdate = true;
+    }
+    if (task) finalTask = task;
+  }
+  if (hasArtifactUpdate) return normalized.artifacts || [];
+  if (finalTask && isTerminalState(finalTask.status?.state)) {
+    return Array.isArray(finalTask.artifacts) ? finalTask.artifacts : [];
+  }
+  return normalized.artifacts || [];
+}
+
+function directText(part) {
+  return typeof part?.text === 'string' ? part.text : '';
+}
+
+function firstData(parts) {
+  for (const part of parts) {
+    if (Object.hasOwn(part || {}, 'data')) return part.data;
+  }
+  return null;
 }
 
 async function send(requestDefinition, options) {
@@ -1011,6 +1083,11 @@ function redactText(value, secret) {
 function validateAuthorization(value) {
   if (value === undefined || value === null) return;
   authorizationToken(value);
+}
+
+export function validateAgentAuthorization(value) {
+  validateAuthorization(value);
+  return value ?? undefined;
 }
 
 function authorizationToken(value) {

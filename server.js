@@ -8,7 +8,12 @@ import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { EvaluationPipeline } from './src/pipeline.js';
 import { EvaluationStore } from './src/store.js';
-import { normalizeSeed, normalizeTemperature, readJsonBody } from './src/utils.js';
+import {
+  normalizeSeed,
+  normalizeTemperature,
+  readJsonBody,
+  readJsonBodyWithSize
+} from './src/utils.js';
 import { resolveAgentCard } from './src/a2a.js';
 import { runAgentDiagnostics } from './src/agent-diagnostics.js';
 import { createDiagnosticsGuard } from './src/diagnostics-guard.js';
@@ -17,16 +22,53 @@ import { createSkillBundle } from './src/runtimes.js';
 import { getPandaDataStatus, pandaDataConfig, queryPandaData } from './src/panda-data.js';
 import { resolveServerAddress } from './src/server-address.js';
 import { projectEvaluation } from './src/evaluation-projection.js';
+import {
+  copyEvidenceEncryptionKey,
+  copyResumeMacKey,
+  readBlackBoxRuntimeConfig
+} from './src/black-box-pipeline.js';
+import { EphemeralCredentialVault } from './src/credential-vault.js';
+import { EvidenceVault } from './src/evidence-vault.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.join(root, 'public');
+const LEGACY_EVALUATION_BODY_LIMIT = 1_000_000;
+const V2_EVALUATION_BODY_LIMIT = 3 * 1024 * 1024;
+export const blackBoxRuntimeConfig = readBlackBoxRuntimeConfig(process.env, {
+  serverRoot: root
+});
 export const evaluationStore = new EvaluationStore(
   process.env.DATA_FILE || path.join(root, 'data/evaluations.json')
 );
 const store = evaluationStore;
 const events = new EventEmitter();
 events.setMaxListeners(100);
-const pipeline = new EvaluationPipeline(evaluationStore, events);
+const credentialVault = blackBoxRuntimeConfig.enabled
+  ? new EphemeralCredentialVault()
+  : null;
+const resumeMacKey = copyResumeMacKey(blackBoxRuntimeConfig);
+export const pipeline = new EvaluationPipeline(evaluationStore, events, {
+  blackBoxEnabled: blackBoxRuntimeConfig.enabled,
+  credentialVault,
+  resumeMacKey,
+  blackBoxServices: blackBoxRuntimeConfig.enabled
+    ? {
+        evidenceVaultFactory: (evaluationId) => {
+          const key = copyEvidenceEncryptionKey(blackBoxRuntimeConfig);
+          try {
+            return new EvidenceVault({
+              root: blackBoxRuntimeConfig.evidenceRoot,
+              evaluationId,
+              key
+            });
+          } finally {
+            key.fill(0);
+          }
+        }
+      }
+    : {}
+});
+resumeMacKey?.fill(0);
 const diagnosticsGuard = createDiagnosticsGuard();
 await evaluationStore.load();
 await pipeline.recoverInterrupted();
@@ -36,6 +78,7 @@ export const server = createServer(async (request, response) => {
     const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     if (request.method === 'GET' && url.pathname === '/api/health') return json(response, 200, {
       ok: true, mode: 'full-stack', time: new Date().toISOString(),
+      a2aBlackBoxV1Enabled: blackBoxRuntimeConfig.enabled,
       evaluationSeed: normalizeSeed(process.env.EVALUATION_SEED), modelTemperature: normalizeTemperature(process.env.MODEL_TEMPERATURE, 0),
       dataSource: await getPandaDataStatus()
     });
@@ -83,8 +126,37 @@ export const server = createServer(async (request, response) => {
       ));
     }
     if (request.method === 'POST' && url.pathname === '/api/evaluations') {
-      const item = await pipeline.create(await readJsonBody(request));
+      const item = await pipeline.create(await readEvaluationCreateBody(request));
+      if (item?.evaluation?.schemaVersion === 2) {
+        response.setHeader('cache-control', 'no-store');
+      }
       return json(response, 202, serializeEvaluationForResponse(item));
+    }
+    const resumeMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/resume$/);
+    if (request.method === 'POST' && resumeMatch) {
+      if (!blackBoxRuntimeConfig.enabled) {
+        return json(response, 409, { error: 'A2A black-box V2 is disabled' });
+      }
+      response.setHeader('cache-control', 'no-store');
+      const participantAccessToken =
+        bearerToken(request.headers.authorization);
+      const authorized = pipeline.authenticateResume(
+        resumeMatch[1],
+        participantAccessToken
+      );
+      if (!authorized) {
+        return json(response, 404, {
+          error: 'Evaluation does not exist'
+        });
+      }
+      const resumed = await pipeline.resume(resumeMatch[1], {
+        participantAccessToken,
+        idempotencyKey: request.headers['idempotency-key'],
+        body: await readJsonBody(request, 16 * 1024)
+      });
+      return resumed
+        ? json(response, resumed.statusCode, resumed.response)
+        : json(response, 404, { error: 'Evaluation does not exist' });
     }
     const cancelMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/cancel$/);
     if (request.method === 'POST' && cancelMatch) {
@@ -158,6 +230,10 @@ export const server = createServer(async (request, response) => {
     return json(response, 404, { error: '接口不存在' });
   } catch (error) {
     if (error.retryAfter) response.setHeader('retry-after', String(error.retryAfter));
+    if (error.responseBody) {
+      response.setHeader('cache-control', 'no-store');
+      return json(response, error.statusCode || 500, error.responseBody);
+    }
     if (!error.statusCode || error.statusCode === 500) console.error(error);
     return json(response, error.statusCode || 500, { error: error.message || '服务器内部错误' });
   }
@@ -211,9 +287,39 @@ function json(response, status, payload) { response.writeHead(status, { 'content
 function summary(item) { return { id: item.id, name: item.agentCard.name, createdAt: item.createdAt, status: item.status, progress: item.progress, tier: item.roast?.tier, score: item.averages?.submitted }; }
 
 export function serializeEvaluationForResponse(item) {
+  if (item?.evaluation?.schemaVersion === 2) {
+    return {
+      ...projectEvaluation(item.evaluation, { audience: 'public' }),
+      participantAccessToken: item.participantAccessToken
+    };
+  }
   return item?.schemaVersion === 2
     ? projectEvaluation(item, { audience: 'public' })
     : item;
+}
+
+function bearerToken(value) {
+  const match = typeof value === 'string'
+    ? value.match(/^Bearer ([A-Za-z0-9_-]{43})$/u)
+    : null;
+  return match?.[1] ?? '';
+}
+
+async function readEvaluationCreateBody(request) {
+  if (!blackBoxRuntimeConfig.enabled) {
+    return readJsonBody(request, LEGACY_EVALUATION_BODY_LIMIT);
+  }
+  const { value, size } = await readJsonBodyWithSize(
+    request,
+    V2_EVALUATION_BODY_LIMIT
+  );
+  if (value?.schemaVersion !== 2 && size > LEGACY_EVALUATION_BODY_LIMIT) {
+    throw Object.assign(
+      new Error('Legacy evaluation request body exceeds the size limit'),
+      { statusCode: 413 }
+    );
+  }
+  return value;
 }
 
 if (process.env.NODE_ENV !== 'test') {

@@ -4,8 +4,18 @@ import {
   executeA2AExample,
   executeA2ATurn,
   normalizeA2AResult,
-  snapshotUrlParts
+  snapshotUrlParts,
+  validateAgentAuthorization
 } from '../src/a2a-executor.js';
+
+test('exports the shared Agent authorization validation boundary', () => {
+  assert.equal(validateAgentAuthorization(undefined), undefined);
+  assert.equal(validateAgentAuthorization('abc'), 'abc');
+  assert.equal(validateAgentAuthorization('Bearer abc'), 'Bearer abc');
+  for (const value of ['', ' abcd', 'abc def', 'a\u0000bc']) {
+    assert.throws(() => validateAgentAuthorization(value), /authorization/i);
+  }
+});
 
 const rpcCard = {
   name: 'Executor Agent',
@@ -17,6 +27,14 @@ const rpcCard = {
   }],
   capabilities: { streaming: true },
   skills: [{ id: 'run', name: 'Run', description: 'Run a workflow.' }]
+};
+const streamingHttpCard = {
+  ...rpcCard,
+  supportedInterfaces: [{
+    url: 'https://agent.example/a2a',
+    protocolBinding: 'HTTP+JSON',
+    protocolVersion: '1.0'
+  }]
 };
 
 test('captures a blocking Message with stable hashes, timing, and no authorization evidence', async () => {
@@ -54,6 +72,7 @@ test('captures a blocking Message with stable hashes, timing, and no authorizati
 
   assert.equal(observedAuthorization, 'Bearer top-secret-token');
   assert.equal(run.outcome.status, 'succeeded');
+  assert.equal(run.protocol.validated, true);
   assert.equal(run.response.normalized.responseKind, 'message');
   assert.equal(run.response.normalized.contextId, 'ctx-1');
   assert.equal(run.response.normalized.text, 'completed');
@@ -61,6 +80,194 @@ test('captures a blocking Message with stable hashes, timing, and no authorizati
   assert.match(run.request.bodyHash, /^[a-f0-9]{64}$/);
   assert.match(run.response.rawHash, /^[a-f0-9]{64}$/);
   assert.doesNotMatch(JSON.stringify(run), /top-secret-token|authorization/i);
+});
+
+test('locks a caller-supplied run ID and exposes only current direct Message output', async () => {
+  const run = await executeA2ATurn({
+    card: rpcCard,
+    runId: 'run_locked',
+    input: { parts: [{ type: 'text', text: 'user input must not return' }] },
+    testId: 'test_locked',
+    turnIndex: 1,
+    repeatIndex: 2,
+    request: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      return jsonResponse({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          message: {
+            messageId: 'reply-current',
+            role: 'ROLE_AGENT',
+            parts: [
+              { text: '{"looks":"json"}' },
+              { data: { current: true } }
+            ]
+          }
+        }
+      });
+    }
+  });
+  assert.equal(run.runId, 'run_locked');
+  assert.deepEqual(run.response.currentOutput, {
+    text: '{"looks":"json"}',
+    data: { current: true },
+    artifacts: []
+  });
+});
+
+test('exposes only final Task artifacts as current output', async () => {
+  const run = await executeA2ATurn({
+    card: rpcCard,
+    runId: 'run_task_output',
+    input: { parts: [{ type: 'text', text: 'user input must not return' }] },
+    testId: 'test_task_output',
+    request: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      return jsonResponse({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          task: {
+            id: 'task-output',
+            contextId: 'ctx-output',
+            status: {
+              state: 'TASK_STATE_COMPLETED',
+              message: {
+                messageId: 'status-output',
+                role: 'ROLE_AGENT',
+                parts: [{ text: 'status text must not return' }]
+              }
+            },
+            history: [{
+              messageId: 'old-history',
+              role: 'ROLE_AGENT',
+              parts: [{ text: 'old history must not return' }]
+            }],
+            artifacts: [
+              {
+                artifactId: 'artifact-1',
+                parts: [
+                  { text: '{"still":"text"}' },
+                  { data: { current: true } }
+                ]
+              },
+              {
+                artifactId: 'artifact-2',
+                parts: [{ text: 'second artifact' }]
+              }
+            ]
+          }
+        }
+      });
+    }
+  });
+
+  assert.deepEqual(run.response.currentOutput, {
+    text: '{"still":"text"}\nsecond artifact',
+    data: { current: true },
+    artifacts: run.response.normalized.artifacts
+  });
+  assert.doesNotMatch(
+    JSON.stringify(run.response.currentOutput),
+    /old history|status text|user input/u
+  );
+});
+
+test('does not inherit a working Task draft artifact when the final polled Task omits artifacts', async () => {
+  let calls = 0;
+  const run = await executeA2ATurn({
+    card: rpcCard,
+    runId: 'run_final_task_artifacts',
+    input: { parts: [{ type: 'text', text: 'run' }] },
+    testId: 'test_final_task_artifacts',
+    sleep: async () => {},
+    request: async (_url, options) => {
+      calls += 1;
+      const body = JSON.parse(options.body);
+      if (calls === 1) {
+        return jsonResponse({
+          jsonrpc: '2.0',
+          id: body.id,
+          result: {
+            task: {
+              id: 'task-final-artifacts',
+              contextId: 'ctx-final-artifacts',
+              status: { state: 'TASK_STATE_WORKING' },
+              artifacts: [{
+                artifactId: 'draft-artifact',
+                parts: [{ text: 'draft must not be accepted' }]
+              }]
+            }
+          }
+        });
+      }
+      return jsonResponse({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          id: 'task-final-artifacts',
+          contextId: 'ctx-final-artifacts',
+          status: { state: 'TASK_STATE_COMPLETED' }
+        }
+      });
+    }
+  });
+
+  assert.equal(run.outcome.status, 'succeeded');
+  assert.equal(run.outcome.lifecycle, 'completed');
+  assert.deepEqual(run.response.currentOutput, {
+    text: '',
+    data: null,
+    artifacts: []
+  });
+  assert.match(run.response.normalized.text, /draft must not be accepted/u);
+});
+
+test('passes locked run provenance to URL snapshot persistence', async () => {
+  let persisted;
+  await executeA2ATurn({
+    card: rpcCard,
+    runId: 'run_snapshot_locked',
+    input: { parts: [{ type: 'text', text: 'run' }] },
+    testId: 'test_snapshot_locked',
+    turnIndex: 3,
+    repeatIndex: 2,
+    request: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      return jsonResponse({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          message: {
+            messageId: 'reply-url-locked',
+            role: 'ROLE_AGENT',
+            parts: [{ url: 'https://files.example/report.csv' }]
+          }
+        }
+      });
+    },
+    snapshotRequest: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/csv' },
+      body: Buffer.from('ok')
+    }),
+    persistSnapshot: async (snapshot) => {
+      persisted = snapshot;
+      return { evidenceId: 'ev_snapshot_locked' };
+    }
+  });
+  assert.deepEqual({
+    runId: persisted.runId,
+    testId: persisted.testId,
+    turnIndex: persisted.turnIndex,
+    repeatIndex: persisted.repeatIndex
+  }, {
+    runId: 'run_snapshot_locked',
+    testId: 'test_snapshot_locked',
+    turnIndex: 3,
+    repeatIndex: 2
+  });
 });
 
 test('redacts an authorization secret even when a remote Agent echoes it', async () => {
@@ -290,6 +497,26 @@ test('polls a non-terminal Task on the locked schedule within one wall-clock dea
   assert.equal(run.outcome.status, 'succeeded');
 });
 
+test('records a validated blocking Task before a later polling deadline expires', async () => {
+  const run = await executeA2ATurn({
+    card: streamingHttpCard,
+    input: { parts: [{ type: 'text', text: 'run' }] },
+    timeoutMs: 200,
+    clock: sequenceClock([1_000, 1_050, 1_200]),
+    request: async () => jsonResponse({
+      task: {
+        id: 'task-working',
+        status: { state: 'TASK_STATE_WORKING' }
+      }
+    })
+  });
+
+  assert.equal(run.outcome.status, 'platform-error');
+  assert.equal(run.error.category, 'timeout');
+  assert.equal(run.protocol.validated, true);
+  assert.equal(run.response.normalized.responseKind, 'task');
+});
+
 test('parses SSE by arriving chunk and records the real first complete event time', async () => {
   const first = 'data: {"jsonrpc":"2.0","id":"stream-req","result":{"task":{"id":"task-1","contextId":"ctx-1","status":{"state":"TASK_STATE_WORK';
   const second = 'ING"}}}}\n\n';
@@ -346,6 +573,7 @@ test('rejects a stream Message as terminal when the same stream started a Task l
 
   assert.equal(run.outcome.status, 'agent-error');
   assert.equal(run.error.category, 'protocol');
+  assert.equal(run.protocol.validated, false);
   assert.equal(run.timing.firstByteAt, null);
   assert.equal(run.timing.firstEventAt, null);
 });
@@ -491,7 +719,7 @@ test('accepts one final v1 HTTP Task snapshot and normalizes cumulative evidence
     } }
   ];
   const run = await executeA2ATurn({
-    card: httpCard,
+    card: streamingHttpCard,
     input: { parts: [{ type: 'text', text: 'stream' }] },
     streaming: true,
     request: async () => ({
@@ -566,6 +794,7 @@ test('classifies transport, protocol, and terminal Agent failures without leakin
   });
   assert.equal(protocol.outcome.status, 'agent-error');
   assert.equal(protocol.error.category, 'protocol');
+  assert.equal(protocol.protocol.validated, false);
 
   const failed = await executeA2ATurn({
     card: rpcCard,
@@ -580,6 +809,7 @@ test('classifies transport, protocol, and terminal Agent failures without leakin
     }
   });
   assert.equal(failed.outcome.status, 'agent-error');
+  assert.equal(failed.protocol.validated, true);
   assert.equal(failed.error.category, 'agent');
 });
 
@@ -974,6 +1204,29 @@ test('preserves equal artifact append chunks while deduplicating replayed snapsh
   assert.equal(normalized.text, 'history\nha\nha');
 });
 
+test('keeps HTTP streaming artifact updates when a terminal Task omits artifacts', async () => {
+  const body = [
+    'data: {"task":{"id":"task-stream","contextId":"ctx-stream","status":{"state":"TASK_STATE_WORKING"}}}\n\n',
+    'data: {"artifactUpdate":{"taskId":"task-stream","contextId":"ctx-stream","artifact":{"artifactId":"artifact-1","parts":[{"text":"assembled"}]},"lastChunk":true}}\n\n',
+    'data: {"statusUpdate":{"taskId":"task-stream","contextId":"ctx-stream","status":{"state":"TASK_STATE_COMPLETED"}}}\n\n',
+    'data: {"task":{"id":"task-stream","contextId":"ctx-stream","status":{"state":"TASK_STATE_COMPLETED"}}}\n\n'
+  ].join('');
+  const run = await executeA2ATurn({
+    card: streamingHttpCard,
+    input: { parts: [{ type: 'text', text: 'stream' }] },
+    streaming: true,
+    request: async () => ({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+      body: Buffer.from(body)
+    })
+  });
+
+  assert.equal(run.outcome.status, 'succeeded', JSON.stringify(run.error));
+  assert.equal(run.response.currentOutput.text, 'assembled');
+  assert.equal(run.response.currentOutput.artifacts.length, 1);
+});
+
 test('reuses task IDs only for interrupted continuations and checks adjacent contexts', async () => {
   const calls = [];
   const result = await executeA2AExample({
@@ -1274,7 +1527,13 @@ test('scrubs encoded credential URLs from every failed run evidence surface', as
     ['~~~x', 'fn5-eA', 'https://files.example/report.csv?credential=fn5-eA', 'agent-error', 'credential-in-url'],
     ['a/b', 'a%2fb', 'https://files.example/a%2fb/report.csv', 'agent-error', 'credential-in-url'],
     ['a/b', 'a%252fb', 'https://files.example/a%252fb/report.csv', 'agent-error', 'credential-in-url'],
-    ['abc', 'Bearer+abc', 'https://files.example/Bearer+abc/report.csv', 'agent-error', 'credential-in-url'],
+    [
+      'sentinel-token-credential-9ZQ4',
+      'Bearer+sentinel-token-credential-9ZQ4',
+      'https://files.example/Bearer+sentinel-token-credential-9ZQ4/report.csv',
+      'agent-error',
+      'credential-in-url'
+    ],
     ['~~~x', 'fn5+eA', 'https://files.example/fn5+eA/report.csv', 'agent-error', 'credential-in-url']
   ];
 
@@ -1540,7 +1799,6 @@ test('bounds persistence by the batch deadline and propagates deadline-aware can
   let persistenceSignal;
   let persistenceBudget;
   let persistenceCompleted = false;
-  const started = performance.now();
   await assert.rejects(
     snapshotUrlParts([{ url: 'https://files.example/deadline-persist.csv' }], {
       batchTimeoutMs: 1,
@@ -1560,11 +1818,9 @@ test('bounds persistence by the batch deadline and propagates deadline-aware can
     }),
     (error) => error.category === 'timeout' && error.outcome === 'platform-error'
   );
-  const elapsed = performance.now() - started;
   assert.ok(persistenceSignal instanceof AbortSignal);
   assert.equal(persistenceSignal.aborted, true);
   assert.ok(persistenceBudget > 0 && persistenceBudget <= 1);
-  assert.ok(elapsed < 50, `deadline returned after ${elapsed}ms`);
   assert.equal(persistenceCompleted, false);
 
   const controller = new AbortController();

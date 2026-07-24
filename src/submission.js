@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { validateAgentCard } from './a2a.js';
 import { validateSafeUrl } from './safe-http.js';
 
@@ -71,6 +72,7 @@ export function freezeSubmission({
   frozenAt
 }) {
   void validation;
+  assertV2CardEndpointCredentialBoundary(agentCard);
   const actualValidation = validateAgentCard(agentCard);
   if (!actualValidation.valid) throw new TypeError('A valid Agent Card is required');
   const selectedInterface = actualValidation.selectedInterface;
@@ -97,6 +99,60 @@ export function freezeSubmission({
   return deepFreeze(snapshot);
 }
 
+export function assertFrozenSubmissionIntegrity(snapshot, expectedConfig) {
+  requireObject(snapshot, 'frozen submission');
+  requireObject(snapshot.agentCard, 'frozen submission agentCard');
+  requireObject(snapshot.agentExamples, 'frozen submission agentExamples');
+  assertV2CardEndpointCredentialBoundary(snapshot.agentCard.value);
+  const actualValidation = validateAgentCard(snapshot.agentCard.value);
+  if (!actualValidation.valid) {
+    throw new TypeError('frozen submission Agent Card integrity check failed');
+  }
+  assertV2EndpointCredentialBoundary(snapshot.selectedInterface?.url);
+  if (
+    snapshot.agentCard.sha256 !== hashCanonical(snapshot.agentCard.value) ||
+    snapshot.agentExamples.sha256 !== hashCanonical(snapshot.agentExamples.value)
+  ) {
+    throw new TypeError('frozen submission hash integrity check failed');
+  }
+  const normalizedExamples = normalizeAgentExamples(snapshot.agentExamples.value);
+  if (!isDeepStrictEqual(normalizedExamples, snapshot.agentExamples.value)) {
+    throw new TypeError('frozen submission examples integrity check failed');
+  }
+  if (!isDeepStrictEqual(actualValidation.selectedInterface, snapshot.selectedInterface)) {
+    throw new TypeError('frozen submission selected interface integrity check failed');
+  }
+  const normalizedExpectedConfig = normalizeConfig(expectedConfig);
+  if (!isDeepStrictEqual(snapshot.config, normalizedExpectedConfig)) {
+    throw new TypeError('frozen submission config integrity check failed');
+  }
+  return true;
+}
+
+function assertV2CardEndpointCredentialBoundary(agentCard) {
+  if (typeof agentCard?.url === 'string') {
+    assertV2EndpointCredentialBoundary(agentCard.url);
+  }
+  if (!Array.isArray(agentCard?.supportedInterfaces)) return;
+  for (const declaredInterface of agentCard.supportedInterfaces) {
+    if (typeof declaredInterface?.url === 'string') {
+      assertV2EndpointCredentialBoundary(declaredInterface.url);
+    }
+  }
+}
+
+function assertV2EndpointCredentialBoundary(rawUrl) {
+  if (
+    typeof rawUrl !== 'string' ||
+    rawUrl.includes('?') ||
+    rawUrl.includes('#')
+  ) {
+    throw new TypeError(
+      'V2 Agent endpoint query or fragment is not allowed; use agentAuthorization'
+    );
+  }
+}
+
 function normalizeTurn(turn, path) {
   requireObject(turn, path);
   requireObject(turn.input, `${path}.input`);
@@ -106,15 +162,19 @@ function normalizeTurn(turn, path) {
   if (turn.input.parts.length > INTERNAL_SUBMISSION_LIMITS.partsPerTurn) {
     throw new RangeError(`parts exceeds limit of ${INTERNAL_SUBMISSION_LIMITS.partsPerTurn}`);
   }
-  if (!Array.isArray(turn.acceptanceCriteria) || turn.acceptanceCriteria.length === 0) {
-    throw new TypeError(`${path}.acceptanceCriteria must be a non-empty array`);
+  if (
+    turn.acceptanceCriteria !== undefined &&
+    !Array.isArray(turn.acceptanceCriteria)
+  ) {
+    throw new TypeError(`${path}.acceptanceCriteria must be an array`);
   }
-  if (turn.acceptanceCriteria.length > INTERNAL_SUBMISSION_LIMITS.criteriaPerTurn) {
+  const rawCriteria = turn.acceptanceCriteria ?? [];
+  if (rawCriteria.length > INTERNAL_SUBMISSION_LIMITS.criteriaPerTurn) {
     throw new RangeError(`criteria exceeds limit of ${INTERNAL_SUBMISSION_LIMITS.criteriaPerTurn}`);
   }
 
   const criterionIds = new Set();
-  const acceptanceCriteria = turn.acceptanceCriteria.map((criterion, criterionIndex) => {
+  const acceptanceCriteria = rawCriteria.map((criterion, criterionIndex) => {
     const criterionPath = `${path}.acceptanceCriteria[${criterionIndex}]`;
     const result = normalizeCriterion(criterion, criterionPath);
     if (criterionIds.has(result.id)) throw new TypeError(`duplicate criterion id within turn: ${result.id}`);
@@ -122,15 +182,21 @@ function normalizeTurn(turn, path) {
     return result;
   });
 
-  return {
+  const result = {
     input: {
       parts: turn.input.parts.map((part, partIndex) =>
         normalizePart(part, `${path}.input.parts[${partIndex}]`)
       )
     },
-    expectedDeliverable: requireString(turn.expectedDeliverable, `${path}.expectedDeliverable`),
     acceptanceCriteria
   };
+  if (turn.expectedDeliverable !== undefined) {
+    result.expectedDeliverable = requireString(
+      turn.expectedDeliverable,
+      `${path}.expectedDeliverable`
+    );
+  }
+  return result;
 }
 
 function normalizePart(part, path) {
