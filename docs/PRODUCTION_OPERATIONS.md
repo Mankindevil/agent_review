@@ -162,6 +162,9 @@ nginx_stage="/etc/nginx/sites-available/agent-review.next.$$"
 nginx_backup="/etc/nginx/sites-available/agent-review.backup.$(date -u +%Y%m%dT%H%M%SZ)"
 environment_live=/etc/agent-review/agent-review.env
 environment_backup="/etc/agent-review/agent-review.env.release-backup.$(date -u +%Y%m%dT%H%M%SZ).$$"
+retrieval_key_live=/root/agent-review-access-key.txt
+retrieval_key_state=missing
+retrieval_key_backup=''
 nginx_rendered="$(mktemp)"
 sed 's/__PUBLIC_IP__/14.103.143.171/g' "$nginx_template" > "$nginx_rendered"
 test -s "$nginx_rendered"
@@ -171,10 +174,19 @@ sudo test -f "$environment_live"
 sudo cp -p "$environment_live" "$environment_backup"
 sudo chown root:root "$environment_backup"
 sudo chmod 0600 "$environment_backup"
+if sudo test -e "$retrieval_key_live" || sudo test -L "$retrieval_key_live"; then
+  sudo test -f "$retrieval_key_live"
+  sudo test ! -L "$retrieval_key_live"
+  retrieval_key_backup="/root/agent-review-access-key.txt.release-backup.$(date -u +%Y%m%dT%H%M%SZ).$$"
+  sudo cp -p "$retrieval_key_live" "$retrieval_key_backup"
+  sudo chown root:root "$retrieval_key_backup"
+  sudo chmod 0600 "$retrieval_key_backup"
+  retrieval_key_state=present
+fi
 previous_dir="$(readlink -f /opt/agent-review/app)"
 test -d "$previous_dir"
-printf 'Record rollback inputs: previous_release=%s nginx_backup=%s environment_backup=%s\n' \
-  "$previous_dir" "$nginx_backup" "$environment_backup"
+printf 'Record rollback inputs: previous_release=%s nginx_backup=%s environment_backup=%s retrieval_key_state=%s retrieval_key_backup=%s\n' \
+  "$previous_dir" "$nginx_backup" "$environment_backup" "$retrieval_key_state" "$retrieval_key_backup"
 stage_link="/opt/agent-review/app.next.$$"
 recovery_link="/opt/agent-review/app.recovery.$$"
 release_switched=0
@@ -214,9 +226,9 @@ rm -f -- "$nginx_rendered"
 trap - EXIT
 ```
 
-The rendered Nginx configuration is installed only after the existing file is backed up. Any failure after promotion restores that backup, validates it with `nginx -t`, reloads Nginx, and restores the previous application symlink if it had already moved. Record the printed previous release, Nginx backup, and root-only environment backup paths with the release. The environment backup preserves the pre-rotation `AGENT_DIAGNOSTICS_ACCESS_KEY` and must survive until the release is accepted.
+The rendered Nginx configuration is installed only after the existing file is backed up. Any failure after promotion restores that backup, validates it with `nginx -t`, reloads Nginx, and restores the previous application symlink if it had already moved. Record every printed rollback input with the release: the previous release, Nginx backup, root-only environment backup, retrieval-key state, and retrieval-key backup path when the state is `present`. A `missing` state is deliberate and must also be recorded. Both root-only backups must survive until the release is accepted.
 
-If post-deployment acceptance fails, use the three exact paths recorded by the release command. Do not guess a SHA or select the newest backup:
+If post-deployment acceptance fails, use the exact paths and retrieval-key state recorded by the release command. Do not guess a SHA or select the newest backup:
 
 ```bash
 set -euo pipefail
@@ -231,33 +243,70 @@ wait_for_health() {
   done
   return 1
 }
+validate_env_key() {
+  sudo python3 - "$1" "$2" <<'PY'
+import hmac, pathlib, re, sys
+env_path, key_path = map(pathlib.Path, sys.argv[1:])
+key = key_path.read_text(encoding='utf-8').strip()
+pattern = re.compile(r'^\s*(?:export\s+)?AGENT_DIAGNOSTICS_ACCESS_KEY\s*=\s*(.*?)\s*$')
+values = [match.group(1) for line in env_path.read_text(encoding='utf-8').splitlines() if (match := pattern.match(line))]
+raise SystemExit(0 if len(values) == 1 and hmac.compare_digest(values[0], key) else 1)
+PY
+}
 previous_release='<recorded previous release directory>'
 nginx_backup='<recorded nginx backup>'
 environment_backup='<recorded environment backup>'
+retrieval_key_state='<recorded retrieval key state: present or missing>'
+retrieval_key_backup='<recorded retrieval key backup; empty if missing>'
 app_live=/opt/agent-review/app
 app_stage="/opt/agent-review/app.rollback.$$"
 nginx_live=/etc/nginx/sites-available/agent-review
 nginx_stage="/etc/nginx/sites-available/agent-review.rollback.$$"
 environment_live=/etc/agent-review/agent-review.env
 environment_stage="/etc/agent-review/agent-review.env.rollback.$$"
+retrieval_key_live=/root/agent-review-access-key.txt
+retrieval_key_stage="/root/agent-review-access-key.txt.rollback.$$"
+service_stopped=0
+rollback_credentials_ready=0
 
 test "$(readlink -f "$previous_release")" = "$previous_release"
 test -d "$previous_release"
 test -f "$previous_release/package.json"
 sudo test -f "$nginx_backup"
 sudo test -f "$environment_backup"
+case "$retrieval_key_state" in
+  present)
+    sudo test -f "$retrieval_key_backup"
+    validate_env_key "$environment_backup" "$retrieval_key_backup"
+    ;;
+  missing)
+    test -z "$retrieval_key_backup"
+    ;;
+  *)
+    echo 'retrieval_key_state must be present or missing' >&2
+    exit 1
+    ;;
+esac
 sudo ln -s "$previous_release" "$app_stage"
 test "$(readlink -f "$app_stage")" = "$previous_release"
 
 rollback_cleanup() {
   status=$?
-  sudo rm -f -- "$app_stage" "$nginx_stage" "$environment_stage" || true
-  if [ "$status" -ne 0 ]; then sudo systemctl start agent-review || true; fi
+  sudo rm -f -- "$app_stage" "$nginx_stage" "$environment_stage" "$retrieval_key_stage" || true
+  if [ "$status" -ne 0 ] && [ "$service_stopped" -eq 1 ]; then
+    if [ "$rollback_credentials_ready" -eq 1 ]; then
+      sudo systemctl start agent-review || true
+    else
+      sudo systemctl stop agent-review || true
+      echo 'Rollback failed before credential consistency was verified; agent-review remains stopped.' >&2
+    fi
+  fi
   exit "$status"
 }
 trap rollback_cleanup EXIT
 
 sudo systemctl stop agent-review
+service_stopped=1
 sudo mv -Tf "$app_stage" "$app_live"
 sudo cp -p "$nginx_backup" "$nginx_stage"
 sudo mv -Tf "$nginx_stage" "$nginx_live"
@@ -267,12 +316,30 @@ sudo install -o root -g root -m 0600 "$environment_backup" "$environment_stage"
 sudo mv -Tf "$environment_stage" "$environment_live"
 sudo chown root:root "$environment_live"
 sudo chmod 0600 "$environment_live"
+test "$(sudo stat -c '%U:%G %a' "$environment_live")" = 'root:root 600'
+if [ "$retrieval_key_state" = present ]; then
+  sudo install -o root -g root -m 0600 "$retrieval_key_backup" "$retrieval_key_stage"
+  sudo mv -Tf "$retrieval_key_stage" "$retrieval_key_live"
+  sudo chown root:root "$retrieval_key_live"
+  sudo chmod 0600 "$retrieval_key_live"
+  test "$(sudo stat -c '%U:%G %a' "$retrieval_key_live")" = 'root:root 600'
+  validate_env_key "$environment_live" "$retrieval_key_live"
+  rollback_credentials_ready=1
+else
+  sudo rm -f -- "$retrieval_key_live"
+  if sudo test -e "$retrieval_key_live" || sudo test -L "$retrieval_key_live"; then
+    echo 'retrieval key removal failed' >&2
+    exit 1
+  fi
+  rollback_credentials_ready=1
+fi
 sudo systemctl restart agent-review
 wait_for_health
+service_stopped=0
 trap - EXIT
 ```
 
-This restores the application release, public routing, and the pre-rotation diagnostics key as one rollback procedure. If a switch is interrupted, inspect only the explicit live and `.rollback.<PID>` paths before acting. Do not remove release directories or backups during an incident.
+This restores the application release, public routing, environment key, and operator retrieval copy as one rollback procedure. When the retrieval copy existed before release, rollback verifies that its backup matches the environment backup before stopping the service, restores both through protected staged files, and verifies them again before restart. When it was absent, rollback removes the newly created retrieval copy before restart. If a switch is interrupted, inspect only the explicit live and `.rollback.<PID>` paths before acting. Do not remove release directories or backups during an incident.
 
 ## Backup and restore
 
@@ -375,7 +442,7 @@ sudo stat -c '%U:%G %a %n' /etc/agent-review/agent-review.env
 
 Expected metadata is `root:root 600`. The browser diagnostics retrieval copy is `/root/agent-review-access-key.txt`, also `root:root` mode `0600`. Authorized operators retrieve it only through their approved privileged-access procedure.
 
-Rotation creates protected staged key and environment files, validates the staged environment without output, then makes exact root-only backups before either live replacement. Its failure trap restores both live files after a failed promotion or post-promotion validation and cleans only the exact generated paths. The old retrieval copy remains intact until the new live environment validates.
+Rotation creates a unique protected key file and a protected staged environment from that same key, validates the pair without output, then makes exact root-only backups before either live replacement. Each live file is replaced with an atomic rename. Its failure trap verifies ownership, mode, and credential consistency before restarting with restored files; if restoration cannot be verified, it stops the service and leaves an explicit error instead of starting with mismatched credentials.
 
 ```bash
 set -euo pipefail
@@ -392,24 +459,53 @@ wait_for_health() {
 }
 env_file=/etc/agent-review/agent-review.env
 key_file=/root/agent-review-access-key.txt
-key_next=/root/agent-review-access-key.next
+key_next=''
 env_stage="/etc/agent-review/agent-review.env.next.$$"
 env_backup="/etc/agent-review/agent-review.env.backup.$$"
 key_backup="/root/agent-review-access-key.backup.$$"
 live_replacements_started=0
+key_had_live=0
+preserve_recovery_backups=0
 rotation_cleanup() {
   status=$?
   if [ "$live_replacements_started" -eq 1 ]; then
-    sudo mv -Tf "$env_backup" "$env_file" || true
-    sudo mv -Tf "$key_backup" "$key_file" || true
-    sudo systemctl restart agent-review || true
-    wait_for_health || true
+    restoration_ok=1
+    if ! sudo mv -Tf "$env_backup" "$env_file"; then restoration_ok=0; fi
+    if ! sudo chown root:root "$env_file"; then restoration_ok=0; fi
+    if ! sudo chmod 0600 "$env_file"; then restoration_ok=0; fi
+    if [ "$(sudo stat -c '%U:%G %a' "$env_file" 2>/dev/null || true)" != 'root:root 600' ]; then
+      restoration_ok=0
+    fi
+    if [ "$key_had_live" -eq 1 ]; then
+      if ! sudo mv -Tf "$key_backup" "$key_file"; then restoration_ok=0; fi
+      if ! sudo chown root:root "$key_file"; then restoration_ok=0; fi
+      if ! sudo chmod 0600 "$key_file"; then restoration_ok=0; fi
+      if [ "$(sudo stat -c '%U:%G %a' "$key_file" 2>/dev/null || true)" != 'root:root 600' ]; then
+        restoration_ok=0
+      fi
+      if ! validate_env_key "$env_file" "$key_file"; then restoration_ok=0; fi
+    else
+      if ! sudo rm -f -- "$key_file"; then restoration_ok=0; fi
+      if sudo test -e "$key_file" || sudo test -L "$key_file"; then restoration_ok=0; fi
+    fi
+    if [ "$restoration_ok" -eq 1 ]; then
+      sudo systemctl restart agent-review || true
+      wait_for_health || true
+    else
+      preserve_recovery_backups=1
+      sudo systemctl stop agent-review || true
+      echo 'Rotation recovery could not verify credential consistency; agent-review remains stopped.' >&2
+    fi
   fi
-  sudo rm -f -- "$env_stage" "$key_next" "$env_backup" "$key_backup" || true
+  if [ "$preserve_recovery_backups" -eq 0 ]; then
+    sudo rm -f -- "$env_stage" "$env_backup" "$key_backup" || true
+    if [ -n "$key_next" ]; then sudo rm -f -- "$key_next" || true; fi
+  fi
   exit "$status"
 }
 trap rotation_cleanup EXIT
-sudo sh -c 'umask 077; test ! -e "$1"; openssl rand -hex 32 > "$1"' sh "$key_next"
+key_next="$(sudo mktemp /root/agent-review-access-key.next.XXXXXX)"
+sudo sh -c 'umask 077; openssl rand -hex 32 > "$1"' sh "$key_next"
 sudo chown root:root "$key_next"
 sudo chmod 0600 "$key_next"
 sudo python3 - "$env_file" "$key_next" "$env_stage" <<'PY'
@@ -446,7 +542,17 @@ PY
 }
 validate_env_key "$env_stage" "$key_next"
 sudo cp -p "$env_file" "$env_backup"
-sudo cp -p "$key_file" "$key_backup"
+sudo chown root:root "$env_backup"
+sudo chmod 0600 "$env_backup"
+if sudo test -e "$key_file" || sudo test -L "$key_file"; then
+  sudo test -f "$key_file"
+  sudo test ! -L "$key_file"
+  sudo cp -p "$key_file" "$key_backup"
+  sudo chown root:root "$key_backup"
+  sudo chmod 0600 "$key_backup"
+  validate_env_key "$env_backup" "$key_backup"
+  key_had_live=1
+fi
 live_replacements_started=1
 sudo mv -Tf "$env_stage" "$env_file"
 sudo mv -Tf "$key_next" "$key_file"

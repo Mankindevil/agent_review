@@ -109,6 +109,14 @@ test('standard release renders, validates, installs, and can roll back nginx', a
     /environment_backup=/,
     /sudo cp -p "\$environment_live" "\$environment_backup"/,
     /sudo chmod 0600 "\$environment_backup"/,
+    /retrieval_key_live=\/root\/agent-review-access-key\.txt/,
+    /retrieval_key_state=missing/,
+    /if sudo test -e "\$retrieval_key_live" \|\| sudo test -L "\$retrieval_key_live"; then/,
+    /sudo test ! -L "\$retrieval_key_live"/,
+    /sudo cp -p "\$retrieval_key_live" "\$retrieval_key_backup"/,
+    /sudo chown root:root "\$retrieval_key_backup"/,
+    /sudo chmod 0600 "\$retrieval_key_backup"/,
+    /retrieval_key_state=present/,
     /Record rollback inputs/,
     /sudo install -o root -g root -m 0644/,
     /sudo nginx -t/,
@@ -137,6 +145,10 @@ test('explicit rollback restores the recorded release, nginx, and environment in
     /previous_release='<recorded previous release directory>'/,
     /nginx_backup='<recorded nginx backup>'/,
     /environment_backup='<recorded environment backup>'/,
+    /retrieval_key_state='<recorded retrieval key state: present or missing>'/,
+    /retrieval_key_backup='<recorded retrieval key backup; empty if missing>'/,
+    /retrieval_key_live=\/root\/agent-review-access-key\.txt/,
+    /validate_env_key "\$environment_backup" "\$retrieval_key_backup"/,
     /sudo ln -s "\$previous_release" "\$app_stage"/,
     /sudo mv -Tf "\$app_stage" "\$app_live"/,
     /sudo cp -p "\$nginx_backup" "\$nginx_stage"/,
@@ -147,6 +159,12 @@ test('explicit rollback restores the recorded release, nginx, and environment in
     /sudo mv -Tf "\$environment_stage" "\$environment_live"/,
     /sudo chown root:root "\$environment_live"/,
     /sudo chmod 0600 "\$environment_live"/,
+    /sudo install -o root -g root -m 0600 "\$retrieval_key_backup" "\$retrieval_key_stage"/,
+    /sudo mv -Tf "\$retrieval_key_stage" "\$retrieval_key_live"/,
+    /sudo chmod 0600 "\$retrieval_key_live"/,
+    /validate_env_key "\$environment_live" "\$retrieval_key_live"/,
+    /sudo rm -f -- "\$retrieval_key_live"/,
+    /rollback_credentials_ready=1/,
     /sudo systemctl restart agent-review/,
     /wait_for_health/
   ]) {
@@ -161,9 +179,66 @@ test('explicit rollback restores the recorded release, nginx, and environment in
     'sudo install -o root -g root -m 0600 "$environment_backup" "$environment_stage"',
     'sudo mv -Tf "$environment_stage" "$environment_live"',
     'sudo chmod 0600 "$environment_live"',
+    'sudo install -o root -g root -m 0600 "$retrieval_key_backup" "$retrieval_key_stage"',
+    'sudo mv -Tf "$retrieval_key_stage" "$retrieval_key_live"',
+    'sudo chmod 0600 "$retrieval_key_live"',
+    'validate_env_key "$environment_live" "$retrieval_key_live"',
     'sudo systemctl restart agent-review'
   ].map((step) => rollback.indexOf(step));
   const steps = [...orderedCommands, rollback.lastIndexOf('wait_for_health')];
   assert.ok(steps.every((index) => index >= 0));
   assert.deepEqual([...steps].sort((left, right) => left - right), steps);
+  const missingStateDeletion = rollback.indexOf('sudo rm -f -- "$retrieval_key_live"');
+  const restart = rollback.indexOf('sudo systemctl restart agent-review');
+  assert.ok(rollback.indexOf('sudo chmod 0600 "$environment_live"') < missingStateDeletion);
+  assert.ok(missingStateDeletion < restart);
+  assert.match(
+    rollback,
+    /if \[ "\$rollback_credentials_ready" -eq 1 \]; then[\s\S]*sudo systemctl start agent-review[\s\S]*else[\s\S]*sudo systemctl stop agent-review/
+  );
+});
+
+test('diagnostics key rotation atomically keeps the environment and retrieval copy in sync without printing it', async () => {
+  const operations = await readDoc('PRODUCTION_OPERATIONS.md');
+  const start = operations.indexOf('Rotation creates a unique protected key');
+  const end = operations.indexOf('`PANDA_DATA_ACCESS_KEY` is absent', start);
+  assert.ok(start >= 0 && end > start);
+  const rotation = operations.slice(start, end);
+  for (const expected of [
+    /key_next="\$\(sudo mktemp \/root\/agent-review-access-key\.next\.XXXXXX\)"/,
+    /openssl rand -hex 32 > "\$1"/,
+    /key = key_path\.read_text\(encoding='utf-8'\)\.strip\(\)/,
+    /validate_env_key "\$env_stage" "\$key_next"/,
+    /sudo mv -Tf "\$env_stage" "\$env_file"/,
+    /sudo mv -Tf "\$key_next" "\$key_file"/,
+    /validate_env_key "\$env_file" "\$key_file"/,
+    /if sudo test -e "\$key_file" \|\| sudo test -L "\$key_file"; then/,
+    /sudo test ! -L "\$key_file"/,
+    /sudo chown root:root "\$key_backup"/,
+    /sudo chmod 0600 "\$key_backup"/,
+    /sudo rm -f -- "\$key_file"/,
+    /validate_env_key "\$env_file" "\$key_file"/,
+    /sudo systemctl stop agent-review/,
+    /preserve_recovery_backups=1/,
+    /if \[ "\$preserve_recovery_backups" -eq 0 \]; then\s+sudo rm -f -- "\$env_stage" "\$env_backup" "\$key_backup"/
+  ]) {
+    assert.match(rotation, expected);
+  }
+  assert.doesNotMatch(rotation, /^\s*set\s+-[^\n]*x/m);
+  assert.doesNotMatch(
+    rotation,
+    /^\s*(?:(?:sudo\s+)?(?:cat|head|tail|less|more|tee|awk|sed)|(?:echo|printf))\b[^\n]*(?:key|AGENT_DIAGNOSTICS_ACCESS_KEY)/mi
+  );
+  assert.doesNotMatch(rotation, /\bprint\s*\(/);
+  assert.doesNotMatch(rotation, /(?:sys\.)?(?:stdout|stderr)\.write/);
+  const stageValidation = rotation.indexOf('validate_env_key "$env_stage" "$key_next"');
+  const envPromotion = rotation.indexOf('sudo mv -Tf "$env_stage" "$env_file"');
+  const keyPromotion = rotation.indexOf('sudo mv -Tf "$key_next" "$key_file"');
+  const liveValidation = rotation.lastIndexOf('validate_env_key "$env_file" "$key_file"');
+  assert.ok(stageValidation < envPromotion && envPromotion < keyPromotion && keyPromotion < liveValidation);
+  const restoredEnv = rotation.indexOf('sudo mv -Tf "$env_backup" "$env_file"');
+  const restoredKey = rotation.indexOf('sudo mv -Tf "$key_backup" "$key_file"');
+  const restoredValidation = rotation.indexOf('validate_env_key "$env_file" "$key_file"');
+  const guardedRestart = rotation.indexOf('if [ "$restoration_ok" -eq 1 ]; then');
+  assert.ok(restoredEnv < restoredKey && restoredKey < restoredValidation && restoredValidation < guardedRestart);
 });
