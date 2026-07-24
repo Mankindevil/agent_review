@@ -4,6 +4,7 @@ description: Use when a caller requests a complete A-share closing report, daily
 allowed-tools: [panda-market-worker, report-renderer, report-validator, narrative-adapter]
 financial-data-source: panda_data-only
 trading-execution: prohibited
+portfolio-execution: prohibited
 missing-data-fabrication: prohibited
 research-use: only
 ---
@@ -24,13 +25,15 @@ instructions.
 ## Deterministic workflow
 
 1. Use `panda-market-worker` to validate the requested/current date against the
-   Shanghai calendar and session close, then execute the fixed Panda query plan.
-2. Use `report-renderer` for Markdown, HTML, plain-text email, Evidence Pack, and Run
-   Trace artifacts.
+   Shanghai calendar and session close, execute the fixed Panda query plan, and
+   produce the schema-valid Evidence Pack.
+2. Use `report-renderer` only for Markdown, HTML, and plain-text report bodies.
 3. If configured, use `narrative-adapter` only to summarize facts already present in
    the Evidence Pack. Discard unsupported model text.
 4. Use `report-validator`; release no report with invalid figures, sources, freshness,
    disclaimers, or conclusion lineage.
+5. Let the orchestrator persist the worker-produced Evidence Pack and the collected
+   Run Trace alongside the rendered report artifacts.
 
 ## Panda-only financial data boundary
 

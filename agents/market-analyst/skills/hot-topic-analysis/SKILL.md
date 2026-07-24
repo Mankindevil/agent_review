@@ -4,8 +4,14 @@ description: Use when a caller asks which A-share industries or concepts are hot
 allowed-tools: [panda-market-worker, report-renderer, report-validator, narrative-adapter]
 financial-data-source: panda_data-only
 trading-execution: prohibited
+portfolio-execution: prohibited
 missing-data-fabrication: prohibited
 research-use: only
+score-components: [ret1=0.25, ret5=0.20, breadth5=0.20, turnover_heat=0.15, acceleration=0.15, lhb_activity=0.05]
+required-components: [ret1, ret5, breadth5, turnover_heat, acceleration]
+optional-components: [lhb_activity]
+minimum-constituents: 5
+minimum-constituent-price-coverage: 0.80
 ---
 
 # Analyze hot topics
@@ -22,9 +28,10 @@ overrides, open/future sessions, and unsupported fields.
 
 1. Use `panda-market-worker` to run the internal daily query plan, then project only
    the hot-topic section.
-2. Score price change, breadth, turnover/volume expansion, persistence, and Panda
-   capital-flow evidence with the fixed weights. Treat LHB activity as optional and
-   record any effective-weight redistribution.
+2. Apply exactly `ret1` 0.25, `ret5` 0.20, `breadth5` 0.20,
+   `turnover_heat` 0.15, `acceleration` 0.15, and optional `lhb_activity` 0.05.
+   Require the five non-LHB components. If LHB is unavailable, redistribute its
+   weight across the five required components and record effective weights.
 3. Use `report-renderer`, optional evidence-bound `narrative-adapter`, and
    `report-validator` to produce and validate the section projection.
 
@@ -36,9 +43,11 @@ fabricate observations or reasons for missing data.
 
 ## Freshness, coverage, and missing-data rules
 
-Require the configured history window and at least 80% required-component coverage.
-Exclude under-covered topics. Mark stale, partial, or absent inputs as missing and
-reduce confidence where specified; never impute them.
+Require the configured history window, at least five constituents, and at least 80%
+constituent price coverage for each industry/concept. This 80% gate is not
+component-weight coverage. Independently require all five non-LHB score components.
+Exclude ineligible topics; mark stale, partial, or absent inputs as missing and never
+impute them.
 
 ## Output schema and trace requirements
 

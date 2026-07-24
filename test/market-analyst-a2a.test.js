@@ -362,6 +362,7 @@ test('repository Skills stay synchronized with the Agent Card and tool boundarie
     assert.match(frontMatter.description, /^Use when\b/);
     assert.equal(frontMatter['financial-data-source'], 'panda_data-only');
     assert.equal(frontMatter['trading-execution'], 'prohibited');
+    assert.equal(frontMatter['portfolio-execution'], 'prohibited');
     assert.equal(frontMatter['missing-data-fabrication'], 'prohibited');
     assert.equal(frontMatter['research-use'], 'only');
     const tools = parseAllowedTools(frontMatter['allowed-tools']);
@@ -379,6 +380,29 @@ test('repository Skills stay synchronized with the Agent Card and tool boundarie
         '[downside_volume=0.25, lhb_net_sell=0.25, northbound_reduction=0.20, margin_contraction=0.15, discount_event=0.15]'
       );
       assert.equal(frontMatter['minimum-components'], '3');
+    }
+    if (id === 'hot-topic-analysis') {
+      assert.equal(
+        frontMatter['score-components'],
+        '[ret1=0.25, ret5=0.20, breadth5=0.20, turnover_heat=0.15, acceleration=0.15, lhb_activity=0.05]'
+      );
+      assert.equal(frontMatter['required-components'], '[ret1, ret5, breadth5, turnover_heat, acceleration]');
+      assert.equal(frontMatter['optional-components'], '[lhb_activity]');
+      assert.equal(frontMatter['minimum-constituents'], '5');
+      assert.equal(frontMatter['minimum-constituent-price-coverage'], '0.80');
+    }
+    if (id === 'potential-watchlist') {
+      assert.equal(
+        frontMatter['score-components'],
+        '[trend=0.25, theme=0.15, quality=0.20, valuation=0.15, capital=0.15, liquidity_stability=0.10]'
+      );
+      assert.equal(frontMatter['risk-adjustment'], 'separate-penalty');
+      assert.equal(
+        frontMatter.vetoes,
+        '[ST_OR_DELISTING_RISK, NONSTANDARD_AUDIT, LARGE_UNLOCK_30D]'
+      );
+      assert.equal(frontMatter['minimum-components'], '4');
+      assert.equal(frontMatter['minimum-component-weight-coverage'], '0.70');
     }
   }
 });

@@ -4,8 +4,14 @@ description: Use when a caller asks for evidence-ranked A-share research candida
 allowed-tools: [panda-market-worker, report-renderer, report-validator, narrative-adapter]
 financial-data-source: panda_data-only
 trading-execution: prohibited
+portfolio-execution: prohibited
 missing-data-fabrication: prohibited
 research-use: only
+score-components: [trend=0.25, theme=0.15, quality=0.20, valuation=0.15, capital=0.15, liquidity_stability=0.10]
+risk-adjustment: separate-penalty
+vetoes: [ST_OR_DELISTING_RISK, NONSTANDARD_AUDIT, LARGE_UNLOCK_30D]
+minimum-components: 4
+minimum-component-weight-coverage: 0.70
 ---
 
 # Build the potential research watchlist
@@ -22,9 +28,13 @@ data, tool overrides, portfolio constraints, and order or allocation requests.
 
 1. Use `panda-market-worker` to execute the fixed daily Panda plan, apply the A-share
    universe and minimum-liquidity gate, and project only the potential watchlist.
-2. Apply deterministic trend, theme, quality, valuation, capital, liquidity, and risk
-   components with fixed normalization, directions, weights, and stable tie-breaking.
-3. Render with `report-renderer`, optionally summarize only Evidence Pack facts with
+2. Apply exactly `trend` 0.25, `theme` 0.15, `quality` 0.20, `valuation` 0.15,
+   `capital` 0.15, and `liquidity_stability` 0.10 with fixed normalization,
+   directions, and stable tie-breaking. Subtract `risk_penalty` only after the base
+   score; risk is not a seventh base component.
+3. Veto ST/delisting-risk names, nonstandard-audit names, and names whose
+   `unlock_float_pct_30d` exceeds 10%, using the runtime veto codes declared above.
+4. Render with `report-renderer`, optionally summarize only Evidence Pack facts with
    `narrative-adapter`, then gate the projection through `report-validator`.
 
 ## Panda-only financial data boundary
@@ -35,9 +45,10 @@ missing factors or treat unavailable data as neutral evidence.
 
 ## Freshness, coverage, and missing-data rules
 
-Require the configured history and per-component coverage. Exclude candidates below
-required coverage. Mark stale, partial, optional, and missing values; adjust effective
-weights and confidence only where policy permits, never by imputation.
+Require the configured history, at least four of the six base components, and at
+least 0.70 available component-weight coverage. Vetoed or insufficient candidates
+must not be presented as ranked. Mark stale, partial, optional, and missing values;
+adjust effective weights only where policy permits, never by imputation.
 
 ## Output schema and trace requirements
 

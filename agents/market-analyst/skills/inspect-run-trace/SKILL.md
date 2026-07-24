@@ -4,6 +4,7 @@ description: Use when a caller needs to audit an existing market-analysis run, i
 allowed-tools: [run-store]
 financial-data-source: panda_data-only
 trading-execution: prohibited
+portfolio-execution: prohibited
 missing-data-fabrication: prohibited
 research-use: only
 ---

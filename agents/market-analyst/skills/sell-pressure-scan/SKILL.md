@@ -4,6 +4,7 @@ description: Use when a caller asks for A-share securities showing converging se
 allowed-tools: [panda-market-worker, report-renderer, report-validator, narrative-adapter]
 financial-data-source: panda_data-only
 trading-execution: prohibited
+portfolio-execution: prohibited
 missing-data-fabrication: prohibited
 research-use: only
 score-components: [downside_volume=0.25, lhb_net_sell=0.25, northbound_reduction=0.20, margin_contraction=0.15, discount_event=0.15]
