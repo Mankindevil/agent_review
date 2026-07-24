@@ -69,6 +69,14 @@ function dependencies(stateDir, overrides = {}) {
   const mailer = {
     async send(message, options) {
       calls.mailer.push({ message, options });
+      const key = deliveryKey(
+        message.reportDate,
+        config.email.to,
+        message.reportVersion
+      );
+      const messageId = `<market-report.${
+        createHash('sha256').update(key).digest('hex')
+      }@market-analyst.local>`;
       await options?.onAttempt?.({
         attempt: 1,
         status: 'sent',
@@ -77,12 +85,13 @@ function dependencies(stateDir, overrides = {}) {
         durationMs: 10,
         acceptedCount: 1,
         rejectedCount: 0,
-        messageId: '<stable@market-analyst.local>'
+        deliveryKey: key,
+        messageId
       });
       return {
         status: 'sent',
-        deliveryKey: 'delivery-hash',
-        messageId: '<stable@market-analyst.local>',
+        deliveryKey: key,
+        messageId,
         attemptCount: 1
       };
     }
@@ -470,6 +479,77 @@ test('accepted attempt without a final receipt suppresses automatic crash-window
   assert.equal(fixture.calls.worker, 1);
 });
 
+test('recipient identity change sends once to the new recipient and then deduplicates', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const fixture = dependencies(stateDir);
+  const deliveries = [];
+  const mailerFor = (config) => createSmtpMailer(config, {
+    createTransport: () => ({
+      async sendMail(message) {
+        deliveries.push(message);
+        return {
+          accepted: [message.to[0]],
+          rejected: [],
+          messageId: message.messageId,
+          response: '250 queued'
+        };
+      }
+    }),
+    clock: (() => {
+      let tick = 0;
+      return () => new Date(Date.UTC(2026, 6, 24, 10, 30, tick++));
+    })()
+  });
+  const firstConfig = {
+    ...fixture.config,
+    email: {
+      ...fixture.config.email,
+      to: ['recipient-a@example.test']
+    },
+    smtp: {
+      host: 'smtp.example.test',
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      username: '',
+      password: ''
+    }
+  };
+  const first = new MarketOrchestrator(firstConfig, {
+    ...fixture.deps,
+    mailer: mailerFor(firstConfig)
+  });
+  const sentA = await first.run(request());
+  assert.equal(sentA.emailStatus, 'sent');
+
+  const secondConfig = {
+    ...firstConfig,
+    email: {
+      ...firstConfig.email,
+      to: ['recipient-b@example.test']
+    }
+  };
+  const freshDependencies = {
+    ...fixture.deps,
+    store: new MarketTaskStore({ stateDir }),
+    mailer: mailerFor(secondConfig)
+  };
+  const second = new MarketOrchestrator(secondConfig, freshDependencies);
+  const sentB = await second.run(request());
+  assert.equal(sentB.runId, sentA.runId);
+  assert.equal(sentB.emailStatus, 'sent');
+  const replayB = await new MarketOrchestrator(secondConfig, {
+    ...freshDependencies,
+    store: new MarketTaskStore({ stateDir })
+  }).run(request());
+  assert.equal(replayB.emailStatus, 'already-sent');
+  assert.deepEqual(deliveries.map(({ to }) => to), [
+    ['recipient-a@example.test'],
+    ['recipient-b@example.test']
+  ]);
+  assert.notEqual(deliveries[0].messageId, deliveries[1].messageId);
+});
+
 test('email-only retry rejects tampered report artifacts before calling SMTP', async (t) => {
   const stateDir = await temporaryDirectory(t);
   const fixture = dependencies(stateDir, {
@@ -672,6 +752,7 @@ test('one-shot CLI prints one sanitized JSON summary and maps terminal exit code
   const code = await runCli(['--date', date, '--force-delivery'], {
     env: {
       MARKET_AGENT_ACCESS_TOKEN: 'scheduled-access',
+      MARKET_AGENT_PRINCIPAL_ID: 'stable-scheduled-principal',
       MARKET_REPORT_SMTP_PASSWORD: 'must-not-print'
     },
     cwd: 'C:\\repo',
@@ -697,7 +778,7 @@ test('one-shot CLI prints one sanitized JSON summary and maps terminal exit code
   assert.equal(orchestratorRequest.trigger, 'scheduled');
   assert.equal(
     orchestratorRequest.ownerScope,
-    ownerScope('bearer:scheduled-access')
+    ownerScope('market-agent-principal:stable-scheduled-principal')
   );
   assert.equal('owner' in orchestratorRequest, false);
   assert.equal(orchestratorRequest.deliverEmail, true);
@@ -736,7 +817,9 @@ test('one-shot CLI prints one sanitized JSON summary and maps terminal exit code
 
 test('scheduled CLI run is visible to its configured Bearer owner with linked detail', async (t) => {
   const stateDir = await temporaryDirectory(t);
-  const token = 'scheduled-detail-token';
+  const originalToken = 'scheduled-detail-token';
+  const rotatedToken = 'rotated-detail-token';
+  const principalId = 'stable-report-owner';
   let detailUrl;
   const fixture = dependencies(stateDir, {
     renderer: (evidenceValue) => {
@@ -748,12 +831,16 @@ test('scheduled CLI run is visible to its configured Bearer owner with linked de
       };
     }
   });
-  fixture.config.accessToken = token;
+  fixture.config.accessToken = originalToken;
+  fixture.config.principalId = principalId;
   fixture.config.publicBaseUrl = 'https://reports.example.test';
   const orchestrator = new MarketOrchestrator(fixture.config, fixture.deps);
   const lines = [];
   const code = await runCli(['--date', date], {
-    env: { MARKET_AGENT_ACCESS_TOKEN: token },
+    env: {
+      MARKET_AGENT_ACCESS_TOKEN: originalToken,
+      MARKET_AGENT_PRINCIPAL_ID: principalId
+    },
     stdout: { write: (value) => lines.push(value) },
     orchestratorFactory: () => orchestrator
   });
@@ -761,23 +848,43 @@ test('scheduled CLI run is visible to its configured Bearer owner with linked de
   const summary = JSON.parse(lines[0]);
   assert.equal(detailUrl, `https://reports.example.test/runs/${summary.runId}`);
   assert.equal(fixture.calls.mailer[0].message.html.includes(detailUrl), true);
+  const persistedState = await readFile(path.join(stateDir, 'state.json'), 'utf8');
+  assert.doesNotMatch(persistedState, new RegExp(originalToken));
+  assert.doesNotMatch(persistedState, new RegExp(rotatedToken));
 
   const server = createMarketAgentServer({
-    config: fixture.config,
+    config: { ...fixture.config, accessToken: rotatedToken },
     orchestrator
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const { port } = server.address();
   const own = await fetch(`http://127.0.0.1:${port}/runs/${summary.runId}`, {
-    headers: { Authorization: `Bearer ${token}` }
+    headers: { Authorization: `Bearer ${rotatedToken}` }
   });
   assert.equal(own.status, 200);
   assert.equal((await own.json()).runId, summary.runId);
   const wrong = await fetch(`http://127.0.0.1:${port}/runs/${summary.runId}`, {
-    headers: { Authorization: 'Bearer wrong-owner-token' }
+    headers: { Authorization: `Bearer ${originalToken}` }
   });
   assert.equal(wrong.status, 401);
+  await new Promise((resolve) => server.close(resolve));
+
+  const isolated = createMarketAgentServer({
+    config: {
+      ...fixture.config,
+      accessToken: rotatedToken,
+      principalId: 'intentionally-isolated-owner'
+    },
+    orchestrator
+  });
+  await new Promise((resolve) => isolated.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => isolated.close(resolve)));
+  const isolatedResponse = await fetch(
+    `http://127.0.0.1:${isolated.address().port}/runs/${summary.runId}`,
+    { headers: { Authorization: `Bearer ${rotatedToken}` } }
+  );
+  assert.equal(isolatedResponse.status, 404);
 });
 
 test('one-shot CLI maps SIGTERM cancellation to 130 and removes both handlers', async () => {

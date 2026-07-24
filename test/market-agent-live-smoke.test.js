@@ -5,6 +5,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { MarketOrchestrator } from '../agents/market-analyst/orchestrator.js';
+import { createSmtpMailer } from '../agents/market-analyst/smtp-mailer.js';
+
 async function temporaryDirectory(t) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'market-smoke-test-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -246,6 +249,78 @@ test('repeated same-date email smoke reuses the durable delivery receipt', async
   assert.equal(repeated.email, 'already-sent');
   assert.equal(repeated.emailReplay, 'already-sent');
   assert.equal(emailRuns, 4);
+});
+
+test('fresh orchestrator processes reuse the durable same-date smoke receipt', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const deliveries = [];
+  let nextRunId = 0;
+  const createOrchestrator = (config) => {
+    const mailer = createSmtpMailer(config, {
+      createTransport: () => ({
+        async sendMail(message) {
+          deliveries.push(message);
+          return {
+            accepted: [message.to[0]],
+            rejected: [],
+            messageId: message.messageId,
+            response: '250 queued'
+          };
+        }
+      }),
+      clock: () => new Date('2026-07-24T10:30:00.000Z')
+    });
+    return new MarketOrchestrator(config, {
+      mailer,
+      worker: async ({ request }) => ({
+        schemaVersion: '1.0',
+        runId: request.runId,
+        reportDate: request.date,
+        status: 'complete',
+        markets: {},
+        conclusions: [],
+        leaderboards: {},
+        sources: [],
+        missingData: []
+      }),
+      narrator: async () => ({
+        sections: [],
+        fallbackReason: 'model disabled',
+        usage: { totalTokens: 0 }
+      }),
+      renderer: () => ({
+        markdown: '# durable smoke report',
+        html: '<h1>durable smoke report</h1>',
+        text: 'durable smoke report'
+      }),
+      validator: () => ({ valid: true }),
+      clock: () => new Date('2026-07-24T10:30:00.000Z'),
+      createId: () => `run-durable-smoke-${++nextRunId}`
+    });
+  };
+  const dependencies = {
+    verifyPandaSdk: async () => {},
+    createOrchestrator,
+    verifyA2A: async () => ({
+      cardVersion: '1.0',
+      taskState: 'TASK_STATE_COMPLETED',
+      artifactCount: 3
+    })
+  };
+  const env = configuredEnv({
+    MARKET_SMOKE_EMAIL_TO: 'smoke@example.test',
+    MARKET_SMOKE_STATE_DIR: stateDir,
+    MARKET_REPORT_EMAIL_FROM: 'sender@example.test',
+    MARKET_REPORT_SMTP_HOST: 'smtp.example.test'
+  });
+  const { runLiveSmoke } = await import('../scripts/market-agent-live-smoke.js');
+  const first = await runLiveSmoke(env, process.cwd(), dependencies);
+  const second = await runLiveSmoke(env, process.cwd(), dependencies);
+  assert.equal(first.email, 'sent');
+  assert.equal(second.email, 'already-sent');
+  assert.equal(second.emailReplay, 'already-sent');
+  assert.equal(deliveries.length, 1);
+  assert.equal(nextRunId, 6);
 });
 
 test('no-email smoke uses and removes disposable state after validation', async () => {

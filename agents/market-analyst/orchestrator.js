@@ -281,16 +281,21 @@ function expectedDeliveryIdentity(task, config) {
 }
 
 function persistedDeliveryState(task, config) {
-  const receiptStatus = task.email?.receipt?.status;
-  if (['sent', 'already-sent'].includes(receiptStatus)) return 'already-sent';
-  if (
-    receiptStatus === 'reconciliation-needed'
-    || ['sent', 'reconciliation-needed'].includes(task.email?.status)
-  ) {
-    return 'reconciliation-needed';
-  }
   const expected = expectedDeliveryIdentity(task, config);
   if (!expected) return null;
+  const receipt = task.email?.receipt;
+  const receiptStatus = task.email?.receipt?.status;
+  const receiptMatches = receipt?.deliveryKey === expected.deliveryKey
+    && receipt?.messageId === expected.messageId;
+  if (
+    receiptMatches
+    && ['sent', 'already-sent'].includes(receiptStatus)
+  ) {
+    return 'already-sent';
+  }
+  if (receiptMatches && receiptStatus === 'reconciliation-needed') {
+    return 'reconciliation-needed';
+  }
   const ambiguous = (task.email?.attempts || []).some((attempt) =>
     ['sent', 'delivery-unknown'].includes(attempt?.status)
     && attempt?.deliveryKey === expected.deliveryKey

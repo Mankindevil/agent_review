@@ -150,14 +150,21 @@ test('confirmed delivery is idempotent unless force delivery is explicit', async
   };
   const delivered = await mailer.send(message);
   const duplicate = await mailer.send(message, { previousReceipt: delivered });
+  const mismatchedIdentity = await mailer.send(message, {
+    previousReceipt: {
+      ...delivered,
+      messageId: '<different-identity@market-analyst.local>'
+    }
+  });
   const forced = await mailer.send(message, {
     previousReceipt: delivered,
     forceDelivery: true
   });
 
-  assert.equal(sends, 2);
+  assert.equal(sends, 3);
   assert.equal(duplicate.status, 'already-sent');
   assert.equal(duplicate.attemptCount, 0);
+  assert.equal(mismatchedIdentity.status, 'sent');
   assert.equal(forced.status, 'sent');
 });
 

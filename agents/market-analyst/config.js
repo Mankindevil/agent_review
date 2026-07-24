@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { normalizeMarketAgentPrincipalId } from './owner-scope.js';
 
 const truthy = (value) => String(value).toLowerCase() === 'true';
 const positive = (value, fallback) => {
@@ -16,6 +17,7 @@ export function marketAgentConfig(env = process.env, cwd = process.cwd()) {
     port: positive(env.MARKET_AGENT_PORT, 4190),
     publicBaseUrl: String(env.MARKET_AGENT_PUBLIC_BASE_URL || '').replace(/\/$/, ''),
     accessToken,
+    principalId: normalizeMarketAgentPrincipalId(env.MARKET_AGENT_PRINCIPAL_ID),
     allowInsecureLoopback: truthy(env.MARKET_AGENT_ALLOW_INSECURE_LOOPBACK),
     timezone: env.MARKET_REPORT_TIMEZONE || 'Asia/Shanghai',
     stateDir: path.resolve(cwd, env.MARKET_REPORT_STATE_DIR || 'data/market-analyst'),

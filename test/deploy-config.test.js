@@ -90,5 +90,13 @@ test('production operations never shell-source the protected systemd environment
   assert.doesNotMatch(guide, /(?:^|[;&|]\s*)(?:source|\.)\s+\/etc\/agent-review\/agent-review\.env/m);
   assert.match(guide, /systemd-run/);
   assert.match(guide, /EnvironmentFile=\/etc\/agent-review\/agent-review\.env/);
-  assert.match(guide, /MARKET_SMOKE_STATE_DIR=\/var\/lib\/agent-review\/market-smoke/);
+  assert.doesNotMatch(guide, /--setenv=MARKET_SMOKE_(?:STATE_DIR|EMAIL_TO)/);
+  assert.match(
+    guide,
+    /\/usr\/bin\/env MARKET_SMOKE_STATE_DIR= MARKET_SMOKE_EMAIL_TO= \/usr\/bin\/npm run market:smoke/
+  );
+  assert.match(
+    guide,
+    /\/usr\/bin\/env MARKET_SMOKE_STATE_DIR=\/var\/lib\/agent-review\/market-smoke 'MARKET_SMOKE_EMAIL_TO=<explicit test inbox>' \/usr\/bin\/npm run market:smoke/
+  );
 });

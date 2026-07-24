@@ -64,6 +64,7 @@ test('environment example documents the complete market analyst contract safely'
     'MARKET_AGENT_PORT',
     'MARKET_AGENT_PUBLIC_BASE_URL',
     'MARKET_AGENT_ACCESS_TOKEN',
+    'MARKET_AGENT_PRINCIPAL_ID',
     'MARKET_AGENT_ALLOW_INSECURE_LOOPBACK',
     'MARKET_REPORT_TIMEZONE',
     'MARKET_REPORT_STATE_DIR',
@@ -108,6 +109,7 @@ test('environment example documents the complete market analyst contract safely'
   }
   assert.equal(values.PANDA_DATA_ENABLED, 'false');
   assert.equal(values.MARKET_AGENT_HOST, '127.0.0.1');
+  assert.equal(values.MARKET_AGENT_PRINCIPAL_ID, 'panda-market-analyst');
   assert.equal(values.MARKET_AGENT_ALLOW_INSECURE_LOOPBACK, 'false');
   assert.equal(values.MARKET_REPORT_TIMEZONE, 'Asia/Shanghai');
 });

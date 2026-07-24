@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 
 import { readJsonBody } from '../../src/utils.js';
 import { buildMarketAgentCard } from './agent-card.js';
-import { ownerScope } from './owner-scope.js';
+import { ownerScope, principalOwnerScope } from './owner-scope.js';
 import {
   MarketA2AError,
   MarketTaskService,
@@ -160,10 +160,6 @@ function constantTimeEqual(left, right) {
   return first.length === second.length && timingSafeEqual(first, second);
 }
 
-function tokenOwner(token) {
-  return ownerScope(`bearer:${token}`);
-}
-
 function isLoopbackHost(value) {
   const host = String(value || '').toLowerCase().replace(/^\[|\]$/g, '');
   return host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host);
@@ -194,7 +190,7 @@ async function authenticateRequest(request, options) {
     return { owner: ownerScope('loopback:anonymous') };
   }
   if (!token || !constantTimeEqual(token, expected)) throw authenticationError();
-  return { owner: tokenOwner(token) };
+  return { owner: principalOwnerScope(options.config?.principalId) };
 }
 
 function requestOrigin(request, options) {

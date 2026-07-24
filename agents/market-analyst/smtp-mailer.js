@@ -259,6 +259,7 @@ export function createSmtpMailer(config, {
       if (
         !forceDelivery
         && previousReceipt?.deliveryKey === key
+        && previousReceipt?.messageId === messageId
         && ['sent', 'already-sent', 'reconciliation-needed'].includes(
           previousReceipt.status
         )

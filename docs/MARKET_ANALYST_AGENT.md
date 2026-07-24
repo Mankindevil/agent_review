@@ -49,6 +49,7 @@ Copy-Item .env.example .env
 | A2A | `MARKET_AGENT_HOST`, `MARKET_AGENT_PORT` | 监听地址与端口，默认 `127.0.0.1:4190` |
 | A2A | `MARKET_AGENT_PUBLIC_BASE_URL` | 反向代理后的公开 HTTPS 根地址 |
 | A2A | `MARKET_AGENT_ACCESS_TOKEN` | 保护任务与运行详情的 Bearer token |
+| A2A | `MARKET_AGENT_PRINCIPAL_ID` | 稳定、非密钥的所有者标识；轮换 Bearer token 时保持不变 |
 | A2A | `MARKET_AGENT_ALLOW_INSECURE_LOOPBACK` | 仅本机开发可设 `true` 以允许无 token |
 | 模型 | `MARKET_REPORT_MODEL_ENABLED` | 是否启用可选叙事改写 |
 | 模型 | `OPENAI_BASE_URL`, `OPENAI_API_KEY` | OpenAI-compatible 接口；不是金融数据源 |
@@ -66,7 +67,7 @@ Copy-Item .env.example .env
 | 分析 | `MARKET_REPORT_MIN_LIQUIDITY_CNY` | 默认最低流动性门槛 |
 | 调度 | `MARKET_REPORT_TIMEZONE` | 必须为 `Asia/Shanghai` |
 
-生产必须配置 `MARKET_AGENT_ACCESS_TOKEN`，并由 HTTPS 反向代理终止 TLS。不要把 token、Panda 或 SMTP 凭据写进 Agent Card、A2A 请求、日志和 trace。
+生产必须配置 `MARKET_AGENT_ACCESS_TOKEN`，并由 HTTPS 反向代理终止 TLS。`MARKET_AGENT_PRINCIPAL_ID` 是稳定身份而不是凭据；轮换 token 时不要修改它，否则历史定时报告会被有意隔离到旧 owner scope。不要把 token、Panda 或 SMTP 凭据写进 Agent Card、A2A 请求、日志和 trace。
 
 `market-agent` 服务入口会加载仓库 `.env`；一次性 CLI 只继承其启动进程的环境。生产 CLI 应由 systemd `EnvironmentFile` 或等价的受控启动器注入变量，本地运行前也要先在当前会话设置变量，不能假设 CLI 自动读取 `.env`。
 

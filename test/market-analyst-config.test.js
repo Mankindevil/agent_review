@@ -14,12 +14,17 @@ test('builds non-secret market agent configuration with Shanghai defaults', () =
     MARKET_REPORT_SMTP_PASSWORD: 'mail-secret'
   }, 'C:\\repo');
   assert.equal(config.timezone, 'Asia/Shanghai');
+  assert.equal(config.principalId, 'panda-market-analyst');
   assert.equal(config.port, 4190);
   assert.deepEqual(config.email.to, ['one@example.com', 'two@example.com']);
   assert.equal(config.smtp.port, 587);
   assert.equal(config.public.accessProtected, true);
   assert.equal('accessToken' in config.public, false);
   assert.equal('password' in config.public.smtp, false);
+  assert.throws(
+    () => marketAgentConfig({ MARKET_AGENT_PRINCIPAL_ID: 'contains spaces' }),
+    /principal/i
+  );
 });
 
 test('accepts declared operations and rejects arbitrary Panda methods', () => {

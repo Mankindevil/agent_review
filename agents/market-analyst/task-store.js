@@ -2,11 +2,11 @@ import { randomUUID } from 'node:crypto';
 import {
   mkdir,
   open,
+  opendir,
   readFile,
-  readdir,
+  lstat,
   rename,
   rmdir,
-  stat,
   unlink
 } from 'node:fs/promises';
 import os from 'node:os';
@@ -27,7 +27,11 @@ const TERMINAL_STATES = new Set([
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_LOCK_STALE_MS = 30_000;
 const DEFAULT_LOCK_RETRY_MS = 10;
+const DEFAULT_CLEANUP_ENTRY_LIMIT = 64;
 const OWNER_FILE_PATTERN = /^owner-([0-9a-f-]+)\.json$/i;
+const CANDIDATE_PATTERN =
+  /^state\.json\.lock\.candidate-(\d+)-([0-9a-f-]+)$/i;
+const TEMP_PATTERN = /^state\.json\.(\d+)\.([0-9a-f-]+)\.tmp$/i;
 
 function clone(value) {
   return structuredClone(value);
@@ -109,6 +113,17 @@ export class MarketTaskStore {
       DEFAULT_LOCK_RETRY_MS,
       'lockRetryMs'
     );
+    this.cleanupEntryLimit = positiveInteger(
+      typeof options === 'object' ? options.cleanupEntryLimit : undefined,
+      DEFAULT_CLEANUP_ENTRY_LIMIT,
+      'cleanupEntryLimit'
+    );
+    this.lockHooks = typeof options === 'object' && options.lockHooks
+      ? options.lockHooks
+      : {};
+    if (!this.lockHooks || typeof this.lockHooks !== 'object') {
+      throw new TypeError('lockHooks must be an object');
+    }
     this.state = { schemaVersion: '1.0', tasks: [] };
     this.loaded = false;
     this.loadPromise = null;
@@ -250,59 +265,81 @@ export class MarketTaskStore {
 
   async #acquireLock() {
     await mkdir(this.stateDir, { recursive: true });
+    await this.#cleanupStaleCandidates();
     const deadline = Date.now() + this.lockTimeoutMs;
     while (true) {
       const token = randomUUID();
-      const ownerPath = path.join(this.lockPath, `owner-${token}.json`);
+      const ownerName = `owner-${token}.json`;
+      const candidatePath = path.join(
+        this.stateDir,
+        `state.json.lock.candidate-${process.pid}-${token}`
+      );
+      const candidateOwnerPath = path.join(candidatePath, ownerName);
+      const ownerPath = path.join(this.lockPath, ownerName);
+      let ownerHandle;
+      let published = false;
+      let publicationAttempted = false;
       try {
-        await mkdir(this.lockPath);
-        let ownerCreated = false;
-        let ownerFileOpened = false;
-        let ownerHandle;
+        await mkdir(candidatePath);
+        await this.lockHooks.afterCandidateCreated?.({
+          candidatePath,
+          lockPath: this.lockPath
+        });
+        ownerHandle = await open(candidateOwnerPath, 'wx', 0o600);
+        await ownerHandle.writeFile(`${JSON.stringify({
+          schemaVersion: '1.0',
+          pid: process.pid,
+          hostname: os.hostname(),
+          token,
+          acquiredAt: new Date().toISOString()
+        })}\n`, 'utf8');
+        await ownerHandle.sync();
+        await ownerHandle.close();
+        ownerHandle = null;
+        await this.#syncDirectory(candidatePath);
+        await this.lockHooks.afterOwnerSynced?.({
+          candidatePath,
+          lockPath: this.lockPath
+        });
         try {
-          ownerHandle = await open(ownerPath, 'wx', 0o600);
-          ownerFileOpened = true;
-          await ownerHandle.writeFile(`${JSON.stringify({
-            schemaVersion: '1.0',
-            pid: process.pid,
-            hostname: os.hostname(),
-            token,
-            acquiredAt: new Date().toISOString()
-          })}\n`, 'utf8');
-          await ownerHandle.sync();
-          await ownerHandle.close();
-          ownerHandle = null;
-          ownerCreated = true;
+          await lstat(this.lockPath);
+          const conflict = storeError('market task state lock exists', 'STORE_LOCK_EXISTS');
+          throw conflict;
         } catch (error) {
-          await ownerHandle?.close().catch(() => undefined);
-          if (!ownerCreated && ownerFileOpened) {
-            await unlink(ownerPath).catch(() => undefined);
-          }
-          if (!ownerCreated) {
-            await rmdir(this.lockPath).catch(() => undefined);
-          }
-          throw error;
+          if (error?.code !== 'ENOENT') throw error;
         }
+        publicationAttempted = true;
+        await rename(candidatePath, this.lockPath);
+        published = true;
+        await this.#syncDirectory(this.stateDir);
+        await this.#cleanupStaleTemps().catch(() => undefined);
         return {
-          release: async () => {
-            let removed = false;
-            try {
-              await unlink(ownerPath);
-              removed = true;
-            } catch (error) {
-              if (error?.code !== 'ENOENT') throw error;
-            }
-            if (removed) {
-              await rmdir(this.lockPath).catch((error) => {
-                if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error?.code)) throw error;
-              });
-            }
-          }
+          release: () => this.#releaseOwnedLock(ownerPath)
         };
       } catch (error) {
-        if (error?.code !== 'EEXIST') throw error;
+        await ownerHandle?.close().catch(() => undefined);
+        if (published) {
+          await this.#releaseOwnedLock(ownerPath);
+          throw error;
+        }
+        await this.#removeOwnCandidate(candidatePath, candidateOwnerPath);
+        const canonicalExists = await lstat(this.lockPath)
+          .then(() => true, (cause) => {
+            if (cause?.code === 'ENOENT') return false;
+            throw cause;
+          });
+        const publicationConflict = publicationAttempted
+          && ['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES'].includes(error?.code);
+        if (
+          !canonicalExists
+          && error?.code !== 'STORE_LOCK_EXISTS'
+          && !publicationConflict
+        ) {
+          throw error;
+        }
       }
       await this.#recoverStaleLock();
+      await this.#cleanupStaleCandidates();
       if (Date.now() >= deadline) {
         throw storeError('timed out acquiring market task state lock', 'STORE_LOCK_TIMEOUT');
       }
@@ -315,8 +352,8 @@ export class MarketTaskStore {
     let files;
     try {
       [lockStat, files] = await Promise.all([
-        stat(this.lockPath),
-        readdir(this.lockPath)
+        lstat(this.lockPath),
+        this.#boundedDirectoryEntries(this.lockPath, 2)
       ]);
     } catch (error) {
       if (error?.code === 'ENOENT') return false;
@@ -324,6 +361,14 @@ export class MarketTaskStore {
     }
     if (!lockStat.isDirectory() || Date.now() - lockStat.mtimeMs < this.lockStaleMs) {
       return false;
+    }
+    if (files.length === 0) {
+      try {
+        await rmdir(this.lockPath);
+        return true;
+      } catch {
+        return false;
+      }
     }
     const owners = files.filter((name) => OWNER_FILE_PATTERN.test(name));
     if (files.length !== 1 || owners.length !== 1) return false;
@@ -355,6 +400,123 @@ export class MarketTaskStore {
     return true;
   }
 
+  async #releaseOwnedLock(ownerPath) {
+    let removed = false;
+    try {
+      await unlink(ownerPath);
+      removed = true;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    if (removed) {
+      await rmdir(this.lockPath).catch((error) => {
+        if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error?.code)) throw error;
+      });
+    }
+  }
+
+  async #removeOwnCandidate(candidatePath, ownerPath) {
+    await unlink(ownerPath).catch(() => undefined);
+    await rmdir(candidatePath).catch(() => undefined);
+  }
+
+  async #boundedDirectoryEntries(directory, limit = this.cleanupEntryLimit) {
+    const entries = [];
+    let handle;
+    try {
+      handle = await opendir(directory);
+      for await (const entry of handle) {
+        entries.push(entry.name);
+        if (entries.length >= limit) break;
+      }
+    } catch (error) {
+      if (error?.code === 'ENOENT') return [];
+      throw error;
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+    return entries;
+  }
+
+  async #cleanupStaleCandidates() {
+    let entries;
+    try {
+      entries = await this.#boundedDirectoryEntries(this.stateDir);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      const match = name.match(CANDIDATE_PATTERN);
+      if (!match) continue;
+      const candidatePath = path.join(this.stateDir, name);
+      let candidateStat;
+      try {
+        candidateStat = await lstat(candidatePath);
+      } catch {
+        continue;
+      }
+      const pid = Number(match[1]);
+      const token = match[2];
+      if (
+        !candidateStat.isDirectory()
+        || Date.now() - candidateStat.mtimeMs < this.lockStaleMs
+        || !Number.isSafeInteger(pid)
+        || !processIsDead(pid)
+      ) {
+        continue;
+      }
+      let files;
+      try {
+        files = await this.#boundedDirectoryEntries(candidatePath, 2);
+      } catch {
+        continue;
+      }
+      if (files.length === 0) {
+        await rmdir(candidatePath).catch(() => undefined);
+        continue;
+      }
+      const ownerName = `owner-${token}.json`;
+      if (files.length === 1 && files[0] === ownerName) {
+        await unlink(path.join(candidatePath, ownerName)).catch(() => undefined);
+        await rmdir(candidatePath).catch(() => undefined);
+      }
+    }
+  }
+
+  async #cleanupStaleTemps() {
+    const entries = await this.#boundedDirectoryEntries(this.stateDir);
+    for (const name of entries) {
+      const match = name.match(TEMP_PATTERN);
+      if (!match) continue;
+      const file = path.join(this.stateDir, name);
+      let fileStat;
+      try {
+        fileStat = await lstat(file);
+      } catch {
+        continue;
+      }
+      const pid = Number(match[1]);
+      if (
+        fileStat.isFile()
+        && Date.now() - fileStat.mtimeMs >= this.lockStaleMs
+        && Number.isSafeInteger(pid)
+        && processIsDead(pid)
+      ) {
+        await unlink(file).catch(() => undefined);
+      }
+    }
+  }
+
+  async #syncDirectory(directory) {
+    if (process.platform === 'win32') return;
+    const handle = await open(directory, 'r');
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+
   async #persist(state) {
     await mkdir(this.stateDir, { recursive: true });
     const tempFile = path.join(
@@ -369,14 +531,7 @@ export class MarketTaskStore {
       await handle.close();
       handle = null;
       await rename(tempFile, this.stateFile);
-      if (process.platform !== 'win32') {
-        const directory = await open(this.stateDir, 'r');
-        try {
-          await directory.sync();
-        } finally {
-          await directory.close();
-        }
-      }
+      await this.#syncDirectory(this.stateDir);
     } catch (error) {
       await handle?.close().catch(() => undefined);
       await unlink(tempFile).catch(() => undefined);

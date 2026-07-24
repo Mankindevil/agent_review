@@ -8,6 +8,10 @@ Install the application at `/opt/agent-review/app`, install the pinned Python
 dependencies in a virtual environment, and put all Panda, A2A, and SMTP
 credentials in `/etc/agent-review/agent-review.env` with `root:root` ownership
 and mode `0600`. The committed environment example contains placeholders only.
+`MARKET_AGENT_PRINCIPAL_ID` is a stable, non-secret owner identifier: keep it
+unchanged during access-token rotation so scheduled reports and protected detail
+links retain the same owner scope. Changing it intentionally creates a separate
+owner scope.
 
 ```bash
 cd /opt/agent-review/app
@@ -40,11 +44,21 @@ sudo journalctl -u market-analyst.service -u market-report.service -n 200 --no-p
 
 Run the credential-gated acceptance smoke from the protected service
 environment. `MARKET_SMOKE_REPORT_DATE` may name a completed historical trading
-date. Leave `MARKET_SMOKE_EMAIL_TO` empty for Panda/A2A-only acceptance; set it
-to a dedicated test inbox only when an actual SMTP delivery is intended. An
-email-enabled smoke requires an absolute, durable `MARKET_SMOKE_STATE_DIR`; its
-delivery receipt is deliberately retained so the same-date smoke reuses it
-instead of sending twice.
+date. Use the first command for a fresh Panda/A2A-only run: the final
+`/usr/bin/env` overrides any recipient from the protected environment, and the
+smoke uses disposable state.
+
+```bash
+sudo systemd-run --wait --collect --pipe \
+  --uid=agent-review \
+  --gid=agent-review \
+  --property=WorkingDirectory=/opt/agent-review/app \
+  --property=EnvironmentFile=/etc/agent-review/agent-review.env \
+  /usr/bin/env MARKET_SMOKE_STATE_DIR= MARKET_SMOKE_EMAIL_TO= /usr/bin/npm run market:smoke
+```
+
+Use a separate durable directory only for an explicitly approved email smoke.
+Replace the quoted placeholder with one controlled test inbox before running:
 
 ```bash
 sudo install -d -o agent-review -g agent-review -m 0700 /var/lib/agent-review/market-smoke
@@ -53,8 +67,7 @@ sudo systemd-run --wait --collect --pipe \
   --gid=agent-review \
   --property=WorkingDirectory=/opt/agent-review/app \
   --property=EnvironmentFile=/etc/agent-review/agent-review.env \
-  --setenv=MARKET_SMOKE_STATE_DIR=/var/lib/agent-review/market-smoke \
-  /usr/bin/npm run market:smoke
+  /usr/bin/env MARKET_SMOKE_STATE_DIR=/var/lib/agent-review/market-smoke 'MARKET_SMOKE_EMAIL_TO=<explicit test inbox>' /usr/bin/npm run market:smoke
 ```
 
 The command prints only bounded, sanitized JSON. A missing Panda enable flag or
@@ -73,11 +86,21 @@ credential policy. Rotate Panda, A2A, model, and SMTP credentials independently
 where possible.
 
 For SMTP testing, set `MARKET_SMOKE_EMAIL_TO` to one controlled test inbox and
-run the transient unit above. The smoke first completes and validates a
+run the email transient unit above. The smoke first completes and validates a
 no-email Panda report, then performs delivery and an idempotent replay against
 the durable smoke state. Check the deterministic Message-ID and receipt in the
 persisted task state and mail-server logs. A `delivery-unknown` or
 `reconciliation-needed` state must be reconciled before any manual resend.
+Repeating the same date and inbox intentionally reuses the durable receipt. For
+a fresh collection, select a new report date or—only under an approved,
+services-stopped procedure—preserve and clear the exact smoke state directory.
+
+The task-store lock is fail-closed. A stale empty legacy lock is recovered
+automatically, while a malformed nonempty `state.json.lock` is not guessed away.
+If that condition persists, stop both market writers, preserve the exact lock
+directory and bounded logs for diagnosis, verify that no recorded owner process
+is live, and quarantine only that exact directory under an approved recovery
+procedure before restart.
 
 ### Market artifact backup, restore, and retention
 

@@ -306,6 +306,99 @@ test('MarketTaskStore releases its owner lock when a mutation fails', async (t) 
   })).id, 'task-after-updater-error');
 });
 
+test('MarketTaskStore publishes only a fully initialized lock directory', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const canonical = path.join(stateDir, 'state.json.lock');
+  const observed = [];
+  for (const hookName of ['afterCandidateCreated', 'afterOwnerSynced']) {
+    const store = new MarketTaskStore({
+      stateDir,
+      lockHooks: {
+        async [hookName]({ candidatePath, lockPath }) {
+          assert.equal(lockPath, canonical);
+          await assert.rejects(stat(canonical), { code: 'ENOENT' });
+          observed.push({
+            hookName,
+            candidateFiles: await readdir(candidatePath)
+          });
+          throw new Error(`injected ${hookName} failure`);
+        }
+      }
+    });
+    await assert.rejects(
+      store.create({
+        id: `task-${hookName}`,
+        owner: 'owner-a',
+        state: 'TASK_STATE_SUBMITTED'
+      }),
+      new RegExp(hookName)
+    );
+    await assert.rejects(stat(canonical), { code: 'ENOENT' });
+  }
+  assert.deepEqual(observed.map(({ hookName }) => hookName), [
+    'afterCandidateCreated',
+    'afterOwnerSynced'
+  ]);
+  assert.equal(observed[0].candidateFiles.length, 0);
+  assert.equal(observed[1].candidateFiles.length, 1);
+  const recovered = new MarketTaskStore({ stateDir });
+  assert.equal((await recovered.create({
+    id: 'task-after-publication-fault',
+    owner: 'owner-a',
+    state: 'TASK_STATE_SUBMITTED'
+  })).id, 'task-after-publication-fault');
+});
+
+test('MarketTaskStore recovers a stale empty canonical lock from legacy code', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const canonical = path.join(stateDir, 'state.json.lock');
+  await mkdir(canonical);
+  const old = new Date(Date.now() - 60_000);
+  await utimes(canonical, old, old);
+  const store = new MarketTaskStore({
+    stateDir,
+    lockStaleMs: 10,
+    lockTimeoutMs: 500,
+    lockRetryMs: 1
+  });
+  assert.equal((await store.create({
+    id: 'task-after-empty-legacy-lock',
+    owner: 'owner-a',
+    state: 'TASK_STATE_SUBMITTED'
+  })).id, 'task-after-empty-legacy-lock');
+  await assert.rejects(stat(canonical), { code: 'ENOENT' });
+});
+
+test('MarketTaskStore bounds and removes stale abandoned candidates and temps', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const deadPid = findDeadPid();
+  const token = '00000000-0000-4000-8000-000000000200';
+  const candidate = path.join(
+    stateDir,
+    `state.json.lock.candidate-${deadPid}-${token}`
+  );
+  const temp = path.join(stateDir, `state.json.${deadPid}.${token}.tmp`);
+  await mkdir(candidate);
+  await writeFile(temp, 'abandoned');
+  const old = new Date(Date.now() - 60_000);
+  await utimes(candidate, old, old);
+  await utimes(temp, old, old);
+  const store = new MarketTaskStore({
+    stateDir,
+    lockStaleMs: 10,
+    lockTimeoutMs: 500,
+    lockRetryMs: 1,
+    cleanupEntryLimit: 16
+  });
+  await store.create({
+    id: 'task-after-abandoned-files',
+    owner: 'owner-a',
+    state: 'TASK_STATE_SUBMITTED'
+  });
+  await assert.rejects(stat(candidate), { code: 'ENOENT' });
+  await assert.rejects(stat(temp), { code: 'ENOENT' });
+});
+
 test('MarketTaskStore rejects terminal-to-working transitions without changing state', async (t) => {
   const stateDir = await temporaryDirectory(t);
   const store = new MarketTaskStore(stateDir);
