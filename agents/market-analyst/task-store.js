@@ -124,6 +124,12 @@ export class MarketTaskStore {
     if (!this.lockHooks || typeof this.lockHooks !== 'object') {
       throw new TypeError('lockHooks must be an object');
     }
+    this.runtimePlatform = typeof options === 'object' && options.runtimePlatform !== undefined
+      ? options.runtimePlatform
+      : process.platform;
+    if (typeof this.runtimePlatform !== 'string' || !this.runtimePlatform) {
+      throw new TypeError('runtimePlatform must be a non-empty string');
+    }
     this.state = { schemaVersion: '1.0', tasks: [] };
     this.loaded = false;
     this.loadPromise = null;
@@ -301,13 +307,14 @@ export class MarketTaskStore {
           candidatePath,
           lockPath: this.lockPath
         });
-        try {
-          await lstat(this.lockPath);
+        if (await this.#canonicalLockExists()) {
           const conflict = storeError('market task state lock exists', 'STORE_LOCK_EXISTS');
           throw conflict;
-        } catch (error) {
-          if (error?.code !== 'ENOENT') throw error;
         }
+        await this.lockHooks.beforeCandidatePublication?.({
+          candidatePath,
+          lockPath: this.lockPath
+        });
         publicationAttempted = true;
         await rename(candidatePath, this.lockPath);
         published = true;
@@ -323,16 +330,11 @@ export class MarketTaskStore {
           throw error;
         }
         await this.#removeOwnCandidate(candidatePath, candidateOwnerPath);
-        const canonicalExists = await lstat(this.lockPath)
-          .then(() => true, (cause) => {
-            if (cause?.code === 'ENOENT') return false;
-            throw cause;
-          });
+        await this.#canonicalLockExists();
         const publicationConflict = publicationAttempted
           && ['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES'].includes(error?.code);
         if (
-          !canonicalExists
-          && error?.code !== 'STORE_LOCK_EXISTS'
+          error?.code !== 'STORE_LOCK_EXISTS'
           && !publicationConflict
         ) {
           throw error;
@@ -344,6 +346,23 @@ export class MarketTaskStore {
         throw storeError('timed out acquiring market task state lock', 'STORE_LOCK_TIMEOUT');
       }
       await wait(Math.min(this.lockRetryMs, Math.max(1, deadline - Date.now())));
+    }
+  }
+
+  async #canonicalLockExists() {
+    const canonicalLstat = this.lockHooks.canonicalLstat || lstat;
+    try {
+      await canonicalLstat(this.lockPath);
+      return true;
+    } catch (error) {
+      if (error?.code === 'ENOENT') return false;
+      if (
+        this.runtimePlatform === 'win32'
+        && ['EPERM', 'EACCES'].includes(error?.code)
+      ) {
+        return true;
+      }
+      throw error;
     }
   }
 

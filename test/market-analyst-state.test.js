@@ -211,6 +211,55 @@ test('MarketTaskStore serializes concurrent cross-instance mutations with unique
   assert.equal(files.some((name) => /^state\.json\..+\.tmp$/.test(name)), false);
 });
 
+test('MarketTaskStore preserves bounded alternating A2A and oneshot contention', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const a2a = new MarketTaskStore({ stateDir });
+  const oneshot = new MarketTaskStore({ stateDir });
+  const rounds = 16;
+  const expectedIds = [];
+
+  for (let round = 0; round < rounds; round += 1) {
+    const a2aId = `task-a2a-${round}`;
+    const oneshotId = `task-oneshot-${round}`;
+    expectedIds.push(a2aId, oneshotId);
+    const writers = round % 2 === 0 ? [a2a, oneshot] : [oneshot, a2a];
+    await Promise.all([
+      writers[0].create({
+        id: a2aId,
+        owner: 'a2a-owner',
+        state: 'TASK_STATE_SUBMITTED'
+      }),
+      writers[1].create({
+        id: oneshotId,
+        owner: 'scheduled-cli',
+        state: 'TASK_STATE_SUBMITTED'
+      })
+    ]);
+    await Promise.all([
+      writers[1].update(a2aId, (task) => ({
+        ...task,
+        state: 'TASK_STATE_WORKING',
+        status: { ...task.status, state: 'TASK_STATE_WORKING' }
+      })),
+      writers[0].update(oneshotId, (task) => ({
+        ...task,
+        state: 'TASK_STATE_WORKING',
+        status: { ...task.status, state: 'TASK_STATE_WORKING' }
+      }))
+    ]);
+  }
+
+  const persisted = JSON.parse(await readFile(path.join(stateDir, 'state.json'), 'utf8'));
+  assert.deepEqual(
+    persisted.tasks.map(({ id }) => id).sort(),
+    expectedIds.sort()
+  );
+  assert.equal(
+    persisted.tasks.every(({ state }) => state === 'TASK_STATE_WORKING'),
+    true
+  );
+});
+
 test('MarketTaskStore reads atomically replaced state from other instances', async (t) => {
   const stateDir = await temporaryDirectory(t);
   const reader = new MarketTaskStore({ stateDir });
@@ -348,6 +397,90 @@ test('MarketTaskStore publishes only a fully initialized lock directory', async 
     state: 'TASK_STATE_SUBMITTED'
   })).id, 'task-after-publication-fault');
 });
+
+for (const sharingCode of ['EPERM', 'EACCES']) {
+  test(`MarketTaskStore retries Windows ${sharingCode} after publication conflict cleanup`, async (t) => {
+    const stateDir = await temporaryDirectory(t);
+    const canonical = path.join(stateDir, 'state.json.lock');
+    let conflictInjected = false;
+    let sharingViolationInjected = false;
+    let canonicalChecks = 0;
+    const store = new MarketTaskStore({
+      stateDir,
+      lockTimeoutMs: 500,
+      lockRetryMs: 1,
+      runtimePlatform: 'win32',
+      lockHooks: {
+        async canonicalLstat(lockPath) {
+          canonicalChecks += 1;
+          if (canonicalChecks === 2) {
+            sharingViolationInjected = true;
+            assert.equal(
+              (await readdir(stateDir))
+                .some((name) => name.startsWith('state.json.lock.candidate-')),
+              false
+            );
+            await rm(lockPath, { recursive: true, force: true });
+            const error = new Error(`injected ${sharingCode}`);
+            error.code = sharingCode;
+            throw error;
+          }
+          return stat(lockPath);
+        },
+        async beforeCandidatePublication({ lockPath }) {
+          if (conflictInjected) return;
+          conflictInjected = true;
+          await mkdir(lockPath);
+        }
+      }
+    });
+
+    assert.equal((await store.create({
+      id: `task-after-${sharingCode.toLowerCase()}-contention`,
+      owner: 'owner-a',
+      state: 'TASK_STATE_SUBMITTED'
+    })).state, 'TASK_STATE_SUBMITTED');
+    assert.equal(conflictInjected, true);
+    assert.equal(sharingViolationInjected, true);
+    assert.ok(canonicalChecks >= 3);
+  });
+}
+
+for (const scenario of [
+  { runtimePlatform: 'win32', code: 'EIO', label: 'unrelated Windows I/O' },
+  { runtimePlatform: 'linux', code: 'EPERM', label: 'POSIX permission' }
+]) {
+  test(`MarketTaskStore rejects ${scenario.label} errors`, async (t) => {
+    const stateDir = await temporaryDirectory(t);
+    let canonicalChecks = 0;
+    const store = new MarketTaskStore({
+      stateDir,
+      runtimePlatform: scenario.runtimePlatform,
+      lockHooks: {
+        async canonicalLstat(lockPath) {
+          canonicalChecks += 1;
+          if (canonicalChecks === 1) {
+            const error = new Error(`injected ${scenario.code}`);
+            error.code = scenario.code;
+            throw error;
+          }
+          if (canonicalChecks === 2) return {};
+          return stat(lockPath);
+        }
+      }
+    });
+
+    await assert.rejects(
+      store.create({
+        id: `task-${scenario.runtimePlatform}-${scenario.code.toLowerCase()}`,
+        owner: 'owner-a',
+        state: 'TASK_STATE_SUBMITTED'
+      }),
+      (error) => error?.code === scenario.code
+    );
+    assert.equal(canonicalChecks, 2);
+  });
+}
 
 test('MarketTaskStore recovers a stale empty canonical lock from legacy code', async (t) => {
   const stateDir = await temporaryDirectory(t);
