@@ -5,12 +5,17 @@ import {
   buildGetTaskRequest,
   extractAgentText,
   parseA2AResponse,
+  parseA2AStreamEvent,
   selectInterface
 } from './a2a.js';
 import { safeHttpRequest, validateSafeUrl } from './safe-http.js';
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const SNAPSHOT_MAX_BYTES = 1024 * 1024;
+const SNAPSHOT_AGGREGATE_MAX_BYTES = 4 * 1024 * 1024;
+const SNAPSHOT_MAX_URLS = 16;
+const SNAPSHOT_BATCH_TIMEOUT_MS = 30_000;
+const MIN_AUTHORIZATION_TOKEN_LENGTH = 3;
 const POLL_DELAYS = [250, 500, 1000, 2000];
 const TERMINAL_STATES = new Set([
   'COMPLETED',
@@ -38,6 +43,8 @@ export async function executeA2ATurn(options) {
     repeatIndex,
     signal,
     request = safeHttpRequest,
+    snapshotRequest = safeHttpRequest,
+    persistSnapshot,
     clock = () => Date.now(),
     sleep = wait,
     requestId: suppliedRequestId
@@ -56,10 +63,12 @@ export async function executeA2ATurn(options) {
   let httpStatus = null;
   let mediaType = null;
   let byteLength = 0;
+  let snapshots = [];
   const rawObjects = [];
   let normalized = emptyNormalized();
 
   try {
+    validateAuthorization(authorization);
     if (signal?.aborted) {
       throw Object.assign(new Error('A2A execution cancelled'), { code: 'cancelled' });
     }
@@ -132,6 +141,8 @@ export async function executeA2ATurn(options) {
       let payload = parseJsonResponse(target, response, requestId);
       rawObjects.push(payload);
       normalized = normalizeA2AResult(target, rawObjects);
+      let lockedTaskId = normalized.responseKind === 'task' ? normalized.taskId : null;
+      let lockedContextId = normalized.responseKind === 'task' ? normalized.contextId : null;
 
       let pollIndex = 0;
       while (normalized.responseKind === 'task' && !normalized.terminal) {
@@ -157,7 +168,15 @@ export async function executeA2ATurn(options) {
         httpStatus = response.status;
         mediaType = contentType(response.headers);
         byteLength += response.body.length;
-        payload = parseJsonResponse(target, response, pollRequest.requestId);
+        payload = parseJsonResponse(target, response, pollRequest.requestId, 'get-task');
+        const polledTask = protocolRoot(target, payload);
+        if (polledTask.id !== lockedTaskId) {
+          throw executorError('GetTask returned a different Task id', 'protocol', 'agent-error');
+        }
+        if (lockedContextId && polledTask.contextId !== lockedContextId) {
+          throw executorError('GetTask returned a different Task contextId', 'protocol', 'agent-error');
+        }
+        if (!lockedContextId && polledTask.contextId) lockedContextId = polledTask.contextId;
         rawObjects.push(payload);
         normalized = normalizeA2AResult(target, rawObjects);
         pollIndex += 1;
@@ -165,13 +184,27 @@ export async function executeA2ATurn(options) {
       endedAt = clock();
     }
 
+    const snapshotParts = collectAgentSnapshotParts(target, rawObjects);
+    if (snapshotParts.some((part) => directPartUrl(part))) {
+      snapshots = await snapshotUrlParts(snapshotParts, {
+        request: snapshotRequest,
+        persistSnapshot,
+        authorization,
+        signal,
+        clock,
+        batchTimeoutMs: remaining(deadline, clock)
+      });
+    }
     const outcome = outcomeFor(normalized);
     const error = outcome.status === 'succeeded'
       ? null
-      : publicError('Agent returned a non-success terminal state', 'agent', authorization);
+      : publicError('Agent returned a non-success terminal state', 'agent', authorization, {
+        code: 'terminal-state'
+      });
     return buildRun({
       runId, testId, turnIndex, repeatIndex, target, initialRequest, requestId, messageId,
       rawObjects, normalized, httpStatus, mediaType, byteLength,
+      snapshots,
       startedAt, headersAt, firstByteAt, firstEventAt, endedAt: endedAt ?? clock(),
       outcome, error, authorization
     });
@@ -182,9 +215,10 @@ export async function executeA2ATurn(options) {
       runId, testId, turnIndex, repeatIndex, target, initialRequest, requestId, messageId,
       rawObjects, normalized: rawObjects.length ? normalizeA2AResult(target, rawObjects) : normalized,
       httpStatus, mediaType, byteLength,
+      snapshots,
       startedAt, headersAt, firstByteAt, firstEventAt, endedAt,
       outcome: { status: classified.outcome },
-      error: publicError(error?.message, classified.category, authorization),
+      error: publicError(error?.message, classified.category, authorization, error),
       authorization
     });
   }
@@ -202,9 +236,11 @@ export async function executeA2AExample({
   let returnedContextId;
   let returnedTaskId;
   const runs = [];
-  let contextObserved = false;
-  let contextConsistent = true;
+  let contextStatus = 'unavailable';
+  let contextUnavailable = false;
+  let checkedTransitions = 0;
   for (let turnIndex = 0; turnIndex < example.turns.length; turnIndex += 1) {
+    const sentContextId = returnedContextId;
     const run = await executeTurn({
       card,
       input: example.turns[turnIndex].input,
@@ -221,31 +257,36 @@ export async function executeA2AExample({
     runs.push(run);
     const nextContextId = run.response?.normalized?.contextId;
     const nextTaskId = run.response?.normalized?.taskId;
-    if (nextContextId) {
-      if (returnedContextId && returnedContextId !== nextContextId) contextConsistent = false;
-      returnedContextId = nextContextId;
-      contextObserved = true;
+    if (turnIndex > 0) {
+      checkedTransitions += 1;
+      if (!sentContextId || !nextContextId) {
+        contextUnavailable = true;
+      } else if (sentContextId !== nextContextId) {
+        contextStatus = 'failed';
+      }
     }
-    if (nextTaskId) returnedTaskId = nextTaskId;
+    returnedContextId = nextContextId || undefined;
+    returnedTaskId = isInterruptedOutcome(run) && nextTaskId ? nextTaskId : undefined;
+    if (contextStatus !== 'failed') {
+      contextStatus = checkedTransitions > 0 && !contextUnavailable ? 'passed' : 'unavailable';
+    }
     if (run.outcome?.status !== 'succeeded') break;
   }
   return {
     testId: example.id,
     repeatIndex,
     runs,
-    contextCheck: contextObserved
-      ? { status: contextConsistent ? 'passed' : 'failed', contextId: returnedContextId }
-      : { status: 'unavailable', contextId: null }
+    contextCheck: { status: contextStatus, contextId: returnedContextId || null }
   };
 }
 
 export function normalizeA2AResult(target, rawObjects) {
   const messages = [];
-  const history = [];
-  const artifacts = [];
-  const parts = [];
+  let history = [];
+  let taskArtifacts = [];
+  const streamedArtifactUpdates = [];
+  const statusMessages = [];
   const statusSequence = [];
-  const textValues = [];
   let responseKind = 'unknown';
   let taskId = null;
   let contextId = null;
@@ -259,60 +300,82 @@ export function normalizeA2AResult(target, rawObjects) {
     const task = root.task || (isTask(root) ? root : null);
     const statusUpdate = root.statusUpdate || (isStatusUpdate(root) ? root : null);
     const artifactUpdate = root.artifactUpdate || (isArtifactUpdate(root) ? root : null);
-
     if (message) {
-      responseKind = responseKind === 'task' ? responseKind : 'message';
+      if (responseKind !== 'task') responseKind = 'message';
       messages.push(message);
-      collectParts(message.parts, parts);
       contextId = message.contextId || contextId;
-      textValues.push(extractAgentText(message));
-      if (!task && !statusUpdate) terminal = true;
+      if (!task && !statusUpdate && !artifactUpdate) terminal = true;
     }
     if (task) {
       responseKind = 'task';
       taskId = task.id || task.taskId || taskId;
       contextId = task.contextId || contextId;
-      if (Array.isArray(task.history)) {
-        history.push(...task.history);
-        for (const item of task.history) collectParts(item.parts, parts);
-      }
+      if (Array.isArray(task.history)) history = dedupeByIdentity(task.history, 'messageId');
       if (Array.isArray(task.artifacts)) {
-        artifacts.push(...task.artifacts);
-        for (const artifact of task.artifacts) collectParts(artifact.parts, parts);
+        taskArtifacts = dedupeByIdentity(task.artifacts, 'artifactId', 'id');
       }
-      collectParts(task.status?.message?.parts, parts);
+      if (task.status?.message) statusMessages.push(task.status.message);
       const state = task.status?.state;
       if (state) statusSequence.push(state);
       if (isTerminalState(state)) {
         terminal = true;
         terminalState = state;
       }
-      textValues.push(extractAgentText({ task }));
     }
     if (statusUpdate) {
       responseKind = 'task';
       taskId = statusUpdate.taskId || taskId;
       contextId = statusUpdate.contextId || contextId;
-      const status = statusUpdate.status || {};
-      collectParts(status.message?.parts, parts);
-      if (status.state) statusSequence.push(status.state);
-      if (statusUpdate.final === true || isTerminalState(status.state)) {
+      if (statusUpdate.status?.message) statusMessages.push(statusUpdate.status.message);
+      const state = statusUpdate.status?.state;
+      if (state) statusSequence.push(state);
+      if (statusUpdate.final === true || isTerminalState(state)) {
         terminal = true;
-        terminalState = status.state || terminalState;
+        terminalState = state || terminalState;
       }
-      textValues.push(extractAgentText({ statusUpdate }));
     }
     if (artifactUpdate) {
       responseKind = 'task';
       taskId = artifactUpdate.taskId || taskId;
-      if (artifactUpdate.artifact) {
-        artifacts.push(artifactUpdate.artifact);
-        collectParts(artifactUpdate.artifact.parts, parts);
-      }
-      textValues.push(extractAgentText({ artifactUpdate }));
+      contextId = artifactUpdate.contextId || contextId;
+      if (artifactUpdate.artifact) streamedArtifactUpdates.push(artifactUpdate);
     }
   }
 
+  const uniqueMessages = dedupeByIdentity(messages, 'messageId');
+  history = dedupeByIdentity(history, 'messageId');
+  const artifactMap = new Map();
+  for (const artifact of taskArtifacts) {
+    artifactMap.set(identityFor(artifact, 'artifactId', 'id'), artifact);
+  }
+  for (const update of streamedArtifactUpdates) {
+    const artifact = update.artifact;
+    const key = identityFor(artifact, 'artifactId', 'id');
+    const previous = artifactMap.get(key);
+    if (update.append === true && previous) {
+      artifactMap.set(key, {
+        ...previous,
+        ...artifact,
+        parts: [...(previous.parts || []), ...(artifact.parts || [])]
+      });
+    } else {
+      artifactMap.set(key, artifact);
+    }
+  }
+  const artifacts = [...artifactMap.values()];
+  const artifactTimeline = streamedArtifactUpdates.map((update) => ({
+    artifactId: update.artifact.artifactId,
+    append: update.append === true,
+    lastChunk: update.lastChunk === true,
+    partCount: update.artifact.parts?.length || 0
+  }));
+  const partCandidates = [
+    ...uniqueMessages.flatMap((message) => message.parts || []),
+    ...history.flatMap((message) => message.parts || []),
+    ...dedupeByIdentity(statusMessages, 'messageId').flatMap((message) => message.parts || []),
+    ...artifacts.flatMap((artifact) => artifact.parts || [])
+  ];
+  const parts = dedupeByIdentity(partCandidates);
   return {
     responseKind,
     terminal,
@@ -320,46 +383,135 @@ export function normalizeA2AResult(target, rawObjects) {
     taskId,
     contextId,
     statusSequence,
-    messages,
+    messages: uniqueMessages,
     history,
     artifacts,
+    artifactTimeline,
     parts,
-    text: textValues.filter(Boolean).join('\n')
+    text: parts.map(partText).filter(Boolean).join('\n')
   };
 }
 
 export async function snapshotUrlParts(parts, options = {}) {
   const request = options.request || safeHttpRequest;
+  const persistSnapshot = options.persistSnapshot;
+  const scrubber = createSecretScrubber(options.authorization);
+  validateAuthorization(options.authorization);
   const seen = new Set();
+  const sources = [];
   const snapshots = [];
   for (const part of parts || []) {
     const declaredSource = directPartUrl(part);
     if (!declaredSource) continue;
-    const source = validateSafeUrl(declaredSource, {
-      allowPrivate: process.env.ALLOW_PRIVATE_AGENT_URLS === 'true'
-    }).toString();
+    if (scrubber.contains(declaredSource)) {
+      throw executorError(
+        'URL Part contains the submission authorization credential',
+        'agent',
+        'agent-error',
+        { code: 'credential-in-url' }
+      );
+    }
+    let source;
+    try {
+      source = validateSafeUrl(declaredSource, {
+        allowPrivate: process.env.ALLOW_PRIVATE_AGENT_URLS === 'true'
+      }).toString();
+    } catch {
+      throw executorError('Agent returned an unsafe URL Part', 'agent', 'agent-error', {
+        code: 'unsafe-part-url'
+      });
+    }
     if (!source || seen.has(source)) continue;
     seen.add(source);
-    const response = await request(source, {
-      method: 'GET',
-      headers: { accept: '*/*' },
-      signal: options.signal,
-      timeoutMs: 10_000,
-      maxBytes: SNAPSHOT_MAX_BYTES
+    sources.push({ source, part });
+  }
+  if (sources.length === 0) return snapshots;
+  if (typeof persistSnapshot !== 'function') {
+    throw executorError('URL Part snapshot persistence is unavailable', 'configuration', 'platform-error');
+  }
+  if (sources.length > SNAPSHOT_MAX_URLS) {
+    throw executorError(`URL Part snapshot count exceeds ${SNAPSHOT_MAX_URLS}`, 'agent', 'agent-error', {
+      code: 'snapshot-count-limit'
     });
+  }
+
+  const clock = options.clock || (() => Date.now());
+  const deadline = clock() + (options.batchTimeoutMs || SNAPSHOT_BATCH_TIMEOUT_MS);
+  let aggregateBytes = 0;
+  for (const { source, part } of sources) {
+    let response;
+    try {
+      response = await request(source, {
+        method: 'GET',
+        headers: { accept: '*/*' },
+        signal: options.signal,
+        timeoutMs: Math.min(10_000, remaining(deadline, clock)),
+        maxBytes: SNAPSHOT_MAX_BYTES
+      });
+    } catch (error) {
+      throw executorError(
+        scrubber.text(error?.message || 'URL Part snapshot transport failed'),
+        classifyFailure(error).category,
+        'platform-error'
+      );
+    }
     if (!response || response.status < 200 || response.status >= 300) {
-      throw executorError(`URL Part snapshot returned HTTP ${response?.status || 0}`, 'protocol', 'agent-error');
+      throw executorError(
+        `URL Part snapshot returned HTTP ${response?.status || 0}`,
+        'http',
+        'agent-error',
+        { code: 'http-status', status: response?.status || 0 }
+      );
     }
     const body = Buffer.from(response.body);
     if (body.length > SNAPSHOT_MAX_BYTES) {
-      throw executorError('URL Part snapshot exceeds 1 MiB', 'response-too-large', 'platform-error');
+      throw executorError(
+        'URL Part snapshot exceeds 1 MiB',
+        'agent',
+        'agent-error',
+        { code: 'response-too-large' }
+      );
+    }
+    aggregateBytes += body.length;
+    if (aggregateBytes > SNAPSHOT_AGGREGATE_MAX_BYTES) {
+      throw executorError(
+        'URL Part snapshots exceed the aggregate size limit',
+        'agent',
+        'agent-error',
+        { code: 'response-too-large' }
+      );
+    }
+    const sourceUrl = scrubber.text(redactUrlQuery(source));
+    const mediaType = contentType(response.headers) || part.mediaType || part.file?.mimeType || null;
+    const digest = sha256(body);
+    let persisted;
+    try {
+      persisted = await persistSnapshot({
+        bytes: body,
+        mediaType,
+        size: body.length,
+        sha256: digest,
+        sourceUrl
+      });
+    } catch (error) {
+      throw executorError(
+        scrubber.text(error?.message || 'URL Part snapshot persistence failed'),
+        'instrumentation',
+        'platform-error'
+      );
+    }
+    const evidenceRef = typeof persisted === 'string'
+      ? persisted
+      : persisted?.evidenceRef || persisted?.evidenceId;
+    if (typeof evidenceRef !== 'string' || evidenceRef.trim() === '') {
+      throw executorError('URL Part snapshot persistence returned no evidence reference', 'instrumentation', 'platform-error');
     }
     snapshots.push({
-      sourceUrl: redactUrlQuery(source),
-      bytes: body.toString('base64'),
-      mediaType: contentType(response.headers) || part.mediaType || part.file?.mimeType || null,
+      evidenceRef: scrubber.text(evidenceRef),
+      sourceUrl,
+      mediaType,
       size: body.length,
-      sha256: sha256(body)
+      sha256: digest
     });
   }
   return snapshots;
@@ -369,6 +521,7 @@ function buildRun(input) {
   const {
     runId, testId, turnIndex, repeatIndex, target, initialRequest, requestId, messageId,
     rawObjects, normalized, httpStatus, mediaType, byteLength,
+    snapshots,
     startedAt, headersAt, firstByteAt, firstEventAt, endedAt, outcome, error, authorization
   } = input;
   const body = redactValue(initialRequest?.body ?? null, authorization);
@@ -396,7 +549,8 @@ function buildRun(input) {
       byteLength,
       rawObjects: safeRawObjects,
       rawHash: hashJson(safeRawObjects),
-      normalized: safeNormalized
+      normalized: safeNormalized,
+      snapshots: redactValue(snapshots || [], authorization)
     },
     timing: {
       startedAt,
@@ -430,63 +584,94 @@ async function send(requestDefinition, options) {
   });
 }
 
-function parseJsonResponse(target, response, requestId) {
+function parseJsonResponse(target, response, requestId, operation = 'send-message') {
   requireHttpSuccess(response);
   requireMediaType(contentType(response.headers), ['application/json', 'application/a2a+json']);
   let payload;
   try {
     payload = JSON.parse(response.body.toString('utf8'));
   } catch {
-    throw executorError('A2A response is not valid JSON', 'protocol', 'agent-error');
+    throw executorError('A2A response is not valid JSON', 'json', 'agent-error', { code: 'invalid-json' });
   }
   try {
-    parseA2AResponse(target, payload, requestId);
+    parseA2AResponse(target, payload, requestId, { operation });
   } catch (error) {
-    throw executorError(error.message, 'protocol', 'agent-error');
+    throw executorError(error.message, 'protocol', 'agent-error', {
+      code: error.protocolCode === undefined ? 'protocol' : 'jsonrpc-error',
+      protocolCode: error.protocolCode
+    });
   }
   return payload;
 }
 
 function requireHttpSuccess(response) {
   if (!response || response.status < 200 || response.status >= 300) {
-    throw executorError(`A2A returned HTTP ${response?.status || 0}`, 'protocol', 'agent-error');
+    throw executorError(
+      `A2A returned HTTP ${response?.status || 0}`,
+      'http',
+      'agent-error',
+      { code: 'http-status', status: response?.status || 0 }
+    );
   }
 }
 
 function requireMediaType(actual, expected) {
   const accepted = Array.isArray(expected) ? expected : [expected];
   if (!accepted.some((item) => actual.includes(item))) {
-    throw executorError('A2A response Content-Type does not match the protocol', 'protocol', 'agent-error');
+    throw executorError(
+      'A2A response Content-Type does not match the protocol',
+      'content-type',
+      'agent-error',
+      { code: 'invalid-content-type' }
+    );
   }
 }
 
 function validateStreamObjects(target, objects, requestId) {
+  let phase = 'start';
+  let taskId = null;
+  let contextId = null;
+  let terminal = false;
   for (const object of objects) {
-    let value = object;
-    if (target.binding === 'JSONRPC') {
-      if (object?.jsonrpc !== '2.0' || String(object.id) !== String(requestId)) {
-        throw executorError('A2A stream JSON-RPC envelope is invalid', 'protocol', 'agent-error');
-      }
-      if (object.error) {
-        throw executorError(`A2A stream protocol error: ${object.error.message || object.error.code}`, 'protocol', 'agent-error');
-      }
-      value = object.result;
+    let event;
+    try {
+      event = parseA2AStreamEvent(target, object, requestId);
+    } catch (error) {
+      throw executorError(error.message, 'protocol', 'agent-error');
     }
-    if (!value || typeof value !== 'object') {
-      throw executorError('A2A stream event is missing a protocol object', 'protocol', 'agent-error');
+    if (phase === 'start') {
+      if (event.kind === 'message') {
+        phase = 'message';
+        terminal = true;
+        continue;
+      }
+      if (event.kind !== 'task') {
+        throw executorError('A2A stream update arrived before its initial Task', 'protocol', 'agent-error');
+      }
+      phase = 'task';
+      taskId = event.value.id;
+      contextId = event.value.contextId || null;
+      terminal = isTerminalState(event.value.status?.state);
+      continue;
     }
-    const message = value.message || (isMessage(value) ? value : null);
-    const task = value.task || (isTask(value) ? value : null);
-    const statusUpdate = value.statusUpdate || (isStatusUpdate(value) ? value : null);
-    const artifactUpdate = value.artifactUpdate || (isArtifactUpdate(value) ? value : null);
-    if (
-      (value.message && !isMessage(value.message)) ||
-      (value.task && !isTask(value.task)) ||
-      (value.statusUpdate && !isStatusUpdate(value.statusUpdate)) ||
-      (value.artifactUpdate && !isArtifactUpdate(value.artifactUpdate)) ||
-      (!message && !task && !statusUpdate && !artifactUpdate)
-    ) {
-      throw executorError('A2A stream event contains an invalid protocol object', 'protocol', 'agent-error');
+    if (phase === 'message') {
+      throw executorError('A2A Message stream must close after exactly one Message', 'protocol', 'agent-error');
+    }
+    if (terminal) {
+      throw executorError('A2A stream emitted an event after its terminal update', 'protocol', 'agent-error');
+    }
+    if (!['statusUpdate', 'artifactUpdate'].includes(event.kind)) {
+      throw executorError('A2A Task stream may contain only status/artifact updates', 'protocol', 'agent-error');
+    }
+    if (event.value.taskId !== taskId) {
+      throw executorError('A2A stream update Task id does not match', 'protocol', 'agent-error');
+    }
+    if (contextId && event.value.contextId && event.value.contextId !== contextId) {
+      throw executorError('A2A stream update contextId does not match', 'protocol', 'agent-error');
+    }
+    if (!contextId && event.value.contextId) contextId = event.value.contextId;
+    if (event.kind === 'statusUpdate') {
+      terminal = event.value.final === true || isTerminalState(event.value.status?.state);
     }
   }
 }
@@ -580,6 +765,26 @@ function collectParts(value, target) {
   if (Array.isArray(value)) target.push(...value);
 }
 
+function dedupeByIdentity(values, ...keys) {
+  const map = new Map();
+  for (const value of values || []) map.set(identityFor(value, ...keys), value);
+  return [...map.values()];
+}
+
+function identityFor(value, ...keys) {
+  for (const key of keys) {
+    if (typeof value?.[key] === 'string' && value[key]) return `${key}:${value[key]}`;
+  }
+  return `json:${JSON.stringify(value)}`;
+}
+
+function partText(part) {
+  if (typeof part?.text === 'string') return part.text;
+  if (typeof part?.data?.text === 'string') return part.data.text;
+  if (Object.hasOwn(part || {}, 'data')) return JSON.stringify(part.data);
+  return '';
+}
+
 function isTerminalState(state) {
   return TERMINAL_STATES.has(normalizeState(state));
 }
@@ -592,16 +797,32 @@ function normalizeState(state) {
 }
 
 function outcomeFor(normalized) {
-  if (normalized.responseKind === 'message' && normalized.terminal) return { status: 'succeeded' };
-  if (normalized.terminal && SUCCESS_STATES.has(normalizeState(normalized.terminalState))) {
-    return { status: 'succeeded' };
+  if (normalized.responseKind === 'message' && normalized.terminal) {
+    return { status: 'succeeded', lifecycle: 'completed' };
   }
-  if (normalized.terminal) return { status: 'agent-error' };
-  return { status: 'unknown' };
+  if (normalized.terminal && SUCCESS_STATES.has(normalizeState(normalized.terminalState))) {
+    return { status: 'succeeded', lifecycle: 'completed' };
+  }
+  if (
+    normalized.terminal &&
+    ['INPUT_REQUIRED', 'AUTH_REQUIRED', 'INTERRUPTED'].includes(normalizeState(normalized.terminalState))
+  ) {
+    return { status: 'succeeded', lifecycle: 'interrupted' };
+  }
+  if (normalized.terminal) return { status: 'agent-error', lifecycle: 'terminal-failure' };
+  return { status: 'unknown', lifecycle: 'incomplete' };
+}
+
+function isInterruptedOutcome(run) {
+  if (run?.outcome?.lifecycle === 'interrupted') return true;
+  return ['INPUT_REQUIRED', 'AUTH_REQUIRED', 'INTERRUPTED'].includes(
+    normalizeState(run?.response?.normalized?.terminalState)
+  );
 }
 
 function classifyFailure(error) {
   if (error?.outcome && error?.category) return { outcome: error.outcome, category: error.category };
+  if (error instanceof TypeError) return { outcome: 'platform-error', category: 'configuration' };
   if (error?.code === 'cancelled' || error?.name === 'AbortError') {
     return { outcome: 'platform-error', category: 'signal' };
   }
@@ -613,14 +834,24 @@ function classifyFailure(error) {
   return { outcome: 'platform-error', category: 'transport' };
 }
 
-function executorError(message, category, outcome) {
-  return Object.assign(new Error(message), { category, outcome });
+function executorError(message, category, outcome, details = {}) {
+  return Object.assign(new Error(message), {
+    category,
+    outcome,
+    code: details.code || category,
+    status: details.status ?? null,
+    ...(details.protocolCode === undefined ? {} : { protocolCode: details.protocolCode })
+  });
 }
 
-function publicError(message, category, authorization) {
+function publicError(message, category, authorization, details = {}) {
+  const scrubber = createSecretScrubber(authorization);
   return {
     category,
-    message: redactText(String(message || 'A2A execution failed'), authorization)
+    code: details.code || category,
+    status: details.status ?? null,
+    message: scrubber.text(String(message || 'A2A execution failed')),
+    ...(details.protocolCode === undefined ? {} : { protocolCode: details.protocolCode })
   };
 }
 
@@ -668,11 +899,52 @@ function wait(delay, signal) {
   });
 }
 
+function collectAgentSnapshotParts(target, rawObjects) {
+  const parts = [];
+  const addMessage = (message) => {
+    if (['agent', 'ROLE_AGENT'].includes(message?.role)) collectParts(message.parts, parts);
+  };
+  for (const raw of rawObjects || []) {
+    const root = protocolRoot(target, raw);
+    if (!root || typeof root !== 'object') continue;
+    const message = root.message || (isMessage(root) ? root : null);
+    const task = root.task || (isTask(root) ? root : null);
+    const statusUpdate = root.statusUpdate || (isStatusUpdate(root) ? root : null);
+    const artifactUpdate = root.artifactUpdate || (isArtifactUpdate(root) ? root : null);
+    addMessage(message);
+    if (task) {
+      addMessage(task.status?.message);
+      for (const item of task.history || []) addMessage(item);
+      for (const artifact of task.artifacts || []) collectParts(artifact.parts, parts);
+    }
+    if (statusUpdate) addMessage(statusUpdate.status?.message);
+    if (artifactUpdate?.artifact) collectParts(artifactUpdate.artifact.parts, parts);
+  }
+  return dedupeByIdentity(parts);
+}
+
 function directPartUrl(part) {
   if (!part || typeof part !== 'object') return null;
-  if (typeof part.url === 'string') return part.url;
-  if (part.type === 'url' && typeof part.url === 'string') return part.url;
-  if (part.kind === 'file' && typeof part.file?.uri === 'string') return part.file.uri;
+  const v1Choices = ['text', 'raw', 'url', 'data'].filter((key) => Object.hasOwn(part, key));
+  if (
+    part.kind === undefined &&
+    part.type === undefined &&
+    v1Choices.length === 1 &&
+    v1Choices[0] === 'url' &&
+    typeof part.url === 'string'
+  ) {
+    return part.url;
+  }
+  if (
+    part.kind === 'file' &&
+    part.file &&
+    typeof part.file === 'object' &&
+    Object.hasOwn(part.file, 'uri') &&
+    !Object.hasOwn(part.file, 'bytes') &&
+    typeof part.file.uri === 'string'
+  ) {
+    return part.file.uri;
+  }
   return null;
 }
 
@@ -684,27 +956,70 @@ function redactUrlQuery(value) {
 }
 
 function redactValue(value, secret) {
-  if (!secret) return value;
-  if (typeof value === 'string') return redactText(value, secret);
-  if (Array.isArray(value)) return value.map((item) => redactValue(item, secret));
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, redactValue(item, secret)])
-    );
-  }
-  return value;
+  return createSecretScrubber(secret).value(value);
 }
 
 function redactText(value, secret) {
-  if (!secret) return value;
-  const text = String(secret);
-  const rawToken = text.match(/^Bearer\s+(.+)$/iu)?.[1];
-  const variants = [...new Set([bearer(text), text, rawToken].filter(Boolean))]
+  return createSecretScrubber(secret).text(value);
+}
+
+function validateAuthorization(value) {
+  if (value === undefined || value === null) return;
+  if (typeof value !== 'string') {
+    throw executorError('Authorization must be a string', 'configuration', 'platform-error');
+  }
+  const token = value.match(/^Bearer\s+(.+)$/iu)?.[1] ?? value;
+  if (
+    value.trim() !== value ||
+    token.length < MIN_AUTHORIZATION_TOKEN_LENGTH ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw executorError('Authorization is blank, too short, or contains unsafe characters', 'configuration', 'platform-error');
+  }
+}
+
+function createSecretScrubber(authorization) {
+  if (typeof authorization !== 'string' || authorization.length === 0) {
+    return {
+      text: (value) => String(value),
+      value: (value) => value,
+      contains: () => false
+    };
+  }
+  const token = authorization.match(/^Bearer\s+(.+)$/iu)?.[1] ?? authorization;
+  const header = bearer(token);
+  const variants = new Set([authorization]);
+  for (const value of [token, header]) {
+    const bytes = Buffer.from(value);
+    const uriEncoded = encodeURIComponent(value);
+    variants.add(value);
+    variants.add(value.replaceAll('/', '\\/'));
+    variants.add(JSON.stringify(value).slice(1, -1));
+    variants.add(uriEncoded);
+    variants.add(uriEncoded.replace(/%[0-9A-F]{2}/gu, (item) => item.toLowerCase()));
+    variants.add(bytes.toString('base64'));
+    variants.add(bytes.toString('base64url'));
+    variants.add(bytes.toString('hex'));
+  }
+  const ordered = [...variants]
+    .filter((value) => value.length >= MIN_AUTHORIZATION_TOKEN_LENGTH)
     .sort((left, right) => right.length - left.length);
-  return variants.reduce(
+  const text = (input) => ordered.reduce(
     (result, variant) => result.split(variant).join('[REDACTED]'),
-    value
+    String(input)
   );
+  const value = (input) => {
+    if (typeof input === 'string') return text(input);
+    if (Array.isArray(input)) return input.map(value);
+    if (input && typeof input === 'object') {
+      return Object.fromEntries(
+        Object.entries(input).map(([key, item]) => [text(key), value(item)])
+      );
+    }
+    return input;
+  };
+  const contains = (input) => ordered.some((variant) => String(input).includes(variant));
+  return { text, value, contains };
 }
 
 function emptyNormalized() {
@@ -718,6 +1033,7 @@ function emptyNormalized() {
     messages: [],
     history: [],
     artifacts: [],
+    artifactTimeline: [],
     parts: [],
     text: ''
   };

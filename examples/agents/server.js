@@ -107,7 +107,17 @@ function messageResult(text, contextId, version) {
 }
 
 function taskResult(text, contextId) {
-  return { task: { id: crypto.randomUUID(), contextId: contextId || crypto.randomUUID(), status: { state: 'completed' }, artifacts: [{ artifactId: crypto.randomUUID(), name: 'incident-action-board', parts: [{ kind: 'text', text }] }] } };
+  return {
+    kind: 'task',
+    id: crypto.randomUUID(),
+    contextId: contextId || crypto.randomUUID(),
+    status: { state: 'completed' },
+    artifacts: [{
+      artifactId: crypto.randomUUID(),
+      name: 'incident-action-board',
+      parts: [{ kind: 'text', text }]
+    }]
+  };
 }
 
 async function readBody(request) {

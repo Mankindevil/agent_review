@@ -268,7 +268,7 @@ export function buildA2ARequest(target, input, options = {}) {
   if (isJsonRpc) {
     return {
       url: assertSafeAgentUrl(target.url).toString(),
-      headers: { 'content-type': 'application/json', 'a2a-version': target.version },
+      headers: { 'content-type': 'application/json', 'a2a-version': protocolHeaderVersion(target.version) },
       body: {
         jsonrpc: '2.0',
         id: requestId,
@@ -286,7 +286,10 @@ export function buildA2ARequest(target, input, options = {}) {
   if (target.tenant) body.tenant = target.tenant;
   return {
     url: endpoint,
-    headers: { 'content-type': isV1 ? 'application/a2a+json' : 'application/json', 'a2a-version': target.version },
+    headers: {
+      'content-type': isV1 ? 'application/a2a+json' : 'application/json',
+      'a2a-version': protocolHeaderVersion(target.version)
+    },
     body,
     requestId
   };
@@ -298,13 +301,14 @@ export function buildGetTaskRequest(target, { taskId, requestId = crypto.randomU
   if (!['JSONRPC', 'HTTP+JSON'].includes(target.binding)) {
     throw new Error(`Unsupported A2A binding: ${target.binding}`);
   }
+  if (!isNonEmptyString(taskId)) throw new TypeError('A2A GetTask taskId must be a non-empty string');
   if (isJsonRpc) {
     const params = { id: taskId, historyLength };
     if (target.tenant) params.tenant = target.tenant;
     return {
       url: assertSafeAgentUrl(target.url).toString(),
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'a2a-version': target.version },
+      headers: { 'content-type': 'application/json', 'a2a-version': protocolHeaderVersion(target.version) },
       body: {
         jsonrpc: '2.0',
         id: requestId,
@@ -323,7 +327,7 @@ export function buildGetTaskRequest(target, { taskId, requestId = crypto.randomU
     method: 'GET',
     headers: {
       accept: isV1 ? 'application/a2a+json' : 'application/json',
-      'a2a-version': target.version
+      'a2a-version': protocolHeaderVersion(target.version)
     },
     body: null,
     requestId
@@ -391,21 +395,78 @@ function copyLegacyFileMetadata(target, source) {
   return target;
 }
 
-export function parseA2AResponse(target, payload, requestId) {
-  let root = payload;
-  if (target.binding === 'JSONRPC') {
-    if (!payload || payload.jsonrpc !== '2.0') throw new Error('A2A JSON-RPC 响应结构无效');
-    if (String(payload.id) !== String(requestId)) throw new Error('A2A 响应请求 ID 不匹配');
-    if (payload.error) throw new Error(`A2A 协议错误：${payload.error.message || payload.error.code || 'unknown'}`);
-    root = payload.result;
+export function parseA2AResponse(target, payload, requestId, options = {}) {
+  let root = unwrapResponseEnvelope(target, payload, requestId);
+  const isV1 = !String(target.version).startsWith('0.');
+  if (options.operation === 'get-task') {
+    validateTask(root, { isV1 });
+    return root;
   }
-  const directPayload = isMessageLike(root) || isTaskLike(root);
-  if (!root || typeof root !== 'object' || (!root.message && !root.task && !directPayload)) {
-    throw new Error('A2A 响应缺少 Message 或 Task');
+  if (!isV1 && target.binding === 'JSONRPC') {
+    if (looksLikeMessage(root)) validateMessage(root, { isV1, topLevel: true });
+    else validateTask(root, { isV1 });
+    return root;
   }
-  if (root.message && !isMessageLike(root.message)) throw new Error('A2A Message 响应结构无效');
-  if (root.task && !isTaskLike(root.task)) throw new Error('A2A Task 响应结构无效');
+  if (!isPlainObject(root)) throw new Error('A2A SendMessage response wrapper is invalid');
+  const choices = ['message', 'task'].filter((key) => Object.hasOwn(root, key) && root[key] !== undefined);
+  if (choices.length !== 1) {
+    throw new Error('A2A SendMessage response wrapper must contain exactly one message/task oneof');
+  }
+  if (choices[0] === 'message') validateMessage(root.message, { isV1, topLevel: true });
+  else validateTask(root.task, { isV1 });
   return root;
+}
+
+export function parseA2AStreamEvent(target, payload, requestId) {
+  const root = unwrapResponseEnvelope(target, payload, requestId);
+  const isV1 = !String(target.version).startsWith('0.');
+  let kind;
+  let value;
+  if (isV1 || target.binding === 'HTTP+JSON') {
+    if (!isPlainObject(root)) throw new Error('A2A stream event wrapper is invalid');
+    const choices = ['message', 'task', 'statusUpdate', 'artifactUpdate']
+      .filter((key) => Object.hasOwn(root, key) && root[key] !== undefined);
+    if (choices.length !== 1) throw new Error('A2A stream event must contain exactly one oneof value');
+    [kind] = choices;
+    value = root[kind];
+  } else {
+    value = root;
+    if (value?.kind === 'message') kind = 'message';
+    else if (value?.kind === 'task') kind = 'task';
+    else if (value?.kind === 'status-update') kind = 'statusUpdate';
+    else if (value?.kind === 'artifact-update') kind = 'artifactUpdate';
+    else throw new Error('A2A 0.3 stream event kind is invalid');
+  }
+  if (kind === 'message') validateMessage(value, { isV1, topLevel: true });
+  if (kind === 'task') validateTask(value, { isV1 });
+  if (kind === 'statusUpdate') validateStatusUpdate(value, { isV1 });
+  if (kind === 'artifactUpdate') validateArtifactUpdate(value, { isV1 });
+  return { kind, value };
+}
+
+function unwrapResponseEnvelope(target, payload, requestId) {
+  if (target.binding !== 'JSONRPC') return payload;
+  if (!payload || payload.jsonrpc !== '2.0') throw new Error('A2A JSON-RPC response envelope is invalid');
+  if (String(payload.id) !== String(requestId)) throw new Error('A2A 响应请求 ID does not match');
+  const hasResult = Object.hasOwn(payload, 'result');
+  const hasError = Object.hasOwn(payload, 'error');
+  if (hasResult === hasError) {
+    throw new Error('A2A JSON-RPC response must contain exactly one result/error branch');
+  }
+  if (hasError) {
+    if (
+      !isPlainObject(payload.error) ||
+      !Number.isInteger(payload.error.code) ||
+      typeof payload.error.message !== 'string'
+    ) {
+      throw new Error('A2A JSON-RPC error branch is invalid');
+    }
+    throw Object.assign(
+      new Error(`A2A protocol error: ${payload.error.message || payload.error.code || 'unknown'}`),
+      { protocolCode: payload.error.code }
+    );
+  }
+  return payload.result;
 }
 
 export function parseSseEvents(text, options = {}) {
@@ -438,24 +499,243 @@ export function parseSseEvents(text, options = {}) {
 }
 
 export function validateStreamResult(target, events, requestId) {
-  if (!events.length) throw new Error('SSE 未返回有效事件');
+  if (!Array.isArray(events) || events.length === 0) throw new Error('SSE 未返回有效事件');
+  let phase = 'start';
+  let taskId = null;
+  let contextId = null;
   let terminal = false;
   for (const event of events) {
-    let value = event;
-    if (target.binding === 'JSONRPC') {
-      if (event?.jsonrpc !== '2.0') throw new Error('SSE JSON-RPC 事件结构无效');
-      if (String(event.id) !== String(requestId)) throw new Error('SSE 事件请求 ID 不匹配');
-      if (event.error) throw new Error(`A2A 流式协议错误：${event.error.message || event.error.code || 'unknown'}`);
-      value = event.result;
+    const parsed = parseA2AStreamEvent(target, event, requestId);
+    if (phase === 'start') {
+      if (parsed.kind === 'message') {
+        phase = 'message';
+        terminal = true;
+        continue;
+      }
+      if (parsed.kind !== 'task') throw new Error('A2A stream update arrived before its initial Task');
+      phase = 'task';
+      taskId = parsed.value.id;
+      contextId = parsed.value.contextId || null;
+      terminal = isTerminalState(parsed.value.status?.state);
+      continue;
     }
-    if (!value || typeof value !== 'object') throw new Error('SSE 事件缺少协议结果');
-    if (value.message || (String(target.version).startsWith('0.') && isMessageLike(value))) terminal = true;
-    if (value.statusUpdate?.final === true || (value.kind === 'status-update' && value.final === true)) terminal = true;
-    const state = value.task?.status?.state || value.statusUpdate?.status?.state || value.status?.state;
-    if (isTerminalState(state)) terminal = true;
+    if (phase === 'message') throw new Error('A2A Message stream must close after exactly one Message');
+    if (terminal) throw new Error('A2A stream emitted an event after its terminal result');
+    if (!['statusUpdate', 'artifactUpdate'].includes(parsed.kind)) {
+      throw new Error('A2A Task stream may contain only status/artifact updates');
+    }
+    if (parsed.value.taskId !== taskId) throw new Error('A2A stream Task id does not match');
+    if (contextId && parsed.value.contextId && parsed.value.contextId !== contextId) {
+      throw new Error('A2A stream contextId does not match');
+    }
+    if (!contextId && parsed.value.contextId) contextId = parsed.value.contextId;
+    if (parsed.kind === 'statusUpdate') {
+      terminal = parsed.value.final === true || isTerminalState(parsed.value.status?.state);
+    }
   }
   if (!terminal) throw new Error('A2A 流在结束前未到达终态');
   return { terminal: true, eventCount: events.length, text: events.map(extractAgentText).filter(Boolean).join('\n') };
+}
+
+function validateMessage(value, { isV1, topLevel = false } = {}) {
+  if (!isPlainObject(value)) throw new Error('A2A Message must be an object');
+  if ((!isV1 && value.kind !== 'message') || (isV1 && value.kind !== undefined && value.kind !== 'message')) {
+    throw new Error('A2A Message kind is invalid');
+  }
+  if (!isNonEmptyString(value.messageId)) throw new Error('A2A Message messageId must be non-empty');
+  const allowedRoles = topLevel
+    ? new Set([isV1 ? 'ROLE_AGENT' : 'agent'])
+    : new Set(isV1 ? ['ROLE_USER', 'ROLE_AGENT'] : ['user', 'agent']);
+  if (!allowedRoles.has(value.role)) throw new Error('A2A Message role is invalid');
+  if (!Array.isArray(value.parts) || value.parts.length === 0) {
+    throw new Error('A2A Message Parts must be a non-empty array');
+  }
+  value.parts.forEach((part, index) => validatePart(part, { isV1, path: `Message.parts[${index}]` }));
+  for (const key of ['taskId', 'contextId']) {
+    if (value[key] !== undefined && !isNonEmptyString(value[key])) {
+      throw new Error(`A2A Message ${key} must be non-empty`);
+    }
+  }
+}
+
+function validateTask(value, { isV1 } = {}) {
+  if (!isPlainObject(value)) throw new Error('A2A GetTask/Task response must be an object');
+  if ((!isV1 && value.kind !== 'task') || (isV1 && value.kind !== undefined && value.kind !== 'task')) {
+    throw new Error('A2A Task kind is invalid');
+  }
+  if (!isNonEmptyString(value.id)) throw new Error('A2A Task id must be non-empty');
+  if (!isV1 && !isNonEmptyString(value.contextId)) {
+    throw new Error('A2A 0.3 Task contextId must be non-empty');
+  }
+  if (value.contextId !== undefined && !isNonEmptyString(value.contextId)) {
+    throw new Error('A2A Task contextId must be non-empty');
+  }
+  validateTaskStatus(value.status, { isV1 });
+  if (value.history !== undefined) {
+    if (!Array.isArray(value.history)) throw new Error('A2A Task history must be an array');
+    value.history.forEach((message, index) => {
+      try {
+        validateMessage(message, { isV1, topLevel: false });
+      } catch (error) {
+        throw new Error(`A2A Task history[${index}] is invalid: ${error.message}`);
+      }
+    });
+  }
+  if (value.artifacts !== undefined) {
+    if (!Array.isArray(value.artifacts)) throw new Error('A2A Task artifacts must be an array');
+    value.artifacts.forEach((artifact, index) => validateArtifact(artifact, {
+      isV1,
+      path: `Task.artifacts[${index}]`
+    }));
+  }
+}
+
+function validateTaskStatus(value, { isV1 } = {}) {
+  if (!isPlainObject(value) || !isNonEmptyString(value.state)) {
+    throw new Error('A2A Task status/state is invalid');
+  }
+  const state = String(value.state).toUpperCase().replace(/^TASK_STATE_/u, '').replace(/-/gu, '_');
+  const allowed = new Set(isV1
+    ? [
+      'UNSPECIFIED', 'SUBMITTED', 'WORKING', 'COMPLETED', 'FAILED',
+      'CANCELED', 'REJECTED', 'INPUT_REQUIRED', 'AUTH_REQUIRED'
+    ]
+    : [
+      'UNKNOWN', 'SUBMITTED', 'WORKING', 'COMPLETED', 'FAILED',
+      'CANCELED', 'REJECTED', 'INPUT_REQUIRED', 'AUTH_REQUIRED'
+    ]);
+  if (!allowed.has(state)) throw new Error('A2A Task status state is invalid');
+  if (value.message !== undefined) validateMessage(value.message, { isV1, topLevel: true });
+}
+
+function validateStatusUpdate(value, { isV1 } = {}) {
+  if (!isPlainObject(value)) throw new Error('A2A status update must be an object');
+  if (
+    (!isV1 && value.kind !== 'status-update') ||
+    (isV1 && value.kind !== undefined && value.kind !== 'status-update')
+  ) {
+    throw new Error('A2A status update kind is invalid');
+  }
+  if (!isNonEmptyString(value.taskId)) throw new Error('A2A status update taskId must be non-empty');
+  if (!isNonEmptyString(value.contextId)) {
+    throw new Error('A2A status update contextId must be non-empty');
+  }
+  if (value.contextId !== undefined && !isNonEmptyString(value.contextId)) {
+    throw new Error('A2A status update contextId must be non-empty');
+  }
+  if (isV1 && value.final !== undefined) {
+    throw new Error('A2A 1.0 status update does not define final');
+  }
+  if (!isV1 && typeof value.final !== 'boolean') {
+    throw new Error('A2A 0.3 status update final must be boolean');
+  }
+  validateTaskStatus(value.status, { isV1 });
+}
+
+function validateArtifactUpdate(value, { isV1 } = {}) {
+  if (!isPlainObject(value)) throw new Error('A2A artifact update must be an object');
+  if (
+    (!isV1 && value.kind !== 'artifact-update') ||
+    (isV1 && value.kind !== undefined && value.kind !== 'artifact-update')
+  ) {
+    throw new Error('A2A artifact update kind is invalid');
+  }
+  if (!isNonEmptyString(value.taskId)) throw new Error('A2A artifact update taskId must be non-empty');
+  if (!isNonEmptyString(value.contextId)) {
+    throw new Error('A2A artifact update contextId must be non-empty');
+  }
+  if (value.contextId !== undefined && !isNonEmptyString(value.contextId)) {
+    throw new Error('A2A artifact update contextId must be non-empty');
+  }
+  validateArtifact(value.artifact, { isV1, path: 'artifactUpdate.artifact' });
+  for (const key of ['append', 'lastChunk']) {
+    if (value[key] !== undefined && typeof value[key] !== 'boolean') {
+      throw new Error(`A2A artifact update ${key} must be boolean`);
+    }
+  }
+}
+
+function validateArtifact(value, { isV1, path }) {
+  if (!isPlainObject(value)) throw new Error(`A2A ${path} artifact must be an object`);
+  if (!isNonEmptyString(value.artifactId)) {
+    throw new Error(`A2A ${path} artifactId must be non-empty`);
+  }
+  if (!Array.isArray(value.parts) || value.parts.length === 0) {
+    throw new Error(`A2A ${path} artifact Parts must be non-empty`);
+  }
+  value.parts.forEach((part, index) => validatePart(part, { isV1, path: `${path}.parts[${index}]` }));
+}
+
+function validatePart(value, { isV1, path }) {
+  if (!isPlainObject(value)) throw new Error(`A2A ${path} Part must be an object`);
+  if (isV1) {
+    const choices = ['text', 'raw', 'url', 'data'].filter((key) => Object.hasOwn(value, key));
+    if (choices.length !== 1) throw new Error(`A2A ${path} Part oneof is invalid`);
+    const choice = choices[0];
+    if (choice === 'text' && typeof value.text !== 'string') throw new Error(`A2A ${path} text Part is invalid`);
+    if (choice === 'raw') validateBase64(value.raw, `${path} raw`);
+    if (choice === 'url') validateHttpUrl(value.url, `${path} url`);
+    if (choice === 'data' && value.data === undefined) throw new Error(`A2A ${path} data Part is invalid`);
+    for (const key of ['mediaType', 'filename']) {
+      if (value[key] !== undefined && !isNonEmptyString(value[key])) {
+        throw new Error(`A2A ${path} ${key} is invalid`);
+      }
+    }
+    return;
+  }
+  if (!['text', 'data', 'file'].includes(value.kind)) throw new Error(`A2A ${path} legacy Part kind is invalid`);
+  if (value.kind === 'text' && typeof value.text !== 'string') throw new Error(`A2A ${path} text Part is invalid`);
+  if (value.kind === 'data' && !isPlainObject(value.data)) throw new Error(`A2A ${path} data Part is invalid`);
+  if (value.kind === 'file') {
+    if (!isPlainObject(value.file)) throw new Error(`A2A ${path} file Part is invalid`);
+    const choices = ['uri', 'bytes'].filter((key) => Object.hasOwn(value.file, key));
+    if (choices.length !== 1) throw new Error(`A2A ${path} file uri/bytes oneof is invalid`);
+    if (choices[0] === 'uri') validateHttpUrl(value.file.uri, `${path} file.uri`);
+    else validateBase64(value.file.bytes, `${path} file.bytes`);
+    for (const key of ['mimeType', 'name']) {
+      if (value.file[key] !== undefined && !isNonEmptyString(value.file[key])) {
+        throw new Error(`A2A ${path} file.${key} is invalid`);
+      }
+    }
+  }
+}
+
+function validateBase64(value, path) {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length % 4 !== 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value) ||
+    Buffer.from(value, 'base64').toString('base64') !== value
+  ) {
+    throw new Error(`A2A ${path} must be canonical base64`);
+  }
+}
+
+function validateHttpUrl(value, path) {
+  if (!isNonEmptyString(value)) throw new Error(`A2A ${path} must be a URL string`);
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`A2A ${path} must be a valid URL`);
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`A2A ${path} must use HTTP(S)`);
+}
+
+function looksLikeMessage(value) {
+  return isPlainObject(value) && (
+    value.kind === 'message' ||
+    Object.hasOwn(value, 'messageId') ||
+    Object.hasOwn(value, 'role') ||
+    Object.hasOwn(value, 'parts')
+  );
+}
+
+function protocolHeaderVersion(value) {
+  const match = String(value || '').match(/^(\d+)\.(\d+)/u);
+  if (!match) throw new TypeError('A2A protocol version must include major.minor');
+  return `${match[1]}.${match[2]}`;
 }
 
 function appendOperation(rawUrl, operation) {
@@ -470,20 +750,6 @@ function isTerminalState(value) {
     .replace(/^TASK_STATE_/, '')
     .replace(/-/g, '_');
   return ['COMPLETED', 'FAILED', 'CANCELED', 'CANCELLED', 'REJECTED', 'INTERRUPTED', 'INPUT_REQUIRED', 'AUTH_REQUIRED'].includes(normalized);
-}
-
-function isMessageLike(value) {
-  return typeof value?.messageId === 'string' &&
-    typeof value?.role === 'string' &&
-    Array.isArray(value?.parts) &&
-    (value.kind === undefined || value.kind === 'message');
-}
-
-function isTaskLike(value) {
-  return typeof value?.id === 'string' &&
-    value?.status &&
-    typeof value.status === 'object' &&
-    (value.kind === undefined || value.kind === 'task');
 }
 
 export function extractAgentText(payload) {

@@ -7,6 +7,7 @@ import {
   extractAgentText,
   getInterfaces,
   parseA2AResponse,
+  parseA2AStreamEvent,
   parseSseEvents,
   selectInterface,
   validateAgentCard,
@@ -300,6 +301,13 @@ test('builds versioned A2A requests with tenant and binding-specific endpoints',
     { requestId: 'req-4', messageId: 'msg-4' }
   );
   assert.equal(legacyRest.headers['content-type'], 'application/json');
+
+  const patchVersion = buildA2ARequest(
+    { url: 'https://example.com/a2a', binding: 'JSONRPC', version: '1.0.0' },
+    'hello',
+    { requestId: 'req-patch', messageId: 'msg-patch' }
+  );
+  assert.equal(patchVersion.headers['a2a-version'], '1.0');
 });
 
 test('serializes normalized multipart input for A2A 1.x and keeps turn context', () => {
@@ -397,6 +405,14 @@ test('builds versioned GetTask requests for JSON-RPC and HTTP+JSON', () => {
     { taskId: 'task-2', requestId: 'poll-4', historyLength: 50 }
   );
   assert.equal(restWithQuery.url, 'https://example.com/a2a/v1/tasks/task-2?signature=keep&historyLength=50');
+
+  assert.throws(
+    () => buildGetTaskRequest(
+      { url: 'https://example.com/rpc', binding: 'JSONRPC', version: '1.0' },
+      { taskId: '' }
+    ),
+    /taskId/i
+  );
 });
 
 test('rejects JSON-RPC errors and mismatched response ids', () => {
@@ -408,6 +424,32 @@ test('rejects JSON-RPC errors and mismatched response ids', () => {
   assert.throws(
     () => parseA2AResponse(target, { jsonrpc: '2.0', id: 'req-1', error: { code: -32602, message: 'bad token' } }, 'req-1'),
     /bad token/
+  );
+  assert.throws(
+    () => parseA2AResponse(target, {
+      jsonrpc: '2.0',
+      id: 'req-1',
+      result: { message: { messageId: 'm', role: 'ROLE_AGENT', parts: [{ text: 'ok' }] } },
+      error: { code: -32602, message: 'both branches' }
+    }, 'req-1'),
+    /result|error|oneof/i
+  );
+  assert.throws(
+    () => parseA2AResponse(target, {
+      jsonrpc: '2.0',
+      id: 'req-1',
+      result: { message: { messageId: 'm', role: 'ROLE_AGENT', parts: [{ text: 'ok' }] } },
+      error: null
+    }, 'req-1'),
+    /result|error|oneof/i
+  );
+  assert.throws(
+    () => parseA2AResponse(target, {
+      jsonrpc: '2.0',
+      id: 'req-1',
+      error: { code: 'bad', message: 7 }
+    }, 'req-1'),
+    /error/i
   );
   assert.throws(
     () => parseA2AResponse(target, { jsonrpc: '2.0', id: 'req-1', result: { message: {} } }, 'req-1'),
@@ -431,13 +473,153 @@ test('accepts legacy 0.3 JSON-RPC results without a 1.0 response wrapper', () =>
     parseA2AResponse(target, { jsonrpc: '2.0', id: 'req-1', result: message }, 'req-1'),
     message
   );
+  assert.throws(
+    () => parseA2AResponse(target, {
+      jsonrpc: '2.0',
+      id: 'req-2',
+      result: { messageId: 'reply-2', role: 'agent', parts: [{ kind: 'text', text: 'missing kind' }] }
+    }, 'req-2'),
+    /kind/i
+  );
+  assert.throws(
+    () => parseA2AResponse(target, {
+      jsonrpc: '2.0',
+      id: 'req-3',
+      result: { id: 'task-3', contextId: 'ctx-3', status: { state: 'completed' } }
+    }, 'req-3'),
+    /kind/i
+  );
+});
+
+test('enforces version and binding-specific SendMessage response wrappers', () => {
+  const v1Rpc = { url: 'https://example.com/rpc', binding: 'JSONRPC', version: '1.0' };
+  const v1Http = { url: 'https://example.com/a2a', binding: 'HTTP+JSON', version: '1.0' };
+  const v03Http = { url: 'https://example.com/a2a', binding: 'HTTP+JSON', version: '0.3' };
+  const messageV1 = {
+    messageId: 'reply-1',
+    role: 'ROLE_AGENT',
+    parts: [{ text: 'ok' }]
+  };
+  const messageV03 = {
+    kind: 'message',
+    messageId: 'reply-legacy',
+    role: 'agent',
+    parts: [{ kind: 'text', text: 'ok' }]
+  };
+
+  assert.throws(
+    () => parseA2AResponse(v1Rpc, { jsonrpc: '2.0', id: 'r', result: messageV1 }, 'r'),
+    /wrapper|oneof/i
+  );
+  assert.throws(() => parseA2AResponse(v1Http, messageV1, 'r'), /wrapper|oneof/i);
+  assert.throws(() => parseA2AResponse(v03Http, messageV03, 'r'), /wrapper|oneof/i);
+  assert.equal(parseA2AResponse(v03Http, { message: messageV03 }, 'r').message, messageV03);
+  assert.throws(
+    () => parseA2AResponse(v1Http, { message: messageV1, task: {
+      id: 'task-1',
+      status: { state: 'TASK_STATE_COMPLETED' }
+    } }, 'r'),
+    /exactly one|oneof/i
+  );
+});
+
+test('strictly validates Message, Part, Task, history, and artifact schemas', () => {
+  const target = { url: 'https://example.com/a2a', binding: 'HTTP+JSON', version: '1.0' };
+  const parseMessage = (message) => parseA2AResponse(target, { message }, 'r');
+  const baseMessage = {
+    messageId: 'reply-1',
+    role: 'ROLE_AGENT',
+    parts: [{ text: 'ok' }]
+  };
+
+  for (const message of [
+    { ...baseMessage, messageId: '' },
+    { ...baseMessage, role: 'agent' },
+    { ...baseMessage, parts: [] },
+    { ...baseMessage, parts: [{ text: 'ok', url: 'https://files.example/x' }] },
+    { ...baseMessage, parts: [{ raw: 7 }] },
+    { ...baseMessage, parts: [{ url: 7 }] }
+  ]) {
+    assert.throws(() => parseMessage(message), /Message|Part|role|oneof/i);
+  }
+
+  assert.throws(
+    () => parseA2AResponse(target, { task: {
+      id: 'task-1',
+      status: { state: 'TASK_STATE_COMPLETED' },
+      history: [{ ...baseMessage, role: 'not-a-role' }]
+    } }, 'r'),
+    /history|role|Message/i
+  );
+  assert.throws(
+    () => parseA2AResponse(target, { task: {
+      id: 'task-1',
+      status: { state: 'TASK_STATE_COMPLETED' },
+      artifacts: [{ artifactId: '', parts: [{ text: 'done' }] }]
+    } }, 'r'),
+    /artifact/i
+  );
+
+  assert.throws(
+    () => parseA2AResponse(target, { task: {
+      id: 'task-1',
+      status: { state: 'TASK_STATE_COMPLETED' },
+      artifacts: [{ id: 'not-artifact-id', parts: [{ text: 'done' }] }]
+    } }, 'r'),
+    /artifactId|artifact id/i
+  );
+
+  for (const data of [null, true, 7, 'value', ['value'], { value: 7 }]) {
+    assert.doesNotThrow(() => parseMessage({ ...baseMessage, parts: [{ data }] }));
+  }
+  for (const state of ['TASK_STATE_UNKNOWN', 'TASK_STATE_INTERRUPTED', 'TASK_STATE_CANCELLED']) {
+    assert.throws(
+      () => parseA2AResponse(target, { task: { id: 'task-1', status: { state } } }, 'r'),
+      /state/i
+    );
+  }
+});
+
+test('binds GetTask responses to Task only and requires 0.3 task context', () => {
+  const v1Rpc = { url: 'https://example.com/rpc', binding: 'JSONRPC', version: '1.0' };
+  const task = {
+    id: 'task-1',
+    contextId: 'ctx-1',
+    status: { state: 'TASK_STATE_COMPLETED' }
+  };
+  assert.equal(
+    parseA2AResponse(
+      v1Rpc,
+      { jsonrpc: '2.0', id: 'poll', result: task },
+      'poll',
+      { operation: 'get-task' }
+    ),
+    task
+  );
+  assert.throws(
+    () => parseA2AResponse(v1Rpc, {
+      jsonrpc: '2.0',
+      id: 'poll',
+      result: { messageId: 'm', role: 'ROLE_AGENT', parts: [{ text: 'no' }] }
+    }, 'poll', { operation: 'get-task' }),
+    /GetTask|Task/i
+  );
+  assert.throws(
+    () => parseA2AResponse(
+      { ...v1Rpc, version: '0.3' },
+      { jsonrpc: '2.0', id: 'poll', result: { kind: 'task', id: 'task-1', status: { state: 'completed' } } },
+      'poll',
+      { operation: 'get-task' }
+    ),
+    /contextId/i
+  );
 });
 
 test('parses SSE frames and requires a terminal stream result', () => {
   const text = [
     ': heartbeat\r\n',
     'data: {"jsonrpc":"2.0","id":"req-1","result":{"task":{"id":"task-1","status":{"state":"TASK_STATE_WORKING"}}}}\r\n\r\n',
-    'data: {"jsonrpc":"2.0","id":"req-1","result":{"statusUpdate":{"taskId":"task-1",\r\n',
+    'data: {"jsonrpc":"2.0","id":"req-1","result":{"statusUpdate":{"taskId":"task-1","contextId":"ctx-1",\r\n',
     'data: "status":{"state":"TASK_STATE_COMPLETED"}}}}\r\n\r\n'
   ].join('');
   const events = parseSseEvents(text);
@@ -476,19 +658,48 @@ test('parses SSE frames and requires a terminal stream result', () => {
 });
 
 test('accepts a legacy 0.3 terminal status update stream', () => {
-  const events = [{
-    jsonrpc: '2.0',
-    id: 'req-1',
-    result: {
-      kind: 'status-update',
-      taskId: 'task-1',
-      final: true,
-      status: { state: 'completed', message: { parts: [{ kind: 'text', text: 'legacy done' }] } }
+  const events = [
+    {
+      jsonrpc: '2.0',
+      id: 'req-1',
+      result: {
+        kind: 'task',
+        id: 'task-1',
+        contextId: 'ctx-1',
+        status: { state: 'working' }
+      }
+    },
+    {
+      jsonrpc: '2.0',
+      id: 'req-1',
+      result: {
+        kind: 'status-update',
+        taskId: 'task-1',
+        contextId: 'ctx-1',
+        final: true,
+        status: {
+          state: 'completed',
+          message: {
+            kind: 'message',
+            messageId: 'legacy-status',
+            role: 'agent',
+            parts: [{ kind: 'text', text: 'legacy done' }]
+          }
+        }
+      }
     }
-  }];
+  ];
   const result = validateStreamResult({ binding: 'JSONRPC', version: '0.3' }, events, 'req-1');
   assert.equal(result.terminal, true);
   assert.match(result.text, /legacy done/);
+  assert.throws(
+    () => validateStreamResult(
+      { binding: 'JSONRPC', version: '0.3' },
+      [events[1]],
+      'req-1'
+    ),
+    /before|Task/i
+  );
 });
 
 test('blocks loopback and private IPv6 Agent URLs by default', () => {
@@ -507,6 +718,61 @@ test('extracts text from A2A artifacts', () => {
   assert.equal(extractAgentText({ task: { artifacts: [{ parts: [{ text: 'done' }] }] } }), 'done');
   assert.equal(extractAgentText({ message: { parts: [{ data: { answer: 42 } }] } }), '{"answer":42}');
   assert.equal(extractAgentText({ task: { id: 'task-1', status: { state: 'working' } } }), '');
+});
+
+test('enforces version-specific status and artifact update fields', () => {
+  const v1 = { binding: 'JSONRPC', version: '1.0' };
+  const v03 = { binding: 'JSONRPC', version: '0.3' };
+  const envelope = (id, result) => ({ jsonrpc: '2.0', id, result });
+  assert.doesNotThrow(() => parseA2AStreamEvent(v1, envelope('v1', {
+    statusUpdate: {
+      taskId: 'task-1',
+      contextId: 'ctx-1',
+      status: { state: 'TASK_STATE_COMPLETED' }
+    }
+  }), 'v1'));
+  assert.throws(() => parseA2AStreamEvent(v1, envelope('v1', {
+    statusUpdate: {
+      taskId: 'task-1',
+      contextId: 'ctx-1',
+      final: true,
+      status: { state: 'TASK_STATE_COMPLETED' }
+    }
+  }), 'v1'), /final/i);
+  assert.throws(() => parseA2AStreamEvent(v1, envelope('v1', {
+    statusUpdate: {
+      taskId: 'task-1',
+      status: { state: 'TASK_STATE_COMPLETED' }
+    }
+  }), 'v1'), /contextId/i);
+  assert.throws(() => parseA2AStreamEvent(v1, envelope('v1', {
+    artifactUpdate: {
+      taskId: 'task-1',
+      artifact: { artifactId: 'artifact-1', parts: [{ text: 'output' }] }
+    }
+  }), 'v1'), /contextId/i);
+
+  const legacyStatus = {
+    kind: 'status-update',
+    taskId: 'task-1',
+    contextId: 'ctx-1',
+    final: true,
+    status: { state: 'completed' }
+  };
+  assert.doesNotThrow(() => parseA2AStreamEvent(v03, envelope('v03', legacyStatus), 'v03'));
+  assert.throws(
+    () => parseA2AStreamEvent(v03, envelope('v03', { ...legacyStatus, contextId: undefined }), 'v03'),
+    /contextId/i
+  );
+  assert.throws(
+    () => parseA2AStreamEvent(v03, envelope('v03', { ...legacyStatus, final: undefined }), 'v03'),
+    /final/i
+  );
+  assert.throws(() => parseA2AStreamEvent(v03, envelope('v03', {
+    kind: 'artifact-update',
+    taskId: 'task-1',
+    artifact: { artifactId: 'artifact-1', parts: [{ kind: 'text', text: 'output' }] }
+  }), 'v03'), /contextId/i);
 });
 
 test('complex workflows score above trivial transforms', () => {

@@ -172,3 +172,40 @@ test('aborts and classifies a synchronous timing hook failure as platform instru
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('never exposes an overflow chunk to instrumentation and classifies onChunk failures', async () => {
+  const server = createServer((request, response) => {
+    if (request.url === '/overflow') {
+      response.write('1234');
+      return setTimeout(() => response.end('5'), 10);
+    }
+    response.end('body');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    const lookup = async () => [{ address: '127.0.0.1', family: 4 }];
+    const observed = [];
+    await assert.rejects(
+      safeHttpRequest(`http://agent.example:${port}/overflow`, {
+        lookup,
+        allowPrivate: true,
+        maxBytes: 4,
+        onChunk: ({ bytes }) => observed.push(bytes.toString())
+      }),
+      (error) => error.code === 'response-too-large'
+    );
+    assert.deepEqual(observed, ['1234']);
+
+    await assert.rejects(
+      safeHttpRequest(`http://agent.example:${port}/hook`, {
+        lookup,
+        allowPrivate: true,
+        onChunk: () => { throw new Error('collector unavailable'); }
+      }),
+      (error) => error.code === 'instrumentation'
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

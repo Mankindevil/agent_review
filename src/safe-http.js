@@ -126,6 +126,12 @@ async function performSafeHttpRequest(rawUrl, options) {
         return;
       }
       response.on('data', (chunk) => {
+        const nextSize = size + chunk.length;
+        if (nextSize > maxBytes) {
+          response.destroy(safeError('远程响应超过大小限制', 'response-too-large'));
+          return;
+        }
+        size = nextSize;
         try {
           options.onChunk?.({
             bytes: Buffer.from(chunk),
@@ -140,7 +146,6 @@ async function performSafeHttpRequest(rawUrl, options) {
           return;
         }
         firstChunk = false;
-        size += chunk.length;
         if (size > maxBytes) {
           response.destroy(safeError('远程响应超过大小限制', 'response-too-large'));
           return;
