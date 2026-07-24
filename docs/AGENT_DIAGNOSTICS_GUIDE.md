@@ -1,6 +1,6 @@
-# Agent Card JSON 技术预检平台使用指南
+# Agent Card 技术预检平台使用指南
 
-Agent Card JSON 技术预检平台是锐评局中的独立测试入口。参赛者上传或粘贴一张 A2A Agent Card，平台验证 Card 结构、接口声明、自然语言 A2A 调用和响应时限，并生成一次性的参评技术预检报告。
+Agent Card 技术预检平台是锐评局中的独立测试入口。参赛者可以上传或粘贴 A2A Agent Card JSON，也可以填写完整 Agent Card URL 或服务根地址。平台获取一张 Card 后验证结构、接口声明、自然语言 A2A 调用和响应时限，并生成一次性的参评技术预检报告。
 
 入口：
 
@@ -14,7 +14,7 @@ http://localhost:4173/agent-check
 
 技术预检平台只处理运行验证所需的信息：
 
-- 单个 Agent Card JSON；
+- 单个 Agent Card JSON、完整 Agent Card URL 或服务根地址；
 - Agent 服务鉴权方式和可选 Bearer Token；
 - 自然语言测试任务；
 - 单次响应上限；
@@ -30,7 +30,7 @@ http://localhost:4173/agent-check
 - 数据 Skills 和投研 Skills 清单；
 - 可选的开源代码仓库地址。
 
-上传的 Card 会用于结构校验和调用，但上传文件本身不能证明正式 Agent Card URL 在评审期间持续可访问。Card URL 可访问性、服务长期稳定性、材料真实性和输出可解释性仍需在正式报名与人工评审阶段核验。
+远程 URL 模式可以证明 Card 在本次预检时可获取，但不能证明它在整个评审期间持续可访问。Card URL 长期可访问性、服务稳定性、材料真实性和输出可解释性仍需在正式报名与人工评审阶段核验。
 
 ## 2. 支持的 A2A 范围
 
@@ -97,9 +97,15 @@ npm start
 
 生产环境必须通过 HTTPS 提供页面和 API，否则平台访问密钥与 Agent Bearer Token 可能在传输过程中泄露。
 
-## 4. 准备 Agent Card JSON
+## 4. 准备 Agent Card 来源
 
-文件要求：
+平台支持三种互斥的输入方式：
+
+1. 上传或粘贴 Agent Card JSON；
+2. 填写完整 Agent Card URL，例如 `https://agent.example.com/cards/public.json`；
+3. 填写服务根地址，例如 `https://agent.example.com`，平台自动读取同一 origin 下的 `/.well-known/agent-card.json`。
+
+JSON 文件要求：
 
 - 扩展名建议为 `.json`；
 - UTF-8 编码；
@@ -136,13 +142,26 @@ A2A 1.0 示例：
 }
 ```
 
-平台不会允许页面另填服务地址。实际目标完全来自 Card 选中的接口，避免上传内容与手工地址互相冲突。
+URL 获取仅用于得到 Agent Card。平台不会把 Card 来源地址当作 A2A 服务地址；实际调用目标仍完全来自 Card 选中的接口，避免发现地址与服务声明互相混淆。
+
+远程 Card 获取限制：
+
+- 仅支持不含账号密码的 HTTP(S) URL；
+- URL 最长 2048 字节；
+- Card 响应最大 1,000,000 字节；
+- 获取超时为 12 秒；
+- 不跟随重定向；
+- 生产环境拒绝 localhost、私网、链路本地和其他非公网地址；
+- Agent Bearer Token 不会用于获取 Card。
 
 ## 5. 页面操作步骤
 
 1. 打开 `/agent-check`。
 2. 输入管理员提供的平台访问密钥。
-3. 把 `.json` 文件拖到上传区、点击“选择文件”，或直接粘贴 Agent Card JSON。
+3. 选择一种 Card 来源：
+   - 把 `.json` 文件拖到上传区、点击“选择文件”，或直接粘贴 Agent Card JSON；
+   - 填写完整 Agent Card URL；
+   - 填写服务根地址，由平台自动发现 `/.well-known/agent-card.json`。
 4. 检查页面生成的摘要：
    - Agent 名称和简介；
    - 协议版本与 binding；
@@ -158,7 +177,7 @@ A2A 1.0 示例：
 9. 如需测试流式调用，打开流式开关并确认第二次真实执行。
 10. 点击“开始技术预检”。
 
-Card 摘要只提供即时反馈，服务端会重新执行全部类型、大小、协议和安全校验。
+JSON 模式会即时生成 Card 摘要；URL 模式先显示待解析地址，在开始预检后由服务端获取并校验。服务端始终重新执行全部类型、大小、协议和安全校验。
 
 ## 6. 两类密钥不要混用
 
@@ -178,8 +197,8 @@ Agent Bearer Token 用于 Card 选定的 A2A 接口。页面只填写 Token 值�
 
 选择 Bearer 鉴权后：
 
-1. 页面显示 Card 选中接口的目标 origin；
-2. 用户必须勾选“我确认把 Token 发往上方 origin”；
+1. JSON 模式直接显示 Card 选中接口的目标 origin；URL 模式在提交前提示目标将从远程 Card 声明中确定，并在结果中显示实际 origin；
+2. 用户必须勾选“我确认把 Token 发往上方 origin”；使用 URL 来源时，这表示确认信任该远程 Card 声明的服务 origin；
 3. API 字段 `confirmAuthorizationTarget` 必须为 `true`；
 4. Card 改变后确认会自动清除，必须重新检查目标。
 
@@ -222,7 +241,7 @@ Agent Token：
 
 | 阶段 ID | 含义 |
 | --- | --- |
-| `card-input` | 确认服务端收到一个大小合规的 Card 对象 |
+| `card-input` | 确认服务端收到大小合规的 Card 对象，或从 URL 成功获取 Card |
 | `card-validation` | 校验字段、版本、binding、`tenant`、Skills、能力和目标 URL |
 | `call` | 执行普通 A2A 调用并校验 Message 或 Task |
 | `stream` | 可选的第二次流式调用与 SSE 终态校验 |
@@ -260,7 +279,7 @@ Agent Token：
 
 ## 9. API 请求示例
 
-请求体总上限为 1.25 MiB，其中 `agentCard` 本身最大 1 MiB。
+请求体总上限为 1.25 MiB。JSON 模式的 `agentCard` 本身最大 1 MiB；URL 模式改为提交 `cardSource`。
 
 ```bash
 curl http://localhost:4173/api/agent-diagnostics \
@@ -293,6 +312,28 @@ curl http://localhost:4173/api/agent-diagnostics \
   }'
 ```
 
+完整 Agent Card URL 模式把 `agentCard` 替换为：
+
+```json
+{
+  "cardSource": {
+    "type": "card-url",
+    "url": "https://agent.example.com/.well-known/agent-card.json"
+  }
+}
+```
+
+服务根地址模式使用：
+
+```json
+{
+  "cardSource": {
+    "type": "service-url",
+    "url": "https://agent.example.com"
+  }
+}
+```
+
 Bearer 模式额外提交：
 
 ```json
@@ -303,7 +344,7 @@ Bearer 模式额外提交：
 }
 ```
 
-旧的 `url` 和 `sourceType` 顶层输入契约已停用。服务地址只能存在于 `agentCard` 中。
+`agentCard` 与 `cardSource` 必须二选一。旧的顶层 `url` 和 `sourceType` 输入契约仍已停用；A2A 服务地址只能来自最终获得的 `agentCard`。
 
 ## 10. HTTP 状态
 

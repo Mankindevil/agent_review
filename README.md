@@ -43,7 +43,7 @@ npm start
 
 打开 `http://localhost:4173`，选择任一“本地真实样本”，再点击“送进评测舱”即可体验演示评测。
 
-设置 `AGENT_DIAGNOSTICS_ACCESS_KEY` 后，可打开 `http://localhost:4173/agent-check` 使用 Agent Card JSON 技术预检平台。一次上传一张 Card，平台会执行真实 A2A 自然语言任务，并提供 1、5、10、20 分钟的单次响应上限；团队与作品材料仍在最终报名表提交。平台访问密钥与 Agent Bearer Token 用途不同，配置与安全说明见 [完整使用指南](./docs/AGENT_DIAGNOSTICS_GUIDE.md)。
+设置 `AGENT_DIAGNOSTICS_ACCESS_KEY` 后，可打开 `http://localhost:4173/agent-check` 使用 Agent Card 技术预检平台。一次测试一张 Card，支持上传或粘贴 JSON、填写完整 Agent Card URL，以及通过服务根地址自动发现 `/.well-known/agent-card.json`。平台会执行真实 A2A 自然语言任务，并提供 1、5、10、20 分钟的单次响应上限；团队与作品材料仍在最终报名表提交。平台访问密钥与 Agent Bearer Token 用途不同，配置与安全说明见 [完整使用指南](./docs/AGENT_DIAGNOSTICS_GUIDE.md)。
 
 开发模式：
 

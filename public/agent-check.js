@@ -2,8 +2,13 @@ const MAX_CARD_BYTES = 1024 * 1024;
 
 const form = document.querySelector('#diagnostics-form');
 const platformKey = document.querySelector('#platform-key');
+const cardSourceButtons = [...document.querySelectorAll('[data-card-source]')];
+const jsonSourcePanel = document.querySelector('#json-source-panel');
+const urlSourcePanel = document.querySelector('#url-source-panel');
 const cardFile = document.querySelector('#agent-card-file');
 const cardJson = document.querySelector('#agent-card-json');
+const cardUrl = document.querySelector('#agent-card-url');
+const cardUrlHelp = document.querySelector('#card-url-help');
 const dropZone = document.querySelector('#card-drop-zone');
 const cardSummary = document.querySelector('#card-summary');
 const authMethod = document.querySelector('#auth-method');
@@ -32,6 +37,7 @@ const checkElements = {
 
 let parsedAgentCard = null;
 let selectedTargetOrigin = '';
+let cardSourceMode = 'json';
 
 window.addEventListener('pageshow', clearSensitiveState);
 window.addEventListener('pagehide', clearSensitiveState);
@@ -42,8 +48,14 @@ cardFile.addEventListener('change', async () => {
 });
 
 cardJson.addEventListener('input', () => {
-  applyCardText(cardJson.value);
+  if (cardSourceMode === 'json') applyCardText(cardJson.value);
 });
+cardUrl.addEventListener('input', () => {
+  if (cardSourceMode !== 'json') applyCardUrl(cardUrl.value);
+});
+for (const button of cardSourceButtons) {
+  button.addEventListener('click', () => setCardSourceMode(button.dataset.cardSource));
+}
 
 for (const eventName of ['dragenter', 'dragover']) {
   dropZone.addEventListener(eventName, (event) => {
@@ -75,9 +87,20 @@ form.addEventListener('submit', async (event) => {
   event.preventDefault();
   formError.textContent = '';
 
-  if (!parsedAgentCard) {
+  if (cardSourceMode === 'json' && !parsedAgentCard) {
     showFormError('请先上传或粘贴一张合法的 Agent Card JSON。', cardJson);
     return;
+  }
+  let cardInput;
+  if (cardSourceMode === 'json') {
+    cardInput = { agentCard: parsedAgentCard };
+  } else {
+    const url = validCardUrl(cardUrl.value);
+    if (!url) {
+      showFormError('请填写合法的 HTTP(S) Agent Card 地址。', cardUrl);
+      return;
+    }
+    cardInput = { cardSource: { type: cardSourceMode, url } };
   }
   if (authMethod.value === 'bearer' && !agentToken.value) {
     showFormError('Bearer 鉴权必须填写 Agent Token。', agentToken);
@@ -105,7 +128,7 @@ form.addEventListener('submit', async (event) => {
         authorization: `Bearer ${platformKey.value}`
       },
       body: JSON.stringify({
-        agentCard: parsedAgentCard,
+        ...cardInput,
         authMethod: authMethod.value,
         agentAuthorization: authMethod.value === 'bearer' ? agentToken.value : '',
         confirmAuthorizationTarget:
@@ -196,6 +219,96 @@ function applyCardText(text, sourceName = '') {
   renderCardSummary(value, target, raw, sourceName);
 }
 
+function applyCardUrl(value) {
+  parsedAgentCard = null;
+  selectedTargetOrigin = '';
+  confirmAuthTarget.checked = false;
+  authTargetOrigin.textContent = '提交后从 Card 声明确定';
+
+  const url = String(value || '').trim();
+  if (!url) {
+    setCardEmpty(
+      cardSourceMode === 'service-url'
+        ? '等待服务根地址；平台会自动读取 /.well-known/agent-card.json。'
+        : '等待完整 Agent Card URL。'
+    );
+    return;
+  }
+  if (!validCardUrl(url)) {
+    setCardError('请输入不含账号密码的 HTTP(S) URL。');
+    return;
+  }
+
+  cardSummary.dataset.state = 'warning';
+  const heading = document.createElement('div');
+  heading.className = 'card-summary-head';
+  const mark = document.createElement('span');
+  mark.className = 'summary-mark';
+  mark.textContent = '↗';
+  const title = document.createElement('div');
+  const name = document.createElement('b');
+  name.textContent =
+    cardSourceMode === 'service-url' ? '服务根地址待发现' : '远程 Agent Card 待读取';
+  const description = document.createElement('p');
+  description.textContent =
+    '开始预检后由服务端安全获取 Card，Agent Token 不参与 Card 获取。';
+  title.append(name, description);
+  heading.append(mark, title);
+
+  const details = document.createElement('dl');
+  appendSummaryDetail(
+    details,
+    '来源',
+    cardSourceMode === 'service-url' ? '服务根地址' : '完整 Card URL'
+  );
+  appendSummaryDetail(details, '输入地址', url);
+  appendSummaryDetail(
+    details,
+    '解析方式',
+    cardSourceMode === 'service-url'
+      ? '自动追加 /.well-known/agent-card.json'
+      : '直接读取此地址'
+  );
+  appendSummaryDetail(details, 'Agent 目标', '从获取到的 Card 声明中读取');
+  cardSummary.replaceChildren(heading, details);
+}
+
+function setCardSourceMode(mode) {
+  if (!['json', 'card-url', 'service-url'].includes(mode)) return;
+  cardSourceMode = mode;
+  for (const button of cardSourceButtons) {
+    const selected = button.dataset.cardSource === mode;
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  }
+  const usesJson = mode === 'json';
+  jsonSourcePanel.hidden = !usesJson;
+  urlSourcePanel.hidden = usesJson;
+  cardJson.required = usesJson;
+  cardUrl.required = !usesJson;
+  cardUrl.placeholder = mode === 'service-url'
+    ? 'https://agent.example.com'
+    : 'https://agent.example.com/.well-known/agent-card.json';
+  cardUrlHelp.textContent = mode === 'service-url'
+    ? '填写服务根地址；平台会读取同一 origin 下的 /.well-known/agent-card.json。'
+    : '填写直接返回 Agent Card JSON 的完整 HTTP(S) URL。';
+  confirmAuthTarget.checked = false;
+  if (usesJson) applyCardText(cardJson.value);
+  else applyCardUrl(cardUrl.value);
+}
+
+function validCardUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw || new TextEncoder().encode(raw).byteLength > 2048) return '';
+  try {
+    const url = new URL(raw);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return '';
+    return url.toString();
+  } catch {
+    return '';
+  }
+}
+
 function renderCardSummary(agentCard, target, raw, sourceName) {
   cardSummary.dataset.state = target ? 'valid' : 'warning';
   const heading = document.createElement('div');
@@ -284,15 +397,15 @@ function selectCardInterface(agentCard) {
   return null;
 }
 
-function setCardEmpty() {
+function setCardEmpty(message =
+  '等待一张 Agent Card。服务地址将从 Card 声明中读取，不能另行覆盖。') {
   cardSummary.dataset.state = 'empty';
   const mark = document.createElement('span');
   mark.className = 'summary-mark';
   mark.textContent = '∅';
-  const message = document.createElement('p');
-  message.textContent =
-    '等待一张 Agent Card。服务地址将从 Card 声明中读取，不能另行覆盖。';
-  cardSummary.replaceChildren(mark, message);
+  const text = document.createElement('p');
+  text.textContent = message;
+  cardSummary.replaceChildren(mark, text);
 }
 
 function setCardError(message) {
@@ -346,6 +459,13 @@ function setRunning() {
 }
 
 function renderReport(report) {
+  const targetOrigin = report.checks?.find(
+    (check) => check.id === 'card-validation'
+  )?.details?.targetOrigin;
+  if (targetOrigin) {
+    selectedTargetOrigin = targetOrigin;
+    authTargetOrigin.textContent = targetOrigin;
+  }
   overallState.dataset.state = report.technicalReadinessOk ? 'passed' : 'failed';
   overallState.textContent = report.technicalReadinessOk
     ? `技术门槛通过 · ${report.durationMs} ms`
@@ -450,6 +570,9 @@ function readinessLabel(id) {
 
 function detailLabel(key) {
   return {
+    sourceType: 'Card 来源',
+    sourceUrl: '输入地址',
+    resolvedUrl: '解析地址',
     name: 'Agent 名称',
     sizeBytes: 'Card 大小',
     version: '协议版本',
@@ -472,6 +595,7 @@ function clearSensitiveState() {
   agentToken.value = '';
   cardFile.value = '';
   cardJson.value = '';
+  cardUrl.value = '';
   parsedAgentCard = null;
   selectedTargetOrigin = '';
   confirmAuthTarget.checked = false;
@@ -479,7 +603,7 @@ function clearSensitiveState() {
   authTargetOrigin.textContent = '等待有效 Card';
   overallState.dataset.state = 'idle';
   overallState.textContent = '等待输入';
-  setCardEmpty();
+  setCardSourceMode('json');
   syncAuthMode();
   syncStreamingMode();
   resetReadiness('完成实测后，这里会汇总 Card、A2A 调用、响应时限与参评声明。');

@@ -107,6 +107,49 @@ test('accepts one bounded Agent Card and rejects legacy, array, timeout, prompt,
   );
 });
 
+test('accepts exactly one complete Card URL or service root source', () => {
+  for (const [type, url] of [
+    ['card-url', 'https://agent.example/.well-known/agent-card.json'],
+    ['service-url', 'https://agent.example']
+  ]) {
+    const normalized = validateDiagnosticsInput({
+      ...baseInput,
+      agentCard: undefined,
+      cardSource: { type, url }
+    });
+    assert.deepEqual(normalized.cardSource, { type, url });
+    assert.equal(normalized.agentCard, null);
+  }
+
+  assert.throws(
+    () => validateDiagnosticsInput({
+      ...baseInput,
+      cardSource: { type: 'card-url', url: 'https://agent.example/card.json' }
+    }),
+    /只能选择一种|不能同时/
+  );
+  assert.throws(
+    () => validateDiagnosticsInput({ ...baseInput, agentCard: undefined }),
+    /Agent Card|来源/
+  );
+  assert.throws(
+    () => validateDiagnosticsInput({
+      ...baseInput,
+      agentCard: undefined,
+      cardSource: { type: 'other', url: 'https://agent.example' }
+    }),
+    /card-url|service-url/
+  );
+  assert.throws(
+    () => validateDiagnosticsInput({
+      ...baseInput,
+      agentCard: undefined,
+      cardSource: { type: 'card-url', url: '' }
+    }),
+    /URL/
+  );
+});
+
 test('requires consistent Agent authentication and explicit target confirmation', () => {
   assert.throws(
     () => validateDiagnosticsInput({ ...baseInput, authMethod: 'none', agentAuthorization: 'secret' }),
@@ -188,6 +231,90 @@ test('uses the uploaded Card directly, propagates tenant, and reports technical 
     ]
   );
   assert.equal(report.technicalReadiness.checks[2].details.timeoutMs, 300_000);
+});
+
+test('resolves both URL source modes before running the existing diagnostics flow', async () => {
+  for (const [type, url, resolvedUrl] of [
+    [
+      'card-url',
+      'https://agent.example/custom-card.json',
+      'https://agent.example/custom-card.json'
+    ],
+    [
+      'service-url',
+      'https://agent.example',
+      'https://agent.example/.well-known/agent-card.json'
+    ]
+  ]) {
+    const resolutions = [];
+    const calls = [];
+    const report = await runAgentDiagnostics({
+      ...baseInput,
+      agentCard: undefined,
+      cardSource: { type, url }
+    }, {
+      resolveCard: async (...args) => {
+        resolutions.push(args);
+        return {
+          card,
+          resolvedUrl,
+          validation: { valid: true, errors: [], version: '1.0' }
+        };
+      },
+      request: async (target, options) => {
+        calls.push(target);
+        const body = JSON.parse(options.body);
+        return jsonResponse({
+          jsonrpc: '2.0',
+          id: body.id,
+          result: {
+            message: {
+              messageId: 'reply',
+              role: 'ROLE_AGENT',
+              parts: [{ text: 'healthy' }]
+            }
+          }
+        });
+      }
+    });
+
+    assert.deepEqual(resolutions, [[type, url, 12_000]]);
+    assert.deepEqual(calls, ['https://agent.example/a2a']);
+    assert.equal(report.ok, true);
+    assert.equal(report.checks[0].details.sourceType, type);
+    assert.equal(report.checks[0].details.sourceUrl, url);
+    assert.equal(report.checks[0].details.resolvedUrl, resolvedUrl);
+  }
+});
+
+test('reports URL resolution failures and blocks Agent calls', async () => {
+  let calls = 0;
+  const report = await runAgentDiagnostics({
+    ...baseInput,
+    agentCard: undefined,
+    cardSource: {
+      type: 'service-url',
+      url: 'https://missing.example'
+    }
+  }, {
+    resolveCard: async () => {
+      throw Object.assign(new Error('lookup failed'), { code: 'dns' });
+    },
+    request: async () => {
+      calls += 1;
+      throw new Error('must not run');
+    }
+  });
+
+  assert.equal(calls, 0);
+  assert.equal(report.ok, false);
+  assert.deepEqual(report.checks.map(({ id, status }) => [id, status]), [
+    ['card-input', 'failed'],
+    ['card-validation', 'blocked'],
+    ['call', 'blocked'],
+    ['stream', 'blocked']
+  ]);
+  assert.match(report.checks[0].suggestion, /DNS|域名/);
 });
 
 test('blocks malformed and unsafe Cards before any network request', async () => {

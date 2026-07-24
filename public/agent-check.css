@@ -185,6 +185,7 @@ label:not(.check-row, .file-button) {
 }
 fieldset > label:first-of-type { margin-top: 0; }
 input[type="password"],
+input[type="url"],
 select,
 textarea {
   width: 100%;
@@ -217,6 +218,34 @@ a:focus-visible,
   outline-offset: 2px;
 }
 fieldset > small { display: block; margin-top: 8px; color: var(--muted); }
+
+.card-source-switch {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 16px;
+  border: 1px solid var(--ink);
+}
+.card-source-switch button {
+  min-height: 48px;
+  padding: 9px 10px;
+  border: 0;
+  border-right: 1px solid var(--ink);
+  color: var(--muted);
+  background: white;
+  font: 800 11px/1.25 var(--mono);
+  cursor: pointer;
+}
+.card-source-switch button:last-child { border-right: 0; }
+.card-source-switch button.selected {
+  color: white;
+  background: var(--blue);
+}
+.card-source-panel > label:first-child { margin-top: 0; }
+.card-source-panel > small {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+}
 
 .card-drop-zone {
   position: relative;
@@ -604,6 +633,12 @@ fieldset > small { display: block; margin-top: 8px; color: var(--muted); }
   .hero h1 { font-size: 54px; }
   .scope-strip { align-items: flex-start; }
   .split-row { display: grid; grid-template-columns: 1fr; }
+  .card-source-switch { grid-template-columns: 1fr; }
+  .card-source-switch button {
+    border-right: 0;
+    border-bottom: 1px solid var(--ink);
+  }
+  .card-source-switch button:last-child { border-bottom: 0; }
   .split-row > div { min-width: 0; }
   .card-drop-zone { grid-template-columns: auto 1fr; }
   .file-button { grid-column: 1 / -1; text-align: center; }
