@@ -79,6 +79,66 @@ class MarketWorkerTests(unittest.TestCase):
         self.assertAlmostEqual(high["weightCoverage"], .95)
         self.assertNotIn("lhb_activity", high["componentsUsed"])
 
+    def test_hot_topics_excludes_nonfinite_constituent_count(self):
+        groups = [
+            {"id": "missing", "coverage": 1},
+            {"id": "text", "constituent_count": "five", "coverage": 1},
+            {"id": "nan", "constituent_count": math.nan, "coverage": 1},
+        ]
+        result = worker.compute_hot_topics(groups)
+        self.assertEqual(result["ranked"], [])
+        self.assertEqual(
+            result["excluded"],
+            [{"id": "missing", "reason": "MIN_CONSTITUENTS"},
+             {"id": "text", "reason": "MIN_CONSTITUENTS"},
+             {"id": "nan", "reason": "MIN_CONSTITUENTS"}],
+        )
+
+    def test_hot_topics_excludes_nonfinite_coverage(self):
+        groups = [
+            {"id": "missing", "constituent_count": 5},
+            {"id": "text", "constituent_count": 5, "coverage": "complete"},
+            {"id": "infinite", "constituent_count": 5, "coverage": math.inf},
+        ]
+        result = worker.compute_hot_topics(groups)
+        self.assertEqual(result["ranked"], [])
+        self.assertEqual(
+            result["excluded"],
+            [{"id": "missing", "reason": "MIN_COVERAGE"},
+             {"id": "text", "reason": "MIN_COVERAGE"},
+             {"id": "infinite", "reason": "MIN_COVERAGE"}],
+        )
+
+    def test_potential_watchlist_ignores_unavailable_unlock_percentages(self):
+        base = {"trend": 80, "theme": 80, "quality": 80, "valuation": 80,
+                "capital": 80, "liquidity_stability": 80}
+        rows = [
+            {**base, "symbol": "missing", "unlock_float_pct_30d": None},
+            {**base, "symbol": "text", "unlock_float_pct_30d": "unknown"},
+            {**base, "symbol": "nan", "unlock_float_pct_30d": math.nan},
+            {**base, "symbol": "large", "unlock_float_pct_30d": 10.01},
+        ]
+        ranked = {row["symbol"]: row for row in worker.compute_potential_watchlist(rows)}
+        self.assertEqual(ranked["missing"]["vetoes"], [])
+        self.assertEqual(ranked["text"]["vetoes"], [])
+        self.assertEqual(ranked["nan"]["vetoes"], [])
+        self.assertEqual(ranked["large"]["vetoes"], ["LARGE_UNLOCK_30D"])
+
+    def test_potential_watchlist_defaults_invalid_risk_penalty_to_zero(self):
+        base = {"trend": 80, "theme": 80, "quality": 80, "valuation": 80,
+                "capital": 80, "liquidity_stability": 80}
+        rows = [
+            {**base, "symbol": "missing", "risk_penalty": None},
+            {**base, "symbol": "text", "risk_penalty": "unknown"},
+            {**base, "symbol": "infinite", "risk_penalty": math.inf},
+            {**base, "symbol": "finite", "risk_penalty": 5},
+        ]
+        ranked = {row["symbol"]: row for row in worker.compute_potential_watchlist(rows)}
+        self.assertAlmostEqual(ranked["missing"]["score"], 80)
+        self.assertAlmostEqual(ranked["text"]["score"], 80)
+        self.assertAlmostEqual(ranked["infinite"]["score"], 80)
+        self.assertAlmostEqual(ranked["finite"]["score"], 75)
+
     def test_potential_watchlist_applies_audit_and_unlock_vetoes(self):
         rows = [
             {"symbol": "000001.SZ", "trend": 80, "theme": 80, "quality": 80, "valuation": 80,

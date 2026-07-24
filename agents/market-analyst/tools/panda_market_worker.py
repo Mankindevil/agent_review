@@ -59,9 +59,11 @@ def _percentile_components(rows, keys):
 def compute_hot_topics(groups, lhb_available=True):
     eligible, excluded = [], []
     for group in groups:
-        if group["constituent_count"] < 5:
+        constituent_count = group.get("constituent_count")
+        coverage = group.get("coverage")
+        if not _is_finite(constituent_count) or float(constituent_count) < 5:
             excluded.append({"id": group["id"], "reason": "MIN_CONSTITUENTS"})
-        elif group["coverage"] < .80:
+        elif not _is_finite(coverage) or float(coverage) < .80:
             excluded.append({"id": group["id"], "reason": "MIN_COVERAGE"})
         else:
             eligible.append(group)
@@ -96,11 +98,14 @@ def compute_potential_watchlist(rows):
             vetoes.append("ST_OR_DELISTING_RISK")
         if row.get("nonstandard_audit"):
             vetoes.append("NONSTANDARD_AUDIT")
-        if (row.get("unlock_float_pct_30d") or 0) > 10:
+        unlock = row.get("unlock_float_pct_30d")
+        if _is_finite(unlock) and float(unlock) > 10:
             vetoes.append("LARGE_UNLOCK_30D")
         score, coverage, used = effective_weights(row, POTENTIAL_WEIGHTS, 4)
         status = "VETOED" if vetoes else ("RANKED" if score is not None and coverage >= .70 else "EVIDENCE_INSUFFICIENT")
-        final = None if score is None else max(0, score - float(row.get("risk_penalty") or 0))
+        risk_penalty = row.get("risk_penalty")
+        penalty = float(risk_penalty) if _is_finite(risk_penalty) else 0
+        final = None if score is None else max(0, score - penalty)
         output.append({**row, "baseScore": score, "score": final, "weightCoverage": coverage,
                        "componentsUsed": used, "vetoes": vetoes, "status": status})
     output.sort(key=lambda item: (item["status"] != "RANKED", -(item["score"] or -1), _identity(item)))
