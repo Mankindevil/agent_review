@@ -11,10 +11,17 @@ from zoneinfo import ZoneInfo
 
 
 SDK_VERSION = "0.0.12"
-DAILY_BATCH_SIZE = 200
+REQUIRED_TRADING_SESSIONS = 60
+PROVIDER_ROW_CAP = 500
+SAFE_DAILY_ROW_BUDGET = 480
+CORE_REPORT_DATE_COVERAGE = .95
+OPTIONAL_CANDIDATE_COVERAGE = .80
 MAX_PRELIMINARY_CANDIDATES = 300
 MAX_FULL_ENRICHMENT = 100
 US_CONTEXT_SYMBOLS = ["SPY", "QQQ"]
+PUBLIC_REQUEST_FIELDS = {
+    "operation", "date", "topN", "minLiquidityCny", "cacheDays", "runId",
+}
 HOT_WEIGHTS = {"ret1": .25, "ret5": .20, "breadth5": .20, "turnover_heat": .15,
                "acceleration": .15, "lhb_activity": .05}
 SELL_WEIGHTS = {"downside_volume": .25, "lhb_net_sell": .25, "northbound_reduction": .20,
@@ -41,7 +48,25 @@ def _sanitize_error(error):
         secret = os.environ.get(key)
         if secret:
             message = message.replace(secret, "[REDACTED]")
-    message = re.sub(r"(?i)(password|token|jwt)\s*[:=]\s*\S+", r"\1=[REDACTED]", message)
+    message = re.sub(
+        r"""(?ix)
+        (["']?(?:authorization|proxy-authorization|auth(?:orization)?_header)["']?
+        \s*[:=]\s*)
+        [^;,\r\n]+
+        """,
+        r"\1[REDACTED]",
+        message,
+    )
+    message = re.sub(
+        r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+",
+        r"\1 [REDACTED]",
+        message,
+    )
+    message = re.sub(
+        r"(?i)(password|token|jwt|access[_-]?key)\s*[:=]\s*[^\s;,]+",
+        r"\1=[REDACTED]",
+        message,
+    )
     return f"{type(error).__name__}: {message}"[:500]
 
 
@@ -139,14 +164,15 @@ class PandaCollector:
             import pandas
             frame = pandas.DataFrame(rows)
             frame.to_parquet(parquet_temp, index=False)
+            data_dates = [
+                _iso_date(row.get("date") or row.get("nature_date") or
+                          row.get("info_date"))
+                for row in rows
+            ]
             metadata = {
                 "schemaVersion": "1.0",
                 "createdAt": datetime.now(timezone.utc).isoformat(),
-                "dataAsOf": max(
-                    (_iso_date(row.get("date") or row.get("nature_date") or
-                               row.get("info_date")) for row in rows),
-                    default=None,
-                ),
+                "dataAsOf": max((value for value in data_dates if value), default=None),
                 "fields": sorted(frame.columns.tolist()),
                 "rowCount": len(rows),
                 "contentHash": _file_hash(parquet_temp),
@@ -166,14 +192,17 @@ class PandaCollector:
                     pass
             return _sanitize_error(error)
 
-    def call(self, method, **params):
+    def call(self, method, *, expected_max_rows=None, required_date=None,
+             required_symbols=None, minimum_symbol_coverage=None, **params):
         started = datetime.now(timezone.utc)
         rows = []
         status = "error"
         error = None
+        truncated = False
         cache_status = "disabled"
         cache_error = None
         cache_key = self._cache_key(method, params)
+        provider_fetched = False
         self._sequence += 1
         try:
             operation = getattr(self.module, method, None)
@@ -184,13 +213,44 @@ class PandaCollector:
                 rows = cached
             else:
                 rows = _records(operation(**params))
-                if self.cache_dir and self.cache_days > 0 and self.report_date:
-                    write_error = self._write_cache(cache_key, rows)
-                    if write_error:
-                        cache_status = "write-error"
-                        cache_error = write_error
-                    else:
-                        cache_status = "miss"
+                provider_fetched = True
+            if expected_max_rows is not None:
+                cap_shape = (
+                    len(rows) == PROVIDER_ROW_CAP and
+                    int(expected_max_rows) > PROVIDER_ROW_CAP
+                )
+                if len(rows) > int(expected_max_rows) or cap_shape:
+                    truncated = True
+                    raise ValueError(
+                        f"{method} 响应违反声明上限，疑似截断："
+                        f"{len(rows)}/{expected_max_rows}"
+                    )
+            if required_symbols is not None and required_date is not None:
+                expected_symbols = {str(value) for value in required_symbols}
+                present_symbols = {
+                    str(row.get("symbol"))
+                    for row in rows
+                    if _date_text(row.get("date")) == _date_text(required_date)
+                }
+                coverage = (
+                    len(expected_symbols & present_symbols) / len(expected_symbols)
+                    if expected_symbols else 1
+                )
+                threshold = float(minimum_symbol_coverage or 1)
+                if coverage < threshold:
+                    truncated = True
+                    raise ValueError(
+                        f"{method} 报告日覆盖不足 (symbol coverage)："
+                        f"{coverage:.1%} < {threshold:.1%}"
+                    )
+            if (provider_fetched and self.cache_dir and self.cache_days > 0 and
+                    self.report_date):
+                write_error = self._write_cache(cache_key, rows)
+                if write_error:
+                    cache_status = "write-error"
+                    cache_error = write_error
+                else:
+                    cache_status = "miss"
             status = "ok"
             return rows
         except Exception as cause:
@@ -222,7 +282,7 @@ class PandaCollector:
                 "cacheStatus": cache_status,
                 "cacheKey": cache_key if cache_status != "disabled" else None,
                 "cacheError": cache_error,
-                "truncated": False,
+                "truncated": truncated,
             }
             self._emit(record)
 
@@ -334,16 +394,21 @@ def _call_optional(collector, missing_data, section, method, **params):
     try:
         return collector.call(method, **params)
     except Exception as error:
-        missing = {
-            "method": method,
-            "section": section,
-            "status": "UNAVAILABLE",
-            "error": _sanitize_error(error),
-        }
-        if method == "get_lhb_list":
-            missing["weightRemoved"] = HOT_WEIGHTS["lhb_activity"]
-        missing_data.append(missing)
+        _record_missing(
+            missing_data, section, method, "UNAVAILABLE",
+            error=_sanitize_error(error),
+        )
         return None
+
+
+def _record_missing(missing_data, section, method, status, **details):
+    if any(item.get("section") == section and item.get("method") == method
+           for item in missing_data):
+        return
+    missing = {"method": method, "section": section, "status": status, **details}
+    if method == "get_lhb_list":
+        missing["weightRemoved"] = HOT_WEIGHTS["lhb_activity"]
+    missing_data.append(missing)
 
 
 def _batches(values, size):
@@ -397,6 +462,10 @@ def _daily_metrics(rows):
             "volatility": max(closes[-20:]) / min(closes[-20:]) - 1
             if len(closes) >= 2 and min(closes[-20:]) else None,
             "rowCount": len(ordered),
+            "isHeadlineEligible": (
+                int(latest.get("trade_status", 1)) == 0 and
+                not str(latest.get("name") or "").upper().startswith(("*ST", "ST"))
+            ),
         }
     return output
 
@@ -407,7 +476,7 @@ def _active_industry_memberships(rows, report_date):
     for row in rows or []:
         in_date = _date_text(row.get("in_date"))
         out_date = _date_text(row.get("out_date"))
-        if in_date and in_date > cutoff:
+        if not in_date or in_date > cutoff:
             continue
         if out_date and out_date <= cutoff:
             continue
@@ -419,9 +488,11 @@ def _point_in_time(rows, report_date, fields=("date", "info_date", "publish_date
     cutoff = _date_text(report_date)
     output = []
     for row in rows or []:
-        availability = next((_date_text(row.get(field)) for field in fields
-                             if _date_text(row.get(field))), "")
-        if availability and availability <= cutoff:
+        availability_dates = [
+            _date_text(row.get(field)) for field in fields
+            if _date_text(row.get(field))
+        ]
+        if availability_dates and all(value <= cutoff for value in availability_dates):
             output.append(row)
     return output
 
@@ -520,9 +591,11 @@ def build_evidence_pack(request, collector, now):
     })
     if not latest or report_compact > latest or report_compact not in trade_dates:
         raise ValueError("报告日期不是已完成交易日")
-    if len(trade_dates) < 20:
-        raise ValueError("交易日历覆盖不足")
-    window_dates = trade_dates[-60:]
+    if len(trade_dates) < REQUIRED_TRADING_SESSIONS:
+        raise ValueError(
+            f"交易日历覆盖不足：需要 {REQUIRED_TRADING_SESSIONS} 个已完成交易日"
+        )
+    window_dates = trade_dates[-REQUIRED_TRADING_SESSIONS:]
 
     universe_rows = collector.call("get_trade_list", date=report_compact, exchange="SH")
     universe = sorted({str(row.get("symbol")) for row in universe_rows if row.get("symbol")})
@@ -534,28 +607,36 @@ def build_evidence_pack(request, collector, now):
         "symbol", "date", "name", "open", "close", "high", "low", "volume", "amount",
         "pre_close", "limit_up", "limit_down", "trade_status",
     ]
-    for symbol_batch in _batches(universe, DAILY_BATCH_SIZE):
+    daily_batch_size = max(1, SAFE_DAILY_ROW_BUDGET // len(window_dates))
+    for symbol_batch in _batches(universe, daily_batch_size):
         batch_rows = collector.call(
             "get_stock_daily",
+            expected_max_rows=len(symbol_batch) * len(window_dates),
+            required_date=report_compact,
+            required_symbols=symbol_batch,
+            minimum_symbol_coverage=CORE_REPORT_DATE_COVERAGE,
             start_date=window_dates[0],
             end_date=window_dates[-1],
             symbol=symbol_batch,
             fields=daily_fields,
             st=True,
         )
-        expected_upper = len(symbol_batch) * len(window_dates)
-        if len(batch_rows) == 500 and expected_upper > 500:
-            collector.records[-1]["truncated"] = True
-            raise ValueError("A股日线数据疑似被截断")
         daily_rows.extend(batch_rows)
     daily_rows = [
         row for row in daily_rows
         if str(row.get("symbol")) in universe and _date_text(row.get("date")) <= report_compact
     ]
-    covered_symbols = {str(row.get("symbol")) for row in daily_rows}
+    covered_symbols = {
+        str(row.get("symbol"))
+        for row in daily_rows
+        if _date_text(row.get("date")) == report_compact
+    }
     daily_coverage = len(covered_symbols) / len(universe)
-    if daily_coverage < .95:
-        raise ValueError(f"A股日线覆盖不足或截断：{daily_coverage:.1%}")
+    if daily_coverage < CORE_REPORT_DATE_COVERAGE:
+        raise ValueError(
+            f"A股报告日日线覆盖不足：{daily_coverage:.1%} < "
+            f"{CORE_REPORT_DATE_COVERAGE:.1%}"
+        )
 
     daily = _daily_metrics(daily_rows)
     min_liquidity = float(request.get("minLiquidityCny", 20_000_000))
@@ -573,6 +654,12 @@ def build_evidence_pack(request, collector, now):
         level="L1",
         fields=["stock_symbol", "l1_code", "l1_name", "in_date", "out_date"],
     )
+    active_industries = _active_industry_memberships(industries, report_compact)
+    if not active_industries:
+        _record_missing(
+            missing_data, "hotIndustries", "get_industry_constituents",
+            "POINT_IN_TIME_INSUFFICIENT",
+        )
     concepts = _call_optional(
         collector, missing_data, "hotConcepts", "get_concept_list",
         end_date=report_compact,
@@ -581,15 +668,27 @@ def build_evidence_pack(request, collector, now):
     if concepts is not None:
         concept_names = sorted({
             str(row.get("name")) for row in concepts
-            if row.get("name") and _date_text(row.get("date")) <= report_compact
+            if row.get("name") and _date_text(row.get("date")) and
+            _date_text(row.get("date")) <= report_compact
         })
-        concept_memberships = _call_optional(
-            collector, missing_data, "hotConcepts", "get_concept_constituents",
-            concept=concept_names,
-            date=report_compact,
-            fields=["concept", "concept_stock", "date"],
-        )
-        concept_memberships = _point_in_time(concept_memberships, report_compact)
+        if not concept_names:
+            _record_missing(
+                missing_data, "hotConcepts", "get_concept_list",
+                "POINT_IN_TIME_INSUFFICIENT",
+            )
+        else:
+            concept_memberships = _call_optional(
+                collector, missing_data, "hotConcepts", "get_concept_constituents",
+                concept=concept_names,
+                date=report_compact,
+                fields=["concept", "concept_stock", "date"],
+            )
+            concept_memberships = _point_in_time(concept_memberships, report_compact)
+            if not concept_memberships:
+                _record_missing(
+                    missing_data, "hotConcepts", "get_concept_constituents",
+                    "POINT_IN_TIME_INSUFFICIENT",
+                )
 
     lhb = []
     if candidate_symbols:
@@ -598,9 +697,19 @@ def build_evidence_pack(request, collector, now):
             symbol=candidate_symbols,
             start_date=window_dates[-20],
             end_date=report_compact,
-            fields=["symbol", "date", "type", "amount", "volume", "change_rate"],
+            fields=[
+                "symbol", "date", "start_date", "end_date", "type",
+                "amount", "volume", "change_rate",
+            ],
         )
-    lhb_available = lhb is not None
+        lhb = _point_in_time(
+            lhb, report_compact, fields=("date", "start_date", "end_date")
+        )
+        if not lhb:
+            _record_missing(
+                missing_data, "lhb", "get_lhb_list", "POINT_IN_TIME_INSUFFICIENT"
+            )
+    lhb_available = bool(lhb)
     lhb_symbols = {str(row.get("symbol")) for row in (lhb or []) if row.get("symbol")}
 
     financial = []
@@ -610,22 +719,63 @@ def build_evidence_pack(request, collector, now):
             symbol=candidate_symbols,
             date=report_compact,
             is_latest=True,
-            fields=["symbol", "date", "quarter", "roe", "net_profit_yoy"],
+            fields=[
+                "symbol", "date", "info_date", "publish_date", "quarter",
+                "roe", "net_profit_yoy",
+            ],
         )
     financial = _point_in_time(financial, report_compact)
+    if candidate_symbols and not financial:
+        _record_missing(
+            missing_data, "fundamentals", "get_fina_reports",
+            "POINT_IN_TIME_INSUFFICIENT",
+        )
+    financial_symbols = {
+        str(row.get("symbol")) for row in (financial or []) if row.get("symbol")
+    }
+    financial_coverage = (
+        len(financial_symbols & set(candidate_symbols)) / len(candidate_symbols)
+        if candidate_symbols else 1
+    )
+    if candidate_symbols and financial_coverage < OPTIONAL_CANDIDATE_COVERAGE:
+        _record_missing(
+            missing_data, "fundamentals", "get_fina_reports",
+            "COVERAGE_INSUFFICIENT", coverage=financial_coverage,
+        )
     financial_by_symbol = defaultdict(list)
     for row in financial or []:
         financial_by_symbol[str(row.get("symbol"))].append(row)
 
+    headline_ineligible = {
+        symbol for symbol, item in daily.items()
+        if not item.get("isHeadlineEligible")
+    }
+    headline_daily = {
+        symbol: item for symbol, item in daily.items()
+        if item.get("isHeadlineEligible")
+    }
     industry_groups = _group_metrics(
-        _active_industry_memberships(industries, report_compact),
-        daily, "l1_code", "l1_name", "stock_symbol", lhb_symbols,
+        [row for row in active_industries
+         if str(row.get("stock_symbol")) not in headline_ineligible],
+        headline_daily, "l1_code", "l1_name", "stock_symbol", lhb_symbols,
     )
     concept_groups = _group_metrics(
-        concept_memberships, daily, "concept", "concept", "concept_stock", lhb_symbols,
+        [row for row in (concept_memberships or [])
+         if str(row.get("concept_stock")) not in headline_ineligible],
+        headline_daily, "concept", "concept", "concept_stock", lhb_symbols,
     )
     hot_industries = compute_hot_topics(industry_groups, lhb_available=lhb_available)
     hot_concepts = compute_hot_topics(concept_groups, lhb_available=lhb_available)
+    if active_industries and not hot_industries["ranked"]:
+        _record_missing(
+            missing_data, "hotIndustries", "get_industry_constituents",
+            "COVERAGE_INSUFFICIENT",
+        )
+    if concept_memberships and not hot_concepts["ranked"]:
+        _record_missing(
+            missing_data, "hotConcepts", "get_concept_constituents",
+            "COVERAGE_INSUFFICIENT",
+        )
 
     candidate_rows = []
     for item in enriched:
@@ -684,9 +834,14 @@ def build_evidence_pack(request, collector, now):
     )
     us_date = max(
         (_date_text(row.get("nature_date")) for row in (us_calendar or [])
-         if int(row.get("is_trade", 0)) == 1),
+         if int(row.get("is_trade", 0)) == 1 and
+         _date_text(row.get("nature_date")) <= us_cutoff.strftime("%Y%m%d")),
         default="",
     )
+    if not us_date:
+        _record_missing(
+            missing_data, "us", "get_trade_cal", "POINT_IN_TIME_INSUFFICIENT"
+        )
     us_rows = None
     if us_date:
         us_rows = _call_optional(
@@ -696,6 +851,20 @@ def build_evidence_pack(request, collector, now):
             symbol=US_CONTEXT_SYMBOLS,
             fields=["symbol", "date", "name", "close", "pre_close"],
         )
+        if not us_rows:
+            _record_missing(
+                missing_data, "us", "get_us_daily", "POINT_IN_TIME_INSUFFICIENT"
+            )
+        else:
+            us_symbols = {
+                str(row.get("symbol")) for row in us_rows if row.get("symbol")
+            }
+            us_coverage = len(us_symbols & set(US_CONTEXT_SYMBOLS)) / len(US_CONTEXT_SYMBOLS)
+            if us_coverage < 1:
+                _record_missing(
+                    missing_data, "us", "get_us_daily",
+                    "COVERAGE_INSUFFICIENT", coverage=us_coverage,
+                )
 
     top_n = max(1, min(50, int(request.get("topN", 10))))
     for collection in (hot_industries["ranked"], hot_concepts["ranked"],
@@ -793,8 +962,17 @@ def emit_trace(value):
     )
 
 
+def _validate_public_request(value):
+    if not isinstance(value, dict):
+        raise ValueError("worker 请求必须是 JSON 对象")
+    unknown = sorted(set(value) - PUBLIC_REQUEST_FIELDS)
+    if unknown:
+        raise ValueError(f"worker 请求包含不允许的字段：{', '.join(unknown)}")
+    return dict(value)
+
+
 def main():
-    request = json.loads(sys.stdin.read() or "{}")
+    request = _validate_public_request(json.loads(sys.stdin.read() or "{}"))
     import panda_data
     panda_data.init_token(
         username=os.environ["PANDA_DATA_USERNAME"],
@@ -807,7 +985,7 @@ def main():
     collector = PandaCollector(
         panda_data,
         emit_trace,
-        request.get("cacheDir"),
+        os.environ.get("MARKET_REPORT_CACHE_DIR", "").strip() or None,
         int(request.get("cacheDays", 30)),
     )
     pack = build_evidence_pack(
@@ -824,9 +1002,14 @@ def main():
     ))
 
 
-if __name__ == "__main__":
+def run():
     try:
         main()
+        return 0
     except Exception as error:
         emit_trace({"type": "worker-error", "error": _sanitize_error(error)})
-        raise SystemExit(1)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())

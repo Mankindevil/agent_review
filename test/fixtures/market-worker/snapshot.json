@@ -4,7 +4,6 @@
     "date": "2026-07-23",
     "topN": 10,
     "minLiquidityCny": 20000000,
-    "cacheDir": null,
     "cacheDays": 30
   },
   "expected": {

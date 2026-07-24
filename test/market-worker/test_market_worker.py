@@ -161,6 +161,44 @@ class MarketWorkerTests(unittest.TestCase):
                 now="2026-07-23T02:30:00Z",
             )
 
+    def test_calendar_with_fewer_than_sixty_completed_sessions_fails(self):
+        class ShortCalendarPanda(FakePanda):
+            def get_trade_cal(self, *args, **kwargs):
+                rows = super().get_trade_cal(*args, **kwargs).to_dict()
+                if kwargs.get("exchange", "SH") == "SH":
+                    rows = rows[-30:]
+                return FakeFrame(rows)
+
+        with self.assertRaisesRegex(ValueError, "60|覆盖不足"):
+            worker.build_evidence_pack(
+                {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+                 "minLiquidityCny": 20_000_000},
+                worker.PandaCollector(ShortCalendarPanda(), lambda _: None, None, 0),
+                now="2026-07-24T10:30:00Z",
+            )
+
+    def test_stale_history_does_not_satisfy_report_date_core_coverage(self):
+        class StaleLatestPanda(FakePanda):
+            def get_stock_daily(self, *args, **kwargs):
+                rows = super().get_stock_daily(*args, **kwargs).to_dict()
+                stale_symbol = self.symbols[-1]
+                end_date = kwargs["end_date"]
+                return FakeFrame([
+                    row for row in rows
+                    if not (row["symbol"] == stale_symbol and row["date"] == end_date)
+                ])
+
+        trace = []
+        with self.assertRaisesRegex(ValueError, "报告日|覆盖不足|截断"):
+            worker.build_evidence_pack(
+                {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+                 "minLiquidityCny": 20_000_000},
+                worker.PandaCollector(StaleLatestPanda(), trace.append, None, 0),
+                now="2026-07-24T10:30:00Z",
+            )
+        daily_call = next(item for item in trace if item["method"] == "get_stock_daily")
+        self.assertTrue(daily_call["truncated"])
+
     def test_empty_candidate_set_does_not_expand_optional_calls_to_all_stocks(self):
         class NoUnboundedEnrichmentPanda(FakePanda):
             def get_lhb_list(self, **params):
@@ -208,6 +246,53 @@ class MarketWorkerTests(unittest.TestCase):
             ["人工智能"],
         )
 
+    def test_concept_definition_without_date_is_excluded(self):
+        class UndatedConceptPanda(FakePanda):
+            def __init__(self):
+                self.constituent_calls = 0
+
+            def get_concept_list(self, concept=None, start_date=None, end_date=None):
+                return FakeFrame([{"name": "无日期概念", "date": None}])
+
+            def get_concept_constituents(self, **params):
+                self.constituent_calls += 1
+                return super().get_concept_constituents(**params)
+
+        provider = UndatedConceptPanda()
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(provider, lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(provider.constituent_calls, 0)
+        self.assertTrue(any(item["method"] == "get_concept_list"
+                            for item in pack["missingData"]))
+
+    def test_empty_concept_set_never_calls_constituent_endpoint(self):
+        class EmptyConceptPanda(FakePanda):
+            def __init__(self):
+                self.constituent_calls = 0
+
+            def get_concept_list(self, concept=None, start_date=None, end_date=None):
+                return FakeFrame([])
+
+            def get_concept_constituents(self, **params):
+                self.constituent_calls += 1
+                raise AssertionError("concept=[] must not reach provider")
+
+        provider = EmptyConceptPanda()
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(provider, lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(provider.constituent_calls, 0)
+        concept_missing = [item for item in pack["missingData"]
+                           if item["section"] == "hotConcepts"]
+        self.assertEqual([item["method"] for item in concept_missing], ["get_concept_list"])
+
     def test_financial_publication_after_report_date_is_excluded(self):
         class LateFinancialPanda(FakePanda):
             def get_fina_reports(self, symbol=None, start_quarter=None, end_quarter=None,
@@ -231,6 +316,65 @@ class MarketWorkerTests(unittest.TestCase):
             item["financialEvidenceDate"] == "2026-07-22"
             for item in pack["leaderboards"]["potentialWatchlist"]
         ))
+
+    def test_later_publish_date_excludes_row_even_when_generic_date_is_earlier(self):
+        class ConflictingDatesPanda(FakePanda):
+            def get_fina_reports(self, symbol=None, **params):
+                return FakeFrame([
+                    {"symbol": stock_symbol, "date": "20260722",
+                     "publish_date": "20260724", "quarter": "2026q2",
+                     "roe": 99, "net_profit_yoy": 999}
+                    for stock_symbol in (symbol or [])
+                ])
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(ConflictingDatesPanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertTrue(all(
+            "quality" not in item["componentsUsed"]
+            for item in pack["leaderboards"]["potentialWatchlist"]
+        ))
+
+    def test_undated_industry_memberships_are_excluded(self):
+        class UndatedIndustryPanda(FakePanda):
+            def get_industry_constituents(self, **params):
+                return FakeFrame([
+                    {"stock_symbol": symbol, "l1_code": "801010",
+                     "l1_name": "农林牧渔", "in_date": None, "out_date": None}
+                    for symbol in self.symbols
+                ])
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(UndatedIndustryPanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(pack["leaderboards"]["hotIndustries"], [])
+        self.assertTrue(any(item["method"] == "get_industry_constituents"
+                            for item in pack["missingData"]))
+
+    def test_future_lhb_rows_are_filtered_and_recorded_as_insufficient(self):
+        class FutureLhbPanda(FakePanda):
+            def get_lhb_list(self, symbol=None, **params):
+                return FakeFrame([
+                    {"symbol": stock_symbol, "date": "20260724",
+                     "type": "G0007", "amount": 1_000_000}
+                    for stock_symbol in (symbol or [])
+                ])
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(FutureLhbPanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertTrue(any(item["method"] == "get_lhb_list"
+                            for item in pack["missingData"]))
+        self.assertEqual(pack["status"], "degraded")
 
     def test_undated_financial_rows_do_not_contribute_quality_evidence(self):
         class UndatedFinancialPanda(FakePanda):
@@ -292,6 +436,29 @@ class MarketWorkerTests(unittest.TestCase):
             pack["excluded"]["hotIndustries"],
             [{"id": "801010", "reason": "MIN_COVERAGE"}],
         )
+        self.assertEqual(pack["status"], "degraded")
+        self.assertTrue(any(item["method"] == "get_industry_constituents"
+                            for item in pack["missingData"]))
+
+    def test_nonempty_but_insufficient_concept_coverage_degrades(self):
+        class LowConceptCoveragePanda(FakePanda):
+            def get_concept_constituents(self, **params):
+                symbols = self.symbols + ["900001.SZ", "900002.SZ"]
+                return FakeFrame([
+                    {"concept": "人工智能", "concept_stock": symbol, "date": "20200101"}
+                    for symbol in symbols
+                ])
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(LowConceptCoveragePanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(pack["leaderboards"]["hotConcepts"], [])
+        self.assertEqual(pack["status"], "degraded")
+        self.assertTrue(any(item["method"] == "get_concept_constituents"
+                            for item in pack["missingData"]))
 
     def test_theme_component_applies_to_all_group_members_not_only_representatives(self):
         pack = worker.build_evidence_pack(
@@ -305,6 +472,30 @@ class MarketWorkerTests(unittest.TestCase):
             if item["symbol"] == "000006.SZ"
         )
         self.assertIn("theme", last_member["componentsUsed"])
+
+    def test_suspended_and_st_rows_are_excluded_from_headline_groups(self):
+        class IneligibleHeadlinePanda(FakePanda):
+            def get_stock_daily(self, *args, **kwargs):
+                rows = super().get_stock_daily(*args, **kwargs).to_dict()
+                end_date = kwargs["end_date"]
+                for row in rows:
+                    if row["symbol"] == self.symbols[0]:
+                        row["name"] = "ST风险"
+                    if row["symbol"] == self.symbols[1] and row["date"] == end_date:
+                        row["trade_status"] = 1
+                return FakeFrame(rows)
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(IneligibleHeadlinePanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(pack["leaderboards"]["hotIndustries"], [])
+        self.assertEqual(
+            pack["excluded"]["hotIndustries"],
+            [{"id": "801010", "reason": "MIN_CONSTITUENTS"}],
+        )
 
     def test_optional_lhb_failure_redistributes_weight_and_lowers_confidence(self):
         class NoLhbPanda(FakePanda):
@@ -361,7 +552,50 @@ class MarketWorkerTests(unittest.TestCase):
             worker.PandaCollector(provider, lambda _: None, None, 0),
             now="2026-07-24T10:30:00Z",
         )
-        self.assertEqual(provider.daily_batch_sizes, [200, 200, 1])
+        self.assertEqual(sum(provider.daily_batch_sizes), 401)
+        self.assertTrue(all(size * 60 <= 480 for size in provider.daily_batch_sizes))
+
+    def test_collector_marks_trace_truncated_before_contract_failure(self):
+        class OverLimitPanda:
+            __version__ = "0.0.12"
+
+            def get_stock_daily(self, **params):
+                return FakeFrame([{"symbol": "000001.SZ", "date": "20260723"}] * 11)
+
+        trace = []
+        collector = worker.PandaCollector(OverLimitPanda(), trace.append, None, 0)
+        with self.assertRaisesRegex(ValueError, "截断|上限|coverage"):
+            collector.call(
+                "get_stock_daily",
+                expected_max_rows=10,
+                start_date="20260701",
+                end_date="20260723",
+                symbol=["000001.SZ"],
+            )
+        self.assertEqual(len(trace), 1)
+        self.assertEqual(trace[0]["status"], "error")
+        self.assertTrue(trace[0]["truncated"])
+
+    def test_collector_accepts_legitimate_response_at_declared_bound(self):
+        class ExactBoundPanda:
+            __version__ = "0.0.12"
+
+            def get_stock_daily(self, **params):
+                return FakeFrame([
+                    {"symbol": "000001.SZ", "date": "20260723", "sequence": index}
+                    for index in range(500)
+                ])
+
+        trace = []
+        rows = worker.PandaCollector(ExactBoundPanda(), trace.append, None, 0).call(
+            "get_stock_daily",
+            expected_max_rows=500,
+            start_date="20260101",
+            end_date="20260723",
+            symbol=["000001.SZ"],
+        )
+        self.assertEqual(len(rows), 500)
+        self.assertFalse(trace[0]["truncated"])
 
     def test_collector_traces_exception_paths_without_secrets(self):
         class FailingPanda:
@@ -376,6 +610,37 @@ class MarketWorkerTests(unittest.TestCase):
         self.assertIsNone(trace[0]["rowCount"])
         self.assertIn("durationMs", trace[0])
         self.assertNotIn("hunter2", json.dumps(trace))
+
+    def test_collector_redacts_authorization_header_forms(self):
+        class AuthFailurePanda:
+            def get_lhb_list(self, **params):
+                raise RuntimeError(
+                    "Authorization: Bearer bearer-secret; "
+                    "authorization=Basic basic-secret; auth_header: header-secret"
+                )
+
+        trace = []
+        with self.assertRaises(RuntimeError):
+            worker.PandaCollector(AuthFailurePanda(), trace.append, None, 0).call(
+                "get_lhb_list", start_date="20260701", end_date="20260723"
+            )
+        serialized = json.dumps(trace)
+        for secret in ("bearer-secret", "basic-secret", "header-secret"):
+            self.assertNotIn(secret, serialized)
+        self.assertIn("[REDACTED]", serialized)
+
+    def test_optional_error_redacts_authorization_text_in_missing_data(self):
+        class AuthFailurePanda(FakePanda):
+            def get_lhb_list(self, **params):
+                raise RuntimeError("Authorization: Bearer missing-secret")
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(AuthFailurePanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertNotIn("missing-secret", json.dumps(pack))
 
     def test_parquet_cache_has_metadata_and_prevents_repeat_provider_call(self):
         class CountingPanda(FakePanda):
@@ -412,6 +677,104 @@ class MarketWorkerTests(unittest.TestCase):
             )
             self.assertEqual(provider.calls, 1)
             self.assertEqual(second_trace[0]["cacheStatus"], "hit")
+
+    def test_cache_mixed_valid_and_undated_rows_round_trips(self):
+        class MixedDatePanda(FakePanda):
+            def __init__(self):
+                self.calls = 0
+
+            def get_trade_list(self, date, exchange="SH"):
+                self.calls += 1
+                return FakeFrame([
+                    {"symbol": self.symbols[0], "date": date},
+                    {"symbol": self.symbols[1], "date": None},
+                ])
+
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.cwd()) as cache_dir:
+            provider = MixedDatePanda()
+            first = worker.PandaCollector(provider, lambda _: None, cache_dir, 30)
+            first.report_date = "20260723"
+            expected = first.call("get_trade_list", date="20260723", exchange="SH")
+            second_trace = []
+            second = worker.PandaCollector(provider, second_trace.append, cache_dir, 30)
+            second.report_date = "20260723"
+            self.assertEqual(
+                second.call("get_trade_list", date="20260723", exchange="SH"),
+                expected,
+            )
+            self.assertEqual(provider.calls, 1)
+            self.assertEqual(second_trace[0]["cacheStatus"], "hit")
+
+    def test_empty_optional_results_degrade_without_duplicate_entries(self):
+        class EmptyOptionalPanda(FakePanda):
+            def get_industry_constituents(self, **params):
+                return FakeFrame([])
+
+            def get_concept_list(self, **params):
+                return FakeFrame([])
+
+            def get_lhb_list(self, **params):
+                return FakeFrame([])
+
+            def get_fina_reports(self, **params):
+                return FakeFrame([])
+
+            def get_trade_cal(self, *args, **kwargs):
+                if kwargs.get("exchange") == "US":
+                    return FakeFrame([])
+                return super().get_trade_cal(*args, **kwargs)
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(EmptyOptionalPanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(pack["status"], "degraded")
+        missing_methods = [item["method"] for item in pack["missingData"]]
+        for method in ("get_industry_constituents", "get_concept_list", "get_lhb_list",
+                       "get_fina_reports", "get_trade_cal"):
+            self.assertIn(method, missing_methods)
+        self.assertEqual(
+            len(pack["missingData"]),
+            len({(item["section"], item["method"]) for item in pack["missingData"]}),
+        )
+
+    def test_empty_us_daily_result_degrades_report(self):
+        class EmptyUsDailyPanda(FakePanda):
+            def get_us_daily(self, **params):
+                return FakeFrame([])
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(EmptyUsDailyPanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(pack["status"], "degraded")
+        self.assertTrue(any(item["method"] == "get_us_daily"
+                            for item in pack["missingData"]))
+
+    def test_partial_financial_and_us_symbol_coverage_degrades_report(self):
+        class PartialOptionalPanda(FakePanda):
+            def get_fina_reports(self, symbol=None, **params):
+                return super().get_fina_reports(symbol=(symbol or [])[:2], **params)
+
+            def get_us_daily(self, start_date, end_date, symbol=None, fields=None):
+                return super().get_us_daily(
+                    start_date, end_date, (symbol or [])[:1], fields
+                )
+
+        pack = worker.build_evidence_pack(
+            {"operation": "daily-market-report", "date": "2026-07-23", "topN": 10,
+             "minLiquidityCny": 20_000_000},
+            worker.PandaCollector(PartialOptionalPanda(), lambda _: None, None, 0),
+            now="2026-07-24T10:30:00Z",
+        )
+        self.assertEqual(pack["status"], "degraded")
+        missing_methods = {item["method"] for item in pack["missingData"]}
+        self.assertIn("get_fina_reports", missing_methods)
+        self.assertIn("get_us_daily", missing_methods)
 
     def test_worker_protocol_stdout_only_json_and_stderr_only_trace_lines(self):
         class ProtocolPanda(FakePanda):
@@ -451,6 +814,77 @@ class MarketWorkerTests(unittest.TestCase):
         self.assertEqual(provider.auth, (
             "8613800000000", "protocol-secret", "http://panda.invalid"
         ))
+
+    def test_protocol_rejects_request_controlled_cache_path_without_writing(self):
+        class ProtocolPanda(FakePanda):
+            def init_token(self, **params):
+                pass
+
+        fixture = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.cwd()) as parent:
+            attacker_path = pathlib.Path(parent) / "request-controlled-cache"
+            request = {**fixture["request"], "cacheDir": str(attacker_path)}
+            with mock.patch.dict(sys.modules, {"panda_data": ProtocolPanda()}), \
+                    mock.patch.dict(os.environ, {
+                        "PANDA_DATA_USERNAME": "8613800000000",
+                        "PANDA_DATA_PASSWORD": "protocol-secret",
+                        "MARKET_REPORT_CACHE_DIR": "",
+                    }, clear=False), \
+                    mock.patch.object(sys, "stdin", io.StringIO(json.dumps(request))), \
+                    mock.patch.object(sys, "stdout", io.StringIO()), \
+                    mock.patch.object(sys, "stderr", io.StringIO()):
+                with self.assertRaisesRegex(ValueError, "cacheDir|字段|路径"):
+                    worker.main()
+            self.assertFalse(attacker_path.exists())
+
+    def test_protocol_rejects_other_request_controlled_path_fields(self):
+        fixture = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+        request = {**fixture["request"], "outputPath": "O:\\attacker\\report.json"}
+        with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(request))):
+            with self.assertRaisesRegex(ValueError, "outputPath|字段|路径"):
+                worker.main()
+
+    def test_protocol_uses_only_environment_controlled_cache_root(self):
+        class ProtocolPanda(FakePanda):
+            def init_token(self, **params):
+                pass
+
+        fixture = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+        request = {key: value for key, value in fixture["request"].items()
+                   if key != "cacheDir"}
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.cwd()) as parent:
+            cache_path = pathlib.Path(parent) / "deployment-cache"
+            with mock.patch.dict(sys.modules, {"panda_data": ProtocolPanda()}), \
+                    mock.patch.dict(os.environ, {
+                        "PANDA_DATA_USERNAME": "8613800000000",
+                        "PANDA_DATA_PASSWORD": "protocol-secret",
+                        "MARKET_REPORT_CACHE_DIR": str(cache_path),
+                    }, clear=False), \
+                    mock.patch.object(sys, "stdin", io.StringIO(json.dumps(request))), \
+                    mock.patch.object(sys, "stdout", io.StringIO()), \
+                    mock.patch.object(sys, "stderr", io.StringIO()):
+                worker.main()
+            self.assertTrue(list(cache_path.glob("*.parquet")))
+            self.assertTrue(list(cache_path.glob("*.json")))
+
+    def test_worker_failure_boundary_is_nonzero_single_trace_and_no_stdout(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(
+                worker,
+                "main",
+                side_effect=RuntimeError("Authorization: Bearer outer-secret"),
+        ), mock.patch.object(sys, "stdout", stdout), mock.patch.object(sys, "stderr", stderr):
+            exit_code = worker.run()
+
+        self.assertNotEqual(exit_code, 0)
+        self.assertEqual(stdout.getvalue(), "")
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("TRACE "))
+        payload = json.loads(lines[0][6:])
+        self.assertEqual(payload["type"], "worker-error")
+        self.assertNotIn("outer-secret", lines[0])
 
     def test_effective_weights_renormalize_without_treating_missing_as_zero(self):
         values = {"downside_volume": 90.0, "lhb_net_sell": None, "northbound_reduction": 70.0,
