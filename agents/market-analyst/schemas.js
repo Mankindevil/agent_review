@@ -8,7 +8,7 @@ const OPERATIONS = new Set([
 
 export function validateOperation(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('operation request must be an object');
-  if (!OPERATIONS.has(value.operation)) throw new RangeError(`涓嶆敮鎸佺殑 operation: ${value.operation}`);
+  if (!OPERATIONS.has(value.operation)) throw new RangeError(`不支持的 operation：${value.operation}`);
   if (value.date !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(value.date)) throw new TypeError('date must be YYYY-MM-DD');
   const topN = value.topN === undefined ? 10 : Number(value.topN);
   if (!Number.isSafeInteger(topN) || topN < 1 || topN > 50) throw new RangeError('topN must be an integer from 1 to 50');

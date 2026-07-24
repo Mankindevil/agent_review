@@ -28,7 +28,7 @@ test('accepts declared operations and rejects arbitrary Panda methods', () => {
     date: '2026-07-23',
     topN: 10
   }), { operation: 'daily-market-report', date: '2026-07-23', sections: [], topN: 10 });
-  assert.throws(() => validateOperation({ operation: 'get_stock_daily' }), /涓嶆敮鎸佺殑 operation/);
+  assert.throws(() => validateOperation({ operation: 'get_stock_daily' }), /不支持的 operation/);
   assert.throws(() => validateOperation({ operation: 'daily-market-report', topN: 500 }), /topN/);
 });
 
