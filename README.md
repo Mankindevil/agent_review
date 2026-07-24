@@ -110,6 +110,10 @@ npm run check
 npm test
 ```
 
+### Production operations
+
+The production server deployment layout, health checks, release and rollback steps, backup and restore procedure, and credential rotation requirements are documented in the [Production Operations Guide](docs/PRODUCTION_OPERATIONS.md).
+
 ## PandaAI Quant 金融数据源
 
 金融分支通过官方 `panda_data` Python SDK 接入 PandaAI Quant。官方文档使用 `panda_data.init_token(username, password)` 登录，账号为 86 开头的账号；项目允许 `.env` 填写 11 位中国大陆手机号并自动补齐 `86`。受限 Python bridge 调用 SDK，Node 服务不会把账号、密码或 JWT 返回给浏览器。
