@@ -16,6 +16,7 @@ export function marketAgentConfig(env = process.env, cwd = process.cwd()) {
     port: positive(env.MARKET_AGENT_PORT, 4190),
     publicBaseUrl: String(env.MARKET_AGENT_PUBLIC_BASE_URL || '').replace(/\/$/, ''),
     accessToken,
+    allowInsecureLoopback: truthy(env.MARKET_AGENT_ALLOW_INSECURE_LOOPBACK),
     timezone: env.MARKET_REPORT_TIMEZONE || 'Asia/Shanghai',
     stateDir: path.resolve(cwd, env.MARKET_REPORT_STATE_DIR || 'data/market-analyst'),
     python: env.PANDA_DATA_PYTHON || (process.platform === 'win32' ? 'py' : 'python3'),
@@ -49,6 +50,7 @@ export function marketAgentConfig(env = process.env, cwd = process.cwd()) {
     port: config.port,
     timezone: config.timezone,
     accessProtected: Boolean(accessToken),
+    allowInsecureLoopback: config.allowInsecureLoopback,
     modelEnabled: config.model.enabled,
     emailConfigured: Boolean(to.length && config.email.from && config.smtp.host),
     smtp: { host: config.smtp.host, port: config.smtp.port, secure: config.smtp.secure }
