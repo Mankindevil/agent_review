@@ -5,6 +5,8 @@ import { validateEvidencePack, validateOperation } from './schemas.js';
 import { sanitizeTraceValue } from './run-trace.js';
 
 const MAX_OUTPUT_BYTES = 20 * 1024 * 1024;
+const DEFAULT_TERMINATION_GRACE_MS = 1_000;
+const DEFAULT_CLEANUP_TIMEOUT_MS = 1_000;
 const WORKER_FILE = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   'tools',
@@ -28,6 +30,12 @@ function positiveInteger(value, name) {
 
 function buildWorkerRequest(request, config) {
   const operation = validateOperation(request);
+  if (operation.operation !== 'daily-market-report') {
+    throw workerError(
+      `Python market worker does not support operation: ${operation.operation}`,
+      'WORKER_OPERATION_UNSUPPORTED'
+    );
+  }
   const result = {
     operation: operation.operation,
     ...(operation.date ? { date: operation.date } : {}),
@@ -52,11 +60,21 @@ export function runMarketWorker({
   onTrace = () => {}
 }) {
   if (!config || typeof config !== 'object') throw new TypeError('config is required');
-  if (typeof config.python !== 'string' || !config.python) throw new TypeError('config.python is required');
+  if (typeof config.python !== 'string' || !config.python) {
+    throw new TypeError('config.python is required');
+  }
   if (typeof config.stateDir !== 'string' || !config.stateDir) {
     throw new TypeError('config.stateDir is required');
   }
   const timeoutMs = positiveInteger(config.workerTimeoutMs, 'workerTimeoutMs');
+  const terminationGraceMs = positiveInteger(
+    config.workerTerminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS,
+    'workerTerminationGraceMs'
+  );
+  const cleanupTimeoutMs = positiveInteger(
+    config.workerCleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS,
+    'workerCleanupTimeoutMs'
+  );
   const payload = buildWorkerRequest(request, config);
   if (signal?.aborted) {
     return Promise.reject(workerError('market worker aborted', 'ABORT_ERR', 'AbortError'));
@@ -65,44 +83,157 @@ export function runMarketWorker({
   return new Promise((resolve, reject) => {
     let child;
     let settled = false;
+    let closed = false;
+    let pendingFailure = null;
     let stdoutBytes = 0;
     let stderrBytes = 0;
     const stdout = [];
     let stderrBuffer = '';
-    let timer;
+    let timeoutTimer;
+    let terminationTimer;
+    let cleanupTimer;
 
-    const cleanup = () => {
-      if (timer) clearTimeout(timer);
-      signal?.removeEventListener('abort', abort);
+    const clearTimers = () => {
+      clearTimeout(timeoutTimer);
+      clearTimeout(terminationTimer);
+      clearTimeout(cleanupTimer);
     };
-    const finish = (callback, value) => {
+    const destroyPipes = () => {
+      for (const stream of [child?.stdin, child?.stdout, child?.stderr]) {
+        if (stream && !stream.destroyed) stream.destroy();
+      }
+    };
+    const removeListeners = () => {
+      signal?.removeEventListener('abort', onAbort);
+      child?.removeListener('error', onChildError);
+      child?.removeListener('close', onClose);
+      child?.stdin?.removeListener('error', onInputError);
+      child?.stdout?.removeListener('data', onStdout);
+      child?.stderr?.removeListener('data', onStderr);
+    };
+    const settle = (callback, value) => {
       if (settled) return;
       settled = true;
-      cleanup();
+      clearTimers();
+      removeListeners();
+      destroyPipes();
       callback(value);
     };
-    const fail = (error, terminate = true) => {
-      if (settled) return;
-      if (terminate && child && !child.killed) child.kill('SIGTERM');
-      finish(reject, error);
+    const sendSignal = (name) => {
+      try {
+        child?.kill(name);
+      } catch {
+        // The cleanup deadline still guarantees settlement.
+      }
     };
-    const abort = () => {
-      fail(workerError('market worker aborted', 'ABORT_ERR', 'AbortError'));
+    const terminateThenReject = (error) => {
+      if (settled || pendingFailure) return;
+      pendingFailure = error;
+      clearTimeout(timeoutTimer);
+      sendSignal('SIGTERM');
+      terminationTimer = setTimeout(() => {
+        if (settled || closed) return;
+        sendSignal('SIGKILL');
+        cleanupTimer = setTimeout(() => {
+          settle(reject, pendingFailure);
+        }, cleanupTimeoutMs);
+      }, terminationGraceMs);
+    };
+    const onAbort = () => {
+      terminateThenReject(workerError('market worker aborted', 'ABORT_ERR', 'AbortError'));
     };
     const processTraceLine = (line) => {
-      if (!line.startsWith('TRACE ')) return;
+      if (pendingFailure || !line.startsWith('TRACE ')) return;
       let event;
       try {
         event = JSON.parse(line.slice(6));
       } catch {
-        fail(workerError('market worker emitted malformed trace JSON', 'WORKER_PROTOCOL_ERROR'));
+        terminateThenReject(
+          workerError('market worker emitted malformed trace JSON', 'WORKER_PROTOCOL_ERROR')
+        );
         return;
       }
       try {
         onTrace(sanitizeTraceValue(event));
       } catch {
-        fail(workerError('market worker trace consumer failed', 'WORKER_TRACE_ERROR'));
+        terminateThenReject(
+          workerError('market worker trace consumer failed', 'WORKER_TRACE_ERROR')
+        );
       }
+    };
+    const onChildError = () => {
+      if (pendingFailure) return;
+      settle(reject, workerError('market worker process error', 'WORKER_SPAWN_ERROR'));
+    };
+    const onInputError = () => {
+      terminateThenReject(workerError('market worker input failed', 'WORKER_INPUT_ERROR'));
+    };
+    const onStdout = (chunk) => {
+      if (settled || pendingFailure) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      stdoutBytes += buffer.length;
+      if (stdoutBytes > MAX_OUTPUT_BYTES) {
+        terminateThenReject(
+          workerError('market worker stdout exceeded 20 MB', 'WORKER_OUTPUT_LIMIT')
+        );
+        return;
+      }
+      stdout.push(buffer);
+    };
+    const onStderr = (chunk) => {
+      if (settled || pendingFailure) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      stderrBytes += buffer.length;
+      if (stderrBytes > MAX_OUTPUT_BYTES) {
+        terminateThenReject(
+          workerError('market worker stderr exceeded 20 MB', 'WORKER_OUTPUT_LIMIT')
+        );
+        return;
+      }
+      stderrBuffer += buffer.toString('utf8');
+      const lines = stderrBuffer.split(/\r?\n/);
+      stderrBuffer = lines.pop() || '';
+      for (const line of lines) {
+        processTraceLine(line);
+        if (pendingFailure) break;
+      }
+    };
+    const onClose = (code, closeSignal) => {
+      if (settled) return;
+      closed = true;
+      if (pendingFailure) {
+        settle(reject, pendingFailure);
+        return;
+      }
+      if (stderrBuffer) processTraceLine(stderrBuffer);
+      if (pendingFailure) {
+        settle(reject, pendingFailure);
+        return;
+      }
+      if (code !== 0) {
+        settle(
+          reject,
+          workerError(
+            closeSignal
+              ? 'market worker terminated by signal'
+              : `market worker exited with code ${code}`,
+            'WORKER_EXIT_ERROR'
+          )
+        );
+        return;
+      }
+      let evidence;
+      try {
+        evidence = JSON.parse(Buffer.concat(stdout).toString('utf8'));
+        validateEvidencePack(evidence);
+      } catch {
+        settle(
+          reject,
+          workerError('market worker emitted invalid Evidence Pack JSON', 'WORKER_PROTOCOL_ERROR')
+        );
+        return;
+      }
+      settle(resolve, evidence);
     };
 
     try {
@@ -119,73 +250,21 @@ export function runMarketWorker({
         }
       });
     } catch {
-      finish(reject, workerError('market worker could not be started', 'WORKER_SPAWN_ERROR'));
+      settle(reject, workerError('market worker could not be started', 'WORKER_SPAWN_ERROR'));
       return;
     }
 
-    signal?.addEventListener('abort', abort, { once: true });
-    timer = setTimeout(() => {
-      fail(workerError(`market worker timed out after ${timeoutMs}ms`, 'WORKER_TIMEOUT'));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    child.once('error', onChildError);
+    child.stdin.once('error', onInputError);
+    child.stdout.on('data', onStdout);
+    child.stderr.on('data', onStderr);
+    child.once('close', onClose);
+    timeoutTimer = setTimeout(() => {
+      terminateThenReject(
+        workerError(`market worker timed out after ${timeoutMs}ms`, 'WORKER_TIMEOUT')
+      );
     }, timeoutMs);
-
-    child.once('error', () => {
-      fail(workerError('market worker process error', 'WORKER_SPAWN_ERROR'), false);
-    });
-    child.stdin.once('error', () => {
-      fail(workerError('market worker input failed', 'WORKER_INPUT_ERROR'));
-    });
-    child.stdout.on('data', (chunk) => {
-      if (settled) return;
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      stdoutBytes += buffer.length;
-      if (stdoutBytes > MAX_OUTPUT_BYTES) {
-        fail(workerError('market worker stdout exceeded 20 MB', 'WORKER_OUTPUT_LIMIT'));
-        return;
-      }
-      stdout.push(buffer);
-    });
-    child.stderr.on('data', (chunk) => {
-      if (settled) return;
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      stderrBytes += buffer.length;
-      if (stderrBytes > MAX_OUTPUT_BYTES) {
-        fail(workerError('market worker stderr exceeded 20 MB', 'WORKER_OUTPUT_LIMIT'));
-        return;
-      }
-      stderrBuffer += buffer.toString('utf8');
-      const lines = stderrBuffer.split(/\r?\n/);
-      stderrBuffer = lines.pop() || '';
-      for (const line of lines) processTraceLine(line);
-    });
-    child.once('close', (code, closeSignal) => {
-      if (settled) return;
-      if (stderrBuffer) processTraceLine(stderrBuffer);
-      if (settled) return;
-      if (code !== 0) {
-        fail(
-          workerError(
-            closeSignal
-              ? 'market worker terminated by signal'
-              : `market worker exited with code ${code}`,
-            'WORKER_EXIT_ERROR'
-          ),
-          false
-        );
-        return;
-      }
-      let evidence;
-      try {
-        evidence = JSON.parse(Buffer.concat(stdout).toString('utf8'));
-        validateEvidencePack(evidence);
-      } catch {
-        fail(
-          workerError('market worker emitted invalid Evidence Pack JSON', 'WORKER_PROTOCOL_ERROR'),
-          false
-        );
-        return;
-      }
-      finish(resolve, evidence);
-    });
 
     child.stdin.end(JSON.stringify(payload));
   });

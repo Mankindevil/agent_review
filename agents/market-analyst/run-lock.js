@@ -3,13 +3,12 @@ import {
   open,
   readFile,
   readdir,
-  rename,
-  rm,
   rmdir,
   stat,
   unlink
 } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import path from 'node:path';
 
 const DEFAULT_STALE_MS = 30 * 60 * 1_000;
@@ -21,41 +20,77 @@ function lockError(message, code) {
   return error;
 }
 
-async function acquisitionTimes(lockPath, info) {
-  const files = info.isDirectory()
-    ? (await readdir(lockPath)).filter((name) => OWNER_FILE.test(name)).slice(0, 10)
-    : [null];
-  const times = [];
-  for (const file of files) {
+function isRealDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() === month - 1
+    && date.getUTCDate() === day;
+}
+
+async function inspectOwner(lockPath, staleMs) {
+  try {
+    const info = await stat(lockPath);
+    if (!info.isDirectory()) return { recoverable: false };
+    const files = (await readdir(lockPath)).filter((name) => OWNER_FILE.test(name));
+    if (files.length !== 1) return { recoverable: false };
+    const file = files[0];
     try {
-      const metadata = JSON.parse(await readFile(file ? path.join(lockPath, file) : lockPath, 'utf8'));
+      const metadata = JSON.parse(await readFile(path.join(lockPath, file), 'utf8'));
       const acquiredAt = Date.parse(
         metadata.acquiredAt || metadata.startedAt || metadata.createdAt || ''
       );
-      if (Number.isFinite(acquiredAt)) times.push(acquiredAt);
+      const lastActivity = Math.max(info.mtimeMs, Number.isFinite(acquiredAt) ? acquiredAt : 0);
+      if (Date.now() - lastActivity <= staleMs) return { recoverable: false };
+      if (metadata.hostname !== hostname()) return { recoverable: false };
+      if (!Number.isSafeInteger(metadata.pid) || metadata.pid < 1) return { recoverable: false };
+      try {
+        process.kill(metadata.pid, 0);
+        return { recoverable: false };
+      } catch (error) {
+        if (error.code !== 'ESRCH') return { recoverable: false };
+      }
+      return { recoverable: true, ownerFile: file };
     } catch {
-      // A partially written owner record is governed by the lock path mtime.
+      return { recoverable: false };
     }
-  }
-  return times;
-}
-
-async function lockIsStale(lockPath, staleMs) {
-  try {
-    const info = await stat(lockPath);
-    if (Date.now() - info.mtimeMs > staleMs) return true;
-    const times = await acquisitionTimes(lockPath, info);
-    return times.length > 0 && Math.max(...times) < Date.now() - staleMs;
   } catch (error) {
-    if (error.code === 'ENOENT') return false;
+    if (error.code === 'ENOENT') return { retry: true };
     throw error;
   }
 }
 
+async function removeDeadOwner(lockPath, ownerFile) {
+  try {
+    await unlink(path.join(lockPath, ownerFile));
+  } catch (error) {
+    if (error.code === 'ENOENT') return 'retry';
+    throw error;
+  }
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      await rmdir(lockPath);
+      return 'removed';
+    } catch (error) {
+      if (error.code === 'ENOENT') return 'retry';
+      if (!['ENOTEMPTY', 'EEXIST'].includes(error.code)) throw error;
+      const remaining = await readdir(lockPath).catch((cause) => {
+        if (cause.code === 'ENOENT') return null;
+        throw cause;
+      });
+      if (remaining === null) return 'retry';
+      if (remaining.length > 0) return 'locked';
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+  return 'locked';
+}
+
 export async function acquireRunLock({ stateDir, reportDate, staleMs = DEFAULT_STALE_MS }) {
   if (typeof stateDir !== 'string' || !stateDir) throw new TypeError('stateDir is required');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) {
-    throw new TypeError('reportDate must be YYYY-MM-DD');
+  if (!isRealDate(reportDate)) {
+    throw new TypeError('reportDate must be a real calendar date in YYYY-MM-DD form');
   }
   if (!Number.isSafeInteger(staleMs) || staleMs < 1) {
     throw new RangeError('staleMs must be a positive integer');
@@ -77,6 +112,7 @@ export async function acquireRunLock({ stateDir, reportDate, staleMs = DEFAULT_S
           schemaVersion: '1.0',
           reportDate,
           pid: process.pid,
+          hostname: hostname(),
           token,
           acquiredAt: new Date().toISOString()
         }), 'utf8');
@@ -108,21 +144,14 @@ export async function acquireRunLock({ stateDir, reportDate, staleMs = DEFAULT_S
       };
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      if (!(await lockIsStale(lockPath, staleMs))) {
+      const owner = await inspectOwner(lockPath, staleMs);
+      if (owner.retry) continue;
+      if (!owner.recoverable) {
         throw lockError(`report date is already running: ${reportDate}`, 'RUN_LOCKED');
       }
-      const stalePath = path.join(
-        lockDirectory,
-        `${reportDate}.lock.stale-${process.pid}-${randomUUID()}`
-      );
-      try {
-        await rename(lockPath, stalePath);
-        await rm(stalePath, { recursive: true, force: true });
-      } catch (recoveryError) {
-        if (recoveryError.code !== 'ENOENT') {
-          throw lockError(`report date is already running: ${reportDate}`, 'RUN_LOCKED');
-        }
-      }
+      const removal = await removeDeadOwner(lockPath, owner.ownerFile);
+      if (removal === 'retry' || removal === 'removed') continue;
+      throw lockError(`report date is already running: ${reportDate}`, 'RUN_LOCKED');
     }
   }
   throw lockError(`could not acquire report lock: ${reportDate}`, 'RUN_LOCKED');

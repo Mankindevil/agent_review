@@ -18,23 +18,37 @@ function clone(value) {
   return structuredClone(value);
 }
 
-function taskState(task) {
-  return task?.status?.state ?? task?.state;
-}
-
 function storeError(message, code) {
   const error = new Error(message);
   error.code = code;
   return error;
 }
 
-function validateTask(task) {
+function normalizeTask(task) {
   if (!task || typeof task !== 'object' || Array.isArray(task)) {
     throw new TypeError('task must be an object');
   }
   if (typeof task.id !== 'string' || !task.id) throw new TypeError('task.id is required');
-  const state = taskState(task);
+  if (task.status !== undefined && (
+    !task.status || typeof task.status !== 'object' || Array.isArray(task.status)
+  )) {
+    throw new TypeError('task.status must be an object');
+  }
+  const directState = task.state;
+  const statusState = task.status?.state;
+  if (directState !== undefined && statusState !== undefined && directState !== statusState) {
+    throw storeError(
+      `task state aliases disagree: ${directState} != ${statusState}`,
+      'TASK_STATE_ALIAS_MISMATCH'
+    );
+  }
+  const state = statusState ?? directState;
   if (!TASK_STATES.has(state)) throw new RangeError(`invalid task state: ${state}`);
+  return {
+    ...task,
+    state,
+    status: { ...(task.status || {}), state }
+  };
 }
 
 export class MarketTaskStore {
@@ -60,17 +74,20 @@ export class MarketTaskStore {
     return this.#enqueue(async () => {
       await this.#loadFromDisk();
       const now = new Date().toISOString();
-      const record = sanitizeTraceValue({
+      const record = normalizeTask(sanitizeTraceValue({
         ...clone(task),
         createdAt: task.createdAt || now,
         lastModified: task.lastModified || now
-      });
-      validateTask(record);
+      }));
       if (this.state.tasks.some((item) => item.id === record.id)) {
         throw storeError(`task already exists: ${record.id}`, 'TASK_EXISTS');
       }
-      this.state.tasks.push(record);
-      await this.#persist();
+      const nextState = {
+        ...this.state,
+        tasks: [...this.state.tasks, record]
+      };
+      await this.#persist(nextState);
+      this.state = nextState;
       return clone(record);
     });
   }
@@ -100,11 +117,10 @@ export class MarketTaskStore {
       const current = clone(this.state.tasks[index]);
       const draft = clone(current);
       const changed = await updater(draft);
-      const candidate = sanitizeTraceValue(changed === undefined ? draft : changed);
-      validateTask(candidate);
+      const candidate = normalizeTask(sanitizeTraceValue(changed === undefined ? draft : changed));
       if (candidate.id !== id) throw storeError('task id cannot change', 'TASK_ID_IMMUTABLE');
-      const previousState = taskState(current);
-      const nextState = taskState(candidate);
+      const previousState = current.state;
+      const nextState = candidate.state;
       if (TERMINAL_STATES.has(previousState) && nextState !== previousState) {
         throw storeError(
           `invalid task transition: ${previousState} -> ${nextState}`,
@@ -113,8 +129,11 @@ export class MarketTaskStore {
       }
       candidate.createdAt = current.createdAt;
       candidate.lastModified = new Date().toISOString();
-      this.state.tasks[index] = candidate;
-      await this.#persist();
+      const tasks = [...this.state.tasks];
+      tasks[index] = candidate;
+      const stagedState = { ...this.state, tasks };
+      await this.#persist(stagedState);
+      this.state = stagedState;
       return clone(candidate);
     });
   }
@@ -149,10 +168,10 @@ export class MarketTaskStore {
         if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.tasks)) {
           throw storeError('invalid market task state file', 'INVALID_STATE_FILE');
         }
-        for (const task of parsed.tasks) validateTask(task);
+        const tasks = parsed.tasks.map((task) => normalizeTask(sanitizeTraceValue(task)));
         this.state = {
           schemaVersion: String(parsed.schemaVersion || '1.0'),
-          tasks: parsed.tasks.map((task) => sanitizeTraceValue(task))
+          tasks
         };
         this.loaded = true;
       })().finally(() => {
@@ -162,11 +181,11 @@ export class MarketTaskStore {
     await this.loadPromise;
   }
 
-  async #persist() {
+  async #persist(state) {
     await mkdir(this.stateDir, { recursive: true });
     const handle = await open(this.tempFile, 'w', 0o600);
     try {
-      await handle.writeFile(`${JSON.stringify(this.state, null, 2)}\n`, 'utf8');
+      await handle.writeFile(`${JSON.stringify(state, null, 2)}\n`, 'utf8');
       await handle.sync();
     } finally {
       await handle.close();

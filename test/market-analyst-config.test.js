@@ -34,16 +34,32 @@ test('accepts declared operations and rejects arbitrary Panda methods', () => {
 
 test('requires evidence pack fields and array evidence collections', () => {
   const evidencePack = {
-    schemaVersion: 1,
+    schemaVersion: '1.0',
     runId: 'run-1',
     reportDate: '2026-07-23',
-    status: 'completed',
+    status: 'complete',
     markets: {},
     conclusions: [],
     leaderboards: {},
-    sources: []
+    sources: [],
+    missingData: []
   };
   assert.equal(validateEvidencePack(evidencePack), evidencePack);
   assert.throws(() => validateEvidencePack({}), /Evidence Pack/);
   assert.throws(() => validateEvidencePack({ ...evidencePack, sources: {} }), /arrays/);
+  for (const invalid of [
+    { ...evidencePack, schemaVersion: 1 },
+    { ...evidencePack, schemaVersion: '2.0' },
+    { ...evidencePack, runId: '' },
+    { ...evidencePack, reportDate: '2026-02-30' },
+    { ...evidencePack, status: 'completed' },
+    { ...evidencePack, markets: [] },
+    { ...evidencePack, leaderboards: [] },
+    { ...evidencePack, missingData: {} }
+  ]) {
+    assert.throws(() => validateEvidencePack(invalid), /Evidence Pack/);
+  }
+  let deep = {};
+  for (let index = 0; index < 40; index += 1) deep = { child: deep };
+  assert.throws(() => validateEvidencePack({ ...evidencePack, extension: deep }), /bounds/);
 });
