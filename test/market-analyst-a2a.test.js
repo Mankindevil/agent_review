@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -237,6 +237,37 @@ function assertError(payload, { code, status, reason }) {
   assert.equal(payload.error.details[0].domain, 'a2a-protocol.org');
 }
 
+const SKILL_ROOT = new URL('../agents/market-analyst/skills/', import.meta.url);
+const ANALYTICAL_SKILL_TOOLS = [
+  'narrative-adapter',
+  'panda-market-worker',
+  'report-renderer',
+  'report-validator'
+];
+
+function parseSkillFrontMatter(source) {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(source);
+  assert.ok(match, 'SKILL.md must start with YAML front matter');
+  const fields = {};
+  for (const line of match[1].split(/\r?\n/)) {
+    const separator = line.indexOf(':');
+    if (separator < 1) continue;
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    fields[key] = value.replace(/^(['"])(.*)\1$/, '$2');
+  }
+  return fields;
+}
+
+function parseAllowedTools(value) {
+  assert.match(value || '', /^\[[^\]]*\]$/, 'allowed-tools must be an inline YAML list');
+  return value.slice(1, -1)
+    .split(',')
+    .map((item) => item.trim().replace(/^(['"])(.*)\1$/, '$2'))
+    .filter(Boolean)
+    .sort();
+}
+
 test('well-known Agent Card declares the exact A2A 1.0 market interface and five skills', async (t) => {
   const { origin } = await startHarness(t);
   const response = await fetch(`${origin}/.well-known/agent-card.json`);
@@ -283,6 +314,36 @@ test('well-known Agent Card declares the exact A2A 1.0 market interface and five
     schemes: { bearerAuth: { list: [] } }
   }]);
   assert.equal(JSON.stringify(card).includes('configured-secret-must-never-appear'), false);
+});
+
+test('repository Skills stay synchronized with the Agent Card and tool boundaries', async (t) => {
+  const { origin } = await startHarness(t);
+  const card = await json(await fetch(`${origin}/.well-known/agent-card.json`));
+  const expectedIds = card.skills.map(({ id }) => id).sort();
+  const loaded = await Promise.all(expectedIds.map(async (id) => {
+    const source = await readFile(new URL(`${id}/SKILL.md`, SKILL_ROOT), 'utf8');
+    return { id, source, frontMatter: parseSkillFrontMatter(source) };
+  }));
+
+  assert.deepEqual(loaded.map(({ frontMatter }) => frontMatter.name).sort(), expectedIds);
+  for (const { id, source, frontMatter } of loaded) {
+    assert.ok(frontMatter.description, `${id} must have a trigger description`);
+    assert.match(frontMatter.description, /^Use when\b/);
+    assert.equal(frontMatter['financial-data-source'], 'panda_data-only');
+    assert.equal(frontMatter.trading, 'prohibited');
+    const tools = parseAllowedTools(frontMatter['allowed-tools']);
+    assert.deepEqual(
+      tools,
+      id === 'inspect-run-trace' ? ['run-store'] : ANALYTICAL_SKILL_TOOLS,
+      `${id} exposes an unexpected internal tool`
+    );
+    assert.match(source, /Panda-only financial data boundary/);
+    assert.match(source, /research-only/i);
+    assert.doesNotMatch(
+      source,
+      /(?:Yahoo Finance|\bBloomberg\b|\bRefinitiv\b|\bWind\b|\bEastmoney\b|\bAkShare\b)/i
+    );
+  }
 });
 
 test('health is public while A2A task and run-detail routes require Bearer authentication', async (t) => {
