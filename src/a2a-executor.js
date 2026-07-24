@@ -22,6 +22,7 @@ const MAX_SECRET_PATTERN_LENGTH = 64 * 1_024;
 const MAX_SECRET_DECODE_DEPTH = 3;
 const MAX_SECRET_DECODE_VIEWS = 8;
 const MAX_SECRET_DECODE_INPUT_LENGTH = 2 * 1_024 * 1_024;
+const MAX_SECRET_DECODE_WORK = 16 * 1_024 * 1_024;
 const POLL_DELAYS = [250, 500, 1000, 2000];
 const TERMINAL_STATES = new Set([
   'COMPLETED',
@@ -1091,21 +1092,30 @@ function createSecretScrubber(authorization) {
   }
   patterns.sort((left, right) => right.source.length - left.source.length);
   const text = (input) => {
+    const inspected = inspectDecodedSecretViews(input);
+    if (inspected.unsafe) return '[REDACTED]';
     const redacted = patterns.reduce(
       (result, pattern) => {
         pattern.regex.lastIndex = 0;
         return result.replace(pattern.regex, '[REDACTED]');
       },
-      String(input)
+      inspected.views[0]
     );
-    if (decodedSecretViews(redacted).some((view) => matchesSecretPattern(patterns, view))) {
+    const inspectedRedacted = inspectDecodedSecretViews(redacted);
+    if (
+      inspectedRedacted.unsafe ||
+      inspectedRedacted.views.some((view) => matchesSecretPattern(patterns, view))
+    ) {
       return '[REDACTED]';
     }
     return redacted;
   };
   const value = (input) => scrubObjectValue(input, text);
-  const contains = (input) => decodedSecretViews(input)
-    .some((view) => matchesSecretPattern(patterns, view));
+  const contains = (input) => {
+    const inspected = inspectDecodedSecretViews(input);
+    return inspected.unsafe ||
+      inspected.views.some((view) => matchesSecretPattern(patterns, view));
+  };
   return { text, value, contains };
 }
 
@@ -1118,31 +1128,54 @@ function matchesSecretPattern(patterns, input) {
   });
 }
 
-function decodedSecretViews(input) {
+function inspectDecodedSecretViews(input) {
   const source = String(input);
-  if (source.length > MAX_SECRET_DECODE_INPUT_LENGTH) return [source];
+  if (source.length > MAX_SECRET_DECODE_INPUT_LENGTH) {
+    return { views: [], unsafe: true };
+  }
   const views = [source];
   const seen = new Set(views);
   const queue = [{ value: source, depth: 0 }];
-  while (queue.length > 0 && views.length < MAX_SECRET_DECODE_VIEWS) {
+  let work = 0;
+  const reserveWork = (amount) => {
+    if (amount > MAX_SECRET_DECODE_WORK - work) return false;
+    work += amount;
+    return true;
+  };
+  const decode = (value, formEncoded) => {
+    const cost = value.length * (formEncoded ? 2 : 1);
+    if (!reserveWork(cost)) return { unsafe: true };
+    const candidate = formEncoded ? value.replaceAll('+', ' ') : value;
+    try {
+      return { value: decodeURIComponent(candidate), unsafe: false };
+    } catch {
+      return { unsafe: true };
+    }
+  };
+
+  while (queue.length > 0) {
     const current = queue.shift();
-    if (current.depth >= MAX_SECRET_DECODE_DEPTH) continue;
-    const candidates = [current.value, current.value.replaceAll('+', '%20')];
-    for (const candidate of candidates) {
-      let decoded;
-      try {
-        decoded = decodeURIComponent(candidate);
-      } catch {
+    if (!reserveWork(current.value.length)) {
+      return { views, unsafe: true };
+    }
+    const modes = current.value.includes('+') ? [false, true] : [false];
+    for (const formEncoded of modes) {
+      const decoded = decode(current.value, formEncoded);
+      if (decoded.unsafe) return { views, unsafe: true };
+      if (current.depth >= MAX_SECRET_DECODE_DEPTH) {
+        if (decoded.value !== current.value) return { views, unsafe: true };
         continue;
       }
-      if (seen.has(decoded)) continue;
-      seen.add(decoded);
-      views.push(decoded);
-      if (views.length >= MAX_SECRET_DECODE_VIEWS) break;
-      queue.push({ value: decoded, depth: current.depth + 1 });
+      if (seen.has(decoded.value)) continue;
+      if (views.length >= MAX_SECRET_DECODE_VIEWS) {
+        return { views, unsafe: true };
+      }
+      seen.add(decoded.value);
+      views.push(decoded.value);
+      queue.push({ value: decoded.value, depth: current.depth + 1 });
     }
   }
-  return views;
+  return { views, unsafe: false };
 }
 
 function literalSecretScrubber(secret) {

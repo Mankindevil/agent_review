@@ -1329,6 +1329,151 @@ test('scrubs encoded credential URLs from every failed run evidence surface', as
   }
 });
 
+test('fails closed for credential encodings beyond normalization bounds', async (t) => {
+  const nestedCredential = (depth) => `a%${'25'.repeat(depth - 1)}2Fb`;
+  const cases = [
+    {
+      name: 'five encodeURIComponent layers',
+      encoded: nestedCredential(5),
+      url: `https://files.example/${nestedCredential(5)}/report.csv`,
+      maxElapsedMs: 1_000
+    },
+    {
+      name: 'a chain far beyond the decode-depth limit',
+      encoded: nestedCredential(100_000),
+      url: `https://files.example/${nestedCredential(100_000)}/report.csv`,
+      maxElapsedMs: 1_000
+    },
+    {
+      name: 'branching form decoding beyond the view limit',
+      encoded: '%25252B+%252B+%2B',
+      url: 'https://files.example/%25252B+%252B+%2B/report.csv',
+      maxElapsedMs: 1_000
+    },
+    {
+      name: 'an input that exhausts the normalization-work budget',
+      encoded: 'budget-marker+%20',
+      url: `https://files.example/${'x'.repeat(1_900_000)}/budget-marker+%20`,
+      maxElapsedMs: 1_000
+    },
+    {
+      name: 'an input beyond the evidence-string length limit',
+      encoded: nestedCredential(5),
+      url: `https://files.example/${'x'.repeat((2 * 1024 * 1024) + 1)}/${nestedCredential(5)}`,
+      maxElapsedMs: 1_000
+    },
+    {
+      name: 'malformed percent encoding',
+      encoded: '%E0%A4%A',
+      url: 'https://files.example/%E0%A4%A/report.csv',
+      maxElapsedMs: 1_000
+    }
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      let snapshotCalls = 0;
+      const startedAt = performance.now();
+      const run = await executeA2ATurn({
+        card: rpcCard,
+        input: { parts: [{ type: 'text', text: 'run' }] },
+        authorization: 'a/b',
+        request: async (_url, options) => {
+          const body = JSON.parse(options.body);
+          return jsonResponse({
+            jsonrpc: '2.0',
+            id: body.id,
+            result: {
+              message: {
+                messageId: 'reply-deep-credential-url',
+                role: 'ROLE_AGENT',
+                parts: [{ url: item.url }]
+              }
+            }
+          });
+        },
+        snapshotRequest: async () => {
+          snapshotCalls += 1;
+          throw new Error(`snapshot transport received leaked URL: ${item.url}`);
+        },
+        persistSnapshot: async () => ({ evidenceId: 'must-not-persist' })
+      });
+      const elapsedMs = performance.now() - startedAt;
+
+      assert.equal(snapshotCalls, 0);
+      assert.equal(run.outcome.status, 'agent-error');
+      assert.equal(run.error.code, 'credential-in-url');
+      assert.equal(run.response.rawObjects[0].result.message.parts[0].url, '[REDACTED]');
+      assert.equal(run.response.normalized.parts[0].url, '[REDACTED]');
+      assert.deepEqual(run.response.snapshots, []);
+      const serialized = JSON.stringify(run);
+      assert.equal(serialized.includes(item.encoded), false);
+      assert.equal(serialized.includes(item.url), false);
+      assert.equal(serialized.includes('sourceUrl'), false);
+      assert.ok(
+        elapsedMs < item.maxElapsedMs,
+        `fail-closed handling took ${elapsedMs.toFixed(1)} ms`
+      );
+    });
+  }
+});
+
+test('redacts a deeply encoded credential from arbitrary evidence leaves', async () => {
+  const encoded = 'a%252525252Fb';
+  const evidence = `remote diagnostic: ${encoded}`;
+  const run = await executeA2ATurn({
+    card: rpcCard,
+    input: { parts: [{ type: 'text', text: 'run' }] },
+    authorization: 'a/b',
+    request: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      return jsonResponse({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          message: {
+            messageId: 'reply-deep-credential-text',
+            role: 'ROLE_AGENT',
+            metadata: {
+              nested: evidence
+            },
+            parts: [{ text: evidence }]
+          }
+        }
+      });
+    }
+  });
+
+  assert.equal(run.outcome.status, 'succeeded');
+  assert.equal(run.response.rawObjects[0].result.message.parts[0].text, '[REDACTED]');
+  assert.equal(run.response.rawObjects[0].result.message.metadata.nested, '[REDACTED]');
+  assert.equal(run.response.normalized.parts[0].text, '[REDACTED]');
+  assert.equal(JSON.stringify(run).includes(encoded), false);
+});
+
+test('allows a normal non-nested percent URL without a credential match', async () => {
+  let snapshotCalls = 0;
+  const snapshots = await snapshotUrlParts(
+    [{ url: 'https://files.example/reports/quarter%202.csv' }],
+    {
+      authorization: 'a/b',
+      request: async () => {
+        snapshotCalls += 1;
+        return {
+          status: 200,
+          headers: { 'content-type': 'text/csv' },
+          body: Buffer.from('safe')
+        };
+      },
+      persistSnapshot: async () => ({ evidenceId: 'evidence-safe-percent-url' })
+    }
+  );
+
+  assert.equal(snapshotCalls, 1);
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0].sourceUrl, 'https://files.example/reports/quarter%202.csv');
+});
+
 test('does not fetch a URL Part when snapshot persistence is unavailable', async () => {
   let calls = 0;
   await assert.rejects(
