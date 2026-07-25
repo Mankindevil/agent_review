@@ -503,6 +503,58 @@ test('report validation rejects missing source lineage and disclaimer text', () 
   );
 });
 
+test('report validation accepts deterministic fallback narratives without model sections', () => {
+  const pack = evidence();
+  const report = renderReport(pack, {
+    sections: [],
+    fallbackReason: 'model request failed: timeout'
+  });
+  assert.deepEqual(validateReport({
+    evidence: pack,
+    markdown: report.markdown,
+    narrative: {
+      sections: [],
+      fallbackReason: 'model request failed: timeout'
+    }
+  }), { valid: true });
+});
+
+test('report validation matches duplicate source methods by call identity', () => {
+  const pack = evidence({
+    sources: [{
+      id: 'panda-call-001',
+      method: 'get_trade_cal',
+      dataAsOf: '2026-07-23',
+      window: '2026-07-01/2026-07-23',
+      coverage: 1,
+      rowCount: 10,
+      traceSequence: 1,
+      status: 'ok'
+    }, {
+      id: 'panda-call-004',
+      method: 'get_trade_cal',
+      dataAsOf: '2026-07-23',
+      window: '2026-03-25/2026-07-23',
+      coverage: 1,
+      rowCount: 82,
+      traceSequence: 4,
+      status: 'ok'
+    }, {
+      id: 'panda-1',
+      method: 'get_stock_daily',
+      dataAsOf: '2026-07-23',
+      window: '2026-06-23/2026-07-23',
+      coverage: 0.996,
+      rowCount: 10000,
+      traceSequence: 7,
+      status: 'ok'
+    }]
+  });
+  const report = renderReport(pack);
+  assert.match(report.markdown, /2026-03-25\/2026-07-23/);
+  assert.deepEqual(validateReport({ evidence: pack, markdown: report.markdown }), { valid: true });
+});
+
 test('narrative adapter sends only compact evidence and normalizes model usage', async () => {
   const pack = evidence({ privateCredential: 'must-not-leave-process' });
   let request;

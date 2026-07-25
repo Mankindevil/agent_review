@@ -95,6 +95,16 @@ def _iso_date(value):
     return f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}" if compact else None
 
 
+def _quarter_end_iso(quarter):
+    text = str(quarter or "").strip().upper().replace("-", "")
+    match = re.fullmatch(r"(\d{4})Q([1-4])", text)
+    if not match:
+        return None
+    year = int(match.group(1))
+    month, day = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}[int(match.group(2))]
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
 def _parse_now(value):
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -438,6 +448,16 @@ class PandaCollector:
                     else ([str(scope_value)] if scope_value else [])
                 ),
             }
+            if status == "ok":
+                if not record["dataAsOf"]:
+                    record["dataAsOf"] = (
+                        _quarter_end_iso(
+                            params.get("end_quarter") or params.get("start_quarter")
+                        )
+                        or _iso_date(self.report_date)
+                    )
+                if not record["window"]:
+                    record["window"] = record["dataAsOf"]
             self._emit(record)
 
 
@@ -479,7 +499,18 @@ def percentile_rank(values):
 
 
 def effective_weights(values, weights, minimum_components):
-    used = [key for key in weights if _is_finite(values.get(key))]
+    evidence = values.get("_metricEvidence") if isinstance(values, dict) else None
+    used = []
+    for key in weights:
+        if not _is_finite(values.get(key)):
+            continue
+        if isinstance(evidence, dict) and key in evidence:
+            detail = evidence.get(key) or {}
+            if "evidenceIds" in detail:
+                evidence_ids = detail.get("evidenceIds")
+                if not isinstance(evidence_ids, list) or not evidence_ids:
+                    continue
+        used.append(key)
     if len(used) < minimum_components:
         return None, sum(weights[key] for key in used), used
     coverage = sum(weights[key] for key in used)
@@ -783,7 +814,8 @@ def _batches(values, size):
 
 
 def _call_symbol_batches(collector, missing_data, section, method, symbols,
-                         rows_per_symbol=1, symbol_param="symbol", **params):
+                         rows_per_symbol=1, symbol_param="symbol",
+                         allow_over_provider_cap=False, **params):
     symbols = list(dict.fromkeys(str(value) for value in symbols if value))
     if not symbols:
         return [], True
@@ -794,9 +826,13 @@ def _call_symbol_batches(collector, missing_data, section, method, symbols,
     for index, symbol_batch in enumerate(batches, start=1):
         try:
             call_params = {**params, symbol_param: symbol_batch}
+            expected = len(symbol_batch) * rows_per_symbol
+            if allow_over_provider_cap:
+                expected = max(expected * 4, collector.provider_max_rows * 10, 5_000)
             output.extend(collector.call(
                 method,
-                expected_max_rows=len(symbol_batch) * rows_per_symbol,
+                expected_max_rows=expected,
+                allow_over_provider_cap=allow_over_provider_cap,
                 batch_index=index,
                 batch_count=len(batches),
                 **call_params,
@@ -1281,18 +1317,36 @@ def _latest_by_symbol(rows, date_fields=("date", "info_date")):
     }
 
 
-def _collector_call_ids(collector, *methods, symbols=None):
+def _collector_call_ids(collector, *methods, symbols=None,
+                        required=None, required_any=None):
     wanted = set(methods)
     relevant_symbols = {str(value) for value in (symbols or [])}
-    return [
+    ids = [
         record["id"] for record in collector.records
-        if record.get("method") in wanted and record.get("status") == "ok"
+        if record.get("method") in wanted
+        and record.get("status") == "ok"
+        and not record.get("truncated")
+        and record.get("dataAsOf")
+        and record.get("window")
+        and isinstance(record.get("rowCount"), int)
+        and record["rowCount"] > 0
+        and isinstance(record.get("responseHash"), str)
+        and record["responseHash"]
         and (
             not relevant_symbols
             or not record.get("_scopeSymbols")
             or bool(relevant_symbols & set(record["_scopeSymbols"]))
         )
     ]
+    present = {
+        record["method"] for record in collector.records
+        if record.get("id") in set(ids)
+    }
+    if required and any(method not in present for method in required):
+        return []
+    if required_any and not any(method in present for method in required_any):
+        return []
+    return ids
 
 
 def _listing_date(row):
@@ -1524,7 +1578,8 @@ def build_evidence_pack(request, collector, now):
         )
     concepts = _call_optional(
         collector, missing_data, "hotConcepts", "get_concept_list",
-        expected_max_rows=collector.provider_max_rows - 1,
+        expected_max_rows=5_000,
+        allow_over_provider_cap=True,
         end_date=report_compact,
     )
     concept_memberships = None
@@ -1543,6 +1598,7 @@ def build_evidence_pack(request, collector, now):
             concept_memberships, concept_memberships_complete = _call_symbol_batches(
                 collector, missing_data, "hotConcepts", "get_concept_constituents",
                 universe, rows_per_symbol=20, symbol_param="concept_stock",
+                allow_over_provider_cap=True,
                 concept=concept_names,
                 date=report_compact,
                 fields=["concept", "concept_stock", "date"],
@@ -1653,6 +1709,7 @@ def build_evidence_pack(request, collector, now):
     financial, financial_complete = _call_symbol_batches(
         collector, missing_data, "fundamentals", "get_fina_reports",
         candidate_symbols, rows_per_symbol=16,
+        allow_over_provider_cap=True,
         start_quarter=start_quarter,
         end_quarter=end_quarter,
         date=report_compact,
@@ -1853,8 +1910,11 @@ def build_evidence_pack(request, collector, now):
         ),
     )
 
-    def evidence_ids(*methods, symbols=None):
-        return _collector_call_ids(collector, *methods, symbols=symbols)
+    def evidence_ids(*methods, symbols=None, required=None, required_any=None):
+        return _collector_call_ids(
+            collector, *methods, symbols=symbols,
+            required=required, required_any=required_any,
+        )
 
     def evidence_date(*methods, symbol=None):
         ids = set(evidence_ids(
@@ -1981,7 +2041,6 @@ def build_evidence_pack(request, collector, now):
                 5 if _is_finite(forecast_floor) and float(forecast_floor) < 0 else 0
             ),
         }
-        risk_penalty = min(30, sum(risk_penalties.values()))
         risk_metric_evidence = {
             "crowding": {
                 "raw": {"turnoverHeat": item.get("turnover_heat")},
@@ -2023,7 +2082,8 @@ def build_evidence_pack(request, collector, now):
                 "coverage": 1 if restricted_complete and float_complete else 0,
                 "sourceRole": "risk_unlock",
                 "evidenceIds": evidence_ids(
-                    "get_restricted_list", "get_share_float", symbols=[symbol]
+                    "get_restricted_list", "get_share_float", symbols=[symbol],
+                    required=("get_restricted_list", "get_share_float"),
                 ),
             },
             "reduction": {
@@ -2035,7 +2095,8 @@ def build_evidence_pack(request, collector, now):
                 "window": "365d", "coverage": 1 if shareholder_complete else 0,
                 "sourceRole": "risk_reduction",
                 "evidenceIds": evidence_ids(
-                    "get_stock_shareholder_change", symbols=[symbol]
+                    "get_stock_shareholder_change", symbols=[symbol],
+                    required=("get_stock_shareholder_change",),
                 ),
             },
             "forecastEvent": {
@@ -2046,10 +2107,16 @@ def build_evidence_pack(request, collector, now):
                 "coverage": 1 if forecast_complete else 0,
                 "sourceRole": "risk_forecast",
                 "evidenceIds": evidence_ids(
-                    "get_fina_forecast", symbols=[symbol]
+                    "get_fina_forecast", symbols=[symbol],
+                    required=("get_fina_forecast",),
                 ),
             },
         }
+        for risk_name in list(risk_penalties):
+            risk_ids = (risk_metric_evidence.get(risk_name) or {}).get("evidenceIds")
+            if isinstance(risk_ids, list) and not risk_ids:
+                risk_penalties[risk_name] = 0
+        risk_penalty = min(30, sum(risk_penalties.values()))
         metric_evidence = {
             "trend": {
                 "raw": {"relativeStrength20": (
@@ -2075,6 +2142,9 @@ def build_evidence_pack(request, collector, now):
                 "evidenceIds": evidence_ids(
                     "get_industry_constituents", "get_concept_constituents",
                     symbols=[symbol],
+                    required_any=(
+                        "get_industry_constituents", "get_concept_constituents"
+                    ),
                 ),
             },
             "quality": {
@@ -2096,7 +2166,8 @@ def build_evidence_pack(request, collector, now):
                 ),
                 "sourceRole": "quality",
                 "evidenceIds": evidence_ids(
-                    "get_fina_performance", symbols=[symbol]
+                    "get_fina_performance", symbols=[symbol],
+                    required=("get_fina_performance",),
                 ),
             },
             "capital": {
@@ -2110,7 +2181,11 @@ def build_evidence_pack(request, collector, now):
                 "sourceRole": "capital",
                 "evidenceIds": evidence_ids(
                     "get_hsgt_hold", "get_lhb_detail", "get_margin",
-                    "get_investor_activity", symbols=[symbol]
+                    "get_investor_activity", symbols=[symbol],
+                    required_any=(
+                        "get_hsgt_hold", "get_lhb_detail", "get_margin",
+                        "get_investor_activity",
+                    ),
                 ),
             },
             "liquidity_stability": {
@@ -2255,6 +2330,9 @@ def build_evidence_pack(request, collector, now):
                     "evidenceIds": evidence_ids(
                         "get_block_trade", "get_stock_shareholder_change",
                         symbols=[item["symbol"]],
+                        required=(
+                            "get_block_trade", "get_stock_shareholder_change"
+                        ),
                     ),
                 },
             },

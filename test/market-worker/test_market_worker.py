@@ -2029,5 +2029,130 @@ class RecordsNormalizationTests(unittest.TestCase):
         )
 
 
+class UsableEvidenceAndCapTests(unittest.TestCase):
+    def test_collector_call_ids_skip_empty_ok_calls(self):
+        collector = worker.PandaCollector(FakePanda(), lambda _: None, None, 0)
+        collector.records = [
+            {
+                "id": "panda-call-001",
+                "method": "get_fina_performance",
+                "status": "ok",
+                "truncated": False,
+                "dataAsOf": None,
+                "window": None,
+                "rowCount": 0,
+                "responseHash": "a" * 64,
+                "_scopeSymbols": ["000001.SZ"],
+            },
+            {
+                "id": "panda-call-002",
+                "method": "get_fina_performance",
+                "status": "ok",
+                "truncated": False,
+                "dataAsOf": "2026-04-30",
+                "window": "2026-04-30",
+                "rowCount": 3,
+                "responseHash": "b" * 64,
+                "_scopeSymbols": ["000001.SZ"],
+            },
+        ]
+        self.assertEqual(
+            worker._collector_call_ids(
+                collector, "get_fina_performance", symbols=["000001.SZ"]
+            ),
+            ["panda-call-002"],
+        )
+
+    def test_collector_fills_dates_for_empty_quarter_responses(self):
+        class EmptyPerformancePanda:
+            __version__ = "0.0.12"
+
+            def get_fina_performance(self, **params):
+                return FakeFrame([])
+
+        trace = []
+        collector = worker.PandaCollector(EmptyPerformancePanda(), trace.append, None, 0)
+        collector.report_date = "20260724"
+        rows = collector.call(
+            "get_fina_performance",
+            expected_max_rows=200,
+            end_quarter="2026Q1",
+            symbol=["000001.SZ"],
+        )
+        self.assertEqual(rows, [])
+        self.assertEqual(trace[0]["status"], "ok")
+        self.assertEqual(trace[0]["dataAsOf"], "2026-03-31")
+        self.assertEqual(trace[0]["window"], "2026-03-31")
+
+    def test_concept_list_may_exceed_provider_row_cap(self):
+        class LargeConceptPanda:
+            __version__ = "0.0.12"
+
+            def get_concept_list(self, **params):
+                return FakeFrame([
+                    {"name": f"概念{index}", "date": "20260724"}
+                    for index in range(620)
+                ])
+
+        trace = []
+        rows = worker.PandaCollector(LargeConceptPanda(), trace.append, None, 0).call(
+            "get_concept_list",
+            expected_max_rows=5_000,
+            allow_over_provider_cap=True,
+            end_date="20260724",
+        )
+        self.assertEqual(len(rows), 620)
+        self.assertFalse(trace[0]["truncated"])
+
+    def test_effective_weights_skip_components_without_evidence_ids(self):
+        score, coverage, used = worker.effective_weights(
+            {
+                "downside_volume": 80,
+                "discount_event": 0,
+                "_metricEvidence": {
+                    "downside_volume": {"evidenceIds": ["panda-call-001"]},
+                    "discount_event": {"evidenceIds": []},
+                },
+            },
+            {
+                "downside_volume": .25,
+                "lhb_net_sell": .25,
+                "northbound_reduction": .20,
+                "margin_contraction": .15,
+                "discount_event": .15,
+            },
+            1,
+        )
+        self.assertEqual(used, ["downside_volume"])
+        self.assertEqual(score, 80)
+        self.assertEqual(coverage, .25)
+
+    def test_collector_call_ids_require_all_declared_methods(self):
+        collector = worker.PandaCollector(FakePanda(), lambda _: None, None, 0)
+        collector.records = [
+            {
+                "id": "panda-call-001",
+                "method": "get_stock_shareholder_change",
+                "status": "ok",
+                "truncated": False,
+                "dataAsOf": "2026-07-24",
+                "window": "2026-07-24",
+                "rowCount": 1,
+                "responseHash": "a" * 64,
+                "_scopeSymbols": ["000001.SZ"],
+            }
+        ]
+        self.assertEqual(
+            worker._collector_call_ids(
+                collector,
+                "get_block_trade",
+                "get_stock_shareholder_change",
+                symbols=["000001.SZ"],
+                required=("get_block_trade", "get_stock_shareholder_change"),
+            ),
+            [],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

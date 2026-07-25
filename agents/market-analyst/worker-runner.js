@@ -232,10 +232,16 @@ export function runMarketWorker({
       try {
         evidence = JSON.parse(Buffer.concat(stdout).toString('utf8'));
         validateEvidencePack(evidence);
-      } catch {
+      } catch (error) {
+        const detail = error instanceof Error && error.message
+          ? `: ${error.message}`
+          : '';
         settle(
           reject,
-          workerError('market worker emitted invalid Evidence Pack JSON', 'WORKER_PROTOCOL_ERROR')
+          workerError(
+            `market worker emitted invalid Evidence Pack JSON${detail}`,
+            'WORKER_PROTOCOL_ERROR'
+          )
         );
         return;
       }

@@ -6,8 +6,8 @@ import { validateEvidencePack } from './schemas.js';
 const MAX_PROMPT_BYTES = 512 * 1024;
 const MAX_RESPONSE_BYTES = 128 * 1024;
 const MAX_RESPONSE_ENVELOPE_BYTES = 256 * 1024;
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const MAX_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 90_000;
+const MAX_REQUEST_TIMEOUT_MS = 180_000;
 const STRICT_NUMERIC_RATE = /^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$/;
 
 function isoNow() {

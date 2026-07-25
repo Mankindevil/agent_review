@@ -287,6 +287,10 @@ function conclusionScope(compact, ids) {
 export function validateNarrative(evidence, narrative, options = {}) {
   validateEvidencePack(evidence);
   if (narrative === undefined || narrative === null) return { valid: true };
+  // Deterministic report rendering owns fallback mode; empty model prose is allowed.
+  if (typeof narrative.fallbackReason === 'string' && narrative.fallbackReason.trim()) {
+    return { valid: true };
+  }
   const compact = options.compactEvidence || buildCompactEvidence(evidence);
   const sections = narrativeSections(narrative);
   if (sections.length === 0 || !sections.some((section) => section?.id === 'executive-summary')) {
@@ -427,9 +431,14 @@ function assertReportContract(evidence, markdown) {
     if (!markdown.includes(marker)) throw new RangeError(`report missing truncation marker: ${marker}`);
   }
   for (const source of evidence.sources.slice(0, REPORT_DISPLAY_CAPS.sources)) {
+    const callIdentity = source.traceSequence ?? source.sequence ?? source.id;
     const line = reportLines.find((item) =>
-      item.startsWith('|') && source.method !== undefined
+      item.startsWith('|')
+      && source.method !== undefined
       && item.includes(String(source.method))
+      && callIdentity !== undefined
+      && callIdentity !== null
+      && item.includes(String(callIdentity))
     );
     if (!line) throw new RangeError(`report missing source method: ${source.method}`);
     const values = [
@@ -437,7 +446,7 @@ function assertReportContract(evidence, markdown) {
       source.window || source.dataWindow,
       source.coverage,
       source.rowCount,
-      source.traceSequence ?? source.sequence ?? source.id,
+      callIdentity,
       source.status
     ];
     for (const value of values) {
