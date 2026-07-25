@@ -1,6 +1,11 @@
 const $ = (selector) => document.querySelector(selector);
 const filters = ['test-type', 'test-id', 'repeat', 'turn', 'grade', 'kind'];
-const state = { evaluationId: decodeURIComponent(location.hash.slice(1)), items: [] };
+const query = new URLSearchParams(location.search);
+const state = {
+  evaluationId: decodeURIComponent(location.hash.slice(1)),
+  items: [],
+  accessToken: query.get('access') || ''
+};
 
 init();
 
@@ -70,7 +75,10 @@ function renderList() {
 async function loadDetail(item) {
   setStatus('正在读取并再次脱敏证据内容…');
   try {
-    const response = await fetch(`/api/evaluations/${encodeURIComponent(state.evaluationId)}/evidence/${encodeURIComponent(item.evidenceId)}`);
+    const response = await fetch(
+      `/api/evaluations/${encodeURIComponent(state.evaluationId)}/evidence/${encodeURIComponent(item.evidenceId)}`,
+      requestOptions()
+    );
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || '证据内容读取失败');
     $('#evidence-detail').textContent = JSON.stringify(payload.item, null, 2);
@@ -78,6 +86,12 @@ async function loadDetail(item) {
   } catch (error) {
     setStatus(error.message);
   }
+}
+
+function requestOptions() {
+  return state.accessToken
+    ? { headers: { authorization: `Bearer ${state.accessToken}` } }
+    : {};
 }
 
 function testType(item) {

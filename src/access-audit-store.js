@@ -4,7 +4,7 @@ import path from 'node:path';
 
 const EVENT_FIELDS = ['principalId', 'evaluationId', 'evidenceId', 'role', 'content'];
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
-const ROLES = new Set(['participant', 'judge', 'admin']);
+const ROLES = new Set(['public', 'participant', 'judge', 'admin']);
 
 let accessAuditStoreSingleton = null;
 

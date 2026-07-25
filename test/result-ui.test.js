@@ -32,6 +32,12 @@ test('publishes the ordered evidence-led dual-track result surface', async () =>
   assert.match(renderer, /待复刻/);
   assert.match(renderer, /same-track only/);
   assert.match(app, /item\.resultV2\s*\?\s*renderV2ResultView\(item,\s*\{\s*escapeHtml\s*\}\)\s*:\s*renderLegacyResult\(item\)/);
+  assert.doesNotMatch(app, /function renderV2Result\(item\)/);
+  assert.match(renderer, /absoluteReview\?\.modelPanel/);
+  assert.match(renderer, /item\.resultV2\?\.humor/);
+  assert.match(renderer, /item\.humanReviewAggregate/);
+  assert.match(renderer, /replica\.runtimes/);
+  assert.match(renderer, /Δc/);
 
   for (const id of [
     'evidence-filter-test-type',
@@ -46,6 +52,8 @@ test('publishes the ordered evidence-led dual-track result surface', async () =>
     assert.match(evidencePage, new RegExp(`id="${id}"`), id);
   }
   assert.match(evidenceScript, /evidence-manifest/);
+  assert.match(evidenceScript, /URLSearchParams/);
+  assert.match(evidenceScript, /authorization/);
   assert.match(evidenceScript, /textContent/);
   assert.doesNotMatch(evidenceScript, /innerHTML/);
   assert.match(evidenceStyle, /prefers-reduced-motion/);

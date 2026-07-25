@@ -452,6 +452,17 @@ test('projects only server-released dual-track summaries after the absolute lock
       },
       resultHash: 'a'.repeat(64)
     },
+    humor: {
+      generatedAt: '2026-07-25T12:00:01.000Z',
+      modelIdentity: 'public-humor-model',
+      sourceResultHash: 'a'.repeat(64),
+      items: [{
+        subcriterionId: 'professionalism.evidenceReasoning',
+        findingIds: ['finding_1'],
+        line: 'Evidence is cited, but it still wants its receipts stapled.'
+      }],
+      privatePrompt: 'must-not-project'
+    },
     replica: {
       status: 'released',
       submittedMedian: 86,
@@ -472,6 +483,31 @@ test('projects only server-released dual-track summaries after the absolute lock
     }
   };
   source.replicaArena = { status: 'released', rawScores: 'must-not-project' };
+  source.absoluteReview.modelPanel = {};
+  source.absoluteReview.modelPanel.primary = [{
+    reviewRunId: 'primary_0',
+    reviews: [{
+      subcriterionId: 'professionalism.evidenceReasoning',
+      findings: [{ findingId: 'finding_1', text: 'Evidence is cited.' }]
+    }]
+  }];
+  source.humanReviewAggregate = {
+    status: 'complete',
+    leaves: {
+      'professionalism.evidenceReasoning': { status: 'resolved', values: [78, 82], spread: 4, score: 80 }
+    }
+  };
+  source.humanReviews = [{
+    role: 'primary',
+    status: 'submitted',
+    scores: {
+      'professionalism.evidenceReasoning': {
+        rationale: 'The public evidence supports a minor adjustment.',
+        modelDisposition: 'modify',
+        overrideReason: ''
+      }
+    }
+  }];
 
   const projection = projectEvaluation(source, { audience: 'public' });
 
@@ -491,6 +527,37 @@ test('projects only server-released dual-track summaries after the absolute lock
     label: '夯',
     differenceStable: true
   });
+  assert.deepEqual(projection.resultV2.humor, {
+    generatedAt: '2026-07-25T12:00:01.000Z',
+    modelIdentity: 'public-humor-model',
+    sourceResultHash: 'a'.repeat(64),
+    items: [{
+      subcriterionId: 'professionalism.evidenceReasoning',
+      findingIds: ['finding_1'],
+      line: 'Evidence is cited, but it still wants its receipts stapled.'
+    }]
+  });
+  assert.deepEqual(projection.absoluteReview.modelPanel.primary[0].reviews, [{
+    subcriterionId: 'professionalism.evidenceReasoning',
+    findings: [{ findingId: 'finding_1', text: 'Evidence is cited.' }]
+  }]);
+  assert.deepEqual(projection.humanReviewAggregate, {
+    status: 'complete',
+    leaves: {
+      'professionalism.evidenceReasoning': { status: 'resolved', values: [78, 82], spread: 4, score: 80 }
+    }
+  });
+  assert.deepEqual(projection.humanReviews, [{
+    role: 'primary',
+    status: 'submitted',
+    scores: {
+      'professionalism.evidenceReasoning': {
+        rationale: 'The public evidence supports a minor adjustment.',
+        modelDisposition: 'modify',
+        overrideReason: ''
+      }
+    }
+  }]);
   assert.deepEqual(projection.governance, {
     phase: 'absolute_locked',
     absoluteLockedAt: '2026-07-25T12:00:00.000Z',

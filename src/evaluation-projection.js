@@ -20,6 +20,10 @@ export function projectEvaluation(evaluation, { audience = 'public', principal =
     throw new TypeError('evaluation must be an object');
   }
   assertAudiencePrincipal(audience, principal);
+  const absoluteLocked = hasAbsoluteLock(
+    evaluation.governance,
+    evaluation.resultV2?.absolute
+  );
 
   const projection = {
     schemaVersion: projectPrimitive(evaluation.schemaVersion, secrets),
@@ -48,7 +52,7 @@ export function projectEvaluation(evaluation, { audience = 'public', principal =
     absoluteReview: projectAbsoluteReview(
       evaluation.absoluteReview,
       secrets,
-      audience === 'judge' || audience === 'judge-preview'
+      audience === 'judge' || audience === 'judge-preview' || absoluteLocked
     ),
     resultV2: evaluation.resultV2 === null
       ? null
@@ -60,6 +64,13 @@ export function projectEvaluation(evaluation, { audience = 'public', principal =
           evaluation.governance
         )
   };
+  if (absoluteLocked) {
+    projection.humanReviewAggregate = projectHumanReviewAggregate(
+      evaluation.humanReviewAggregate,
+      secrets
+    );
+    projection.humanReviews = projectHumanReviews(evaluation.humanReviews, secrets);
+  }
   if (evaluation.archivedAt !== undefined) {
     projection.archivedAt = projectPrimitive(evaluation.archivedAt, secrets);
   }
@@ -113,6 +124,44 @@ function projectAbsoluteReview(value, secrets, includeModelPanel = false) {
   }, secrets);
 }
 
+function projectHumanReviewAggregate(value, secrets) {
+  return pick(value, ['status', 'leaves'], {
+    leaves: projectHumanReviewLeaves
+  }, secrets);
+}
+
+function projectHumanReviewLeaves(value, secrets) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return Object.fromEntries(Object.entries(value).flatMap(([subcriterionId, leaf]) => {
+    const projected = pick(leaf, ['status', 'values', 'spread', 'score'], {
+      values: projectPrimitiveArray
+    }, secrets);
+    return Object.keys(projected).length ? [[subcriterionId, projected]] : [];
+  }));
+}
+
+function projectHumanReviews(value, secrets) {
+  if (!Array.isArray(value)) return undefined;
+  return value
+    .filter((review) => review?.status === 'submitted')
+    .map((review) => pick(review, ['role', 'status', 'scores'], {
+      scores: projectHumanScores
+    }, secrets));
+}
+
+function projectHumanScores(value, secrets) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return Object.fromEntries(Object.entries(value).flatMap(([subcriterionId, score]) => {
+    const projected = pick(score, [
+      'score', 'evidenceIds', 'checkEvidence', 'rationale', 'modelDisposition', 'overrideReason'
+    ], {
+      evidenceIds: projectPrimitiveArray,
+      checkEvidence: projectCheckEvidence
+    }, secrets);
+    return Object.keys(projected).length ? [[subcriterionId, projected]] : [];
+  }));
+}
+
 function projectResultV2(
   value,
   secrets,
@@ -127,8 +176,8 @@ function projectResultV2(
     typeof governance?.replicaReleasedAt === 'string';
   const staleRelease = replicaStatus === 'released' && !releaseAllowed;
   return pick(value, omitReplica
-    ? ['absolute', 'rating']
-    : ['absolute', 'replica', 'rating'], {
+    ? ['absolute', 'rating', 'humor']
+    : ['absolute', 'replica', 'rating', 'humor'], {
     absolute: (item, nestedSecrets) => pick(
       item,
       [
@@ -151,7 +200,20 @@ function projectResultV2(
     ),
     rating: (item, nestedSecrets) => staleRelease
       ? { status: 'sealed' }
-      : pick(item, ['status', 'code', 'label', 'differenceStable'], {}, nestedSecrets)
+      : pick(item, ['status', 'code', 'label', 'differenceStable'], {}, nestedSecrets),
+    humor: (item, nestedSecrets) => absoluteLocked
+      ? projectLockedHumor(item, nestedSecrets)
+      : undefined
+  }, secrets);
+}
+
+function projectLockedHumor(value, secrets) {
+  return pick(value, ['generatedAt', 'modelIdentity', 'sourceResultHash', 'items'], {
+    items: (items, nestedSecrets) => Array.isArray(items)
+      ? items.map((item) => pick(item, ['subcriterionId', 'findingIds', 'line'], {
+        findingIds: projectPrimitiveArray
+      }, nestedSecrets))
+      : undefined
   }, secrets);
 }
 

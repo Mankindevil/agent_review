@@ -593,14 +593,24 @@ test('fails closed for judge and admin elevation when review governance is disab
   }
 });
 
-test('records evidence-view audit events without returning vault content', async () => {
-  const { readdir, readFile } = await import('node:fs/promises');
+test('allows public evidence replay for public-projected manifest items', async () => {
   const vault = new EvidenceVault({
     root: process.env.EVIDENCE_ROOT,
     evaluationId: v2Fixture.id,
     key: process.env.EVIDENCE_ENCRYPTION_KEY
   });
   await vault.put(apiEvidenceRecord);
+  const response = await fetch(
+    `${origin}/api/evaluations/${v2Fixture.id}/evidence/${apiEvidenceRecord.evidenceId}`
+  );
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.item.evidenceId, 'ev_api');
+  assert.deepEqual(body.item.payload, { durationMs: 30 });
+});
+
+test('records evidence-view audit events without returning vault content', async () => {
+  const { readdir, readFile } = await import('node:fs/promises');
   const response = await fetch(
     `${origin}/api/evaluations/${v2Fixture.id}/evidence/${apiEvidenceRecord.evidenceId}`,
     { headers: { authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}` } }
@@ -826,19 +836,9 @@ test('keeps V2 browser secrets memory-only and renders nested projections safely
   assert.match(script, /function statusOf\(item\)/);
   assert.match(script, /function stageOf\(item\)/);
   assert.match(script, /function progressOf\(item\)/);
-  assert.match(script, /function renderV2Result\(item\)/);
-  assert.match(script, /function renderReleasedReplicaResult/);
-  assert.match(script, /复刻结果已密封，等待绝对分锁定/);
-  assert.match(script, /const absoluteLocked = item\.governance\?\.phase === 'absolute_locked'/);
-  assert.match(script, /item\.governance\?\.absoluteLockedAt/);
-  assert.match(script, /item\.governance\?\.resultHash/);
-  assert.match(script, /const replicaReleased = absoluteLocked/);
-  assert.match(script, /item\.governance\?\.replicaReleasedAt/);
-  assert.match(script, /replica\.status === 'released'/);
-  assert.match(script, /const replicaUnavailable = absoluteLocked/);
-  assert.match(script, /human_open/);
-  assert.match(script, /非盲人工复核/);
-  assert.match(script, /protocolRecovery/);
+  assert.match(script, /renderV2Result as renderV2ResultView/);
+  assert.doesNotMatch(script, /function renderV2Result\(item\)/);
+  assert.match(script, /renderV2ResultView\(item, \{ escapeHtml \}\)/);
   assert.match(script, /function renderV2HistoryItem\(item\)/);
   assert.match(script, /schemaVersion:\s*2,\s*agentCard,\s*agentExamples/);
   assert.match(script, /participantAccessToken/);

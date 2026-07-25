@@ -718,18 +718,16 @@ async function serveEvidenceItem(request, response, evaluationId, evidenceId) {
     return json(response, 404, { error: 'Evaluation does not exist' });
   }
   const principal = authenticatePrincipal(request, item, process.env);
-  if (!principal) {
-    return json(response, 401, { error: 'authentication required' });
-  }
+  const audience = principal?.role || 'public';
   if (
-    (principal.role === 'judge' || principal.role === 'admin') &&
+    (audience === 'judge' || audience === 'admin') &&
     !isReviewGovernanceEnabled(process.env)
   ) {
     return json(response, 403, { error: 'Review governance is disabled' });
   }
   const projected = projectEvaluation(item, {
-    audience: principal.role,
-    principal
+    audience,
+    principal: principal || null
   });
   const manifestItem = projected.evidenceManifest?.items?.find(
     (entry) => entry.evidenceId === evidenceId
@@ -741,10 +739,10 @@ async function serveEvidenceItem(request, response, evaluationId, evidenceId) {
   const record = await evidenceVault.get(manifestItem.evidenceId, manifestItem.recordHash);
   const projectedRecord = projectEvidenceRecord(record, manifestItem);
   await accessAuditStore.append({
-    principalId: principal.principalId,
+    principalId: principal?.principalId || 'public',
     evaluationId: item.id,
     evidenceId: manifestItem.evidenceId,
-    role: principal.role
+    role: audience
   });
   return json(response, 200, { item: projectedRecord });
 }

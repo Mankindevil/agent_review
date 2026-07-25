@@ -14,6 +14,14 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
     ['Agent 能力', dimensions.agentCapability]
   ].map(([label, dimension]) => `<li><span>${label}</span><b>${value(dimension?.score)}</b><small>置信 ${value(dimension?.confidence)}</small></li>`).join('');
   const variants = testSummary.variantCounts || {};
+  const runtimeRows = released ? renderRuntimeRows(replica, escapeHtml) : '';
+  const findings = renderModelFindings(item.absoluteReview?.modelPanel, escapeHtml);
+  const humor = renderHumor(item.resultV2?.humor, escapeHtml);
+  const humanOpinions = renderHumanOpinions(
+    item.humanReviewAggregate,
+    item.humanReviews,
+    escapeHtml
+  );
 
   return `
     <article class="v2-result-report" data-result-section="absolute-total">
@@ -31,7 +39,7 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
     <article class="v2-result-report" data-result-section="replica-advantage">
       <header><div><small>SEALED THEN RELEASED / REPLICA</small><h3>复刻优势：是否胜过五分钟临时 Skill</h3></div><b>${released ? signed(replica.conservativeDelta) : pendingReplica ? '待复刻' : '密封中'}</b></header>
       ${released
-        ? `<p>提交 Agent ${value(replica.submittedMedian)}；最佳有效复刻 ${value(replica.bestBaseline?.median)}（${escapeHtml(replica.bestBaseline?.runtimeId || '—')}）。Δc ${signed(replica.conservativeDelta)}，95% CI ${value(replica.ci95?.low)} → ${value(replica.ci95?.high)}，${stableCopy}。</p>`
+        ? `<p>提交 Agent 中位数 ${value(replica.submittedMedian)}；最佳有效复刻 ${value(replica.bestBaseline?.median)}（${escapeHtml(replica.bestBaseline?.runtimeId || '—')}）。Δc ${signed(replica.conservativeDelta)}，95% CI ${value(replica.ci95?.low)} → ${value(replica.ci95?.high)}，${stableCopy}。</p>${runtimeRows}`
         : '<p>绝对分单独成立；没有有效 Replica 时不把“待复刻”解释为胜出。</p>'}
     </article>
     <article class="v2-result-report" data-result-section="capability-declared-observed">
@@ -45,10 +53,13 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
     <article class="v2-result-report" data-result-section="findings-and-humor">
       <header><div><small>LOCKED FINDINGS</small><h3>严肃结论与一句锐评</h3></div></header>
       <p>结论、引用与幽默改写均以锁定结果为准；幽默不新增事实、不改动分数。</p>
+      ${findings || '<p>锁定模型结论尚未公开。</p>'}
+      ${humor || '<p>幽默锐评尚未生成。</p>'}
     </article>
     <article class="v2-result-report" data-result-section="human-opinions">
       <header><div><small>HUMAN FINAL OPINIONS</small><h3>人工最终意见与调整</h3></div></header>
       <p>两名独立评委完成适用叶子评分；超过 15 分的分歧进入仲裁。最终权重仅由服务端计算。</p>
+      ${humanOpinions || '<p>人工最终意见尚未锁定。</p>'}
     </article>
     <article class="v2-result-report v2-result-report--gaps" data-result-section="evidence-gaps">
       <header><div><small>UNCERTAINTY REGISTER</small><h3>不可验证声明与证据缺口</h3></div></header>
@@ -63,4 +74,56 @@ function value(item) {
 
 function signed(item) {
   return Number.isFinite(item) ? `${item >= 0 ? '+' : ''}${Math.round(item * 100) / 100}` : '—';
+}
+
+function renderRuntimeRows(replica, escapeHtml) {
+  const runtimes = Array.isArray(replica.runtimes) ? runtimes.filter((runtime) => runtime?.valid) : [];
+  if (!runtimes.length) return '<p>没有有效 Replica runtime 中位数可公开。</p>';
+  return `<ul class="v2-result-runtimes">${runtimes.map((runtime) =>
+    `<li><span>${escapeHtml(runtime.runtimeId || 'unknown')}</span><b>提交 ${value(replica.submittedMedian)} vs Replica ${value(runtime.median)}</b><small>Δc ${signed(replica.conservativeDelta)} · 95% CI ${value(replica.ci95?.low)} → ${value(replica.ci95?.high)}</small></li>`
+  ).join('')}</ul>`;
+}
+
+function renderModelFindings(panel, escapeHtml) {
+  const seen = new Set();
+  const findings = (panel?.primary || []).flatMap((run) => run?.reviews || [])
+    .flatMap((review) => (review?.findings || []).map((finding) => ({
+      subcriterionId: review.subcriterionId,
+      findingId: finding?.findingId,
+      text: finding?.text
+    })))
+    .filter((finding) => typeof finding.text === 'string' && finding.text.trim())
+    .filter((finding) => {
+      const key = `${finding.subcriterionId}:${finding.findingId}:${finding.text}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  return findings.length
+    ? `<ul class="v2-result-findings">${findings.map((finding) =>
+      `<li><small>${escapeHtml(finding.subcriterionId || '模型结论')}</small>${escapeHtml(finding.text)}</li>`
+    ).join('')}</ul>`
+    : '';
+}
+
+function renderHumor(humor, escapeHtml) {
+  const items = Array.isArray(humor?.items) ? humor.items : [];
+  return items.length
+    ? `<ul class="v2-result-humor">${items.map((item) =>
+      `<li><small>${escapeHtml(item.subcriterionId || '锐评')}</small>${escapeHtml(item.line || '—')}</li>`
+    ).join('')}</ul>`
+    : '';
+}
+
+function renderHumanOpinions(aggregate, reviews, escapeHtml) {
+  const leaves = Object.entries(aggregate?.leaves || {}).filter(([, leaf]) => leaf?.status === 'resolved');
+  const opinions = (reviews || []).flatMap((review) => Object.entries(review?.scores || {}).map(
+    ([subcriterionId, score]) => ({ subcriterionId, ...score })
+  ));
+  if (!leaves.length && !opinions.length) return '';
+  return `<ul class="v2-result-human">${leaves.map(([subcriterionId, leaf]) =>
+    `<li><b>${escapeHtml(subcriterionId)}</b><span>最终 ${value(leaf.score)} · 分歧 ${value(leaf.spread)}</span></li>`
+  ).join('')}${opinions.map((opinion) =>
+    `<li><b>${escapeHtml(opinion.subcriterionId)}</b><span>${escapeHtml(opinion.modelDisposition || 'affirm')}：${escapeHtml(opinion.rationale || opinion.overrideReason || '未提供说明')}</span></li>`
+  ).join('')}</ul>`;
 }
