@@ -51,7 +51,8 @@ export function createReplicaAdapter(runtime, mode, dependencies = {}) {
       if (remote) {
         payload = await executeWithLimits(async (signal) => {
           const value = await postReplica(config, dependencies, {
-            action: 'build_replica', replicaPackage, buildBudget, seed: options.seed, temperature: options.temperature
+            action: 'build_replica', replicaPackage, buildBudget, seed: options.seed, temperature: options.temperature,
+            ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {})
           }, signal);
           await verifyPayloadLimits(dependencies, value, REPLICA_BUILD_BUDGET_V1, 'build', signal);
           return value;
@@ -59,7 +60,7 @@ export function createReplicaAdapter(runtime, mode, dependencies = {}) {
       } else if (local && typeof dependencies.localBuild === 'function') {
         payload = await withFreshWorkspace(runtime.id, dependencies, (workspace) => executeWithLimits(async (signal) => {
           const value = await dependencies.localBuild({
-            replicaPackage, buildBudget, options: { ...options, signal }, workspace, policy: localPolicy(buildBudget, dependencies.sandbox)
+            replicaPackage, buildBudget, idempotencyKey: options.idempotencyKey, options: { ...options, signal }, workspace, policy: localPolicy(buildBudget, dependencies.sandbox)
           });
           await verifyPayloadLimits(dependencies, value, REPLICA_BUILD_BUDGET_V1, 'build', signal);
           return value;
@@ -78,7 +79,8 @@ export function createReplicaAdapter(runtime, mode, dependencies = {}) {
         if (remote) {
           payload = await executeWithLimits(async (signal) => {
             const value = await postReplica(config, dependencies, {
-              action: 'run_replica', replicaArtifact, testInput, contextHandle: remoteContext(context), runBudget, seed: options.seed, temperature: options.temperature
+              action: 'run_replica', replicaArtifact, testInput, contextHandle: remoteContext(context), runBudget, seed: options.seed, temperature: options.temperature,
+              ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {})
             }, signal);
             await verifyPayloadLimits(dependencies, value, runBudget, 'run', signal);
             return value;
@@ -90,7 +92,7 @@ export function createReplicaAdapter(runtime, mode, dependencies = {}) {
           }
           payload = await executeWithLimits(async (signal) => {
             const value = await dependencies.localRun({
-              replicaArtifact, testInput, contextHandle: context, runBudget, options: { ...options, signal }, policy: localPolicy(runBudget, dependencies.sandbox)
+              replicaArtifact, testInput, contextHandle: context, runBudget, idempotencyKey: options.idempotencyKey, options: { ...options, signal }, policy: localPolicy(runBudget, dependencies.sandbox)
             });
             await verifyPayloadLimits(dependencies, value, runBudget, 'run', signal);
             return value;

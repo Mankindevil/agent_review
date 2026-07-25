@@ -831,7 +831,8 @@ function mergeReplicaCheckpoint(previous, step, testPlan) {
     turns: { ...(current.turns || {}) },
     cells: { ...(current.cells || {}) }
   };
-  if (step.type === 'package-locked') next.packageHash = step.packageHash;
+      if (step.type === 'package-locked') next.packageHash = step.packageHash;
+  if (step.type === 'package-locked') next.packageGeneratedAt = step.packageGeneratedAt;
   if (step.type === 'build-complete') {
     next.builds[step.runtimeId] = {
       validity: step.validity,

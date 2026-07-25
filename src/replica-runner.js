@@ -30,7 +30,7 @@ export async function buildReplicas(options = {}) {
     options.agentExamples,
     {
       rubricVersion: requiredString(options.rubricVersion, 'rubricVersion'),
-      generatedAt: options.generatedAt || now(),
+      generatedAt: options.resume?.packageGeneratedAt || options.generatedAt || now(),
       ...(options.packageOptions || {})
     }
   );
@@ -38,7 +38,7 @@ export async function buildReplicas(options = {}) {
   if (options.resume?.packageHash && options.resume.packageHash !== packageHash) {
     throw replicaError('CHECKPOINT_COMMITMENT_MISMATCH', 'Replica checkpoint package hash did not match the rebuilt public package');
   }
-  await checkpoint(options, { version: 'replica-checkpoint/v1', type: 'package-locked', packageHash });
+  await checkpoint(options, { version: 'replica-checkpoint/v1', type: 'package-locked', packageHash, packageGeneratedAt: replicaPackage.manifest.generatedAt });
   const resumeBuilds = options.resume?.builds || {};
   const sealedManifestItems = [];
   const records = [];
