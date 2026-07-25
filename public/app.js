@@ -115,6 +115,8 @@ function bindEvents() {
     if (deleteControl) { deleteEvaluation(deleteControl); return; }
     const skipControl = event.target.closest('[data-skip-human-review]');
     if (skipControl) { skipHumanReview(skipControl); return; }
+    const finalizeControl = event.target.closest('[data-finalize-dual-track]');
+    if (finalizeControl) { finalizeDualTrack(finalizeControl); return; }
     const skillDetail = event.target.closest('[data-skill-detail]');
     if (skillDetail) { toggleSkillDetail(skillDetail); return; }
     const skillFile = event.target.closest('[data-skill-file]');
@@ -552,6 +554,7 @@ async function submitV2Evaluation(agentCard) {
   const authorizationInput = $('#agent-authorization');
   const agentAuthorization = authorizationInput.value.trim();
   const skipHumanReview = Boolean($('#skip-human-review')?.checked);
+  const replicaReviewPolicy = collectReplicaReviewPolicy();
   const request = {
     schemaVersion: 2, agentCard, agentExamples,
     ...(agentAuthorization ? { agentAuthorization } : {}),
@@ -572,6 +575,7 @@ async function submitV2Evaluation(agentCard) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || '创建 V2 评测失败');
     created = true;
+    if (replicaReviewPolicy) await applyReplicaReviewPolicy(payload.id, replicaReviewPolicy);
     await loadHistory();
     await openEvaluation(payload.id);
   } catch (error) {
@@ -581,6 +585,40 @@ async function submitV2Evaluation(agentCard) {
       button.disabled = false;
       $('span', button).textContent = '启动 A2A 证据评测';
     }
+  }
+}
+
+const DEFAULT_REPLICA_REVIEW_POLICY = { visibility: 'full_blind', requiredPrimaries: 1, forceSeparateJudges: false };
+
+function collectReplicaReviewPolicy() {
+  const visibilityInput = $('#replica-policy-visibility');
+  if (!visibilityInput) return null;
+  const requiredPrimariesRaw = Number($('#replica-policy-required-primaries')?.value);
+  const policy = {
+    visibility: visibilityInput.value,
+    requiredPrimaries: Number.isSafeInteger(requiredPrimariesRaw) && requiredPrimariesRaw >= 1
+      ? requiredPrimariesRaw
+      : 1,
+    forceSeparateJudges: Boolean($('#replica-policy-force-separate-judges')?.checked)
+  };
+  const isDefault = Object.entries(DEFAULT_REPLICA_REVIEW_POLICY)
+    .every(([key, value]) => policy[key] === value);
+  return isDefault ? null : policy;
+}
+
+// Evaluation creation does not accept a replica review policy inline, so the
+// desk applies it right after create via PUT (policy freezes after the
+// first replica-human submission, so this is always safe here).
+async function applyReplicaReviewPolicy(evaluationId, policy) {
+  try {
+    await fetch(`/api/evaluations/${evaluationId}/replica-review-policy`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(policy)
+    });
+  } catch {
+    // Best-effort — the evaluation is already created and will fall back to
+    // the server's default replica review policy.
   }
 }
 
@@ -865,6 +903,31 @@ async function skipHumanReview(button) {
     await openEvaluation(id);
   } catch (error) {
     label.textContent = idleText;
+    button.disabled = false;
+    showError(error.message);
+  }
+}
+
+async function finalizeDualTrack(button) {
+  const id = button.dataset.finalizeDualTrack;
+  if (!id || button.disabled) return;
+  button.disabled = true;
+  const idleText = button.textContent;
+  button.textContent = '正在结算…';
+  try {
+    const response = await fetch(`/api/evaluations/${id}/finalize-dual-track`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': crypto.randomUUID()
+      },
+      body: JSON.stringify({})
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || '结算双轨终审失败');
+    await openEvaluation(id);
+  } catch (error) {
+    button.textContent = idleText;
     button.disabled = false;
     showError(error.message);
   }

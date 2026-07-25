@@ -67,3 +67,39 @@ test('publishes the ordered evidence-led dual-track result surface', async () =>
   assert.doesNotMatch(evidenceScript, /innerHTML/);
   assert.match(evidenceStyle, /prefers-reduced-motion/);
 });
+
+test('surfaces dual-track progress, replica-human hand-off, and finalize control', async () => {
+  const [renderer, app, indexHtml, styles, projection] = await Promise.all([
+    readFile(new URL('public/result-v2.js', root), 'utf8'),
+    readFile(new URL('public/app.js', root), 'utf8'),
+    readFile(new URL('public/index.html', root), 'utf8'),
+    readFile(new URL('public/styles.css', root), 'utf8'),
+    readFile(new URL('src/evaluation-projection.js', root), 'utf8')
+  ]);
+
+  assert.match(renderer, /trackStatus\.subStatusLabel/);
+  assert.match(renderer, /进行中/);
+  assert.match(projection, /等双轨/);
+  assert.match(projection, /等绝对分/);
+  assert.match(projection, /等复刻人工/);
+  assert.match(renderer, /function renderFinalizePanel/);
+  assert.match(renderer, /data-finalize-dual-track="/);
+  assert.match(renderer, /trackStatus\.canFinalize/);
+  assert.match(renderer, /function replicaTrackCopy/);
+  assert.match(renderer, /replicaHumanReview\?\.trackPhase/);
+  assert.match(renderer, /前往复刻人工评审台/);
+
+  assert.match(app, /data-finalize-dual-track/);
+  assert.match(app, /finalize-dual-track/);
+  assert.match(app, /function collectReplicaReviewPolicy/);
+  assert.match(app, /function applyReplicaReviewPolicy/);
+  assert.match(app, /replica-review-policy/);
+  assert.match(app, /skip-human-review/);
+  assert.match(app, /skipHumanReview/);
+
+  assert.match(indexHtml, /id="skip-human-review"/);
+  assert.match(indexHtml, /id="replica-policy-visibility"/);
+  assert.match(indexHtml, /id="replica-policy-required-primaries"/);
+  assert.match(indexHtml, /id="replica-policy-force-separate-judges"/);
+  assert.match(styles, /\.replica-policy-panel/);
+});

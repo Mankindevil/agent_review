@@ -136,6 +136,26 @@
             <span>跳过人工打分</span>
             <small>模型四席评审锁定后直接以模型中位数结算终审，不进入人工评审阶段。</small>
           </label>
+
+          <fieldset class="replica-policy-panel" id="replica-policy-panel">
+            <legend>复刻人工评审策略（可选，双轨并行）</legend>
+            <label>可见性
+              <select id="replica-policy-visibility">
+                <option value="full_blind" selected>full_blind · 复刻结果全程密封</option>
+                <option value="semi_blind">semi_blind</option>
+                <option value="open">open</option>
+                <option value="split_blind">split_blind · 绝对分公开，复刻强制密封</option>
+              </select>
+            </label>
+            <label>所需人工主评人数
+              <input id="replica-policy-required-primaries" type="number" min="1" step="1" value="1">
+            </label>
+            <label class="a2a-check">
+              <input id="replica-policy-force-separate-judges" type="checkbox">
+              禁止同一人同时评审绝对分与复刻
+            </label>
+            <small>复刻结果密封、模型 Arena 评分后并行开放；人工评分与绝对分复核互不阻塞，双轨都锁定后才结算终审。</small>
+          </fieldset>
         </section>
 
         <div class="form-actions single"><button class="primary-button" id="start-evaluation" type="button" disabled><span>正在确认评测模式</span><i>↗</i></button></div>

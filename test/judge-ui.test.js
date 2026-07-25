@@ -7,7 +7,9 @@ const requiredIds = [
   'queue-status',
   'queue-list',
   'queue-card-template',
-  'queue-leaf-template'
+  'queue-leaf-template',
+  'queue-replica-card-template',
+  'queue-replica-source-template'
 ];
 
 test('open review desk exposes the public queue controls and safety copy without a token gate', async () => {
@@ -24,11 +26,15 @@ test('open review desk exposes the public queue controls and safety copy without
 
   assert.doesNotMatch(html, /judge-access-form|assignment-list|human-score-form/);
   assert.match(html, /模型先评/u);
-  assert.match(html, /复刻结果.*绝对分锁定.*密封/u);
+  assert.match(html, /双轨终审结算前保持密封/u);
+  assert.match(html, /TRACK \/ 绝对分/u);
+  assert.match(html, /TRACK \/ 复刻/u);
   assert.match(index, /href="\/judge.html"/);
   assert.match(script, /\/api\/review-queue/);
   assert.match(script, /\/skip-human-review/);
   assert.match(script, /\/human-reviews/);
+  assert.match(script, /\/replica-human-reviews/);
+  assert.match(script, /\/replica-human-reviews\/lock/);
   assert.match(css, /@media \(max-width: 900px\)/);
   assert.match(css, /prefers-reduced-motion/);
   assert.doesNotMatch(`${html}\n${script}`, /localStorage|sessionStorage|indexedDB|document\.cookie|innerHTML/);
@@ -45,4 +51,20 @@ test('open review desk lets anyone skip or submit a single human review without 
   assert.match(script, /idempotency-key/);
   assert.match(script, /modelDisposition/);
   assert.match(script, /overturn/);
+});
+
+test('open review desk lists both absolute and replica tracks from the review queue', async () => {
+  const [html, script] = await Promise.all([
+    readFile(new URL('../public/judge.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/judge.js', import.meta.url), 'utf8')
+  ]);
+
+  assert.match(script, /function renderReplicaCard/);
+  assert.match(script, /function submitReplicaReview/);
+  assert.match(script, /replicaHumanReview\?\.trackPhase === 'open'/);
+  assert.match(script, /governance\?\.phase === 'human_open'/);
+  assert.match(script, /\/replica-human-reviews\/lock/);
+  for (const dim of ['taskConstraint', 'professionalQuality', 'evidenceRisk', 'artifactUsability']) {
+    assert.match(html, new RegExp(`data-dim="${dim}"`), dim);
+  }
 });

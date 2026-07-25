@@ -158,6 +158,12 @@ h1 em::after { content: ""; position: absolute; left: 0; bottom: -5px; width: 10
 .skip-human-review-panel input { width:16px; height:16px; margin-top:2px; }
 .skip-human-review-panel span { font-weight:800; font-size:12px; }
 .skip-human-review-panel small { grid-column:2; color:#5a5a52; font-size:9px; line-height:1.55; }
+.replica-policy-panel { display:grid; gap:10px; margin-top:12px; padding:14px; border:0; border-left:4px solid var(--ink); background:#f4f4f0; }
+.replica-policy-panel legend { padding:0; font-weight:800; font-size:12px; }
+.replica-policy-panel label { display:grid; gap:4px; font-size:11px; font-weight:700; color:#5a5a52; }
+.replica-policy-panel label.a2a-check { display:flex !important; grid-column:auto; }
+.replica-policy-panel select, .replica-policy-panel input[type="number"] { padding:8px; border:1px solid var(--ink); }
+.replica-policy-panel > small { color:#5a5a52; font-size:9px; line-height:1.55; }
 .v2-skip-panel { border-left:4px solid var(--lime); }
 .v2-skip-panel [data-skip-human-review] { margin:0 18px 16px; padding:10px 16px; border:1px solid var(--ink); background:var(--ink); color:white; font-weight:800; }
 .form-actions { display: grid; grid-template-columns: .8fr 1.25fr; gap: 10px; margin-top: 18px; }

@@ -48,7 +48,9 @@ export function projectEvaluation(evaluation, { audience = 'public', principal =
     ], secrets),
     governance: pickResult(evaluation.governance, [
       'phase', 'modelLockedAt', 'humanLockedAt', 'absoluteLockedAt',
-      'resultHash', 'replicaReleasedAt'
+      'resultHash', 'replicaReleasedAt', 'replicaHumanPhase',
+      'replicaHumanOpenedAt', 'replicaHumanLockedAt', 'replicaUnavailableAt',
+      'dualTrackFinalizedAt', 'humanReviewSkipped'
     ], secrets),
     qualification: projectQualification(evaluation.qualification, secrets),
     evidenceManifest: projectManifest(
@@ -72,8 +74,11 @@ export function projectEvaluation(evaluation, { audience = 'public', principal =
           evaluation.governance
         ),
     runLog: projectRunLog(evaluation.runLog, secrets),
-    activeWork: projectActiveWork(evaluation.activeWork, secrets)
+    activeWork: projectActiveWork(evaluation.activeWork, secrets),
+    trackStatus: projectTrackStatus(evaluation.governance, absoluteLocked)
   };
+  const replicaHumanReview = projectReplicaHumanReview(evaluation.replicaArena, evaluation.governance);
+  if (replicaHumanReview) projection.replicaHumanReview = replicaHumanReview;
   if (absoluteLocked) {
     projection.humanReviewAggregate = projectHumanReviewAggregate(
       evaluation.humanReviewAggregate,
@@ -255,7 +260,8 @@ function projectResultV2(
       replicaArena,
       nestedSecrets,
       releaseAllowed,
-      staleRelease
+      staleRelease,
+      governance
     ),
     rating: (item, nestedSecrets) => staleRelease
       ? { status: 'sealed' }
@@ -305,7 +311,7 @@ function projectLockedDimensions(value, secrets) {
     }));
 }
 
-function projectReplica(value, replicaArena, secrets, releaseAllowed, staleRelease) {
+function projectReplica(value, replicaArena, secrets, releaseAllowed, staleRelease, governance) {
   const status = projectPrimitive(value?.status || replicaArena?.status, secrets);
   if (status === 'released' && releaseAllowed) {
     return pick(value, [
@@ -335,11 +341,91 @@ function projectReplica(value, replicaArena, secrets, releaseAllowed, staleRelea
     : [];
   return {
     status: 'sealed',
+    // 「进行中」 sub-copy for the replica card: pending (not yet open),
+    // open (replica-human review under way), or locked (waiting on
+    // finalize alongside — or instead of — the absolute track).
+    humanReviewPhase: typeof governance?.replicaHumanLockedAt === 'string'
+      ? 'locked'
+      : governance?.replicaHumanPhase === 'replica_human_open'
+        ? 'open'
+        : 'pending',
     validReplicaCount: summaries.filter((item) => item?.validity === 'valid').length,
     pendingAttributionCount: summaries.filter(
       (item) => item?.validity === 'attribution-pending'
     ).length
   };
+}
+
+const TRACK_SUB_STATUS_LABELS = Object.freeze({
+  waiting_both: '等双轨',
+  waiting_absolute: '等绝对分',
+  waiting_replica_human: '等复刻人工'
+});
+
+/**
+ * Dual-track UI status (see
+ * docs/superpowers/specs/2026-07-26-parallel-replica-human-review-design.md):
+ * the FINAL label stays 「进行中」 with a sub-status until
+ * `finalizeDualTrack` transitions governance to `final`. This never derives
+ * a rating; it only summarizes which track(s) the desk is still waiting on.
+ */
+function projectTrackStatus(governance, absoluteLocked) {
+  const finalized = governance?.phase === 'final' &&
+    typeof governance?.dualTrackFinalizedAt === 'string';
+  if (finalized) return { overall: 'final' };
+  const replicaSettled = typeof governance?.replicaUnavailableAt === 'string' ||
+    typeof governance?.replicaHumanLockedAt === 'string';
+  const subStatus = !absoluteLocked && !replicaSettled
+    ? 'waiting_both'
+    : !absoluteLocked
+      ? 'waiting_absolute'
+      : !replicaSettled
+        ? 'waiting_replica_human'
+        : 'waiting_both';
+  return {
+    overall: 'in_progress',
+    subStatus,
+    subStatusLabel: TRACK_SUB_STATUS_LABELS[subStatus],
+    canFinalize: Boolean(absoluteLocked && replicaSettled)
+  };
+}
+
+/**
+ * Surfaces just enough of the sealed Replica Arena for the open replica-
+ * human desk to know what to score, without leaking anything beyond the
+ * already-anonymous `submitted` / `replica:{runtimeId}` source labels (the
+ * same blind labels the model Arena itself uses). Returns `undefined` once
+ * there is nothing replica-human-review-relevant to report (no Replica
+ * Arena at all).
+ */
+function projectReplicaHumanReview(replicaArena, governance) {
+  if (!replicaArena) return undefined;
+  const locked = typeof governance?.replicaHumanLockedAt === 'string';
+  const unavailable = typeof governance?.replicaUnavailableAt === 'string';
+  const open = !locked && governance?.replicaHumanPhase === 'replica_human_open';
+  let trackPhase;
+  if (unavailable) trackPhase = 'unavailable';
+  else if (locked) trackPhase = 'locked';
+  else if (open) trackPhase = 'open';
+  else if (replicaArena.status === 'sealed') trackPhase = 'sealed';
+  else return undefined;
+  const result = { trackPhase };
+  const policy = governance?.replicaReviewPolicy;
+  if (policy && typeof policy === 'object') {
+    result.policy = pick(policy, ['visibility', 'requiredPrimaries', 'forceSeparateJudges']);
+  }
+  if (trackPhase === 'open') {
+    result.requiredSources = replicaHumanRequiredSources(replicaArena);
+  }
+  return result;
+}
+
+function replicaHumanRequiredSources(replicaArena) {
+  const summaries = Array.isArray(replicaArena.runtimeSummaries) ? replicaArena.runtimeSummaries : [];
+  const validRuntimeIds = summaries
+    .filter((item) => item?.validity === 'valid' && typeof item.runtimeId === 'string')
+    .map((item) => item.runtimeId);
+  return ['submitted', ...validRuntimeIds.map((runtimeId) => `replica:${runtimeId}`)];
 }
 
 function hasAbsoluteLock(governance, absolute) {

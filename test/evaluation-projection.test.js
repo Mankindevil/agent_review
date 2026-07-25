@@ -138,8 +138,15 @@ test('constructs a public V2 projection from explicit allow-listed fields', () =
     'schemaVersion', 'id', 'createdAt', 'updatedAt', 'revision',
     'evaluationWindow', 'execution', 'governance', 'qualification',
     'evidenceManifest', 'objectiveCapability', 'absoluteReview', 'resultV2',
-    'runLog', 'activeWork'
+    'runLog', 'activeWork', 'trackStatus', 'replicaHumanReview'
   ]);
+  assert.deepEqual(projection.trackStatus, {
+    overall: 'in_progress',
+    subStatus: 'waiting_both',
+    subStatusLabel: '等双轨',
+    canFinalize: false
+  });
+  assert.deepEqual(projection.replicaHumanReview, { trackPhase: 'sealed' });
   assert.deepEqual(projection.runLog, []);
   assert.equal(projection.activeWork, null);
   assert.deepEqual(projection.evaluationWindow, {
@@ -428,7 +435,7 @@ test('all pre-lock projections expose sealed Replica counts without runtime or e
             : null
     });
     assert.deepEqual(projection.resultV2.replica, {
-      status: 'sealed', validReplicaCount: 1, pendingAttributionCount: 1
+      status: 'sealed', humanReviewPhase: 'pending', validReplicaCount: 1, pendingAttributionCount: 1
     });
     const serialized = JSON.stringify(projection);
     for (const secret of ['runtime-private', 'runtime-pending', 'ev_private', 'must-not-project']) {

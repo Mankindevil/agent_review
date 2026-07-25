@@ -1176,7 +1176,7 @@ test('serves the open review desk without a token gate or Replica preview', asyn
   assert.match(response.headers.get('content-type'), /text\/html/);
   assert.match(html, /queue-list/);
   assert.doesNotMatch(html, /judge-access-form/);
-  assert.match(html, /复刻结果.*绝对分锁定.*密封/u);
+  assert.match(html, /复刻结果仍密封/u);
   assert.doesNotMatch(html, /replicaArena|revealMap|runtimeId/u);
 });
 

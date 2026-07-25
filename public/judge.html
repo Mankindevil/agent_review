@@ -23,7 +23,7 @@
       <aside class="seal-card" id="replica-seal-notice">
         <span>SEALED ARENA</span>
         <b>复刻结果仍密封</b>
-        <p>复刻结果在绝对分锁定前保持密封；Replica 身份和对战优势均不可见。</p>
+        <p>复刻身份和对战优势在双轨终审结算前保持密封；模型 Arena 密封评分后，复刻人工评审即可与绝对分复核并行开放。</p>
       </aside>
     </section>
 
@@ -43,6 +43,7 @@
         <div><small class="queue-card-id"></small><b class="queue-card-heading">评测详情</b></div>
         <a class="queue-card-view" target="_blank" rel="noopener">查看详情 ↗</a>
       </header>
+      <p class="queue-card-track-label">TRACK / 绝对分</p>
       <div class="queue-card-dimensions"></div>
       <div class="queue-card-actions">
         <button type="button" class="queue-card-toggle" data-action="toggle-score">展开打分</button>
@@ -71,6 +72,33 @@
         </select>
       </label>
       <label class="leaf-override-label hidden">推翻理由（推翻时必填）<textarea class="leaf-override"></textarea></label>
+    </fieldset>
+  </template>
+  <template id="queue-replica-card-template">
+    <article class="queue-card queue-card-replica">
+      <header>
+        <div><small class="queue-card-id"></small><b class="queue-card-heading">复刻人工评审</b></div>
+        <a class="queue-card-view" target="_blank" rel="noopener">查看详情 ↗</a>
+      </header>
+      <p class="queue-card-track-label">TRACK / 复刻</p>
+      <p class="queue-card-replica-hint">对提交 Agent 与每个有效复刻 Runtime 打四维分；来源标签均已匿名，不代表真实身份。</p>
+      <form class="queue-card-form" data-role="replica-score-form">
+        <div class="queue-card-leaves replica-source-list"></div>
+        <label class="replica-rationale-label">简短说明（可选）<textarea class="replica-rationale"></textarea></label>
+        <p class="queue-card-error" role="alert"></p>
+        <div class="queue-card-form-actions">
+          <button type="submit">提交复刻人工打分</button>
+        </div>
+      </form>
+    </article>
+  </template>
+  <template id="queue-replica-source-template">
+    <fieldset class="leaf-form replica-source-form">
+      <h3 class="leaf-name"></h3>
+      <label>任务约束遵循（0–100）<input type="number" min="0" max="100" required class="replica-dim" data-dim="taskConstraint"></label>
+      <label>专业质量（0–100）<input type="number" min="0" max="100" required class="replica-dim" data-dim="professionalQuality"></label>
+      <label>证据与风险（0–100）<input type="number" min="0" max="100" required class="replica-dim" data-dim="evidenceRisk"></label>
+      <label>产物可用性（0–100）<input type="number" min="0" max="100" required class="replica-dim" data-dim="artifactUsability"></label>
     </fieldset>
   </template>
   <script type="module" src="/judge.js"></script>

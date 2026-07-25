@@ -2,6 +2,8 @@ const queueStatus = document.querySelector('#queue-status');
 const queueList = document.querySelector('#queue-list');
 const cardTemplate = document.querySelector('#queue-card-template');
 const leafTemplate = document.querySelector('#queue-leaf-template');
+const replicaCardTemplate = document.querySelector('#queue-replica-card-template');
+const replicaSourceTemplate = document.querySelector('#queue-replica-source-template');
 
 loadQueue();
 
@@ -19,12 +21,18 @@ async function loadQueue() {
 
 function renderQueue(items) {
   queueList.replaceChildren();
-  if (!items.length) {
+  const cards = items.flatMap((item) => {
+    const nodes = [];
+    if (item.governance?.phase === 'human_open') nodes.push(renderCard(item));
+    if (item.replicaHumanReview?.trackPhase === 'open') nodes.push(renderReplicaCard(item));
+    return nodes;
+  });
+  if (!cards.length) {
     queueStatus.textContent = '当前没有等待人工复核的评测。';
     return;
   }
-  queueStatus.textContent = `共 ${items.length} 项等待人工复核。`;
-  for (const item of items) queueList.append(renderCard(item));
+  queueStatus.textContent = `共 ${cards.length} 项等待人工复核。`;
+  for (const card of cards) queueList.append(card);
 }
 
 function renderCard(item) {
@@ -104,6 +112,81 @@ async function skipHumanReview(evaluationId, button, cardRoot) {
     button.disabled = false;
     button.textContent = idle;
     alert(error.message || '跳过人工打分失败。');
+  }
+}
+
+function renderReplicaCard(item) {
+  const fragment = replicaCardTemplate.content.cloneNode(true);
+  const root = fragment.querySelector('.queue-card-replica');
+  fragment.querySelector('.queue-card-id').textContent = `EVAL / ${item.id}`;
+  fragment.querySelector('.queue-card-view').href = `/#/evaluation/${encodeURIComponent(item.id)}`;
+  const form = fragment.querySelector('[data-role="replica-score-form"]');
+  const sources = item.replicaHumanReview?.requiredSources || [];
+  form.querySelector('.replica-source-list').replaceChildren(...sources.map((sourceId) => renderReplicaSource(sourceId)));
+  form.addEventListener('submit', (event) => submitReplicaReview(event, item, form, root));
+  return fragment;
+}
+
+function renderReplicaSource(sourceId) {
+  const fragment = replicaSourceTemplate.content.cloneNode(true);
+  const root = fragment.querySelector('.replica-source-form');
+  root.dataset.source = sourceId;
+  fragment.querySelector('.leaf-name').textContent = sourceId === 'submitted' ? '提交 Agent' : sourceId;
+  return fragment;
+}
+
+async function submitReplicaReview(event, item, form, cardRoot) {
+  event.preventDefault();
+  const errorBox = form.querySelector('.queue-card-error');
+  errorBox.textContent = '';
+  const scores = {};
+  for (const sourceForm of form.querySelectorAll('.replica-source-form')) {
+    const sourceId = sourceForm.dataset.source;
+    const dimensions = {};
+    for (const input of sourceForm.querySelectorAll('.replica-dim')) {
+      dimensions[input.dataset.dim] = Number(input.value);
+    }
+    scores[sourceId] = dimensions;
+  }
+  const rationale = form.querySelector('.replica-rationale').value.trim();
+  const submitButton = form.querySelector('button[type="submit"]');
+  submitButton.disabled = true;
+  try {
+    const response = await fetch(`/api/evaluations/${encodeURIComponent(item.id)}/replica-human-reviews`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scores, ...(rationale ? { rationale } : {}) })
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || '提交失败。');
+    await tryLockReplicaHumanReview(item.id);
+    cardRoot.classList.add('queue-card-resolved');
+    form.classList.add('hidden');
+    cardRoot.querySelector('.queue-card-replica-hint').replaceChildren(
+      document.createTextNode('复刻人工打分已提交，达到所需人数后自动锁定该轨道。')
+    );
+    setTimeout(loadQueue, 800);
+  } catch (error) {
+    errorBox.textContent = error.message || '提交失败。';
+  } finally {
+    submitButton.disabled = false;
+  }
+}
+
+// Open-review desk: with the default `requiredPrimaries: 1` a single
+// submission already satisfies the replica-human gate, so the desk tries to
+// lock right after every submit. This is a best-effort call — the server
+// rejects it harmlessly when more primaries (or arbitration) are still
+// required, and the queue simply keeps the card open for the next reviewer.
+async function tryLockReplicaHumanReview(evaluationId) {
+  try {
+    await fetch(`/api/evaluations/${encodeURIComponent(evaluationId)}/replica-human-reviews/lock`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': crypto.randomUUID() },
+      body: JSON.stringify({})
+    });
+  } catch {
+    // Ignored — see comment above.
   }
 }
 

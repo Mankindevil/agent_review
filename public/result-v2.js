@@ -2,6 +2,7 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
   const absolute = item.resultV2?.absolute || {};
   const replica = item.resultV2?.replica || {};
   const rating = item.resultV2?.rating || {};
+  const trackStatus = item.trackStatus || {};
   const dimensions = absolute.dimensions || {};
   const testSummary = absolute.testSummary || {};
   const coverage = dimensions.agentCapability?.objectiveCoverage;
@@ -23,9 +24,15 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
     escapeHtml
   );
   const skipPanel = renderSkipHumanReviewPanel(item, escapeHtml);
+  const finalizePanel = renderFinalizePanel(item, trackStatus, escapeHtml);
+  const ratingLabel = trackStatus.overall === 'final' ? (rating.label || '待定') : '进行中';
+  const ratingSub = trackStatus.overall === 'final'
+    ? (item.evaluationTrack || item.qualification?.selectedInterface?.binding || 'same-track only')
+    : (trackStatus.subStatusLabel || 'same-track only');
 
   return `
     ${skipPanel}
+    ${finalizePanel}
     <article class="v2-result-report" data-result-section="absolute-total">
       <header class="v2-result-report__head">
         <div><small>LOCKED / ABSOLUTE RESULT</small><h3>三维绝对分：Agent 本身做得怎么样</h3></div>
@@ -35,14 +42,14 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
       <ul class="v2-result-dimensions">${dimensionRows}</ul>
     </article>
     <article class="v2-rating-strip" data-result-section="rating-status">
-      <span>FINAL RATING</span><b>${escapeHtml(rating.label || (absolute.status === 'locked' ? '待定' : '进行中'))}</b>
-      <small>${escapeHtml(item.evaluationTrack || item.qualification?.selectedInterface?.binding || 'same-track only')}</small>
+      <span>FINAL RATING</span><b>${escapeHtml(ratingLabel)}</b>
+      <small>${escapeHtml(ratingSub)}</small>
     </article>
     <article class="v2-result-report" data-result-section="replica-advantage">
       <header><div><small>SEALED THEN RELEASED / REPLICA</small><h3>复刻优势：是否胜过五分钟临时 Skill</h3></div><b>${released ? signed(replica.conservativeDelta) : pendingReplica ? '待复刻' : '密封中'}</b></header>
       ${released
         ? `<p>提交 Agent 中位数 ${value(replica.submittedMedian)}；最佳有效复刻 ${value(replica.bestBaseline?.median)}（${escapeHtml(replica.bestBaseline?.runtimeId || '—')}）。Δc ${signed(replica.conservativeDelta)}，95% CI ${value(replica.ci95?.low)} → ${value(replica.ci95?.high)}，${stableCopy}。</p>${runtimeRows}`
-        : '<p>绝对分单独成立；没有有效 Replica 时不把“待复刻”解释为胜出。</p>'}
+        : `<p>${replicaTrackCopy(item, pendingReplica)}</p>`}
     </article>
     <article class="v2-result-report" data-result-section="capability-declared-observed">
       <header><div><small>DECLARED × OBSERVED</small><h3>声明能力与观测能力</h3></div><b>${coverage === undefined ? '—' : `${Math.round(coverage * 100)}%`}</b></header>
@@ -78,6 +85,32 @@ function renderSkipHumanReviewPanel(item, escapeHtml) {
       <p>模型四席评审已锁定；任何人都可以提交一次人工打分，或直接跳过并以模型中位数结算终审。</p>
       <button type="button" class="text-button" data-skip-human-review="${escapeHtml(item.id)}">跳过人工打分</button>
     </article>`;
+}
+
+// Dual-track finalize is opportunistic on every state-changing endpoint (see
+// docs/superpowers/specs/2026-07-26-parallel-replica-human-review-design.md),
+// so this manual button only ever appears for the rare race where both
+// tracks are ready but nothing has triggered `finalize-dual-track` yet.
+function renderFinalizePanel(item, trackStatus, escapeHtml) {
+  if (!trackStatus.canFinalize || trackStatus.overall === 'final') return '';
+  return `
+    <article class="v2-result-report v2-finalize-panel" data-result-section="dual-track-finalize">
+      <header><div><small>DUAL TRACK READY</small><h3>双轨均已就绪，可以结算终审</h3></div></header>
+      <p>绝对分与复刻人工评审均已锁定；点击结算生成最终 Δc 与评级。</p>
+      <button type="button" class="text-button" data-finalize-dual-track="${escapeHtml(item.id)}">结算双轨终审</button>
+    </article>`;
+}
+
+function replicaTrackCopy(item, pendingReplica) {
+  if (pendingReplica) return '绝对分单独成立；没有有效 Replica 时不把“待复刻”解释为胜出。';
+  const trackPhase = item.replicaHumanReview?.trackPhase;
+  if (trackPhase === 'open') {
+    return '模型 Arena 已密封评分，复刻人工评审进行中；<a href="/judge.html">前往复刻人工评审台 ↗</a>。';
+  }
+  if (trackPhase === 'locked') {
+    return '复刻人工评审已锁定；等待绝对分一起结算终审。';
+  }
+  return '复刻结果仍密封；密封解除前不展示对战优势。';
 }
 
 function value(item) {
