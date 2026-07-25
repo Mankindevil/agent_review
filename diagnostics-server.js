@@ -184,8 +184,12 @@ function httpError(statusCode, message) {
   return Object.assign(new Error(message), { statusCode });
 }
 
+export function formatDiagnosticsStartupMessage(port) {
+  return `Agent Card Check ready: http://localhost:${port}/agent-check`;
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const server = await startDiagnosticsServer();
   const address = server.address();
-  console.log(`Agent Card 自测台已启动：http://localhost:${address.port}/agent-check`);
+  console.log(formatDiagnosticsStartupMessage(address.port));
 }

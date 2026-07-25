@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createDiagnosticsServer,
+  formatDiagnosticsStartupMessage,
   startDiagnosticsServer
 } from '../diagnostics-server.js';
 
@@ -15,6 +16,12 @@ async function close(server) {
     server.close((error) => error ? reject(error) : resolve());
   });
 }
+
+test('formats the Windows-visible startup confirmation as ASCII', () => {
+  const message = formatDiagnosticsStartupMessage(4173);
+  assert.equal(message, 'Agent Card Check ready: http://localhost:4173/agent-check');
+  assert.equal(Buffer.from(message).every((byte) => byte < 0x80), true);
+});
 
 test('serves only the standalone diagnostics surface', async () => {
   const server = createDiagnosticsServer();
