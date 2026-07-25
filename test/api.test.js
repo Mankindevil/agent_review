@@ -86,6 +86,65 @@ function openReviewEvaluationFixture(id, phase = 'human_open') {
   };
 }
 
+function sealedReplicaEvaluationFixture(id, { phase = 'human_open' } = {}) {
+  const base = openReviewEvaluationFixture(id, phase);
+  return {
+    ...base,
+    qualification: { status: 'eligible' },
+    replicaArena: { status: 'sealed', runtimeSummaries: [{ runtimeId: 'alpha', validity: 'valid' }] },
+    replicaHumanReviews: [],
+    testPlan: {
+      tests: [{ testId: 'test_1', repeatCount: 1, input: { parts: [{ type: 'text', text: 'Evaluate this.' }] } }]
+    },
+    phase2Execution: {
+      testRuns: [{
+        testId: 'test_1',
+        repeatIndex: 0,
+        runs: [{ response: { currentOutput: { text: 'Submitted output.', data: null, artifacts: [] } } }]
+      }]
+    },
+    replicaCheckpoint: {
+      status: 'sealed',
+      turns: {
+        'alpha:test_1:0:0': {
+          runtimeId: 'alpha',
+          testId: 'test_1',
+          repeatIndex: 0,
+          turnIndex: 0,
+          resultCommitment: { evidenceId: 'ev_alpha_test_1', recordHash: 'b'.repeat(64) }
+        }
+      }
+    }
+  };
+}
+
+function replicaHumanScorePayload(totalsBySource) {
+  return {
+    scores: Object.fromEntries(Object.entries(totalsBySource).map(([sourceId, total]) => [sourceId, {
+      taskConstraint: total,
+      professionalQuality: total,
+      evidenceRisk: total,
+      artifactUsability: total
+    }]))
+  };
+}
+
+function stubEvidenceVault() {
+  return {
+    async get(evidenceId) {
+      return {
+        payload: {
+          result: {
+            messageParts: [{ type: 'text', text: `Replica output for ${evidenceId}.` }],
+            artifacts: []
+          }
+        }
+      };
+    },
+    async put(record) { return record; }
+  };
+}
+
 const {
   cachedRuntimeReadiness,
   clearRuntimeReadinessCache,
@@ -219,7 +278,8 @@ const {
   server,
   evaluationStore,
   serializeEvaluationForResponse,
-  setAppealRecalculationServicesForTest
+  setAppealRecalculationServicesForTest,
+  setReplicaReleaseServicesForTest
 } = serverModule;
 
 let origin;
@@ -676,6 +736,211 @@ test('accepts one anonymous open human review submission and locks the absolute 
       body: JSON.stringify({ scores })
     });
     assert.equal(again.status, 409);
+  } finally {
+    await evaluationStore.delete(evaluation.id);
+  }
+});
+
+test('validates the replica review policy enum and freezes it after the first replica-human submission', async () => {
+  const evaluation = sealedReplicaEvaluationFixture('eval_v2_replica_policy_api');
+  await evaluationStore.set(evaluation);
+  try {
+    const invalid = await fetch(`${origin}/api/evaluations/${evaluation.id}/replica-review-policy`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ visibility: 'not-a-mode' })
+    });
+    assert.equal(invalid.status, 422);
+
+    const set = await fetch(`${origin}/api/evaluations/${evaluation.id}/replica-review-policy`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ visibility: 'open', requiredPrimaries: 1, forceSeparateJudges: false })
+    });
+    const setBody = await set.json();
+    assert.equal(set.status, 200);
+    assert.deepEqual(setBody.replicaReviewPolicy, {
+      visibility: 'open', requiredPrimaries: 1, forceSeparateJudges: false
+    });
+
+    const submitted = await fetch(`${origin}/api/evaluations/${evaluation.id}/replica-human-reviews`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(replicaHumanScorePayload({ submitted: 90, 'replica:alpha': 60 }))
+    });
+    assert.equal(submitted.status, 201);
+
+    const frozen = await fetch(`${origin}/api/evaluations/${evaluation.id}/replica-review-policy`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ visibility: 'full_blind' })
+    });
+    assert.equal(frozen.status, 409);
+  } finally {
+    await evaluationStore.delete(evaluation.id);
+  }
+});
+
+test('keeps the absolute lock isolated from a pending replica-human track and finalizes only once both close', async () => {
+  const evaluation = sealedReplicaEvaluationFixture('eval_v2_replica_dual_track_api');
+  await evaluationStore.set(evaluation);
+  setReplicaReleaseServicesForTest({
+    evidenceVault: stubEvidenceVault(),
+    runAnonymousArena: async () => ({
+      scoringCube: [{ testId: 'test_1', repeatIndex: 0, judgeId: 'gpt', scores: { submitted: 80, 'replica:alpha': 60 } }]
+    })
+  });
+  try {
+    const skipped = await fetch(
+      `${origin}/api/evaluations/${evaluation.id}/skip-human-review`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'replica-dual-skip-1' },
+        body: '{}'
+      }
+    );
+    const skippedBody = await skipped.json();
+    assert.equal(skipped.status, 200);
+    assert.equal(skippedBody.absolute.status, 'locked');
+    // A sealed valid Replica still needs replica-human review, so absolute
+    // lock alone must not finalize the dual-track rating.
+    assert.equal(skippedBody.phase, 'absolute_locked');
+    assert.equal(skippedBody.rating.status, 'pending-human');
+
+    const detailAfterSkip = await fetch(`${origin}/api/evaluations/${evaluation.id}`);
+    assert.equal((await detailAfterSkip.json()).governance.phase, 'absolute_locked');
+
+    const submitted = await fetch(`${origin}/api/evaluations/${evaluation.id}/replica-human-reviews`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(replicaHumanScorePayload({ submitted: 95, 'replica:alpha': 40 }))
+    });
+    const submittedBody = await submitted.json();
+    assert.equal(submitted.status, 201);
+    assert.equal(submittedBody.role, 'replica_primary');
+    assert.equal(submittedBody.status, 'submitted');
+    // Submitting a replica-human review does not itself lock the track or
+    // finalize the rating; an explicit lock call is required.
+    assert.equal(submittedBody.governance.phase, 'absolute_locked');
+
+    const missingKey = await fetch(
+      `${origin}/api/evaluations/${evaluation.id}/replica-human-reviews/lock`,
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }
+    );
+    assert.equal(missingKey.status, 422);
+
+    const locked = await fetch(
+      `${origin}/api/evaluations/${evaluation.id}/replica-human-reviews/lock`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'replica-dual-lock-1' },
+        body: '{}'
+      }
+    );
+    const lockedBody = await locked.json();
+    assert.equal(locked.status, 200);
+    // Absolute was already locked, so locking the replica-human track
+    // opportunistically finalizes the dual-track rating in the same call.
+    assert.equal(lockedBody.phase, 'final');
+    assert.equal(lockedBody.replica.status, 'released');
+    assert.notEqual(lockedBody.rating.status, 'pending-human');
+
+    const replayLocked = await fetch(
+      `${origin}/api/evaluations/${evaluation.id}/replica-human-reviews/lock`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'replica-dual-lock-1' },
+        body: '{}'
+      }
+    );
+    assert.deepEqual(await replayLocked.json(), lockedBody);
+
+    const finalizeReplay = await fetch(
+      `${origin}/api/evaluations/${evaluation.id}/finalize-dual-track`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'replica-dual-lock-1' },
+        body: '{}'
+      }
+    );
+    const finalizeReplayBody = await finalizeReplay.json();
+    assert.equal(finalizeReplay.status, 200);
+    assert.equal(finalizeReplayBody.phase, 'final');
+    assert.deepEqual(finalizeReplayBody.replica, lockedBody.replica);
+
+    const finalizeConflict = await fetch(
+      `${origin}/api/evaluations/${evaluation.id}/finalize-dual-track`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'replica-dual-finalize-fresh' },
+        body: '{}'
+      }
+    );
+    assert.equal(finalizeConflict.status, 409);
+  } finally {
+    setReplicaReleaseServicesForTest(null);
+    await evaluationStore.delete(evaluation.id);
+  }
+});
+
+test('rejects finalize-dual-track before the absolute lock and rejects a duplicate replica-human submission from the same principal', async () => {
+  const evaluation = sealedReplicaEvaluationFixture('eval_v2_replica_gate_api');
+  await evaluationStore.set(evaluation);
+  try {
+    const tooEarly = await fetch(
+      `${origin}/api/evaluations/${evaluation.id}/finalize-dual-track`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'idempotency-key': 'replica-gate-finalize-1' },
+        body: '{}'
+      }
+    );
+    assert.equal(tooEarly.status, 409);
+
+    const payload = replicaHumanScorePayload({ submitted: 90, 'replica:alpha': 60 });
+    const first = await fetch(`${origin}/api/evaluations/${evaluation.id}/replica-human-reviews`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer judge-secret' },
+      body: JSON.stringify(payload)
+    });
+    assert.equal(first.status, 201);
+
+    const duplicate = await fetch(`${origin}/api/evaluations/${evaluation.id}/replica-human-reviews`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer judge-secret' },
+      body: JSON.stringify(payload)
+    });
+    assert.equal(duplicate.status, 409);
+  } finally {
+    await evaluationStore.delete(evaluation.id);
+  }
+});
+
+test('lists open replica-human dossiers on the review queue until the track locks', async () => {
+  const evaluation = {
+    ...sealedReplicaEvaluationFixture('eval_v2_replica_queue_api', { phase: 'absolute_locked' }),
+    governance: {
+      phase: 'absolute_locked',
+      modelLockedAt: '2026-07-26T00:00:00.000Z',
+      replicaHumanPhase: 'replica_human_open'
+    }
+  };
+  await evaluationStore.set(evaluation);
+  try {
+    const queue = await fetch(`${origin}/api/review-queue`);
+    const queueItems = await queue.json();
+    assert.equal(queue.status, 200);
+    assert.ok(queueItems.some((item) => item.id === evaluation.id));
+
+    const committed = await evaluationStore.mutate(evaluation.id, undefined, (current) => ({
+      ...current,
+      governance: { ...current.governance, replicaHumanLockedAt: '2026-07-26T01:00:00.000Z' }
+    }));
+    assert.equal(committed.governance.replicaHumanLockedAt, '2026-07-26T01:00:00.000Z');
+
+    const queueAfter = await fetch(`${origin}/api/review-queue`);
+    const queueAfterItems = await queueAfter.json();
+    assert.equal(queueAfterItems.some((item) => item.id === evaluation.id), false);
   } finally {
     await evaluationStore.delete(evaluation.id);
   }

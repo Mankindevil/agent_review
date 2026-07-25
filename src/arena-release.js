@@ -390,7 +390,7 @@ function assertAbsoluteLock(evaluation) {
     absolute.status !== 'locked' ||
     absolute.resultHash !== governance.resultHash
   ) {
-    throw new Error('Replica Arena release requires an immutable absolute locked result');
+    throw conflict('Replica Arena release requires an immutable absolute locked result');
   }
 }
 

@@ -31,9 +31,13 @@ import {
   requireRole
 } from './src/review-access.js';
 import {
+  finalizeDualTrack,
   lockAndReleaseAbsoluteResult,
+  lockReplicaHumanReview,
+  setReplicaReviewPolicy,
   skipHumanReview,
-  submitOpenHumanReview
+  submitOpenHumanReview,
+  submitReplicaHumanReview
 } from './src/review-governance.js';
 import {
   authorizeReplacementRun,
@@ -71,6 +75,7 @@ const store = evaluationStore;
 const events = new EventEmitter();
 events.setMaxListeners(100);
 let injectedAppealRecalculationServices = null;
+let injectedReplicaReleaseServices = null;
 const credentialVault = blackBoxRuntimeConfig.enabled
   ? new EphemeralCredentialVault()
   : null;
@@ -339,7 +344,11 @@ export const server = createServer(async (request, response) => {
       response.setHeader('cache-control', 'no-store');
       requireGovernanceEnabled();
       const queue = store.list()
-        .filter((item) => item.schemaVersion === 2 && item.governance?.phase === 'human_open')
+        .filter((item) => item.schemaVersion === 2 && (
+          item.governance?.phase === 'human_open' ||
+          (item.governance?.replicaHumanPhase === 'replica_human_open' &&
+            !item.governance?.replicaHumanLockedAt)
+        ))
         .map((item) => projectEvaluation(item, { audience: 'participant', principal: { principalId: 'open-judge', role: 'participant' } }));
       return json(response, 200, queue);
     }
@@ -410,6 +419,116 @@ export const server = createServer(async (request, response) => {
         rating: lockResult?.rating,
         governance: { phase: committed.governance.phase }
       });
+    }
+    const replicaReviewPolicyMatch =
+      url.pathname.match(/^\/api\/evaluations\/([^/]+)\/replica-review-policy$/);
+    if (request.method === 'PUT' && replicaReviewPolicyMatch) {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const item = requireV2Evaluation(replicaReviewPolicyMatch[1]);
+      const principal = openReviewPrincipal(request);
+      const payload = await readJsonBody(request, 4_000);
+      const committed = await store.mutate(item.id, undefined, (current) => {
+        setReplicaReviewPolicy(current, principal, payload);
+        return current;
+      });
+      return json(response, 200, {
+        replicaReviewPolicy: committed.governance.replicaReviewPolicy
+      });
+    }
+    const replicaHumanReviewsMatch =
+      url.pathname.match(/^\/api\/evaluations\/([^/]+)\/replica-human-reviews$/);
+    if (request.method === 'POST' && replicaHumanReviewsMatch) {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const item = requireV2Evaluation(replicaHumanReviewsMatch[1]);
+      const principal = openReviewPrincipal(request);
+      const payload = await readJsonBody(request, 250_000);
+      const committed = await store.mutate(item.id, undefined, (current) => {
+        submitReplicaHumanReview(current, principal, payload);
+        return current;
+      });
+      const review = committed.replicaHumanReviews.find((candidate) =>
+        candidate.principalId === principal.principalId
+      );
+      return json(response, 201, {
+        reviewId: review?.reviewId,
+        role: review?.role,
+        status: review?.status,
+        submittedAt: review?.submittedAt,
+        governance: { phase: committed.governance.phase }
+      });
+    }
+    const replicaHumanReviewLockMatch =
+      url.pathname.match(/^\/api\/evaluations\/([^/]+)\/replica-human-reviews\/lock$/);
+    if (request.method === 'POST' && replicaHumanReviewLockMatch) {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const item = requireV2Evaluation(replicaHumanReviewLockMatch[1]);
+      const principal = openReviewPrincipal(request);
+      const idempotencyKey = requiredIdempotencyKey(request);
+      const payload = await readJsonBody(request, 4_000);
+      // Anonymous callers get a fresh principal per request, so the replay
+      // fingerprint must not depend on actor identity here.
+      const fingerprint = governanceIdempotencyFingerprint(
+        item.id, 'replica-human-review-lock', 'open', payload
+      );
+      const committed = await store.mutate(item.id, undefined, async (current) => {
+        const replies = governanceIdempotency(current, 'replicaHumanReviewLocks');
+        if (idempotencyResponse(replies, idempotencyKey, fingerprint)) return current;
+        const actor = { principalId: principal.principalId, idempotencyKey };
+        const locked = lockReplicaHumanReview(current, actor);
+        let finalizeResult = null;
+        if (current.governance?.absoluteLockedAt) {
+          finalizeResult = await finalizeDualTrack(current, replicaReleaseServices(), actor);
+        }
+        replies[idempotencyKey] = {
+          fingerprint,
+          response: {
+            replicaHumanReviewAggregate: locked,
+            replica: finalizeResult?.replica ?? current.resultV2.replica,
+            rating: finalizeResult?.rating ?? current.resultV2.rating,
+            phase: current.governance.phase
+          }
+        };
+        return current;
+      });
+      return json(response, 200, idempotencyResponse(
+        governanceIdempotency(committed, 'replicaHumanReviewLocks'), idempotencyKey, fingerprint
+      ));
+    }
+    const finalizeDualTrackMatch =
+      url.pathname.match(/^\/api\/evaluations\/([^/]+)\/finalize-dual-track$/);
+    if (request.method === 'POST' && finalizeDualTrackMatch) {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const item = requireV2Evaluation(finalizeDualTrackMatch[1]);
+      const principal = openReviewPrincipal(request);
+      const idempotencyKey = requiredIdempotencyKey(request);
+      const payload = await readJsonBody(request, 4_000);
+      const fingerprint = governanceIdempotencyFingerprint(
+        item.id, 'finalize-dual-track', 'open', payload
+      );
+      const committed = await store.mutate(item.id, undefined, async (current) => {
+        const replies = governanceIdempotency(current, 'dualTrackFinalizes');
+        if (idempotencyResponse(replies, idempotencyKey, fingerprint)) return current;
+        const result = await finalizeDualTrack(current, replicaReleaseServices(), {
+          principalId: principal.principalId,
+          idempotencyKey
+        });
+        replies[idempotencyKey] = {
+          fingerprint,
+          response: {
+            replica: result.replica,
+            rating: result.rating,
+            phase: current.governance.phase
+          }
+        };
+        return current;
+      });
+      return json(response, 200, idempotencyResponse(
+        governanceIdempotency(committed, 'dualTrackFinalizes'), idempotencyKey, fingerprint
+      ));
     }
     const evidenceMatch =
       url.pathname.match(/^\/api\/evaluations\/([^/]+)\/evidence\/([^/]+)$/);
@@ -616,8 +735,13 @@ function replicaReleaseServices() {
       } finally {
         key.fill(0);
       }
-    }
+    },
+    ...injectedReplicaReleaseServices
   };
+}
+
+export function setReplicaReleaseServicesForTest(services) {
+  injectedReplicaReleaseServices = services;
 }
 
 function appealRecalculationServices() {
