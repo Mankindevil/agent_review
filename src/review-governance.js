@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 
+export {
+  calculateAbsoluteResult,
+  lockAbsoluteResult
+} from './result-v2.js';
+
 const PHASES = new Set([
   'waiting_model', 'human_open', 'human_arbitration', 'absolute_locked',
   'replica_released', 'final'
