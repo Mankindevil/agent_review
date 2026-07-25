@@ -35,7 +35,7 @@ export function projectEvaluation(evaluation, { audience = 'public', secrets = [
     ], secrets),
     governance: pickResult(evaluation.governance, [
       'phase', 'modelLockedAt', 'humanLockedAt', 'absoluteLockedAt',
-      'replicaReleasedAt'
+      'resultHash', 'replicaReleasedAt'
     ], secrets),
     qualification: projectQualification(evaluation.qualification, secrets),
     evidenceManifest: projectManifest(

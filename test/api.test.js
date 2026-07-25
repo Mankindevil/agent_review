@@ -410,7 +410,13 @@ test('keeps V2 browser secrets memory-only and renders nested projections safely
   assert.match(script, /function renderV2Result\(item\)/);
   assert.match(script, /function renderReleasedReplicaResult/);
   assert.match(script, /复刻结果已密封，等待绝对分锁定/);
+  assert.match(script, /const absoluteLocked = item\.governance\?\.phase === 'absolute_locked'/);
+  assert.match(script, /item\.governance\?\.absoluteLockedAt/);
+  assert.match(script, /item\.governance\?\.resultHash/);
+  assert.match(script, /const replicaReleased = absoluteLocked/);
+  assert.match(script, /item\.governance\?\.replicaReleasedAt/);
   assert.match(script, /replica\.status === 'released'/);
+  assert.match(script, /const replicaUnavailable = absoluteLocked/);
   assert.match(script, /human_open/);
   assert.match(script, /非盲人工复核/);
   assert.match(script, /protocolRecovery/);

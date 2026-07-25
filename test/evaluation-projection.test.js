@@ -415,7 +415,48 @@ test('projects only server-released dual-track summaries after the absolute lock
     label: '夯',
     differenceStable: true
   });
+  assert.deepEqual(projection.governance, {
+    phase: 'absolute_locked',
+    absoluteLockedAt: '2026-07-25T12:00:00.000Z',
+    resultHash: 'a'.repeat(64),
+    replicaReleasedAt: '2026-07-25T12:01:00.000Z'
+  });
   assert.equal(JSON.stringify(projection).includes('must-not-project'), false);
+});
+
+test('projects absolute-lock governance fields required by the release UI gate', () => {
+  const source = unsafeEvaluation();
+  source.governance = {
+    phase: 'absolute_locked',
+    modelLockedAt: '2026-07-25T11:00:00.000Z',
+    humanLockedAt: '2026-07-25T11:30:00.000Z',
+    absoluteLockedAt: '2026-07-25T12:00:00.000Z',
+    resultHash: 'b'.repeat(64),
+    replicaReleasedAt: '2026-07-25T12:01:00.000Z',
+    anonymousMapping: { A: 'must-not-project' }
+  };
+  source.resultV2 = {
+    absolute: {
+      status: 'locked',
+      total: 82,
+      resultHash: 'b'.repeat(64)
+    },
+    replica: { status: 'released', submittedMedian: 86 },
+    rating: { status: 'final', code: 'HARD', label: '夯' }
+  };
+
+  const projection = projectEvaluation(source, { audience: 'public' });
+
+  assert.deepEqual(projection.governance, {
+    phase: 'absolute_locked',
+    modelLockedAt: '2026-07-25T11:00:00.000Z',
+    humanLockedAt: '2026-07-25T11:30:00.000Z',
+    absoluteLockedAt: '2026-07-25T12:00:00.000Z',
+    resultHash: 'b'.repeat(64),
+    replicaReleasedAt: '2026-07-25T12:01:00.000Z'
+  });
+  assert.equal(JSON.stringify(projection).includes('must-not-project'), false);
+  assert.equal(JSON.stringify(projection).includes('anonymousMapping'), false);
 });
 
 test('keeps stale released Replica details sealed before the absolute lock', () => {

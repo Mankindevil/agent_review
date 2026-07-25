@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { releaseReplicaArena } from '../src/arena-release.js';
+import { projectEvaluation } from '../src/evaluation-projection.js';
 
 function lockedEvaluation() {
   return {
@@ -139,6 +140,15 @@ test('releases a sealed arena using the locked absolute result without mutation'
   assert.equal(calls[2][1].absoluteTotal, 82);
   assert.equal(calls[2][1].scenarioScore, 64);
   assert.equal(calls[2][1].objectiveCoverage, 0.75);
+
+  const publicView = projectEvaluation(released, { audience: 'public' });
+  assert.deepEqual(publicView.governance, {
+    phase: 'absolute_locked',
+    absoluteLockedAt: '2026-07-25T12:00:00.000Z',
+    resultHash: 'a'.repeat(64),
+    replicaReleasedAt: '2026-07-25T12:01:00.000Z'
+  });
+  assert.equal(publicView.resultV2.replica.status, 'released');
 });
 
 test('loads sealed test and output material before invoking the default arena adapter', async () => {

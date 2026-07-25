@@ -41,3 +41,17 @@
 - Verification: `node --test test/pipeline-replica-arena.test.js
   test/evaluation-projection.test.js` passed (14 tests, 0 failures); `npm run
   check` and `git diff --check` passed.
+
+## Repair round 2
+
+- Public governance projection now allowlists `resultHash` alongside
+  `absoluteLockedAt` and `replicaReleasedAt`, so the browser release gate can
+  verify the immutable absolute-lock commitment from server-provided state.
+- The V2 renderer applies the same SHA-256 `resultHash` validation as
+  `hasAbsoluteLock()` and requires `absoluteLocked` before rendering released
+  or unavailable replica panels.
+- Added projection and pipeline tests asserting public governance lock fields
+  survive release, plus API source assertions for the aligned UI gate.
+- Verification: `node --test test/pipeline-replica-arena.test.js
+  test/evaluation-projection.test.js` passed (15 tests, 0 failures); `npm run
+  check` and `git diff --check` passed.

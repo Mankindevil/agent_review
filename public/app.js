@@ -839,7 +839,7 @@ function renderV2Result(item) {
   const humanOpen = item.governance?.phase === 'human_open';
   const absoluteLocked = item.governance?.phase === 'absolute_locked' &&
     typeof item.governance?.absoluteLockedAt === 'string' &&
-    typeof item.governance?.resultHash === 'string' &&
+    /^[a-f0-9]{64}$/u.test(item.governance?.resultHash || '') &&
     absolute.status === 'locked' &&
     absolute.resultHash === item.governance.resultHash;
   const replicaReleased = absoluteLocked &&
