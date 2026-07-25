@@ -917,6 +917,38 @@ test('rejects finalize-dual-track before the absolute lock and rejects a duplica
   }
 });
 
+test('attaches absolute and replica reviewDossier on the open review queue', async () => {
+  const absolute = openReviewEvaluationFixture('eval_v2_queue_dossier_abs');
+  const replica = {
+    ...sealedReplicaEvaluationFixture('eval_v2_queue_dossier_rep', { phase: 'absolute_locked' }),
+    governance: {
+      phase: 'absolute_locked',
+      modelLockedAt: '2026-07-26T00:00:00.000Z',
+      replicaHumanPhase: 'replica_human_open'
+    }
+  };
+  await evaluationStore.set(absolute);
+  await evaluationStore.set(replica);
+  try {
+    const queue = await fetch(`${origin}/api/review-queue`);
+    const queueItems = await queue.json();
+    assert.equal(queue.status, 200);
+    const absItem = queueItems.find((item) => item.id === absolute.id);
+    const repItem = queueItems.find((item) => item.id === replica.id);
+    assert.ok(absItem?.reviewDossier?.absolute?.leaves?.length > 0);
+    assert.ok(
+      Array.isArray(repItem?.reviewDossier?.replica?.cases)
+        || typeof repItem?.reviewDossier?.replica?.error === 'string'
+    );
+    const serialized = JSON.stringify(repItem?.reviewDossier || {});
+    assert.equal(serialized.includes('conservativeDelta'), false);
+    assert.equal(serialized.includes('displayName'), false);
+  } finally {
+    await evaluationStore.delete(absolute.id);
+    await evaluationStore.delete(replica.id);
+  }
+});
+
 test('lists open replica-human dossiers on the review queue until the track locks', async () => {
   const evaluation = {
     ...sealedReplicaEvaluationFixture('eval_v2_replica_queue_api', { phase: 'absolute_locked' }),

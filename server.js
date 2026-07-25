@@ -30,6 +30,10 @@ import {
   projectEvidenceRecord
 } from './src/evaluation-projection.js';
 import {
+  buildAbsoluteReviewDossier,
+  buildReplicaReviewDossier
+} from './src/review-dossier.js';
+import {
   authenticatePrincipal,
   isReviewGovernanceEnabled,
   requireRole
@@ -368,13 +372,33 @@ export const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/review-queue') {
       response.setHeader('cache-control', 'no-store');
       requireGovernanceEnabled();
-      const queue = store.list()
-        .filter((item) => item.schemaVersion === 2 && (
-          item.governance?.phase === 'human_open' ||
-          (item.governance?.replicaHumanPhase === 'replica_human_open' &&
-            !item.governance?.replicaHumanLockedAt)
-        ))
-        .map((item) => projectEvaluation(item, { audience: 'participant', principal: { principalId: 'open-judge', role: 'participant' } }));
+      const openItems = store.list().filter((item) => item.schemaVersion === 2 && (
+        item.governance?.phase === 'human_open' ||
+        (item.governance?.replicaHumanPhase === 'replica_human_open' &&
+          !item.governance?.replicaHumanLockedAt)
+      ));
+      const queue = await Promise.all(openItems.map(async (item) => {
+        const projected = projectEvaluation(item, {
+          audience: 'participant',
+          principal: { principalId: 'open-judge', role: 'participant' }
+        });
+        const reviewDossier = {};
+        const absolute = buildAbsoluteReviewDossier(item);
+        if (absolute) reviewDossier.absolute = absolute;
+        if (
+          item.governance?.replicaHumanPhase === 'replica_human_open' &&
+          !item.governance?.replicaHumanLockedAt
+        ) {
+          const replica = await buildReplicaReviewDossier(item, {
+            evidenceVault: evidenceVaultForRead(item.id)
+          });
+          if (replica) reviewDossier.replica = replica;
+        }
+        if (Object.keys(reviewDossier).length) {
+          projected.reviewDossier = reviewDossier;
+        }
+        return projected;
+      }));
       return json(response, 200, queue);
     }
     const skipHumanReviewMatch =
