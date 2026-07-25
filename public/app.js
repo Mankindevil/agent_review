@@ -11,8 +11,12 @@ import {
   resolveParticipantToken,
   restoreV2StartButton
 } from './evaluation-actions.js?v=20260725-hardening1';
+import {
+  parseExampleMarkdown,
+  skillExamplesFromCard
+} from './example-import.js?v=20260725-examples1';
 
-const state = { mode: 'demo', sourceType: 'direct', blackBoxEnabled: false, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), participantTokens: new Map(), pendingEvaluationId: null, skillRequestToken: 0 };
+const state = { mode: 'demo', sourceType: 'direct', blackBoxEnabled: false, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), participantTokens: new Map(), pendingEvaluationId: null, skillRequestToken: 0, activeWorkTimer: null, activeWorkKey: null };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const DEFAULT_REVIEW_PLAN = [
@@ -85,6 +89,8 @@ function bindEvents() {
   $$('.source-switch button').forEach((button) => button.addEventListener('click', () => setSourceType(button.dataset.source)));
   $('#add-case').addEventListener('click', () => addCase('', ''));
   $('#add-v2-example').addEventListener('click', () => addV2Example());
+  $('#fill-examples-from-card').addEventListener('click', fillExamplesFromAgentCard);
+  $('#apply-example-paste').addEventListener('click', applyExamplePaste);
   $('#copy-participant-token').addEventListener('click', copyParticipantToken);
   $('#dismiss-participant-token').addEventListener('click', dismissParticipantTokenReceipt);
   $('#resume-evaluation').addEventListener('click', resumeEvaluation);
@@ -149,12 +155,13 @@ function addCase(name, prompt, dataQueries) {
 
 function updateCaseNumbers() { $$('.case-row').forEach((row, index) => $('.case-index', row).textContent = String(index + 1).padStart(2, '0')); }
 
-function addV2Example() {
+function addV2Example(draft = null) {
   const root = $('#v2-example-list');
-  const nextId = nextAvailableEditorId(
+  const nextId = draft?.id || nextAvailableEditorId(
     $$('.a2a-example-id', root).map((input) => input.value.trim()),
     'example'
   );
+  const exampleName = draft?.name || `公开研究任务 ${root.children.length + 1}`;
   const example = document.createElement('article');
   example.className = 'a2a-custody-rail a2a-example';
   example.dataset.a2aExample = '';
@@ -165,18 +172,19 @@ function addV2Example() {
       <button type="button" data-a2a-action="remove-example" aria-label="删除 Example">×</button>
     </header>
     <div class="a2a-node-fields a2a-example-fields">
-      <label>Example ID<input class="a2a-example-id" value="${nextId}" autocomplete="off"></label>
-      <label>Example 名称<input class="a2a-example-name" value="公开研究任务 ${root.children.length + 1}" autocomplete="off"></label>
-      <label class="a2a-field-wide">可选约束（每行一项）<textarea class="a2a-example-constraints" placeholder="例如：不得编造缺失数据"></textarea></label>
+      <label>Example ID<input class="a2a-example-id" value="${escapeAttr(nextId)}" autocomplete="off"></label>
+      <label>Example 名称<input class="a2a-example-name" value="${escapeAttr(exampleName)}" autocomplete="off"></label>
+      <label class="a2a-field-wide">可选约束（每行一项）<textarea class="a2a-example-constraints" placeholder="例如：不得编造缺失数据">${escapeHtml(Array.isArray(draft?.constraints) ? draft.constraints.join('\n') : '')}</textarea></label>
     </div>
     <div class="a2a-turn-list"></div>
     <button class="text-button a2a-nested-add" type="button" data-a2a-action="add-turn">＋ 添加 Turn</button>`;
   root.append(example);
-  addV2Turn(example);
+  const turns = Array.isArray(draft?.turns) && draft.turns.length ? draft.turns : [null];
+  for (const turnDraft of turns) addV2Turn(example, turnDraft);
   updateA2AEditorNumbers();
 }
 
-function addV2Turn(example) {
+function addV2Turn(example, draft = null) {
   const list = $('.a2a-turn-list', example);
   const turn = document.createElement('section');
   turn.className = 'a2a-turn';
@@ -188,22 +196,27 @@ function addV2Turn(example) {
       <button type="button" data-a2a-action="remove-turn" aria-label="删除 Turn">×</button>
     </header>
     <div class="a2a-node-fields">
-      <label class="a2a-field-wide">可选预期交付物<input class="a2a-expected-deliverable" placeholder="例如：结构化研究结论与风险提示"></label>
+      <label class="a2a-field-wide">可选预期交付物<input class="a2a-expected-deliverable" placeholder="例如：结构化研究结论与风险提示" value="${escapeAttr(draft?.expectedDeliverable || '')}"></label>
     </div>
     <div class="a2a-subhead"><span>PARTS / 输入组成</span><button type="button" data-a2a-action="add-part">＋ Part</button></div>
     <div class="a2a-part-list"></div>
     <div class="a2a-subhead"><span>CRITERIA / 可选验收</span><button type="button" data-a2a-action="add-criterion">＋ Criterion</button></div>
     <div class="a2a-criterion-list"></div>`;
   list.append(turn);
-  addV2Part(turn);
+  const parts = Array.isArray(draft?.parts) && draft.parts.length ? draft.parts : [null];
+  for (const partDraft of parts) addV2Part(turn, partDraft);
+  for (const criterionDraft of Array.isArray(draft?.criteria) ? draft.criteria : []) {
+    addV2Criterion(turn, criterionDraft);
+  }
   updateA2AEditorNumbers();
 }
 
-function addV2Part(turn) {
+function addV2Part(turn, draft = null) {
   const list = $('.a2a-part-list', turn);
   const part = document.createElement('div');
   part.className = 'a2a-part';
   part.dataset.a2aPart = '';
+  const type = draft?.type || 'text';
   part.innerHTML = `
     <span class="a2a-rail-index">P01</span>
     <label>Part 类型<select class="a2a-part-type">
@@ -212,27 +225,31 @@ function addV2Part(turn) {
       <option value="raw">raw</option>
       <option value="url">url</option>
     </select></label>
-    <label class="a2a-part-value-field">文本<textarea class="a2a-part-value" placeholder="输入发送给 Agent 的文本"></textarea></label>
-    <label>可选 media type<input class="a2a-part-media-type" placeholder="text/plain"></label>
-    <label>可选 filename<input class="a2a-part-filename" placeholder="brief.txt"></label>
+    <label class="a2a-part-value-field">文本<textarea class="a2a-part-value" placeholder="输入发送给 Agent 的文本">${escapeHtml(draft?.text || '')}</textarea></label>
+    <label>可选 media type<input class="a2a-part-media-type" placeholder="text/plain" value="${escapeAttr(draft?.mediaType || '')}"></label>
+    <label>可选 filename<input class="a2a-part-filename" placeholder="brief.txt" value="${escapeAttr(draft?.filename || '')}"></label>
     <button type="button" data-a2a-action="remove-part" aria-label="删除 Part">×</button>`;
   list.append(part);
+  $('.a2a-part-type', part).value = type;
   updatePartEditor(part);
   updateA2AEditorNumbers();
 }
 
-function addV2Criterion(turn) {
+function addV2Criterion(turn, draft = null) {
   const list = $('.a2a-criterion-list', turn);
-  const nextId = nextAvailableEditorId(
+  const nextId = draft?.id || nextAvailableEditorId(
     $$('.a2a-criterion-id', list).map((input) => input.value.trim()),
     'criterion'
   );
   const criterion = document.createElement('div');
   criterion.className = 'a2a-criterion';
   criterion.dataset.a2aCriterion = '';
+  const expectedText = Array.isArray(draft?.expected)
+    ? draft.expected.join('\n')
+    : (draft?.expected == null ? '' : String(draft.expected));
   criterion.innerHTML = `
     <span class="a2a-rail-index">C01</span>
-    <label>Criterion ID<input class="a2a-criterion-id" value="${nextId}"></label>
+    <label>Criterion ID<input class="a2a-criterion-id" value="${escapeAttr(nextId)}"></label>
     <label>类型<select class="a2a-criterion-type">
       <option value="contains">contains</option>
       <option value="exact">exact</option>
@@ -240,16 +257,72 @@ function addV2Criterion(turn) {
       <option value="numeric">numeric</option>
       <option value="model">model</option>
     </select></label>
-    <label class="a2a-field-wide">说明<input class="a2a-criterion-description" value="验证公开交付物"></label>
-    <label class="a2a-criterion-expected-field a2a-field-wide">预期值<textarea class="a2a-criterion-expected" placeholder="contains 每行一项；其余类型按字段提示"></textarea></label>
+    <label class="a2a-field-wide">说明<input class="a2a-criterion-description" value="${escapeAttr(draft?.description || '验证公开交付物')}"></label>
+    <label class="a2a-criterion-expected-field a2a-field-wide">预期值<textarea class="a2a-criterion-expected" placeholder="contains 每行一项；其余类型按字段提示">${escapeHtml(expectedText)}</textarea></label>
     <label class="a2a-criterion-path-field hidden">JSON path<input class="a2a-criterion-path" placeholder="$.score"></label>
     <label class="a2a-criterion-tolerance-field hidden">容差<input class="a2a-criterion-tolerance" type="number" min="0" step="any" value="0"></label>
-    <label class="a2a-check"><input class="a2a-criterion-required" type="checkbox" checked> 必须满足</label>
-    <label class="a2a-check a2a-criterion-case-field"><input class="a2a-criterion-case-sensitive" type="checkbox"> 区分大小写</label>
+    <label class="a2a-check"><input class="a2a-criterion-required" type="checkbox"${draft?.required === false ? '' : ' checked'}> 必须满足</label>
+    <label class="a2a-check a2a-criterion-case-field"><input class="a2a-criterion-case-sensitive" type="checkbox"${draft?.caseSensitive ? ' checked' : ''}> 区分大小写</label>
     <button type="button" data-a2a-action="remove-criterion" aria-label="删除 Criterion">×</button>`;
   list.append(criterion);
+  if (draft?.type) $('.a2a-criterion-type', criterion).value = draft.type;
   updateCriterionEditor(criterion);
   updateA2AEditorNumbers();
+}
+
+function replaceV2ExamplesWithDrafts(drafts, statusMessage) {
+  const root = $('#v2-example-list');
+  root.replaceChildren();
+  for (const draft of drafts) addV2Example(draft);
+  if (!root.children.length) addV2Example();
+  setExampleImportStatus(statusMessage, 'ok');
+}
+
+function currentAgentCardForImport() {
+  if (state.sourceType !== 'direct' && state.resolvedCard) return state.resolvedCard;
+  try {
+    return JSON.parse($('#agent-card').value);
+  } catch {
+    return null;
+  }
+}
+
+function fillExamplesFromAgentCard() {
+  const card = currentAgentCardForImport();
+  if (!card) {
+    setExampleImportStatus('请先提供合法的 Agent Card JSON，或完成远程 Card 解析。', 'error');
+    return;
+  }
+  const drafts = skillExamplesFromCard(card);
+  if (!drafts.length) {
+    setExampleImportStatus('当前 Agent Card 的 skills[].examples 为空，没有可填充示例。', 'error');
+    return;
+  }
+  replaceV2ExamplesWithDrafts(
+    drafts,
+    `已从 Agent Card 填充 ${drafts.length} 个示例；可再粘贴完整说明补充验收要点。`
+  );
+}
+
+function applyExamplePaste() {
+  const { drafts, errors } = parseExampleMarkdown($('#example-paste').value);
+  if (!drafts.length) {
+    setExampleImportStatus(errors.join('；') || '未能解析出示例。', 'error');
+    return;
+  }
+  replaceV2ExamplesWithDrafts(
+    drafts,
+    errors.length
+      ? `已填充 ${drafts.length} 个示例；部分段落未解析：${errors.join('；')}`
+      : `已从粘贴文本填充 ${drafts.length} 个示例（含输入与预期要点）。`
+  );
+}
+
+function setExampleImportStatus(message, tone = '') {
+  const status = $('#example-import-status');
+  status.textContent = message || '';
+  if (tone) status.dataset.tone = tone;
+  else delete status.dataset.tone;
 }
 
 function handleA2AEditorAction(control) {
@@ -678,7 +751,9 @@ function showEvaluation(item) {
   const modeLabel = isV2 ? 'V2 / BLACK-BOX' : item.overallMode === 'live' ? 'LIVE / 全链路真实' : item.mode === 'live' ? 'MIXED / Agent 实调' : 'DEMO / 演示模拟';
   $('#run-mode').textContent = isV2 ? modeLabel : `${modeLabel} · SEED ${item.seed ?? 'LEGACY'}`;
   $('#current-stage').textContent = stage || status || '等待评测舱';
-  $('#latest-log').textContent = isV2 ? v2StatusCopy(item) : item.logs?.at(-1)?.text || '等待评测信号';
+  $('#latest-log').textContent = isV2
+    ? latestV2LogLine(item)
+    : item.logs?.at(-1)?.text || '等待评测信号';
   $('#progress-number').textContent = progress;
   $('#pulse-progress').style.height = `${progress}%`;
   $('#pulse-dot').style.top = `calc(${Math.min(progress, 96)}% - 2px)`;
@@ -692,9 +767,10 @@ function showEvaluation(item) {
     requestAnimationFrame(() => $('.stage-copy').classList.add('flash'));
   }
   $('.stage-list').classList.toggle('hidden', isV2);
-  $('.telemetry-panel').classList.toggle('hidden', isV2);
+  $('.telemetry-panel').classList.remove('hidden');
   $$('.stage-list li').forEach((li) => li.classList.toggle('done', progress >= Number(li.dataset.threshold)));
-  if (!isV2) renderLogs(item.logs || []);
+  renderLogs(isV2 ? (item.runLog || []) : (item.logs || []));
+  syncActiveWorkTimer(item);
   renderResumePanel(item);
   const revealingVerdict = renderResult(item);
   if (changedEvaluation && !revealingVerdict) scrollTo({ top: 0, behavior: 'smooth' });
@@ -815,6 +891,54 @@ function v2StatusCopy(item) {
   if (item.governance?.phase === 'human_open') return '四席模型初评已锁定，等待非盲人工复核。';
   if (status === 'completed') return '动态测试已完成，等待四席模型评审锁定。';
   return '正在提交可验证的 A2A 证据与清单承诺。';
+}
+
+function latestV2LogLine(item) {
+  const work = item?.activeWork;
+  if (work?.label) {
+    const elapsed = formatElapsedSince(work.startedAt);
+    return elapsed ? `${work.label} · 已过 ${elapsed}` : work.label;
+  }
+  const last = item?.runLog?.at(-1);
+  if (last?.text) {
+    return last.detail ? `${last.text} · ${last.detail}` : last.text;
+  }
+  return v2StatusCopy(item);
+}
+
+function formatElapsedSince(startedAt) {
+  const started = Date.parse(startedAt);
+  if (!Number.isFinite(started)) return '';
+  const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rem = seconds % 60;
+  return `${minutes}m ${rem}s`;
+}
+
+function syncActiveWorkTimer(item) {
+  const work = item?.schemaVersion === 2 ? item.activeWork : null;
+  const key = work?.key || null;
+  if (!work || !['queued', 'running'].includes(statusOf(item))) {
+    if (state.activeWorkTimer) {
+      clearInterval(state.activeWorkTimer);
+      state.activeWorkTimer = null;
+    }
+    state.activeWorkKey = null;
+    return;
+  }
+  if (state.activeWorkKey === key && state.activeWorkTimer) return;
+  if (state.activeWorkTimer) clearInterval(state.activeWorkTimer);
+  state.activeWorkKey = key;
+  state.activeWorkTimer = setInterval(() => {
+    if (state.current?.id !== item.id || !state.current?.activeWork) {
+      clearInterval(state.activeWorkTimer);
+      state.activeWorkTimer = null;
+      state.activeWorkKey = null;
+      return;
+    }
+    $('#latest-log').textContent = latestV2LogLine(state.current);
+  }, 1000);
 }
 
 function renderResumePanel(item) {
@@ -1436,5 +1560,6 @@ function normalizeTier(tier = {}) {
   return tier;
 }
 function escapeHtml(value='') { return String(value).replace(/[&<>'"]/g, char=>({ '&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;' })[char]); }
+function escapeAttr(value='') { return escapeHtml(value); }
 function signed(value) { return `${value>=0?'+':''}${value} 分`; }
 function formatTime(value) { return new Intl.DateTimeFormat('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date(value)); }

@@ -36,6 +36,7 @@ test('serves only the standalone diagnostics surface', async () => {
       '/agent-check.html',
       '/agent-check.js',
       '/agent-check-helpers.js',
+      '/example-import.js',
       '/agent-check.css'
     ]) {
       const response = await fetch(`${origin}${pathname}`);

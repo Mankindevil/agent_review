@@ -61,7 +61,9 @@ A2A Agent endpoint   Model / Runtime endpoints
 - `name`、`description` 和至少一个 `skill`；
 - 每个 skill 的 `id`、`name`、`description`；
 - A2A 1.0 的 `supportedInterfaces`；
-- 兼容 A2A 0.3 常见的顶层 `url` 与 `preferredTransport`。
+- 兼容 A2A 0.3 常见的顶层 `url` 与 `preferredTransport`；
+- 顶层 `0.2.x` 会归一为 `0.3` 执行接口并产生兼容警告；
+- 无 `supportedInterfaces` 但声明 `1.x` + 顶层 `url` + 明确 `preferredTransport` 的混合 Card，会合成兼容接口并警告。
 
 真实调用优先选择 `supportedInterfaces` 第一项。支持 `HTTP+JSON` 的 `message:send`、A2A 1.0 JSON-RPC 的 `SendMessage` 和 0.3 JSON-RPC 的 `message/send`，再从 Message 或 Artifact 的 parts 中提取文本结果。
 

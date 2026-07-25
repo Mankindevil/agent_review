@@ -117,6 +117,14 @@ Tests will be written before implementation and will cover:
 7. Formal submission and pipeline validation accept the same hybrid card.
 8. Compatibility warnings survive resolution and validation projections.
 
+## Extension: top-level 0.2.x
+
+In addition to the hybrid 1.x rules above, the platform normalizes a top-level
+`protocolVersion` of `0.2` / `0.2.x` (with a valid `url` and supported
+transport) to an internal `0.3` execution interface and emits a compatibility
+warning. This keeps diagnostics, submissions, and formal evaluation on the same
+normalized path without rewriting the remote Agent Card.
+
 ## Out of Scope
 
 - Probing multiple bindings to guess an omitted transport.

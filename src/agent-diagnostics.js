@@ -4,7 +4,6 @@ import {
   parseA2AResponse,
   parseSseEvents,
   resolveAgentCard,
-  selectInterface,
   validateAgentCard,
   validateStreamResult
 } from './a2a.js';
@@ -168,7 +167,7 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
   const card = input.agentCard;
   const validationStarted = Date.now();
   const validation = validateAgentCard(card, { allowPrivate });
-  const target = validation.valid ? selectInterface(card) : null;
+  const target = validation.valid ? validation.selectedInterface : null;
   if (!validation.valid || !target) {
     const reason = !validation.valid
       ? validation.errors.join('；')
@@ -193,13 +192,15 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
   checks[1] = passed('card-validation', validationStarted, 'Agent Card 与接口声明有效', {
     version: validation.version,
     binding: target.binding,
+    executionVersion: target.version,
     targetOrigin: targetUrl.origin,
     networkPolicy: allowPrivate ? '允许内网/本机' : '仅公网',
     targetScope: urlScopeLabel(targetUrl),
     streaming: card.capabilities?.streaming === true,
     acceptedOutputModes,
     tenant: target.tenant || null,
-    skillsCount: card.skills.length
+    skillsCount: card.skills.length,
+    warnings: validation.warnings
   });
 
   const callStarted = Date.now();

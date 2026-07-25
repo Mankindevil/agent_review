@@ -1,4 +1,4 @@
-import { promptForAgentCard } from './agent-check-helpers.js';
+import { promptForAgentCard, skillExampleChoices } from './agent-check-helpers.js';
 
 const MAX_CARD_BYTES = 1024 * 1024;
 
@@ -18,6 +18,7 @@ const authTargetOrigin = document.querySelector('#auth-target-origin');
 const agentToken = document.querySelector('#agent-token');
 const confirmAuthTarget = document.querySelector('#confirm-auth-target');
 const diagnosticPrompt = document.querySelector('#diagnostic-prompt');
+const skillExamplePicker = document.querySelector('#skill-example-picker');
 const timeoutSelect = document.querySelector('#timeout-ms');
 const attestationDeepseek = document.querySelector('#attestation-deepseek');
 const attestationAuthorized = document.querySelector('#attestation-authorized');
@@ -209,6 +210,7 @@ function applyCardText(text, sourceName = '') {
 
   parsedAgentCard = value;
   diagnosticPrompt.value = promptForAgentCard(diagnosticPrompt.value, value);
+  refreshSkillExamplePicker(value, { selectFirst: true });
   const target = selectCardInterface(value);
   if (target) {
     try {
@@ -234,10 +236,46 @@ async function previewCardPrompt(sourceType, url) {
       diagnosticPrompt.value,
       resolved.card
     );
+    refreshSkillExamplePicker(resolved.card, { selectFirst: true });
   } catch {
     // The diagnostics API remains authoritative for Card resolution errors.
   }
 }
+
+function refreshSkillExamplePicker(card, { selectFirst = false } = {}) {
+  if (!skillExamplePicker) return;
+  const examples = skillExampleChoices(card);
+  skillExamplePicker.replaceChildren();
+  if (!examples.length) {
+    const empty = document.createElement('option');
+    empty.value = '';
+    empty.textContent = '当前 Card 未声明 skills.examples';
+    skillExamplePicker.append(empty);
+    skillExamplePicker.disabled = true;
+    return;
+  }
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = `选择 Card 示例（共 ${examples.length} 条）`;
+  skillExamplePicker.append(placeholder);
+  examples.forEach((example, index) => {
+    const option = document.createElement('option');
+    option.value = String(index);
+    option.textContent = truncate(example, 72);
+    skillExamplePicker.append(option);
+  });
+  skillExamplePicker.disabled = false;
+  if (selectFirst) {
+    skillExamplePicker.value = '0';
+  }
+}
+
+skillExamplePicker?.addEventListener('change', () => {
+  const examples = skillExampleChoices(parsedAgentCard);
+  const index = Number(skillExamplePicker.value);
+  if (!Number.isInteger(index) || !examples[index]) return;
+  diagnosticPrompt.value = examples[index];
+});
 
 function applyCardUrl(value) {
   parsedAgentCard = null;
@@ -405,12 +443,34 @@ function selectCardInterface(agentCard) {
         };
       }
     }
+    return null;
   }
-  if (typeof agentCard.url === 'string' && agentCard.url) {
+  if (typeof agentCard.url !== 'string' || !agentCard.url) return null;
+
+  const declaredVersion = agentCard.protocolVersion || '0.3';
+  const binding = bindings[agentCard.preferredTransport];
+  if (/^1\./.test(declaredVersion)) {
+    if (!binding) return null;
     return {
       url: agentCard.url,
-      binding: bindings[agentCard.preferredTransport] || 'JSONRPC',
-      version: agentCard.protocolVersion || '0.3',
+      binding,
+      version: declaredVersion,
+      tenant: ''
+    };
+  }
+  if (/^0\.2(?:\.|$)/.test(declaredVersion)) {
+    return {
+      url: agentCard.url,
+      binding: binding || 'JSONRPC',
+      version: '0.3',
+      tenant: ''
+    };
+  }
+  if (/^0\.3(?:\.|$)/.test(declaredVersion)) {
+    return {
+      url: agentCard.url,
+      binding: binding || 'JSONRPC',
+      version: declaredVersion,
       tenant: ''
     };
   }
@@ -426,6 +486,7 @@ function setCardEmpty(message =
   const text = document.createElement('p');
   text.textContent = message;
   cardSummary.replaceChildren(mark, text);
+  refreshSkillExamplePicker(null);
 }
 
 function setCardError(message) {
@@ -597,6 +658,7 @@ function detailLabel(key) {
     name: 'Agent 名称',
     sizeBytes: 'Card 大小',
     version: '协议版本',
+    executionVersion: '执行协议版本',
     binding: '接口绑定',
     targetOrigin: '调用目标',
     networkPolicy: '网络策略',
@@ -604,6 +666,7 @@ function detailLabel(key) {
     streaming: '流式能力',
     tenant: 'Tenant',
     skillsCount: 'Skills 数量',
+    warnings: '兼容警告',
     timeoutMs: '响应上限',
     durationMs: '实际耗时',
     preview: '响应预览',
@@ -627,6 +690,7 @@ function clearSensitiveState() {
   overallState.textContent = '等待输入';
   setCardSourceMode('json');
   syncAuthMode();
+  refreshSkillExamplePicker(null);
   syncStreamingMode();
   resetReadiness('完成实测后，这里会汇总 Card、A2A 调用、响应时限与参评声明。');
   for (const [id, element] of Object.entries(checkElements)) {

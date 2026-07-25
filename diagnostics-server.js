@@ -17,6 +17,7 @@ const STATIC_FILES = new Map([
   ['/agent-check.html', 'agent-check.html'],
   ['/agent-check.js', 'agent-check.js'],
   ['/agent-check-helpers.js', 'agent-check-helpers.js'],
+  ['/example-import.js', 'example-import.js'],
   ['/agent-check.css', 'agent-check.css']
 ]);
 

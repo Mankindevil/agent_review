@@ -219,19 +219,98 @@ test('defaults an unversioned top-level URL Card to protocol 0.3', () => {
   assert.equal(legacy.selectedInterface.version, '0.3');
 });
 
-test('rejects a top-level URL Card that claims a 1.x protocol version', () => {
+test('accepts a hybrid top-level URL Card that claims a 1.x protocol version', () => {
   const result = validateAgentCard({
-    name: 'Shape Mismatch',
+    name: 'Hybrid Agent',
     description: 'Legacy shape with a modern version.',
     url: 'https://example.com/a2a',
     protocolVersion: '1.0',
-    skills: [{ id: 'mismatch', name: 'Mismatch', description: 'Invalid shape.' }]
+    preferredTransport: 'JSONRPC',
+    skills: [{ id: 'hybrid', name: 'Hybrid', description: 'Hybrid skill.' }]
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.schemaVersion, '0.3');
+  assert.deepEqual(result.selectedInterface, {
+    url: 'https://example.com/a2a',
+    binding: 'JSONRPC',
+    version: '1.0'
+  });
+  assert.match(result.warnings.join('\n'), /混合格式/);
+});
+
+test('accepts a hybrid HTTP+JSON 1.0 top-level URL Card', () => {
+  const result = validateAgentCard({
+    name: 'Hybrid HTTP Agent',
+    description: 'Hybrid HTTP+JSON card.',
+    url: 'https://example.com/a2a',
+    protocolVersion: '1.0',
+    preferredTransport: 'HTTP+JSON',
+    skills: [{ id: 'hybrid', name: 'Hybrid', description: 'Hybrid skill.' }]
+  });
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.selectedInterface, {
+    url: 'https://example.com/a2a',
+    binding: 'HTTP+JSON',
+    version: '1.0'
+  });
+  assert.match(result.warnings.join('\n'), /混合格式/);
+});
+
+test('rejects a hybrid 1.x top-level URL Card without preferredTransport', () => {
+  const result = validateAgentCard({
+    name: 'Hybrid Missing Transport',
+    description: 'Hybrid shape without transport.',
+    url: 'https://example.com/a2a',
+    protocolVersion: '1.0',
+    skills: [{ id: 'hybrid', name: 'Hybrid', description: 'Hybrid skill.' }]
   });
 
   assert.equal(result.valid, false);
-  assert.equal(result.schemaVersion, '0.3');
   assert.equal(result.selectedInterface, null);
-  assert.match(result.errors.join('\n'), /protocolVersion/);
+  assert.match(result.errors.join('\n'), /preferredTransport/);
+});
+
+test('normalizes a top-level 0.2.x Card to a 0.3 execution interface', () => {
+  const card02 = {
+    name: '财神 MoneyGod',
+    description: '玄学皮·量化芯投研团队',
+    url: 'https://example.com/',
+    protocolVersion: '0.2.6',
+    preferredTransport: 'JSONRPC',
+    skills: [{
+      id: 'multi_agent_quant_research',
+      name: '多 Agent 量化投研',
+      description: '因子到回测反馈闭环'
+    }]
+  };
+  const result = validateAgentCard(card02);
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.selectedInterface, {
+    url: 'https://example.com/',
+    binding: 'JSONRPC',
+    version: '0.3'
+  });
+  assert.match(result.warnings.join('\n'), /0\.2\.x/);
+  assert.deepEqual(selectInterface(card02), result.selectedInterface);
+  assert.deepEqual(getInterfaces(card02), result.interfaces);
+});
+
+test('keeps getInterfaces aligned with validateAgentCard for hybrid cards', () => {
+  const hybrid = {
+    name: 'Aligned Hybrid',
+    description: 'Interface selection must match validation.',
+    url: 'https://example.com/rpc',
+    protocolVersion: '1.0',
+    preferredTransport: 'JSON-RPC',
+    skills: [{ id: 'hybrid', name: 'Hybrid', description: 'Hybrid skill.' }]
+  };
+  const result = validateAgentCard(hybrid);
+  assert.equal(result.valid, true);
+  assert.deepEqual(getInterfaces(hybrid), result.interfaces);
+  assert.deepEqual(selectInterface(hybrid), result.selectedInterface);
 });
 
 test('rejects a 0.3 endpoint declared inside the 1.x supportedInterfaces shape', () => {

@@ -34,6 +34,7 @@ export const APP_FILES = Object.freeze([
   'public/agent-check-helpers.js',
   'public/agent-check.html',
   'public/agent-check.js',
+  'public/example-import.js',
   'src/a2a.js',
   'src/agent-diagnostics.js',
   'src/diagnostics-guard.js',

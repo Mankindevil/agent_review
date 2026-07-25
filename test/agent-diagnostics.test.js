@@ -231,6 +231,48 @@ test('uses the uploaded Card directly, propagates tenant, and reports technical 
   assert.equal(report.technicalReadiness.checks[2].details.timeoutMs, 300_000);
 });
 
+test('normalizes top-level 0.2.x Cards and surfaces compatibility warnings', async () => {
+  const calls = [];
+  const request = async (url, options) => {
+    calls.push({ url, options });
+    const body = JSON.parse(options.body);
+    assert.equal(body.method, 'message/send');
+    return jsonResponse({
+      jsonrpc: '2.0',
+      id: body.id,
+      result: {
+        kind: 'message',
+        messageId: 'reply',
+        role: 'agent',
+        parts: [{ kind: 'text', text: 'ok' }]
+      }
+    });
+  };
+
+  const report = await runAgentDiagnostics({
+    ...baseInput,
+    agentCard: {
+      name: '财神 MoneyGod',
+      description: '玄学皮·量化芯投研团队',
+      url: 'https://agent.example/',
+      protocolVersion: '0.2.6',
+      preferredTransport: 'JSONRPC',
+      skills: [{
+        id: 'multi_agent_quant_research',
+        name: '多 Agent 量化投研',
+        description: '因子到回测反馈闭环'
+      }]
+    }
+  }, { request });
+
+  const validation = report.checks.find((check) => check.id === 'card-validation');
+  assert.equal(validation.status, 'passed');
+  assert.equal(validation.details.executionVersion, '0.3');
+  assert.match(validation.details.warnings.join('\n'), /0\.2\.x/);
+  assert.equal(calls.length, 1);
+  assert.equal(report.ok, true);
+});
+
 test('resolves both URL source modes before running the existing diagnostics flow', async () => {
   for (const [type, url, resolvedUrl] of [
     [

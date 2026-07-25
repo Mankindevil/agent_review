@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {
   STOCK_DIAGNOSTIC_PROMPT,
   firstSkillExample,
-  promptForAgentCard
+  promptForAgentCard,
+  skillExampleChoices
 } from '../public/agent-check-helpers.js';
 
 test('selects the first non-empty skill example', () => {
@@ -15,6 +16,10 @@ test('selects the first non-empty skill example', () => {
   };
 
   assert.equal(firstSkillExample(card), 'run the declared market report');
+  assert.deepEqual(skillExampleChoices(card), [
+    'run the declared market report',
+    'later'
+  ]);
 });
 
 test('replaces only the untouched stock diagnostics prompt', () => {

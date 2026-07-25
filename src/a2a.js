@@ -1,6 +1,10 @@
 import { safeHttpRequest, validateSafeUrl } from './safe-http.js';
 
 const LEGACY_BINDINGS = { JSONRPC: 'JSONRPC', 'JSON-RPC': 'JSONRPC', HTTP_JSON: 'HTTP+JSON', 'HTTP+JSON': 'HTTP+JSON' };
+const HYBRID_1X_WARNING =
+  '检测到 A2A 0.3/1.x 混合格式；平台已根据顶层 url、protocolVersion 和 preferredTransport 生成兼容接口。建议提交前修正原始 Agent Card。';
+const LEGACY_02_WARNING =
+  '检测到 A2A 0.2.x；平台已按 0.3 兼容接口执行。建议将 protocolVersion 升级为 0.3 或改为 supportedInterfaces 1.x。';
 
 export function validateAgentCard(card, options = {}) {
   const errors = [];
@@ -34,21 +38,17 @@ export function validateAgentCard(card, options = {}) {
   validateOptionalContainer(card, 'signatures', 'array', errors);
   validateOptionalContainer(card, 'extensions', 'array', errors);
 
-  const schemaVersion = Array.isArray(card?.supportedInterfaces) ||
-    Object.hasOwn(card || {}, 'supportedInterfaces')
-    ? '1.x'
-    : '0.3';
-  const interfaces = schemaVersion === '1.x'
-    ? validateV1Interfaces(card?.supportedInterfaces, errors, options)
-    : validateV03Interface(card, errors, options);
-  const selectedInterface = interfaces.find(isSupportedInterface) || null;
+  const resolved = resolveDeclaredInterfaces(card, options);
+  errors.push(...resolved.errors);
+  const selectedInterface = resolved.interfaces.find(isSupportedInterface) || null;
   if (!selectedInterface) errors.push('Agent Card must declare at least one supported interface');
   return {
     valid: errors.length === 0,
     errors,
+    warnings: resolved.warnings,
     version: inferVersion(card),
-    schemaVersion,
-    interfaces,
+    schemaVersion: resolved.schemaVersion,
+    interfaces: resolved.interfaces,
     selectedInterface
   };
 }
@@ -57,28 +57,28 @@ export function inferVersion(card) {
   return card?.protocolVersion || card?.supportedInterfaces?.[0]?.protocolVersion || (card?.url ? '0.3-compatible' : '1.0');
 }
 
-export function getInterfaces(card) {
-  if (Array.isArray(card?.supportedInterfaces)) {
-    return card.supportedInterfaces
-      .filter((item) => isNonEmptyString(item?.url))
-      .map((item) => {
-        const normalized = {
-          url: item.url,
-          binding: LEGACY_BINDINGS[item.protocolBinding] || item.protocolBinding || '',
-          version: item.protocolVersion || card.protocolVersion || ''
-        };
-        if (isNonEmptyString(item.tenant)) normalized.tenant = item.tenant;
-        return normalized;
-      });
-  }
-  if (isNonEmptyString(card?.url)) {
-    return [{ url: card.url, binding: LEGACY_BINDINGS[card.preferredTransport] || 'JSONRPC', version: card.protocolVersion || '0.3' }];
-  }
-  return [];
+export function getInterfaces(card, options = {}) {
+  return resolveDeclaredInterfaces(card, options).interfaces;
 }
 
-export function selectInterface(card) {
-  return getInterfaces(card).find(isSupportedInterface) || null;
+export function selectInterface(card, options = {}) {
+  return getInterfaces(card, options).find(isSupportedInterface) || null;
+}
+
+export function resolveDeclaredInterfaces(card, options = {}) {
+  const errors = [];
+  const warnings = [];
+  const hasSupportedInterfaces = Array.isArray(card?.supportedInterfaces) ||
+    Object.hasOwn(card || {}, 'supportedInterfaces');
+  if (hasSupportedInterfaces) {
+    return {
+      schemaVersion: '1.x',
+      interfaces: validateV1Interfaces(card?.supportedInterfaces, errors, options),
+      warnings,
+      errors
+    };
+  }
+  return resolveTopLevelInterface(card, errors, warnings, options);
 }
 
 function isNonEmptyString(value) { return typeof value === 'string' && value.trim().length > 0; }
@@ -118,24 +118,70 @@ function validateV1Interfaces(value, errors, options) {
   return interfaces;
 }
 
-function validateV03Interface(card, errors, options) {
+function resolveTopLevelInterface(card, errors, warnings, options) {
   const url = validateDeclaredUrl(card?.url, 'url', errors, options);
-  let version = card?.protocolVersion === undefined
+  const declaredVersion = card?.protocolVersion === undefined
     ? '0.3'
     : validateRequiredString(card.protocolVersion, 'protocolVersion', errors);
-  if (version && !/^0\.3(?:\.|$)/u.test(version)) {
-    errors.push('protocolVersion 必须是 0.3 兼容版本');
-    version = null;
+  if (!url || !declaredVersion) {
+    return { schemaVersion: '0.3', interfaces: [], warnings, errors };
   }
-  const transport = card?.preferredTransport === undefined
-    ? 'JSONRPC'
-    : validateRequiredString(card.preferredTransport, 'preferredTransport', errors);
-  if (!url || !version || !transport) return [];
-  return [{
-    url,
-    binding: LEGACY_BINDINGS[transport] || transport,
-    version
-  }];
+
+  if (/^0\.3(?:\.|$)/u.test(declaredVersion)) {
+    const transport = resolveLegacyTransport(card, errors, { required: false });
+    if (!transport) return { schemaVersion: '0.3', interfaces: [], warnings, errors };
+    return {
+      schemaVersion: '0.3',
+      interfaces: [{ url, binding: transport, version: declaredVersion }],
+      warnings,
+      errors
+    };
+  }
+
+  if (/^0\.2(?:\.|$)/u.test(declaredVersion)) {
+    const transport = resolveLegacyTransport(card, errors, { required: false });
+    if (!transport) return { schemaVersion: '0.3', interfaces: [], warnings, errors };
+    warnings.push(LEGACY_02_WARNING);
+    return {
+      schemaVersion: '0.3',
+      interfaces: [{ url, binding: transport, version: '0.3' }],
+      warnings,
+      errors
+    };
+  }
+
+  if (/^1\./u.test(declaredVersion)) {
+    const transport = resolveLegacyTransport(card, errors, { required: true });
+    if (!transport) return { schemaVersion: '0.3', interfaces: [], warnings, errors };
+    warnings.push(HYBRID_1X_WARNING);
+    return {
+      schemaVersion: '0.3',
+      interfaces: [{ url, binding: transport, version: declaredVersion }],
+      warnings,
+      errors
+    };
+  }
+
+  errors.push('protocolVersion 必须是 0.2.x、0.3 兼容版本或 1.x 混合格式');
+  return { schemaVersion: '0.3', interfaces: [], warnings, errors };
+}
+
+function resolveLegacyTransport(card, errors, { required }) {
+  if (card?.preferredTransport === undefined) {
+    if (required) {
+      errors.push('hybrid 1.x Agent Card 必须声明 preferredTransport');
+      return null;
+    }
+    return 'JSONRPC';
+  }
+  const transport = validateRequiredString(card.preferredTransport, 'preferredTransport', errors);
+  if (!transport) return null;
+  const binding = LEGACY_BINDINGS[transport];
+  if (!binding) {
+    errors.push('preferredTransport 必须是 JSONRPC 或 HTTP+JSON');
+    return null;
+  }
+  return binding;
 }
 
 function validateDeclaredUrl(value, path, errors, options = {}) {

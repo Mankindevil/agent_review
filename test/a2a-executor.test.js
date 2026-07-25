@@ -981,12 +981,12 @@ test('matches exact Content-Type essences while allowing legal parameters', asyn
   assert.equal(parameterized.outcome.status, 'succeeded');
 
   const legacyCard = {
-    ...rpcCard,
-    supportedInterfaces: [{
-      url: 'https://agent.example/a2a',
-      protocolBinding: 'JSONRPC',
-      protocolVersion: '0.3'
-    }]
+    name: rpcCard.name,
+    description: rpcCard.description,
+    skills: rpcCard.skills,
+    url: 'https://agent.example/a2a',
+    protocolVersion: '0.3',
+    preferredTransport: 'JSONRPC'
   };
   const legacyParameterized = await executeA2ATurn({
     card: legacyCard,

@@ -108,6 +108,17 @@
             <b id="v2-examples-heading">Agent 使用示例</b>
             <small>按 Example → Turn → Part → Criterion 的执行顺序登记公开样本；每个 Example 固定采样三次。</small>
           </div>
+          <div class="a2a-example-import">
+            <div class="a2a-example-import-actions">
+              <button class="text-button" id="fill-examples-from-card" type="button">从 Agent Card 填充</button>
+              <button class="text-button" id="apply-example-paste" type="button">解析下方粘贴文本</button>
+            </div>
+            <label class="a2a-field-wide" for="example-paste">
+              粘贴多示例说明（自动识别「### 示例 N：标题」+ 输入 JSON + 预期要点）
+              <textarea id="example-paste" rows="8" spellcheck="false" placeholder="### 示例 1：……&#10;&#10;**输入**&#10;```json&#10;{&quot;text&quot;: &quot;……&quot;, &quot;riskLevel&quot;: &quot;balanced&quot;}&#10;```&#10;&#10;**预期输出要点**&#10;- ……"></textarea>
+            </label>
+            <p id="example-import-status" class="a2a-example-import-status" role="status" aria-live="polite"></p>
+          </div>
           <div id="v2-example-list" class="a2a-example-list"></div>
           <button class="text-button a2a-add-root" id="add-v2-example" type="button">＋ 添加 Example</button>
 
@@ -190,7 +201,7 @@
     </section>
 
     <section class="telemetry-panel">
-      <header><div><span>TRACE / 评测执行日志</span><b id="log-count">0 EVENTS</b></div><small>每一条都标明真实、演示或规则执行</small></header>
+      <header><div><span>TRACE / 评测执行日志</span><b id="log-count">0 EVENTS</b></div><small>公开页为脱敏时间线；等待中单行计时，不刷屏。完整明细在服务端 data/runlogs/</small></header>
       <div class="log-stream" id="log-stream"><p class="log-empty">等待第一条评测信号……</p></div>
     </section>
 
@@ -211,6 +222,6 @@
     </div>
   </template>
 
-  <script type="module" src="/app.js?v=20260725-a2a1"></script>
+  <script type="module" src="/app.js?v=20260725-examples1"></script>
 </body>
 </html>

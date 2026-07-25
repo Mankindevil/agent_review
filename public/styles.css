@@ -118,6 +118,12 @@ h1 em::after { content: ""; position: absolute; left: 0; bottom: -5px; width: 10
 .a2a-section-heading > b { font:900 22px/1 var(--display); }
 .a2a-section-heading > small { color:var(--muted); font-size:9px; line-height:1.5; }
 .a2a-intake { min-width:0; border-top:1px solid var(--line); margin-top:16px; }
+.a2a-example-import { display:grid; gap:10px; margin:0 0 14px; padding:12px; border:1px dashed var(--line); background:color-mix(in srgb, var(--paper, #fff) 92%, var(--teal, #0f6) 8%); }
+.a2a-example-import-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.a2a-example-import textarea { width:100%; min-height:140px; margin-top:6px; padding:10px; border:1px solid var(--line); background:var(--paper, #fff); font:11px/1.45 var(--mono, ui-monospace, monospace); resize:vertical; }
+.a2a-example-import-status { min-height:1.2em; margin:0; color:var(--muted); font-size:10px; line-height:1.45; }
+.a2a-example-import-status[data-tone="error"] { color:var(--red); }
+.a2a-example-import-status[data-tone="ok"] { color:var(--teal, var(--blue)); }
 .a2a-example-list { min-width:0; display:grid; gap:14px; }
 .a2a-custody-rail { min-width:0; position:relative; padding-left:18px; border-left:3px solid var(--teal,var(--blue)); }
 .a2a-custody-rail::before { content:""; position:absolute; left:-7px; top:18px; width:11px; height:11px; background:var(--paper); border:3px solid var(--red); }
