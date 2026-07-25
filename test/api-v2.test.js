@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -9,9 +9,15 @@ const testRoot = await mkdtemp(path.join(tmpdir(), 'agent-roast-api-v2-'));
 process.env.NODE_ENV = 'test';
 process.env.DATA_FILE = path.join(testRoot, 'evaluations.json');
 process.env.A2A_BLACK_BOX_V1_ENABLED = 'true';
+process.env.REVIEW_GOVERNANCE_ENABLED = 'true';
+process.env.REVIEW_PRINCIPALS_JSON = JSON.stringify([{
+  principalId: 'judge_preview_test',
+  displayName: 'Judge Preview Test',
+  role: 'judge',
+  tokenSha256: createHash('sha256').update('judge-preview-test-key', 'utf8').digest('hex')
+}]);
 process.env.EVIDENCE_ENCRYPTION_KEY = randomBytes(32).toString('base64');
 process.env.EVIDENCE_ROOT = path.join(testRoot, 'evidence');
-process.env.JUDGE_PREVIEW_ACCESS_KEY = 'judge-preview-test-key';
 
 const {
   evaluationStore,

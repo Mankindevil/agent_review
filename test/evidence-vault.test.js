@@ -108,7 +108,12 @@ test('round-trips a projected canonical manifest commitment through the Vault', 
   try {
     await vault.put(record);
     for (const audience of ['public', 'admin']) {
-      const projectedManifest = projectEvaluation(evaluation, { audience })
+      const projectedManifest = projectEvaluation(evaluation, {
+        audience,
+        principal: audience === 'admin'
+          ? { principalId: 'admin_manifest_flow', role: 'admin' }
+          : null
+      })
         .evidenceManifest.items[0];
       assert.equal(projectedManifest.recordHash, record.recordHash);
       assert.deepEqual(
