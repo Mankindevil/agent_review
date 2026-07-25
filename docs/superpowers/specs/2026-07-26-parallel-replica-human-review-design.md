@@ -1,7 +1,7 @@
 # Parallel Replica Track And Human Replica Quality Scores
 
 Date: 2026-07-26  
-Status: design approved in discussion; awaiting written review
+Status: implemented on `codex/finance-roast` (cube merge → replica-human lock → finalize dual-track → UI)
 
 ## Goal
 
