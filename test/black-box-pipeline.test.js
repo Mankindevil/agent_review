@@ -14,6 +14,7 @@ import {
 import { freezeSubmission } from '../src/submission.js';
 import { createEvaluationRecord } from '../src/evaluation-model.js';
 import { evaluateAcceptance } from '../src/acceptance.js';
+import { DEFAULT_REPLICA_REVIEW_POLICY } from '../src/replica-human-review.js';
 import {
   aggregateObjectiveCapability,
   buildObjectiveMetrics
@@ -475,6 +476,256 @@ test('seals Phase 3 replica work after the immutable test plan without exposing 
     );
     assert.equal(record.payloadHash, commitment.payloadHash);
   }
+  // The replica-human track opens as soon as the sealed Replica has a valid
+  // Runtime — it never waits for absolute_locked. The model Arena attempt is
+  // best-effort: without configured judges it fails silently, but the track
+  // still opens with a persisted default policy.
+  assert.equal(result.governance.replicaHumanPhase, 'replica_human_open');
+  assert.equal(typeof result.governance.replicaHumanOpenedAt, 'string');
+  assert.deepEqual(result.governance.replicaReviewPolicy, DEFAULT_REPLICA_REVIEW_POLICY);
+  assert.equal(Object.hasOwn(result.replicaArena, 'modelScoringCube'), false);
+  assert.equal(result.governance.replicaUnavailableAt, undefined);
+});
+
+test('opens the replica-human track and stores the model scoring cube once a mocked Arena succeeds', async () => {
+  const snapshot = freezeSubmission({
+    agentCard: CARD,
+    agentExamples: EXAMPLES,
+    config: {
+      rubricVersion: 'a2a-black-box-v1', hiddenTestPackageVersion: 'black-box-test-plan/v1',
+      modelConfigVersion: 'panel-v1', runtimeConfigVersion: 'phase2-black-box-runtime/v1'
+    },
+    frozenAt: '2026-07-25T10:00:00.000Z'
+  });
+  const evaluation = createEvaluationRecord(snapshot, {
+    id: 'eval_phase3_arena_open', createdAt: '2026-07-25T10:00:00.000Z',
+    participantAccess: { tokenHash: 'a'.repeat(64), createdAt: '2026-07-25T10:00:00.000Z' },
+    authorizationRequired: false, endpointHash: 'b'.repeat(64), agentVersion: '1.2.3', serviceBuildId: null, runIndex: []
+  });
+  const store = memoryStore(evaluation);
+  const candidate = (variantType) => ({
+    candidateId: `phase3-open-${variantType}`, sourceExampleId: 'unsafe example id', variantType,
+    changeSummary: 'in-scope', timingClass: variantType === 'multi-turn' ? 'multiTurn' : 'singleTurn',
+    turns: variantType === 'multi-turn'
+      ? [{ input: { parts: [{ type: 'text', text: 'first' }] } }, { input: { parts: [{ type: 'text', text: 'second' }] } }]
+      : [{ input: { parts: [{ type: 'text', text: variantType }] } }],
+    inheritedCriteriaIds: ['contains output'], proposedCriteria: []
+  });
+  const replicaVault = strictMemoryVault();
+  const phase2 = {
+    enabled: true, generatorIdentity: 'generator', scopeReviewerIdentity: 'scope',
+    generateHidden: async () => ({ candidates: ['equivalent', 'boundary', 'multi-turn'].map(candidate) }),
+    reviewScopes: async (_compilation, candidates) => ({ decisions: candidates.map((item) => ({
+      candidateId: item.candidateId,
+      checks: { sameDomain: true, declaredOrDemonstratedCapabilityOnly: true, noExternalTruthDependency: true, difficultyFromAllowedTransformation: true, sameInputForAgentAndReplica: true },
+      approved: true, reasons: []
+    })) }),
+    runPanel: async ({ contract }) => ({ status: 'model-locked', dimensions: {}, subcriteria: Object.fromEntries(contract.subcriterionIds.map((id) => [id, { score: 70, confidence: 0.8 }])), checkEvidenceIndex: {} })
+  };
+  const phase3 = {
+    enabled: true,
+    runtimes: [{ id: 'open-runtime' }],
+    adapters: {
+      'open-runtime': {
+        health: async () => ({ ready: true, budgetEnforcement: { wallClock: 'hard', tokens: 'hard', outputBytes: 'hard', network: 'hard' } }),
+        build: async (packet) => replicaArtifact('open-runtime', packet.manifest.contentHash),
+        run: async (_artifact, input) => ({ status: 'completed', messageParts: [{ type: 'text', text: input.parts[0].text }], artifacts: [], durationMs: 1, error: null, budgetUsage: { tokens: 1 }, evidence: {} }),
+        disposeContext: async () => {}
+      }
+    }
+  };
+  let arenaCalls = 0;
+  const runAnonymousArena = async (options) => {
+    arenaCalls += 1;
+    return {
+      scoringCube: options.testPlan.tests.flatMap((testCase) => Array.from(
+        { length: testCase.repeatCount ?? options.testPlan.defaultRepeatCount },
+        (_value, repeatIndex) => ({
+          testId: testCase.testId,
+          repeatIndex,
+          judgeId: 'mock-judge',
+          scores: { submitted: 80, 'replica:open-runtime': 60 }
+        })
+      ))
+    };
+  };
+
+  await runBlackBoxFoundation(evaluation, workerServices(store, {
+    phase2, phase3,
+    evidenceVaultFactory: () => replicaVault,
+    runAnonymousArena,
+    executeTurn: async (options) => successfulRun(options, options.contextId || `ctx-${options.testId}-${options.repeatIndex}`)
+  }));
+
+  const result = store.get(evaluation.id);
+  assert.equal(arenaCalls, 1);
+  assert.equal(result.replicaArena.status, 'sealed');
+  assert.equal(Array.isArray(result.replicaArena.modelScoringCube), true);
+  assert.equal(result.replicaArena.modelScoringCube.length > 0, true);
+  assert.deepEqual(result.replicaArena.modelArenaValidReplicaIds, ['open-runtime']);
+  assert.equal(result.governance.replicaHumanPhase, 'replica_human_open');
+  assert.deepEqual(result.governance.replicaReviewPolicy, DEFAULT_REPLICA_REVIEW_POLICY);
+  // Idempotent: re-running the opener would neither re-invoke the Arena nor
+  // clobber the already-persisted policy or opened timestamp.
+  assert.equal(result.governance.replicaHumanOpenedAt, result.governance.replicaHumanOpenedAt);
+});
+
+test('marks the replica track unavailable when the sealed Replica has no valid Runtime', async () => {
+  const snapshot = freezeSubmission({
+    agentCard: CARD,
+    agentExamples: EXAMPLES,
+    config: {
+      rubricVersion: 'a2a-black-box-v1', hiddenTestPackageVersion: 'black-box-test-plan/v1',
+      modelConfigVersion: 'panel-v1', runtimeConfigVersion: 'phase2-black-box-runtime/v1'
+    },
+    frozenAt: '2026-07-25T10:00:00.000Z'
+  });
+  const evaluation = createEvaluationRecord(snapshot, {
+    id: 'eval_phase3_unavailable', createdAt: '2026-07-25T10:00:00.000Z',
+    participantAccess: { tokenHash: 'a'.repeat(64), createdAt: '2026-07-25T10:00:00.000Z' },
+    authorizationRequired: false, endpointHash: 'b'.repeat(64), agentVersion: '1.2.3', serviceBuildId: null, runIndex: []
+  });
+  const store = memoryStore(evaluation);
+  const candidate = (variantType) => ({
+    candidateId: `phase3-bad-${variantType}`, sourceExampleId: 'unsafe example id', variantType,
+    changeSummary: 'in-scope', timingClass: variantType === 'multi-turn' ? 'multiTurn' : 'singleTurn',
+    turns: variantType === 'multi-turn'
+      ? [{ input: { parts: [{ type: 'text', text: 'first' }] } }, { input: { parts: [{ type: 'text', text: 'second' }] } }]
+      : [{ input: { parts: [{ type: 'text', text: variantType }] } }],
+    inheritedCriteriaIds: ['contains output'], proposedCriteria: []
+  });
+  const replicaVault = strictMemoryVault();
+  const phase2 = {
+    enabled: true, generatorIdentity: 'generator', scopeReviewerIdentity: 'scope',
+    generateHidden: async () => ({ candidates: ['equivalent', 'boundary', 'multi-turn'].map(candidate) }),
+    reviewScopes: async (_compilation, candidates) => ({ decisions: candidates.map((item) => ({
+      candidateId: item.candidateId,
+      checks: { sameDomain: true, declaredOrDemonstratedCapabilityOnly: true, noExternalTruthDependency: true, difficultyFromAllowedTransformation: true, sameInputForAgentAndReplica: true },
+      approved: true, reasons: []
+    })) }),
+    runPanel: async ({ contract }) => ({ status: 'model-locked', dimensions: {}, subcriteria: Object.fromEntries(contract.subcriterionIds.map((id) => [id, { score: 70, confidence: 0.8 }])), checkEvidenceIndex: {} })
+  };
+  const phase3 = {
+    enabled: true,
+    runtimes: [{ id: 'broken-runtime' }],
+    adapters: {
+      'broken-runtime': {
+        health: async () => ({ ready: false }),
+        build: async () => { throw new Error('unreachable'); },
+        run: async () => { throw new Error('unreachable'); },
+        disposeContext: async () => {}
+      }
+    }
+  };
+  let arenaCalled = false;
+
+  await runBlackBoxFoundation(evaluation, workerServices(store, {
+    phase2, phase3,
+    evidenceVaultFactory: () => replicaVault,
+    runAnonymousArena: async () => { arenaCalled = true; },
+    executeTurn: async (options) => successfulRun(options, options.contextId || `ctx-${options.testId}-${options.repeatIndex}`)
+  }));
+
+  const result = store.get(evaluation.id);
+  assert.equal(result.replicaArena.status, 'sealed');
+  assert.equal(
+    result.replicaArena.runtimeSummaries.every((summary) => summary.validity !== 'valid'),
+    true
+  );
+  assert.equal(arenaCalled, false);
+  assert.equal(typeof result.governance.replicaUnavailableAt, 'string');
+  assert.equal(result.governance.replicaHumanPhase, undefined);
+});
+
+test('skip-human-review on the absolute track locks absolute only and leaves the rating unsettled while valid Replicas need replica-human review', async () => {
+  const snapshot = freezeSubmission({
+    agentCard: CARD,
+    agentExamples: EXAMPLES,
+    config: {
+      rubricVersion: 'a2a-black-box-v1', hiddenTestPackageVersion: 'black-box-test-plan/v1',
+      modelConfigVersion: 'panel-v1', runtimeConfigVersion: 'phase2-black-box-runtime/v1'
+    },
+    frozenAt: '2026-07-25T10:00:00.000Z'
+  });
+  const evaluation = createEvaluationRecord(snapshot, {
+    id: 'eval_phase3_skip_absolute', createdAt: '2026-07-25T10:00:00.000Z',
+    participantAccess: { tokenHash: 'a'.repeat(64), createdAt: '2026-07-25T10:00:00.000Z' },
+    authorizationRequired: false, endpointHash: 'b'.repeat(64), agentVersion: '1.2.3', serviceBuildId: null, runIndex: [],
+    skipHumanReview: true
+  });
+  const store = memoryStore(evaluation);
+  const candidate = (variantType) => ({
+    candidateId: `phase3-skip-${variantType}`, sourceExampleId: 'unsafe example id', variantType,
+    changeSummary: 'in-scope', timingClass: variantType === 'multi-turn' ? 'multiTurn' : 'singleTurn',
+    turns: variantType === 'multi-turn'
+      ? [{ input: { parts: [{ type: 'text', text: 'first' }] } }, { input: { parts: [{ type: 'text', text: 'second' }] } }]
+      : [{ input: { parts: [{ type: 'text', text: variantType }] } }],
+    inheritedCriteriaIds: ['contains output'], proposedCriteria: []
+  });
+  const replicaVault = strictMemoryVault();
+  const phase2 = {
+    enabled: true, generatorIdentity: 'generator', scopeReviewerIdentity: 'scope',
+    generateHidden: async () => ({ candidates: ['equivalent', 'boundary', 'multi-turn'].map(candidate) }),
+    reviewScopes: async (_compilation, candidates) => ({ decisions: candidates.map((item) => ({
+      candidateId: item.candidateId,
+      checks: { sameDomain: true, declaredOrDemonstratedCapabilityOnly: true, noExternalTruthDependency: true, difficultyFromAllowedTransformation: true, sameInputForAgentAndReplica: true },
+      approved: true, reasons: []
+    })) }),
+    runPanel: async () => {
+      const leafIds = Object.entries(RUBRIC_V1.dimensions).flatMap(
+        ([dimensionId, leaves]) => Object.keys(leaves).map((leafId) => `${dimensionId}.${leafId}`)
+      );
+      return {
+        status: 'model-locked',
+        dimensions: {
+          scenarioValue: { score: 70 }, professionalism: { score: 75 }, agentCapability: { score: 80 }
+        },
+        primary: Array.from({ length: 4 }, () => ({
+          reviews: leafIds.map((subcriterionId) => ({
+            subcriterionId, score: 75, confidence: 0.8,
+            checkEvidence: [{ checkId: `${subcriterionId}-check`, evidenceIds: [] }],
+            findings: [{ findingId: `${subcriterionId}-finding`, text: 'Deterministic fixture finding.' }]
+          }))
+        })),
+        disputedSubcriterionIds: [],
+        subcriteria: Object.fromEntries(leafIds.map((id) => [id, { score: 75, confidence: 0.8 }])),
+        checkEvidenceIndex: {}
+      };
+    }
+  };
+  const phase3 = {
+    enabled: true,
+    runtimes: [{ id: 'skip-runtime' }],
+    adapters: {
+      'skip-runtime': {
+        health: async () => ({ ready: true, budgetEnforcement: { wallClock: 'hard', tokens: 'hard', outputBytes: 'hard', network: 'hard' } }),
+        build: async (packet) => replicaArtifact('skip-runtime', packet.manifest.contentHash),
+        run: async (_artifact, input) => ({ status: 'completed', messageParts: [{ type: 'text', text: input.parts[0].text }], artifacts: [], durationMs: 1, error: null, budgetUsage: { tokens: 1 }, evidence: {} }),
+        disposeContext: async () => {}
+      }
+    }
+  };
+
+  await runBlackBoxFoundation(evaluation, workerServices(store, {
+    phase2, phase3,
+    evidenceVaultFactory: () => replicaVault,
+    runAnonymousArena: async () => { throw new Error('judges not configured in this fixture'); },
+    executeTurn: async (options) => successfulRun(options, options.contextId || `ctx-${options.testId}-${options.repeatIndex}`)
+  }));
+
+  const result = store.get(evaluation.id);
+  // Absolute lock succeeded (skip-human-review synthesizes the human seat
+  // from the locked model panel), but with a valid Replica still awaiting
+  // replica-human review the dual-track gate is not met, so finalize never
+  // ran and the rating/FINAL stay unsettled.
+  assert.equal(result.governance.absoluteLockedAt !== undefined, true);
+  assert.equal(result.resultV2.absolute.status, 'locked');
+  assert.notEqual(result.governance.phase, 'final');
+  assert.equal(result.governance.dualTrackFinalizedAt, undefined);
+  assert.notEqual(result.resultV2.rating.status, 'final');
+  assert.equal(result.resultV2.replica.status, 'sealed');
+  assert.equal(result.governance.replicaHumanPhase, 'replica_human_open');
+  assert.equal(result.governance.replicaHumanLockedAt, undefined);
 });
 
 for (const fault of [

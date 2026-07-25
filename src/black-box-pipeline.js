@@ -47,6 +47,11 @@ import {
   lockAndReleaseAbsoluteResult,
   skipHumanReview
 } from './review-governance.js';
+import {
+  runSealedModelArena,
+  validReplicaIdsFor
+} from './arena-release.js';
+import { getReplicaReviewPolicy } from './replica-human-review.js';
 
 export { releaseReplicaArena } from './arena-release.js';
 
@@ -1133,10 +1138,107 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
     activeWork: null
   }));
   const lockedRecord = context.store.get(context.evaluationId);
-  if (lockedRecord.governance?.skipHumanReview === true) {
-    return autoSkipHumanReview(lockedRecord, context);
+  const withReplicaTrack = await openReplicaTrackAfterModelLock(
+    lockedRecord,
+    context,
+    services
+  );
+  if (withReplicaTrack.governance?.skipHumanReview === true) {
+    return autoSkipHumanReview(withReplicaTrack, context);
   }
-  return lockedRecord;
+  return withReplicaTrack;
+}
+
+/**
+ * Runs immediately after the absolute model panel locks (see
+ * docs/superpowers/specs/2026-07-26-parallel-replica-human-review-design.md):
+ * the Replica track opens in parallel with absolute human review and never
+ * waits for `absolute_locked`. When the sealed Replica has valid Runtimes,
+ * this best-effort runs the anonymous model Arena into
+ * `replicaArena.modelScoringCube` and marks the replica-human track open
+ * (persisting default review policy). When there are no valid Runtimes, it
+ * marks the track unavailable so `finalizeDualTrack` can settle on
+ * 「待复刻」 without any replica-human review. A failed Arena attempt (e.g.
+ * judges not yet configured) never blocks the pipeline — `finalizeDualTrack`
+ * retries the Arena run at finalize time.
+ */
+async function openReplicaTrackAfterModelLock(record, context, services) {
+  try {
+    return await openReplicaTrackAfterModelLockUnsafe(record, context, services);
+  } catch (error) {
+    console.error(
+      `[v2-pipeline] opening the replica-human track failed for ${context.evaluationId}`,
+      error
+    );
+    return context.store.get(context.evaluationId);
+  }
+}
+
+async function openReplicaTrackAfterModelLockUnsafe(record, context, services) {
+  if (record.replicaArena?.status !== 'sealed') return record;
+  const validReplicaIds = validReplicaIdsFor(record.replicaArena);
+
+  if (validReplicaIds.length === 0) {
+    if (record.governance?.replicaUnavailableAt) return record;
+    return await mutateCurrent(context, (current) => withRunProgress({
+      ...current,
+      governance: {
+        ...current.governance,
+        replicaUnavailableAt: current.governance?.replicaUnavailableAt || context.now()
+      }
+    }, context, {
+      entry: {
+        level: 'info',
+        source: 'REPLICA',
+        phase: 'replica-human',
+        text: 'Replica 无有效实例，标记为待复刻'
+      }
+    }));
+  }
+
+  try {
+    await mutateCurrent(context, async (current) => {
+      await runSealedModelArena(current, {
+        evidenceVault: context.evidenceVault,
+        now: context.now,
+        ...(services.runAnonymousArena
+          ? { runAnonymousArena: services.runAnonymousArena }
+          : {}),
+        ...(services.arenaOptions ? { arenaOptions: services.arenaOptions } : {})
+      });
+      return current;
+    });
+  } catch (error) {
+    console.error(
+      `[v2-pipeline] sealed model Arena run failed for ${context.evaluationId}`,
+      error
+    );
+  }
+
+  const beforeOpen = context.store.get(context.evaluationId);
+  if (beforeOpen.governance?.replicaHumanPhase === 'replica_human_open') {
+    return beforeOpen;
+  }
+  return await mutateCurrent(context, (current) => {
+    // Persists default replicaReviewPolicy the first time it is read so the
+    // replica-human desk has a stable policy before any submission arrives.
+    getReplicaReviewPolicy(current);
+    return withRunProgress({
+      ...current,
+      governance: {
+        ...current.governance,
+        replicaHumanPhase: 'replica_human_open',
+        replicaHumanOpenedAt: current.governance?.replicaHumanOpenedAt || context.now()
+      }
+    }, context, {
+      entry: {
+        level: 'success',
+        source: 'REPLICA',
+        phase: 'replica-human',
+        text: '模型 Arena 已尝试密封评分，打开复刻人工复核'
+      }
+    });
+  });
 }
 
 async function autoSkipHumanReview(evaluation, context) {
