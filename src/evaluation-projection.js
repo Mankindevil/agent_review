@@ -320,11 +320,13 @@ function projectReplica(value, replicaArena, secrets, releaseAllowed, staleRelea
   if (status === 'released' && releaseAllowed) {
     return pick(value, [
       'status', 'submittedMedian', 'runtimes', 'bestBaseline', 'delta',
-      'conservativeDelta', 'ci95', 'differenceStable'
+      'conservativeDelta', 'ci95', 'differenceStable', 'skills', 'cases'
     ], {
       runtimes: projectReplicaRuntimes,
       bestBaseline: projectReplicaBaseline,
-      ci95: projectReplicaInterval
+      ci95: projectReplicaInterval,
+      skills: projectReplicaSkills,
+      cases: projectReplicaCases
     }, secrets);
   }
   if (staleRelease) {
@@ -449,6 +451,27 @@ function projectReplicaRuntimes(value, secrets) {
   return value.map((item) => pick(item, [
     'runtimeId', 'valid', 'median'
   ], {}, secrets));
+}
+
+function projectReplicaSkills(value, secrets) {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((item) => pick(item, [
+    'runtimeId', 'runtimeName', 'skillName', 'validity'
+  ], {}, secrets));
+}
+
+function projectReplicaCases(value, secrets) {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((item) => pick(item, [
+    'testId', 'repeatIndex', 'title', 'prompt', 'scores'
+  ], {
+    scores: (scores) => {
+      if (!scores || typeof scores !== 'object' || Array.isArray(scores)) return undefined;
+      return Object.fromEntries(Object.entries(scores).flatMap(([key, score]) =>
+        Number.isFinite(score) ? [[key, score]] : []
+      ));
+    }
+  }, secrets));
 }
 
 function projectReplicaBaseline(value, secrets) {

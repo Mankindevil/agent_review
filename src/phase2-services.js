@@ -194,6 +194,29 @@ function appendInstruction(turns, instruction) {
   return result;
 }
 
+function demoFindingText(reviewer, subcriterionId, index, score) {
+  const name = reviewer.name || reviewer.id || `seat-${index}`;
+  const leaf = String(subcriterionId || 'leaf').split('.').pop();
+  const tones = [
+    `在「${leaf}」上能对上提交证据，但叙述偏稳、锋芒不够。`,
+    `「${leaf}」有可复查引用，关键断言偶尔跨一步，分数按证据收着给。`,
+    `「${leaf}」主结论成立，边界与反证交代偏薄。`,
+    `「${leaf}」能跑通链路，和任务必要性的咬合还不够紧。`
+  ];
+  return `${name}（demo ${score}）：${tones[index % tones.length]}`;
+}
+
+function demoRepairSuggestion(subcriterionId, index) {
+  const leaf = String(subcriterionId || 'leaf').split('.').pop();
+  const fixes = [
+    `把「${leaf}」的证据→结论映射写死到可复查 check。`,
+    `收窄「${leaf}」结论范围，补一条反证或不确定性声明。`,
+    `为「${leaf}」补齐边界用例对照，避免只报乐观路径。`,
+    `在「${leaf}」里显式标出假设、限制与修复步骤。`
+  ];
+  return fixes[index % fixes.length];
+}
+
 function deterministicPanelAnswer(contract, reviewer, index) {
   const allowedEvidence = contract.evidenceIds || [];
   const primaryEvidence = allowedEvidence.slice(0, 2);
@@ -211,15 +234,14 @@ function deterministicPanelAnswer(contract, reviewer, index) {
           evidenceIds: primaryEvidence
         })),
       findings: [{
-        text: `${reviewer.name || reviewer.id} found observable support in the captured A2A evidence.`,
+        text: demoFindingText(reviewer, subcriterionId, index, score),
         evidenceIds: primaryEvidence
       }],
       counterEvidence: [],
       uncertainties: [
         'External factual truth was not added to the supplied evidence.'
       ],
-      repairSuggestion:
-        'Make assumptions, evidence links, limitations, and repair steps more explicit.',
+      repairSuggestion: demoRepairSuggestion(subcriterionId, index),
       conclusions: {
         taskCompleted: 'partial',
         criticalRisk: 'uncertain'

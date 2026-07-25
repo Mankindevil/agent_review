@@ -19,6 +19,10 @@ import { runAgentDiagnostics } from './src/agent-diagnostics.js';
 import { createDiagnosticsGuard } from './src/diagnostics-guard.js';
 import { getRuntimeStatus } from './src/runtime-status.js';
 import { createSkillBundle } from './src/runtimes.js';
+import {
+  loadReplicaCaseOutputs,
+  loadReplicaSkillBundle
+} from './src/replica-public-detail.js';
 import { getPandaDataStatus, pandaDataConfig, queryPandaData } from './src/panda-data.js';
 import { resolveServerAddress } from './src/server-address.js';
 import {
@@ -580,6 +584,51 @@ export const server = createServer(async (request, response) => {
         return json(response, 200, createSkillBundle(build, item.agentCard.description));
       } catch (error) {
         return json(response, 409, { error: error.message || 'Skill 产物无法标准化' });
+      }
+    }
+    const replicaSkillMatch = url.pathname.match(
+      /^\/api\/evaluations\/([^/]+)\/replica\/runtimes\/([^/]+)\/skill$/
+    );
+    if (request.method === 'GET' && replicaSkillMatch) {
+      const item = store.get(replicaSkillMatch[1]);
+      if (!item) return json(response, 404, { error: '评测不存在' });
+      if (item.schemaVersion !== 2) {
+        return json(response, 404, { error: 'Not a V2 evaluation' });
+      }
+      try {
+        const bundle = await loadReplicaSkillBundle(
+          item,
+          decodeURIComponent(replicaSkillMatch[2]),
+          replicaReleaseServices()
+        );
+        return json(response, 200, bundle);
+      } catch (error) {
+        return json(response, error.statusCode || 409, {
+          error: error.message || 'Replica Skill 不可用'
+        });
+      }
+    }
+    const replicaOutputMatch = url.pathname.match(
+      /^\/api\/evaluations\/([^/]+)\/replica\/cases\/([^/]+)\/([^/]+)\/outputs$/
+    );
+    if (request.method === 'GET' && replicaOutputMatch) {
+      const item = store.get(replicaOutputMatch[1]);
+      if (!item) return json(response, 404, { error: '评测不存在' });
+      if (item.schemaVersion !== 2) {
+        return json(response, 404, { error: 'Not a V2 evaluation' });
+      }
+      try {
+        const payload = await loadReplicaCaseOutputs(
+          item,
+          decodeURIComponent(replicaOutputMatch[2]),
+          decodeURIComponent(replicaOutputMatch[3]),
+          replicaReleaseServices()
+        );
+        return json(response, 200, payload);
+      } catch (error) {
+        return json(response, error.statusCode || 409, {
+          error: error.message || 'Replica 输出不可用'
+        });
       }
     }
     const match = url.pathname.match(/^\/api\/evaluations\/([^/]+)$/);

@@ -119,6 +119,10 @@ function bindEvents() {
     if (finalizeControl) { finalizeDualTrack(finalizeControl); return; }
     const skillDetail = event.target.closest('[data-skill-detail]');
     if (skillDetail) { toggleSkillDetail(skillDetail); return; }
+    const replicaOutput = event.target.closest('details.v2-replica-output');
+    if (replicaOutput && event.target.tagName === 'SUMMARY') {
+      loadReplicaOutputDetail(replicaOutput);
+    }
     const skillFile = event.target.closest('[data-skill-file]');
     if (skillFile) { selectSkillFile(skillFile); return; }
     const copySkill = event.target.closest('[data-copy-skill]');
@@ -1102,7 +1106,10 @@ async function toggleSkillDetail(button) {
   const token = ++state.skillRequestToken;
   inspector.dataset.requestToken = String(token);
   try {
-    const response = await fetch(`/api/evaluations/${encodeURIComponent(evaluationId)}/builds/${encodeURIComponent(runtimeId)}/skill`);
+    const api = button.dataset.skillApi === 'replica'
+      ? `/api/evaluations/${encodeURIComponent(evaluationId)}/replica/runtimes/${encodeURIComponent(runtimeId)}/skill`
+      : `/api/evaluations/${encodeURIComponent(evaluationId)}/builds/${encodeURIComponent(runtimeId)}/skill`;
+    const response = await fetch(api);
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'Skill 详情读取失败');
     if (inspector.dataset.requestToken !== String(token) || state.current?.id !== evaluationId || !inspector.isConnected) return;
@@ -1111,6 +1118,42 @@ async function toggleSkillDetail(button) {
   } catch (error) {
     if (inspector.dataset.requestToken === String(token) && state.current?.id === evaluationId && inspector.isConnected) renderSkillError(inspector, error.message);
   }
+}
+
+async function loadReplicaOutputDetail(details) {
+  if (details.dataset.loaded === 'true') return;
+  const evaluationId = details.dataset.replicaOutput;
+  const testId = details.dataset.testId;
+  const repeatIndex = details.dataset.repeatIndex;
+  const sourceId = details.dataset.sourceId;
+  const body = details.querySelector('.v2-replica-output-body');
+  if (!evaluationId || !testId || !body) return;
+  body.textContent = '加载中…';
+  try {
+    const response = await fetch(
+      `/api/evaluations/${encodeURIComponent(evaluationId)}/replica/cases/${encodeURIComponent(testId)}/${encodeURIComponent(repeatIndex)}/outputs`
+    );
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || '输出读取失败');
+    const source = (payload.sources || []).find((item) => item.sourceId === sourceId);
+    const text = formatReplicaOutput(source?.output);
+    body.textContent = text || '（空输出）';
+    details.dataset.loaded = 'true';
+  } catch (error) {
+    body.textContent = error.message || '输出读取失败';
+  }
+}
+
+function formatReplicaOutput(output) {
+  if (!output) return '';
+  if (Array.isArray(output.messageParts)) {
+    return output.messageParts.map((part) => {
+      if (part?.type === 'text') return String(part.text || '');
+      if (part?.type === 'data') return JSON.stringify(part.data, null, 2);
+      return JSON.stringify(part, null, 2);
+    }).filter(Boolean).join('\n\n');
+  }
+  return typeof output.text === 'string' ? output.text : JSON.stringify(output, null, 2);
 }
 
 function renderSkillInspector(inspector, bundle) {

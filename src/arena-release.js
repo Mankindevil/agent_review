@@ -6,6 +6,7 @@ import {
   median
 } from './statistics.js';
 import { classifyDualTrackRating as classifyDualTrackRatingDefault } from './rating.js';
+import { buildReleasedReplicaPublicDetail } from './replica-public-detail.js';
 
 const SHA256 = /^[a-f0-9]{64}$/u;
 
@@ -179,8 +180,33 @@ async function finalizeWithValidReplicas(evaluation, validReplicaIds, services) 
     objectiveCoverage: absolute.dimensions.agentCapability.objectiveCoverage,
     replicaAdvantage: advantage
   });
+  const replica = releasedReplica(advantage, validReplicaIds, scoreCells, rating);
+  try {
+    const detail = await buildReleasedReplicaPublicDetail(
+      evaluation,
+      validReplicaIds,
+      scoreCells,
+      services
+    );
+    replica.skills = detail.skills;
+    replica.cases = detail.cases;
+  } catch {
+    replica.skills = validReplicaIds.map((runtimeId) => ({
+      runtimeId,
+      runtimeName: runtimeId,
+      skillName: 'replica-skill',
+      validity: 'valid'
+    }));
+    replica.cases = scoreCells.map((cell) => ({
+      testId: cell.testId,
+      repeatIndex: cell.repeatIndex,
+      title: cell.testId,
+      prompt: '',
+      scores: cell.scores
+    }));
+  }
   return {
-    replica: releasedReplica(advantage, validReplicaIds, scoreCells, rating),
+    replica,
     rating,
     released: true
   };

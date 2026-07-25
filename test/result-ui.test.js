@@ -14,23 +14,35 @@ test('publishes the ordered evidence-led dual-track result surface', async () =>
   ]);
 
   for (const section of [
+    'verdict-hero',
     'absolute-total',
     'rating-status',
     'replica-advantage',
+    'model-panel',
+    'leaf-contrast',
     'capability-declared-observed',
     'test-matrix',
-    'findings-and-humor',
+    'humor-list',
     'human-opinions',
-    'evidence-gaps'
+    'evidence-gaps',
+    'replica-skills',
+    'replica-battle'
   ]) {
     assert.match(renderer, new RegExp(`data-result-section="${section}"`), section);
   }
   assert.match(renderer, /三维绝对分：Agent 本身做得怎么样/);
   assert.match(renderer, /复刻优势：是否胜过五分钟临时 Skill/);
+  assert.match(renderer, /四方模型审稿/);
+  assert.match(renderer, /叶子对照/);
+  assert.match(renderer, /席位评审/);
+  assert.match(renderer, /labelLeaf/);
   assert.match(renderer, /Replica results never enter the absolute total/);
   assert.match(renderer, /差异未稳定/);
   assert.match(renderer, /待复刻/);
   assert.match(renderer, /same-track only/);
+  assert.match(renderer, /data-skill-api="replica"/);
+  assert.match(renderer, /同题复现对打/);
+  assert.doesNotMatch(renderer, /v2-result-findings/);
   assert.match(app, /function renderResult\(item\)/);
   assert.match(app, /item\.schemaVersion === 2/);
   assert.match(
@@ -38,6 +50,8 @@ test('publishes the ordered evidence-led dual-track result surface', async () =>
     /#result-content[\s\S]*?innerHTML\s*=\s*renderV2ResultView\(item,\s*\{\s*escapeHtml\s*\}\)/
   );
   assert.match(app, /renderLegacyResult\(item\)/);
+  assert.match(app, /replica\/runtimes/);
+  assert.match(app, /loadReplicaOutputDetail/);
   assert.doesNotMatch(app, /function renderV2Result\(item\)/);
   assert.doesNotMatch(app, /if \(!item\.resultV2\) return renderLegacyResult/);
   assert.match(renderer, /data-result-section="v2-live-progress"/);
@@ -48,6 +62,11 @@ test('publishes the ordered evidence-led dual-track result surface', async () =>
   assert.match(renderer, /item\.humanReviewAggregate/);
   assert.match(renderer, /replica\.runtimes/);
   assert.match(renderer, /Δc/);
+
+  const labels = await readFile(new URL('public/rubric-labels.js', root), 'utf8');
+  assert.match(labels, /Agent 必要性/);
+  assert.match(labels, /证据推理/);
+  assert.match(labels, /export function labelLeaf/);
 
   for (const id of [
     'evidence-filter-test-type',
