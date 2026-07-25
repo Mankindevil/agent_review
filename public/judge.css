@@ -71,9 +71,14 @@ input, select, textarea { width: 100%; border: 1px solid var(--ink); border-radi
 .queue-card-dimension-list li:first-child { border-left: none; }
 .queue-card-dimension-list span { color: var(--muted); font: 800 10px/1 var(--mono); letter-spacing: .06em; }
 .queue-card-dimension-list b { font: 900 22px/1 var(--display); }
-.review-dossier { padding: 12px 16px 4px; border-bottom: 1px solid var(--line); }
+.review-dossier { padding: 12px 16px 16px; border-top: 1px solid var(--line); }
 .review-dossier-block { display: grid; gap: 10px; }
-.review-dossier-block > h3 { margin: 0; font: 800 14px/1.2 var(--display); letter-spacing: .02em; }
+.review-dossier-block > h3,
+.review-dossier-collapsible > summary {
+  margin: 0; font: 800 14px/1.2 var(--display); letter-spacing: .02em; cursor: pointer;
+}
+.review-dossier-collapsible { padding: 4px 0; }
+.review-dossier-collapsible[open] { display: grid; gap: 10px; }
 .review-dossier-empty, .review-dossier-error { margin: 0; color: var(--muted); font-size: 13px; }
 .review-dossier-error { color: #a81b15; font-weight: 700; }
 .review-dossier-leaf, .review-dossier-source, .review-dossier-case {

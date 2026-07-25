@@ -49,11 +49,19 @@ export class EvidenceVault {
     };
 
     const file = this.fileFor(canonicalRecord.evidenceId);
-    await writeFile(file, JSON.stringify(envelope), {
-      encoding: 'utf8',
-      flag: 'wx',
-      mode: 0o600
-    });
+    try {
+      await writeFile(file, JSON.stringify(envelope), {
+        encoding: 'utf8',
+        flag: 'wx',
+        mode: 0o600
+      });
+    } catch (error) {
+      // Identical content-addressed writes are idempotent: a prior partial
+      // Arena/finalize attempt may have left the envelope on disk without
+      // persisting the scoring cube. Re-putting the same recordHash is a no-op.
+      if (error?.code !== 'EEXIST') throw error;
+      return this.get(canonicalRecord.evidenceId, canonicalRecord.recordHash);
+    }
     if (process.platform !== 'win32') await chmod(file, 0o600);
     return canonicalRecord;
   }

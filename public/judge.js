@@ -174,25 +174,29 @@ function renderAbsoluteDossier(absolute) {
 }
 
 function renderReplicaDossier(replica) {
-  const section = document.createElement('section');
-  section.className = 'review-dossier-block';
-  const heading = document.createElement('h3');
-  heading.textContent = '同题对照';
-  section.append(heading);
+  const wrap = document.createElement('details');
+  wrap.className = 'review-dossier-block review-dossier-collapsible';
+  const heading = document.createElement('summary');
+  heading.textContent = '同题对照（点击展开材料）';
+  wrap.append(heading);
   if (replica?.error) {
     const error = document.createElement('p');
     error.className = 'review-dossier-error';
     error.textContent = `材料不可用：${replica.error}`;
-    section.append(error);
-    return section;
+    wrap.append(error);
+    return wrap;
   }
   if (!replica?.cases?.length) {
     const empty = document.createElement('p');
     empty.className = 'review-dossier-empty';
     empty.textContent = '暂无同题输出材料。';
-    section.append(empty);
-    return section;
+    wrap.append(empty);
+    return wrap;
   }
+  const count = document.createElement('p');
+  count.className = 'review-dossier-empty';
+  count.textContent = `共 ${replica.cases.length} 道同题，展开后可对照匿名输出再打分。`;
+  wrap.append(count);
   for (const item of replica.cases) {
     const caseBlock = document.createElement('article');
     caseBlock.className = 'review-dossier-case';
@@ -214,9 +218,9 @@ function renderReplicaDossier(replica) {
       details.append(summary, pre);
       caseBlock.append(details);
     }
-    section.append(caseBlock);
+    wrap.append(caseBlock);
   }
-  return section;
+  return wrap;
 }
 
 function renderReplicaSource(sourceId) {
@@ -231,6 +235,15 @@ async function submitReplicaReview(event, item, form, cardRoot) {
   event.preventDefault();
   const errorBox = form.querySelector('.queue-card-error');
   errorBox.textContent = '';
+  const missing = [...form.querySelectorAll('.replica-dim')].filter((input) => {
+    const value = Number(input.value);
+    return input.value === '' || !Number.isFinite(value) || value < 0 || value > 100;
+  });
+  if (missing.length) {
+    errorBox.textContent = `请先填齐全部 ${missing.length} 个分数（0–100）再提交。`;
+    missing[0].focus();
+    return;
+  }
   const scores = {};
   for (const sourceForm of form.querySelectorAll('.replica-source-form')) {
     const sourceId = sourceForm.dataset.source;
@@ -251,13 +264,16 @@ async function submitReplicaReview(event, item, form, cardRoot) {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || '提交失败。');
-    await tryLockReplicaHumanReview(item.id);
+    const lock = await tryLockReplicaHumanReview(item.id);
     cardRoot.classList.add('queue-card-resolved');
     form.classList.add('hidden');
+    const hint = lock.ok
+      ? '复刻人工打分已提交并锁定该轨道。'
+      : `复刻人工打分已提交，但锁定失败：${lock.error || '未知错误'}。请刷新后重试或联系管理员。`;
     cardRoot.querySelector('.queue-card-replica-hint').replaceChildren(
-      document.createTextNode('复刻人工打分已提交，达到所需人数后自动锁定该轨道。')
+      document.createTextNode(hint)
     );
-    setTimeout(loadQueue, 800);
+    if (lock.ok) setTimeout(loadQueue, 800);
   } catch (error) {
     errorBox.textContent = error.message || '提交失败。';
   } finally {
@@ -267,18 +283,21 @@ async function submitReplicaReview(event, item, form, cardRoot) {
 
 // Open-review desk: with the default `requiredPrimaries: 1` a single
 // submission already satisfies the replica-human gate, so the desk tries to
-// lock right after every submit. This is a best-effort call — the server
-// rejects it harmlessly when more primaries (or arbitration) are still
-// required, and the queue simply keeps the card open for the next reviewer.
+// lock right after every submit.
 async function tryLockReplicaHumanReview(evaluationId) {
   try {
-    await fetch(`/api/evaluations/${encodeURIComponent(evaluationId)}/replica-human-reviews/lock`, {
+    const response = await fetch(`/api/evaluations/${encodeURIComponent(evaluationId)}/replica-human-reviews/lock`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'idempotency-key': crypto.randomUUID() },
       body: JSON.stringify({})
     });
-  } catch {
-    // Ignored — see comment above.
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return { ok: false, error: payload.error || `HTTP ${response.status}` };
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message || '锁定请求失败' };
   }
 }
 

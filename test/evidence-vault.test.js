@@ -57,6 +57,21 @@ function fixtureRecord(evidenceId = 'ev_vault') {
   });
 }
 
+test('treats a second put of the same evidenceId and recordHash as an idempotent no-op', async () => {
+  const root = path.join(tmpdir(), `agent-review-vault-idem-${process.pid}-${Date.now()}`);
+  const key = randomBytes(32).toString('base64');
+  const vault = new EvidenceVault({ root, evaluationId: 'eval_vault_idem', key });
+  const record = fixtureRecord('ev_vault_idem');
+  try {
+    const first = await vault.put(record);
+    const second = await vault.put(record);
+    assert.deepEqual(second, first);
+    assert.deepEqual(await vault.get(record.evidenceId, record.recordHash), record);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('stores authenticated AES-256-GCM envelopes append-only and round-trips immutable evidence', async () => {
   const root = path.join(tmpdir(), `agent-review-vault-${process.pid}-${Date.now()}`);
   const key = randomBytes(32).toString('base64');
@@ -80,7 +95,7 @@ test('stores authenticated AES-256-GCM envelopes append-only and round-trips imm
       assert.equal((await stat(path.join(root, 'eval_vault'))).mode & 0o777, 0o700);
       assert.equal((await stat(file)).mode & 0o777, 0o600);
     }
-    await assert.rejects(() => vault.put(record), (error) => error.code === 'EEXIST');
+    assert.deepEqual(await vault.put(record), record);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

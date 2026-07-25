@@ -82,9 +82,8 @@
         <a class="queue-card-view" target="_blank" rel="noopener">查看详情 ↗</a>
       </header>
       <p class="queue-card-track-label">TRACK / 复刻</p>
-      <p class="queue-card-replica-hint">对提交 Agent 与每个有效复刻 Runtime 打四维分；来源标签均已匿名，不代表真实身份。</p>
-      <div class="review-dossier" data-role="replica-dossier"></div>
-      <form class="queue-card-form" data-role="replica-score-form">
+      <p class="queue-card-replica-hint">对提交 Agent 与每个有效复刻 Runtime 打四维分；来源标签均已匿名，不代表真实身份。请先填齐下方分数再提交；同题材料默认折叠。</p>
+      <form class="queue-card-form" data-role="replica-score-form" novalidate>
         <div class="queue-card-leaves replica-source-list"></div>
         <label class="replica-rationale-label">简短说明（可选）<textarea class="replica-rationale"></textarea></label>
         <p class="queue-card-error" role="alert"></p>
@@ -92,6 +91,7 @@
           <button type="submit">提交复刻人工打分</button>
         </div>
       </form>
+      <div class="review-dossier" data-role="replica-dossier"></div>
     </article>
   </template>
   <template id="queue-replica-source-template">
