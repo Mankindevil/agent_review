@@ -1,6 +1,7 @@
 import { hashCanonical } from './submission.js';
+import { scoredVariantCount } from './execution-tuning.js';
 
-const REQUIRED_VARIANTS = Object.freeze(['equivalent', 'boundary', 'multi-turn']);
+const DEFAULT_HIDDEN_VARIANTS = Object.freeze(['equivalent', 'boundary', 'multi-turn']);
 const SCOPE_CHECKS = Object.freeze([
   'sameDomain',
   'declaredOrDemonstratedCapabilityOnly',
@@ -22,6 +23,11 @@ export function finalizeTestPlan(compilation, candidates, decisions, policy = {}
   if (!Array.isArray(candidates) || !Array.isArray(decisions)) {
     throw new TypeError('candidates and decisions must be arrays');
   }
+  const requiredVariants = resolveRequiredHiddenVariants(policy);
+  const repeatCount = resolveRepeatCount(policy);
+  const activeCandidates = candidates.filter((candidate) =>
+    requiredVariants.includes(candidate?.variantType)
+  );
   const decisionById = new Map();
   for (const decision of decisions) {
     if (!decision || typeof decision !== 'object' || decisionById.has(decision.candidateId)) {
@@ -31,8 +37,8 @@ export function finalizeTestPlan(compilation, candidates, decisions, policy = {}
   }
   const approved = [];
   const rejected = [];
-  for (const candidate of candidates) {
-    validateCandidate(candidate, compilation);
+  for (const candidate of activeCandidates) {
+    validateCandidate(candidate, compilation, requiredVariants);
     const decision = decisionById.get(candidate.candidateId);
     if (!decision) throw new TypeError(`missing scope decision for ${candidate.candidateId}`);
     const valid = isApprovedDecision(decision);
@@ -49,28 +55,29 @@ export function finalizeTestPlan(compilation, candidates, decisions, policy = {}
     ])
   );
   const complete = compilation.contracts.every((contract) =>
-    REQUIRED_VARIANTS.every((variantType) =>
+    requiredVariants.every((variantType) =>
       candidateBySlot.has(`${contract.exampleId}:${variantType}`)
     )
   );
   const exampleWeight = 1 / compilation.contracts.length;
+  const variantWeight = exampleWeight / scoredVariantCount(requiredVariants);
   const tests = [];
   for (const contract of compilation.contracts) {
-    tests.push(buildOriginalTest(contract, exampleWeight / 4, policy));
-    for (const variantType of REQUIRED_VARIANTS) {
+    tests.push(buildOriginalTest(contract, variantWeight, policy, repeatCount));
+    for (const variantType of requiredVariants) {
       const candidate = candidateBySlot.get(`${contract.exampleId}:${variantType}`);
       if (candidate) {
-        tests.push(buildHiddenTest(contract, candidate, exampleWeight / 4, policy));
+        tests.push(buildHiddenTest(contract, candidate, variantWeight, policy, repeatCount));
       }
     }
   }
-  tests.push(buildProtocolRecoveryProbe(policy));
+  tests.push(buildProtocolRecoveryProbe(policy, repeatCount));
 
   return deepFreeze({
     status: complete ? 'ready' : 'scope-incomplete',
     testPlanVersion: 'black-box-test-plan/v1',
     rubricVersion: compilation.rubricVersion,
-    defaultRepeatCount: 3,
+    defaultRepeatCount: repeatCount,
     generatedAt: requireString(policy.generatedAt, 'generatedAt'),
     generatorIdentity: requireString(policy.generatorIdentity, 'generatorIdentity'),
     scopeReviewerIdentity: requireString(
@@ -78,12 +85,30 @@ export function finalizeTestPlan(compilation, candidates, decisions, policy = {}
       'scopeReviewerIdentity'
     ),
     timingPolicy: structuredClone(policy.timingPolicy || TEST_TIMING_POLICY_V1),
+    requiredHiddenVariants: [...requiredVariants],
     tests,
     scopeAudit: { approved, rejected }
   });
 }
 
-function validateCandidate(candidate, compilation) {
+function resolveRequiredHiddenVariants(policy) {
+  if (Array.isArray(policy.requiredHiddenVariants)) {
+    return Object.freeze([...policy.requiredHiddenVariants]);
+  }
+  if (policy.multiTurnEnabled === false) {
+    return Object.freeze(['equivalent', 'boundary']);
+  }
+  return DEFAULT_HIDDEN_VARIANTS;
+}
+
+function resolveRepeatCount(policy) {
+  if (Number.isInteger(policy.repeatCount) && policy.repeatCount >= 1) {
+    return policy.repeatCount;
+  }
+  return 3;
+}
+
+function validateCandidate(candidate, compilation, requiredVariants) {
   if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
     throw new TypeError('hidden candidate must be an object');
   }
@@ -92,7 +117,7 @@ function validateCandidate(candidate, compilation) {
     (contract) => contract.exampleId === candidate.sourceExampleId
   );
   if (!source) throw new TypeError('hidden candidate has an unknown source example');
-  if (!REQUIRED_VARIANTS.includes(candidate.variantType)) {
+  if (!requiredVariants.includes(candidate.variantType)) {
     throw new TypeError('hidden candidate has an unsupported variant type');
   }
   if (!Array.isArray(candidate.turns) || candidate.turns.length === 0) {
@@ -121,7 +146,7 @@ export function inputForTurn(test, turnIndex) {
   return structuredClone(test.turns[turnIndex].input);
 }
 
-function buildOriginalTest(contract, weight, policy) {
+function buildOriginalTest(contract, weight, policy, repeatCount) {
   return buildTest({
     testId: `${safeSegment(contract.exampleId)}__original`,
     sourceExampleId: contract.exampleId,
@@ -132,10 +157,10 @@ function buildOriginalTest(contract, weight, policy) {
     weight,
     timingClass: contract.turnCount > 1 ? 'multiTurn' : 'singleTurn',
     scopeDecisionId: null
-  }, policy);
+  }, policy, repeatCount);
 }
 
-function buildHiddenTest(contract, candidate, weight, policy) {
+function buildHiddenTest(contract, candidate, weight, policy, repeatCount) {
   const sourceCriteria = flattenCriteria(contract.sourceTurns);
   const inherited = new Set(candidate.inheritedCriteriaIds);
   return buildTest({
@@ -152,10 +177,10 @@ function buildHiddenTest(contract, candidate, weight, policy) {
     weight,
     timingClass: candidate.timingClass,
     scopeDecisionId: candidate.candidateId
-  }, policy);
+  }, policy, repeatCount);
 }
 
-function buildProtocolRecoveryProbe(policy) {
+function buildProtocolRecoveryProbe(policy, repeatCount) {
   return buildTest({
     testId: 'protocol_error_recovery',
     sourceExampleId: null,
@@ -172,10 +197,10 @@ function buildProtocolRecoveryProbe(policy) {
       malformedFirst: true,
       nextValidInputUsesFreshContext: true
     }
-  }, policy);
+  }, policy, repeatCount);
 }
 
-function buildTest(input, policy) {
+function buildTest(input, policy, repeatCount) {
   const timingPolicy = policy.timingPolicy || TEST_TIMING_POLICY_V1;
   const timing = input.timingClass === 'multiTurn'
     ? timingPolicy.multiTurnPerTurn
@@ -183,7 +208,7 @@ function buildTest(input, policy) {
   return {
     ...structuredClone(input),
     contextPolicy: input.timingClass === 'multiTurn' ? 'reuse-within-example' : 'fresh',
-    repeatCount: 3,
+    repeatCount,
     timing: structuredClone(timing),
     normalizedInputHash: hashCanonical(input.turns.map((turn) => turn.input))
   };

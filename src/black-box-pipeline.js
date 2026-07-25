@@ -623,14 +623,22 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
       const roundDecisions = reviewed.decisions || reviewed;
       candidates.push(...roundCandidates);
       decisions.push(...roundDecisions);
-      if (hasEveryApprovedSlot(compilation, candidates, decisions)) break;
+      if (hasEveryApprovedSlot(
+        compilation,
+        candidates,
+        decisions,
+        phase2.requiredHiddenVariants
+      )) break;
     }
 
     testPlan = finalizeTestPlan(compilation, candidates, decisions, {
       generatedAt: context.now(),
       generatorIdentity: phase2.generatorIdentity,
       scopeReviewerIdentity: phase2.scopeReviewerIdentity,
-      timingPolicy: phase2.timingPolicy
+      timingPolicy: phase2.timingPolicy,
+      multiTurnEnabled: phase2.multiTurnEnabled !== false,
+      requiredHiddenVariants: phase2.requiredHiddenVariants,
+      repeatCount: phase2.repeatCount
     });
     await mutateCurrent(context, (record) => withRunProgress({
       ...record,
@@ -1288,7 +1296,12 @@ function isFormalPhase2Submission(submission) {
   );
 }
 
-function hasEveryApprovedSlot(compilation, candidates, decisions) {
+function hasEveryApprovedSlot(
+  compilation,
+  candidates,
+  decisions,
+  requiredVariants = ['equivalent', 'boundary', 'multi-turn']
+) {
   const decisionById = new Map(
     decisions.map((decision) => [decision.candidateId, decision])
   );
@@ -1301,7 +1314,7 @@ function hasEveryApprovedSlot(compilation, candidates, decisions) {
       : [];
   }));
   return compilation.contracts.every((contract) =>
-    ['equivalent', 'boundary', 'multi-turn'].every((variantType) =>
+    requiredVariants.every((variantType) =>
       approvedSlots.has(`${contract.exampleId}:${variantType}`)
     )
   );

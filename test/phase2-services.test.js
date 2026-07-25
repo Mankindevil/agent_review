@@ -79,3 +79,20 @@ test('demo Phase 2 services deterministically generate, scope, and lock five mod
   assert.equal(new Set(panel.primary.map((run) => run.reviewRunId)).size, 4);
   assert.notEqual(services.generatorIdentity, services.scopeReviewerIdentity);
 });
+
+test('demo Phase 2 services omit multi-turn when disabled by env', async () => {
+  const services = createPhase2Services({
+    env: {
+      A2A_MULTI_TURN_ENABLED: 'false',
+      A2A_REPEAT_COUNT: '1'
+    }
+  });
+  const generated = await services.generateHidden(compilation, { attempt: 0 });
+  assert.equal(services.multiTurnEnabled, false);
+  assert.equal(services.repeatCount, 1);
+  assert.deepEqual(services.requiredHiddenVariants, ['equivalent', 'boundary']);
+  assert.deepEqual(
+    generated.candidates.map((item) => item.variantType),
+    ['equivalent', 'boundary']
+  );
+});

@@ -111,6 +111,28 @@ test('fails closed when a direct caller supplies a fake multi-turn candidate', (
   );
 });
 
+test('omits multi-turn and redistributes weights when multi-turn is disabled', () => {
+  const plan = finalizeTestPlan(compilation, candidates, decisions, {
+    generatedAt: '2026-07-25T00:00:00.000Z',
+    generatorIdentity: 'provider:generator:model',
+    scopeReviewerIdentity: 'provider:scope:model',
+    multiTurnEnabled: false,
+    repeatCount: 1
+  });
+
+  assert.equal(plan.status, 'ready');
+  assert.equal(plan.defaultRepeatCount, 1);
+  assert.deepEqual(plan.requiredHiddenVariants, ['equivalent', 'boundary']);
+  const scored = plan.tests.filter((item) => item.variantType !== 'protocol-recovery');
+  assert.deepEqual(
+    scored.map((item) => item.variantType),
+    ['original', 'equivalent', 'boundary']
+  );
+  assert.equal(scored.every((item) => item.repeatCount === 1), true);
+  assert.equal(scored.reduce((sum, item) => sum + item.weight, 0), 1);
+  assert.equal(scored.every((item) => item.weight === 1 / 3), true);
+});
+
 test('returns cloned byte-identical turn input for submitted Agent and later Replica use', () => {
   const plan = finalizeTestPlan(compilation, candidates, decisions, {
     generatedAt: '2026-07-25T00:00:00.000Z',

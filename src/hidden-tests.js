@@ -35,10 +35,12 @@ export function reviewerIdentityKey(reviewer) {
 
 export async function generateHiddenVariants(compilation, {
   generator,
-  requestJson
+  requestJson,
+  requiredVariants = VARIANT_TYPES
 }) {
   reviewerIdentityKey(generator);
   if (typeof requestJson !== 'function') throw new TypeError('requestJson is required');
+  const required = Object.freeze([...requiredVariants]);
   const value = await requestJson(
     generator,
     'Generate closed-scope hidden tests. JSON only.',
@@ -48,10 +50,10 @@ export async function generateHiddenVariants(compilation, {
     throw new TypeError('generator response must contain candidates');
   }
 
-  const candidates = value.candidates.map((candidate, index) =>
-    normalizeCandidate(compilation, candidate, index)
-  );
-  assertRequiredSlots(compilation, candidates);
+  const candidates = value.candidates
+    .map((candidate, index) => normalizeCandidate(compilation, candidate, index))
+    .filter((candidate) => required.includes(candidate.variantType));
+  assertRequiredSlots(compilation, candidates, required);
   return deepFreeze({
     generatorIdentity: reviewerIdentityKey(generator),
     candidates
@@ -229,10 +231,10 @@ function normalizeProposedCriteria(criteria, candidateId) {
   return structuredClone(normalized.turns[0].acceptanceCriteria);
 }
 
-function assertRequiredSlots(compilation, candidates) {
+function assertRequiredSlots(compilation, candidates, requiredVariants = VARIANT_TYPES) {
   const expected = new Set(
     compilation.contracts.flatMap((contract) =>
-      VARIANT_TYPES.map((variantType) => `${contract.exampleId}:${variantType}`)
+      requiredVariants.map((variantType) => `${contract.exampleId}:${variantType}`)
     )
   );
   const actual = new Set();

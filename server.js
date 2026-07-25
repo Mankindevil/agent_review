@@ -50,10 +50,12 @@ import { getAccessAuditStore } from './src/access-audit-store.js';
 import {
   copyEvidenceEncryptionKey,
   copyResumeMacKey,
+  PHASE1_EXECUTION_POLICY,
   readBlackBoxRuntimeConfig
 } from './src/black-box-pipeline.js';
 import { EphemeralCredentialVault } from './src/credential-vault.js';
 import { EvidenceVault } from './src/evidence-vault.js';
+import { readA2AExecutionTuning } from './src/execution-tuning.js';
 import { createPhase2Services } from './src/phase2-services.js';
 
 export { releaseReplicaArena } from './src/arena-release.js';
@@ -65,6 +67,7 @@ const V2_EVALUATION_BODY_LIMIT = 3 * 1024 * 1024;
 export const blackBoxRuntimeConfig = readBlackBoxRuntimeConfig(process.env, {
   serverRoot: root
 });
+export const a2aExecutionTuning = readA2AExecutionTuning(process.env);
 export const evaluationStore = new EvaluationStore(
   process.env.DATA_FILE || path.join(root, 'data/evaluations.json')
 );
@@ -81,6 +84,10 @@ export const pipeline = new EvaluationPipeline(evaluationStore, events, {
   blackBoxEnabled: blackBoxRuntimeConfig.enabled,
   credentialVault,
   resumeMacKey,
+  policy: Object.freeze({
+    ...PHASE1_EXECUTION_POLICY,
+    repeatCount: a2aExecutionTuning.repeatCount
+  }),
   blackBoxServices: blackBoxRuntimeConfig.enabled
     ? {
         phase2: createPhase2Services({ env: process.env }),

@@ -8,6 +8,7 @@ import {
   configuredReviewPanel,
   requestJson
 } from './providers.js';
+import { readA2AExecutionTuning } from './execution-tuning.js';
 
 export function createPhase2Services({
   env = process.env,
@@ -17,10 +18,14 @@ export function createPhase2Services({
   const generator = panel.primary[0];
   const scopeReviewer = panel.primary[1];
   const demo = panel.mode === 'demo';
+  const tuning = readA2AExecutionTuning(env);
   return Object.freeze({
     enabled: true,
     generatorIdentity: generator.identityKey,
     scopeReviewerIdentity: scopeReviewer.identityKey,
+    multiTurnEnabled: tuning.multiTurnEnabled,
+    repeatCount: tuning.repeatCount,
+    requiredHiddenVariants: tuning.requiredHiddenVariants,
     seed: Number.isSafeInteger(Number(env.EVALUATION_SEED))
       ? Number(env.EVALUATION_SEED)
       : null,
@@ -28,11 +33,16 @@ export function createPhase2Services({
       if (demo) {
         return {
           generatorIdentity: generator.identityKey,
-          candidates: deterministicCandidates(compilation, attempt)
+          candidates: deterministicCandidates(
+            compilation,
+            attempt,
+            tuning.requiredHiddenVariants
+          )
         };
       }
       return generateHiddenVariants(compilation, {
         generator,
+        requiredVariants: tuning.requiredHiddenVariants,
         requestJson: (reviewer, system, prompt) =>
           requestJsonFn(reviewer, system, prompt, undefined, {
             seed: deriveAttemptSeed(env, attempt, 11),
@@ -109,38 +119,58 @@ export function createPhase2Services({
   });
 }
 
-function deterministicCandidates(compilation, attempt) {
+function deterministicCandidates(
+  compilation,
+  attempt,
+  requiredVariants = ['equivalent', 'boundary', 'multi-turn']
+) {
   return compilation.contracts.flatMap((contract) => {
     const inheritedCriteriaIds = [
       ...contract.executableCriteria,
       ...contract.modelCriteria
     ].map((criterion) => criterion.criterionId);
     const baseTurns = structuredClone(contract.sourceTurns);
-    const equivalentTurns = appendInstruction(
-      baseTurns,
-      'Use an equivalent wording and preserve the requested deliverable.'
-    );
-    const boundaryTurns = appendInstruction(
-      baseTurns,
-      'Handle the smallest in-scope input without inventing missing facts.'
-    );
-    const multiTurns = [
-      ...structuredClone(baseTurns),
-      {
-        input: {
-          parts: [{
-            type: 'text',
-            text: 'Revise the prior result using the same supplied context and state what changed.'
-          }]
-        },
-        acceptanceCriteria: []
-      }
-    ];
-    return [
-      candidate(contract, 'equivalent', equivalentTurns, inheritedCriteriaIds, attempt),
-      candidate(contract, 'boundary', boundaryTurns, inheritedCriteriaIds, attempt),
-      candidate(contract, 'multi-turn', multiTurns, inheritedCriteriaIds, attempt)
-    ];
+    const byType = {
+      equivalent: candidate(
+        contract,
+        'equivalent',
+        appendInstruction(
+          baseTurns,
+          'Use an equivalent wording and preserve the requested deliverable.'
+        ),
+        inheritedCriteriaIds,
+        attempt
+      ),
+      boundary: candidate(
+        contract,
+        'boundary',
+        appendInstruction(
+          baseTurns,
+          'Handle the smallest in-scope input without inventing missing facts.'
+        ),
+        inheritedCriteriaIds,
+        attempt
+      ),
+      'multi-turn': candidate(
+        contract,
+        'multi-turn',
+        [
+          ...structuredClone(baseTurns),
+          {
+            input: {
+              parts: [{
+                type: 'text',
+                text: 'Revise the prior result using the same supplied context and state what changed.'
+              }]
+            },
+            acceptanceCriteria: []
+          }
+        ],
+        inheritedCriteriaIds,
+        attempt
+      )
+    };
+    return requiredVariants.map((variantType) => byType[variantType]);
   });
 }
 
