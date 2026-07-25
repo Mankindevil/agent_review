@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { deflateRaw } from 'node:zlib';
 import {
   chmod,
   copyFile,
@@ -15,6 +16,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 const scriptFile = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(scriptFile), '..');
@@ -41,6 +43,13 @@ export const APP_FILES = Object.freeze([
 ]);
 
 const APP_FILE_SET = new Set(APP_FILES);
+const deflateRawAsync = promisify(deflateRaw);
+const ZIP_EXECUTABLES = new Set([
+  'start.command',
+  'runtime/arm64/bin/node',
+  'runtime/x64/bin/node'
+]);
+const CRC32_TABLE = createCrc32Table();
 
 export async function buildAgentCheckBundles(options = {}) {
   const outputRoot = path.resolve(
@@ -96,7 +105,7 @@ export async function buildAgentCheckBundles(options = {}) {
       if (job.target.startsWith('mac-')) await chmod(job.destination, 0o755);
     }
 
-    const archiveWriter = options.archiveWriter || defaultArchiveWriter;
+    const archiveWriter = options.archiveWriter || writeBundleZip;
     windowsZip = path.join(outputRoot, 'agent-check-windows.zip');
     macZip = path.join(outputRoot, 'agent-check-mac.zip');
     await archiveWriter({
@@ -250,9 +259,113 @@ async function defaultRuntimeProvider(options) {
   }
 }
 
-async function defaultArchiveWriter({ sourceDir, destination }) {
+export async function writeBundleZip({ sourceDir, destination }) {
   await rm(destination, { force: true });
-  runCommand('tar', ['-a', '-cf', destination, '-C', sourceDir, '.']);
+  const localParts = [];
+  const centralParts = [];
+  let localOffset = 0;
+
+  for (const relativePath of await listRegularFiles(sourceDir)) {
+    const name = Buffer.from(relativePath, 'utf8');
+    const content = await readFile(safeJoin(sourceDir, relativePath));
+    const compressed = await deflateRawAsync(content, { level: 9 });
+    const checksum = crc32(content);
+    const { dosDate, dosTime } = toDosDateTime(
+      (await lstat(safeJoin(sourceDir, relativePath))).mtime
+    );
+    const mode = ZIP_EXECUTABLES.has(relativePath) ? 0o100755 : 0o100644;
+
+    assertZip32Value(name.length, 'filename');
+    assertZip32Value(content.length, relativePath);
+    assertZip32Value(compressed.length, relativePath);
+    assertZip32Value(localOffset, relativePath);
+
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0x0800, 6);
+    localHeader.writeUInt16LE(8, 8);
+    localHeader.writeUInt16LE(dosTime, 10);
+    localHeader.writeUInt16LE(dosDate, 12);
+    localHeader.writeUInt32LE(checksum, 14);
+    localHeader.writeUInt32LE(compressed.length, 18);
+    localHeader.writeUInt32LE(content.length, 22);
+    localHeader.writeUInt16LE(name.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+    localParts.push(localHeader, name, compressed);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(0x0314, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0x0800, 8);
+    centralHeader.writeUInt16LE(8, 10);
+    centralHeader.writeUInt16LE(dosTime, 12);
+    centralHeader.writeUInt16LE(dosDate, 14);
+    centralHeader.writeUInt32LE(checksum, 16);
+    centralHeader.writeUInt32LE(compressed.length, 20);
+    centralHeader.writeUInt32LE(content.length, 24);
+    centralHeader.writeUInt16LE(name.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE((mode << 16) >>> 0, 38);
+    centralHeader.writeUInt32LE(localOffset, 42);
+    centralParts.push(centralHeader, name);
+
+    localOffset += localHeader.length + name.length + compressed.length;
+  }
+
+  if (centralParts.length / 2 > 0xffff) {
+    throw new Error('ZIP 文件数量超过 ZIP32 限制');
+  }
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  const entryCount = centralParts.length / 2;
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entryCount, 8);
+  end.writeUInt16LE(entryCount, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(localOffset, 16);
+  end.writeUInt16LE(0, 20);
+  await writeFile(destination, Buffer.concat([...localParts, centralDirectory, end]));
+}
+
+function createCrc32Table() {
+  return Array.from({ length: 256 }, (_, value) => {
+    let checksum = value;
+    for (let bit = 0; bit < 8; bit += 1) {
+      checksum = (checksum >>> 1) ^ ((checksum & 1) ? 0xedb88320 : 0);
+    }
+    return checksum >>> 0;
+  });
+}
+
+function crc32(content) {
+  let checksum = 0xffffffff;
+  for (const byte of content) {
+    checksum = (checksum >>> 8) ^ CRC32_TABLE[(checksum ^ byte) & 0xff];
+  }
+  return (checksum ^ 0xffffffff) >>> 0;
+}
+
+function toDosDateTime(value) {
+  const date = new Date(value);
+  const year = Math.min(2107, Math.max(1980, date.getFullYear()));
+  return {
+    dosDate: ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+    dosTime: (date.getHours() << 11) | (date.getMinutes() << 5) |
+      Math.floor(date.getSeconds() / 2)
+  };
+}
+
+function assertZip32Value(value, label) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffffffff) {
+    throw new Error(`ZIP32 不支持该文件大小或偏移：${label}`);
+  }
 }
 
 function runCommand(command, args) {

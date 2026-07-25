@@ -8,7 +8,8 @@ import {
   acquireRuntimeArchive,
   buildAgentCheckBundles,
   verifyAppBundle,
-  verifyFileSha256
+  verifyFileSha256,
+  writeBundleZip
 } from '../scripts/build-agent-check-bundles.js';
 
 const EXPECTED_APP_FILES = [
@@ -33,6 +34,27 @@ async function withTempDir(run) {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+function readZipCentralEntries(buffer) {
+  const entries = new Map();
+  let offset = 0;
+  while (offset <= buffer.length - 46) {
+    if (buffer.readUInt32LE(offset) !== 0x02014b50) {
+      offset += 1;
+      continue;
+    }
+    const nameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30);
+    const commentLength = buffer.readUInt16LE(offset + 32);
+    const name = buffer.subarray(offset + 46, offset + 46 + nameLength).toString('utf8');
+    entries.set(name, {
+      creatorSystem: buffer.readUInt16LE(offset + 4) >>> 8,
+      mode: buffer.readUInt32LE(offset + 38) >>> 16
+    });
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  return entries;
 }
 
 test('builds application trees from an exact standalone allowlist', async () => {
@@ -247,6 +269,39 @@ test('assembles both platform runtime layouts through injected build boundaries'
       windows: '441a017d46f2f71cd84855496017c1cbe7858cd7d987f6c974b10138083dffa5',
       mac: '5b0ec45f4063673035f3cf600dc856bee9bcfdc44d3fce6a9eb05f4b395d21da'
     });
+  });
+});
+
+test('writes macOS launchers and bundled Node runtimes as executable ZIP entries', async () => {
+  await withTempDir(async (root) => {
+    const sourceDir = path.join(root, 'mac');
+    const destination = path.join(root, 'agent-check-mac.zip');
+    const fixtureFiles = {
+      'start.command': '#!/bin/sh\n',
+      'runtime/arm64/bin/node': 'arm64',
+      'runtime/x64/bin/node': 'x64',
+      'config.env': 'PORT=4173\n',
+      '使用说明.md': '# 使用说明\n'
+    };
+    for (const [relativePath, content] of Object.entries(fixtureFiles)) {
+      const target = path.join(sourceDir, ...relativePath.split('/'));
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, content);
+    }
+
+    await writeBundleZip({ sourceDir, destination });
+    const entries = readZipCentralEntries(await readFile(destination));
+
+    for (const relativePath of [
+      'start.command',
+      'runtime/arm64/bin/node',
+      'runtime/x64/bin/node'
+    ]) {
+      assert.equal(entries.get(relativePath)?.creatorSystem, 3);
+      assert.equal(entries.get(relativePath)?.mode & 0o111, 0o111);
+    }
+    assert.equal(entries.get('config.env')?.mode & 0o111, 0);
+    assert.ok(entries.has('使用说明.md'));
   });
 });
 
