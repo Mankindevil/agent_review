@@ -14,6 +14,7 @@ const draftStatus = document.querySelector('#draft-status');
 const formError = document.querySelector('#form-error');
 const submitButton = document.querySelector('#submit-review');
 const recuseButton = document.querySelector('#recuse-review');
+const reloadAssignmentButton = document.querySelector('#reload-assignment');
 
 let judgeToken = '';
 let assignments = [];
@@ -28,6 +29,7 @@ testFilter.addEventListener('change', renderEvidence);
 scoreForm.addEventListener('input', scheduleDraft);
 scoreForm.addEventListener('submit', submitReview);
 recuseButton.addEventListener('click', recuseReview);
+reloadAssignmentButton.addEventListener('click', loadAssignment);
 
 function clearSensitiveState() {
   judgeToken = '';
@@ -44,6 +46,7 @@ function clearSensitiveState() {
   scoreLeaves.replaceChildren();
   submitButton.disabled = true;
   recuseButton.disabled = true;
+  reloadAssignmentButton.hidden = true;
 }
 
 async function loadAssignments(event) {
@@ -107,10 +110,20 @@ function renderSubmission() {
   const submission = current.evaluation.submission || {};
   const card = submission.agentCard?.value || {};
   const examples = submission.agentExamples?.value || [];
+  const evidenceItems = current.evaluation.evidenceManifest?.items || [];
+  const testTypes = [...new Set(evidenceItems.map((item) => item.testType || item.testId).filter(Boolean))];
   const heading = text('h3', '', card.name || '已提交 Agent');
   const description = text('p', '', card.description || '未提供公开描述。');
-  const facts = text('p', '', `使用示例 ${examples.length} 个 · 委派叶项 ${current.assignment.criterionScope.length} 个`);
-  submissionPanel.replaceChildren(heading, description, facts);
+  const facts = text('p', '', `委派叶项 ${current.assignment.criterionScope.length} 个`);
+  const testType = text('p', 'submission-test-types', `测试类型：${testTypes.length ? testTypes.join('、') : '未提供'}`);
+  const exampleList = document.createElement('ul');
+  exampleList.className = 'agent-examples';
+  examples.forEach((example, index) => {
+    const turnCount = Array.isArray(example.turns) ? example.turns.length : 0;
+    exampleList.append(text('li', '', `${example.name || example.id || `示例 ${index + 1}`} · ${turnCount} 轮`));
+  });
+  if (!examples.length) exampleList.append(text('li', '', '未提供使用示例。'));
+  submissionPanel.replaceChildren(heading, description, facts, testType, exampleList);
 }
 
 function renderFilters() {
@@ -168,18 +181,38 @@ function renderModelOpinions() {
     ? `本委派有 ${disputed.length} 个模型分歧叶项；人工结论必须回到可见证据。`
     : '四模型意见已锁定。本委派范围内没有第五模型触发的分歧叶项。';
   for (const leafId of current.assignment.criterionScope) {
-    const reviews = primary.map((run) => (run.reviews || []).find((review) => review.subcriterionId === leafId)).filter(Boolean);
+    const reviews = primary.map((run, index) => ({
+      run,
+      index,
+      review: (run.reviews || []).find((review) => review.subcriterionId === leafId)
+    })).filter((item) => item.review);
+    const arbitration = panel.arbitration?.reviews?.find((review) => review.subcriterionId === leafId);
     const card = document.createElement('article');
     card.className = 'model-card';
     const header = document.createElement('header');
-    header.append(text('b', '', leafId), text('strong', '', reviews.length ? `${median(reviews.map((review) => review.score))} 分` : '无模型分'));
+    header.append(
+      text('b', '', leafId),
+      text('strong', '', reviews.length ? `主评中位数 ${median(reviews.map((item) => item.review.score))} 分` : '无模型分')
+    );
     card.append(header);
-    const findings = reviews.flatMap((review) => review.findings || []);
-    card.append(text('p', '', findings.length ? `共识/异议：${findings.map((finding) => finding.text).join('；')}` : '模型没有提供可展示的文字意见。'));
-    const uncertainties = reviews.flatMap((review) => review.uncertainties || []);
-    if (uncertainties.length) card.append(text('p', '', `不确定性：${uncertainties.join('；')}`));
-    const suggestion = reviews.find((review) => review.repairSuggestion)?.repairSuggestion;
-    if (suggestion) card.append(text('p', '', `修复建议：${suggestion}`));
+    const scores = document.createElement('ul');
+    scores.className = 'model-scores';
+    primary.forEach((run, index) => {
+      const review = (run.reviews || []).find((item) => item.subcriterionId === leafId);
+      scores.append(text(
+        'li',
+        review ? '' : 'missing-model-score',
+        `主评 ${index + 1}（${run.reviewRunId || '未标识'}）：${review ? `${review.score} 分` : '未提供'}`
+      ));
+    });
+    if (arbitration) {
+      scores.append(text('li', 'arbitration-score', `第五模型 / 仲裁（${panel.arbitration?.reviewRunId || '未标识'}）：${arbitration.score} 分`));
+    }
+    card.append(scores);
+    for (const { index, review } of reviews) {
+      appendReviewNotes(card, `主评 ${index + 1}`, review);
+    }
+    if (arbitration) appendReviewNotes(card, '第五模型 / 仲裁', arbitration);
     modelOpinions.append(card);
   }
 }
@@ -221,10 +254,11 @@ function renderScoreForm() {
     scoreLeaves.append(block);
   }
   draftStatus.textContent = current.submitted ? '已提交：评审记录不可修改。' : '草稿未保存。';
+  reloadAssignmentButton.hidden = true;
 }
 
 function scheduleDraft() {
-  if (!current || current.submitted) return;
+  if (!current || current.submitted || current.draftConflict) return;
   draftStatus.textContent = '编辑中；将在停笔后保存草稿。';
   clearTimeout(draftTimer);
   draftTimer = setTimeout(saveDraft, 700);
@@ -240,7 +274,9 @@ async function saveDraft() {
     });
     const payload = await response.json();
     if (response.status === 409) {
-      draftStatus.textContent = '草稿版本冲突：请重新载入，系统不会覆盖另一处修改。';
+      current.draftConflict = true;
+      draftStatus.textContent = '草稿版本冲突：服务器已有较新的修改，未覆盖。请重新载入。';
+      reloadAssignmentButton.hidden = false;
       return;
     }
     if (!response.ok) throw new Error(payload.error || '草稿保存失败。');
@@ -314,6 +350,15 @@ function reviewPayload() {
     };
   }
   return { assignmentId: current.assignment.assignmentId, scores };
+}
+
+function appendReviewNotes(card, label, review) {
+  const findings = (review.findings || []).map((finding) => finding.text).filter(Boolean);
+  if (findings.length) card.append(text('p', '', `${label} 发现：${findings.join('；')}`));
+  const counterEvidence = (review.counterEvidence || []).map((finding) => finding.text).filter(Boolean);
+  if (counterEvidence.length) card.append(text('p', 'counter-evidence', `${label} 反证：${counterEvidence.join('；')}`));
+  if (review.uncertainties?.length) card.append(text('p', '', `${label} 不确定性：${review.uncertainties.join('；')}`));
+  if (review.repairSuggestion) card.append(text('p', '', `${label} 修复建议：${review.repairSuggestion}`));
 }
 
 function validatePayload(payload) {

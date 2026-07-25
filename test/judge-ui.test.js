@@ -41,3 +41,18 @@ test('judge workbench exposes the governed review controls and safety copy', asy
   assert.match(css, /prefers-reduced-motion/);
   assert.doesNotMatch(`${html}\n${script}`, /localStorage|sessionStorage|indexedDB|document\.cookie|innerHTML/);
 });
+
+test('judge workbench renders complete non-blind review inputs and reloads draft conflicts', async () => {
+  const script = await readFile(new URL('../public/judge.js', import.meta.url), 'utf8');
+
+  assert.match(script, /examples\.forEach/);
+  assert.match(script, /example\.name/);
+  assert.match(script, /testType/);
+  assert.match(script, /primary\.map/);
+  assert.match(script, /reviewRunId/);
+  assert.match(script, /arbitration/);
+  assert.match(script, /counterEvidence/);
+  assert.match(script, /response\.status === 409/);
+  assert.match(script, /草稿版本冲突/);
+  assert.match(script, /addEventListener\('click', loadAssignment\)/);
+});
