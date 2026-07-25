@@ -837,7 +837,15 @@ function renderV2Result(item) {
   const evidenceCount = item.evidenceManifest?.items?.length || 0;
   const objectiveReady = Number.isFinite(objective.score);
   const humanOpen = item.governance?.phase === 'human_open';
-  const replicaReleased = replica.status === 'released';
+  const absoluteLocked = item.governance?.phase === 'absolute_locked' &&
+    typeof item.governance?.absoluteLockedAt === 'string' &&
+    typeof item.governance?.resultHash === 'string' &&
+    absolute.status === 'locked' &&
+    absolute.resultHash === item.governance.resultHash;
+  const replicaReleased = absoluteLocked &&
+    typeof item.governance?.replicaReleasedAt === 'string' &&
+    replica.status === 'released';
+  const replicaUnavailable = absoluteLocked && replica.status === 'unavailable';
   const replicaSealed = replica.status === 'sealed';
   const waitingModel = status === 'completed' &&
     qualification.status === 'eligible' &&
@@ -880,6 +888,7 @@ function renderV2Result(item) {
       ${humanOpen ? '<p class="v2-state-notice human-open">模型初评已锁定 · 等待非盲人工复核；当前分数仍为 provisional，不产生夯拉评级。</p>' : ''}
       ${replicaSealed ? '<p class="v2-state-notice replica-sealed">复刻结果已密封，等待绝对分锁定</p>' : ''}
       ${replicaReleased ? renderReleasedReplicaResult(absolute, replica, rating) : ''}
+      ${replicaUnavailable ? renderUnavailableReplicaResult(absolute, rating) : ''}
       ${ineligible ? `<p class="v2-state-notice ineligible">不具备正式评测资格 · ${escapeHtml(qualification.reason || 'endpoint-not-callable')}</p>` : ''}
       ${['credentials-required','interrupted'].includes(status) ? '<p class="v2-state-notice paused">证据采集已暂停，请使用 participant access token 恢复。</p>' : ''}
       ${status === 'cancelled' ? '<p class="v2-state-notice cancelled">本次证据采集已取消；已提交的证据承诺保持不变。</p>' : ''}
@@ -910,6 +919,22 @@ function renderReleasedReplicaResult(absolute, replica, rating) {
       <div class="v2-replica-footer">
         <p>同一输入、匿名只看结果评分；最佳有效复刻基线为 ${escapeHtml(baseline.runtimeId || '—')}。${replica.differenceStable === false ? ' 区间跨越评级门槛，差异不稳定。' : ' 差异未跨越相关评级门槛。'}</p>
         ${runtimeRows ? `<ul>${runtimeRows}</ul>` : ''}
+      </div>
+    </section>`;
+}
+
+function renderUnavailableReplicaResult(absolute, rating) {
+  return `
+    <section class="v2-replica-release" aria-label="待复刻的绝对结果">
+      <header>
+        <div><small>COUNTERFACTUAL ARENA / PENDING</small><h4>绝对结果已锁定，复刻对照待补齐</h4></div>
+        <strong>${escapeHtml(rating.label || '待复刻')}</strong>
+      </header>
+      <div class="v2-replica-metrics">
+        <article><small>ABSOLUTE TOTAL</small><b>${escapeHtml(absolute.total ?? '—')}</b><span>绝对分独立锁定</span></article>
+      </div>
+      <div class="v2-replica-footer">
+        <p>当前没有有效复刻运行可供匿名对照；不会把此结果解释为提交 Agent 胜出。</p>
       </div>
     </section>`;
 }

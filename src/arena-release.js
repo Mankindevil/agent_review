@@ -62,8 +62,14 @@ async function releaseSealedArena(evaluation, services) {
     services.bootstrapReplicaAdvantage || bootstrapReplicaAdvantageDefault;
   const classifyDualTrackRating =
     services.classifyDualTrackRating || classifyDualTrackRatingDefault;
+  const materials = await loadSealedArenaMaterials(
+    evaluation,
+    validReplicaIds,
+    services
+  );
   const arena = await runAnonymousArena({
     ...(services.arenaOptions || {}),
+    ...materials,
     evaluation,
     replicaArena: evaluation.replicaArena,
     validReplicaIds
@@ -96,6 +102,103 @@ async function releaseSealedArena(evaluation, services) {
   );
   next.resultV2.rating = rating;
   return next;
+}
+
+async function loadSealedArenaMaterials(evaluation, validReplicaIds, services) {
+  const testPlan = evaluation.testPlan;
+  if (!testPlan || !Array.isArray(testPlan.tests)) {
+    throw new TypeError('sealed Replica release requires the committed test plan');
+  }
+  const evidenceVault = services.evidenceVault ||
+    services.evidenceVaultFactory?.(evaluation.id);
+  if (!evidenceVault || typeof evidenceVault.get !== 'function' ||
+    typeof evidenceVault.put !== 'function') {
+    throw new TypeError('sealed Replica release requires an encrypted evidenceVault');
+  }
+  const submittedOutputs = submittedOutputsFor(evaluation.phase2Execution);
+  const replicas = await replicaOutputsFor(
+    evaluation.replicaCheckpoint,
+    validReplicaIds,
+    evidenceVault
+  );
+  return { testPlan, submittedOutputs, replicas, evidenceVault };
+}
+
+function submittedOutputsFor(execution) {
+  if (!Array.isArray(execution?.testRuns)) {
+    throw new TypeError('sealed Replica release requires submitted test outputs');
+  }
+  return execution.testRuns.map((testRun) => {
+    const lastRun = testRun?.runs?.at(-1);
+    return {
+      testId: requiredText(testRun?.testId, 'submitted test output testId'),
+      repeatIndex: requiredRepeatIndex(testRun?.repeatIndex),
+      ...toArenaOutput(lastRun?.response?.currentOutput, 'submitted test output')
+    };
+  });
+}
+
+async function replicaOutputsFor(checkpoint, validReplicaIds, evidenceVault) {
+  if (checkpoint?.status !== 'sealed' || !checkpoint.turns) {
+    throw new TypeError('sealed Replica release requires replica checkpoint evidence');
+  }
+  const outputsByRuntime = new Map(validReplicaIds.map((runtimeId) => [runtimeId, []]));
+  const latestTurns = new Map();
+  for (const turn of Object.values(checkpoint.turns)) {
+    if (!outputsByRuntime.has(turn?.runtimeId)) continue;
+    const key = `${turn.runtimeId}:${turn.testId}:${turn.repeatIndex}`;
+    if (!latestTurns.has(key) || turn.turnIndex > latestTurns.get(key).turnIndex) {
+      latestTurns.set(key, turn);
+    }
+  }
+  for (const turn of latestTurns.values()) {
+    const commitment = turn.resultCommitment;
+    if (!commitment?.evidenceId || !commitment?.recordHash) {
+      throw new TypeError('Replica turn checkpoint is missing its evidence commitment');
+    }
+    const record = await evidenceVault.get(commitment.evidenceId, commitment.recordHash);
+    outputsByRuntime.get(turn.runtimeId).push({
+      testId: requiredText(turn.testId, 'Replica turn testId'),
+      repeatIndex: requiredRepeatIndex(turn.repeatIndex),
+      ...toArenaOutput(record?.payload?.result, 'Replica sealed output')
+    });
+  }
+  return validReplicaIds.map((runtimeId) => ({
+    runtimeId,
+    validity: 'valid',
+    outputs: outputsByRuntime.get(runtimeId)
+  }));
+}
+
+function toArenaOutput(value, field) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${field} is missing`);
+  }
+  if (Array.isArray(value.messageParts)) {
+    return {
+      messageParts: structuredClone(value.messageParts),
+      ...(Array.isArray(value.artifacts) ? { artifacts: structuredClone(value.artifacts) } : {})
+    };
+  }
+  const messageParts = [];
+  if (typeof value.text === 'string') messageParts.push({ type: 'text', text: value.text });
+  if (value.data !== null && value.data !== undefined) {
+    messageParts.push({ type: 'data', data: structuredClone(value.data) });
+  }
+  if (messageParts.length) return { messageParts };
+  throw new TypeError(`${field} has no renderable output`);
+}
+
+function requiredText(value, field) {
+  if (typeof value !== 'string' || !value) throw new TypeError(`${field} is required`);
+  return value;
+}
+
+function requiredRepeatIndex(value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError('Replica output repeatIndex must be a non-negative integer');
+  }
+  return value;
 }
 
 function releasedReplica(advantage, validReplicaIds, scoringCube, rating) {

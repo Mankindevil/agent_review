@@ -418,6 +418,39 @@ test('projects only server-released dual-track summaries after the absolute lock
   assert.equal(JSON.stringify(projection).includes('must-not-project'), false);
 });
 
+test('keeps stale released Replica details sealed before the absolute lock', () => {
+  const source = unsafeEvaluation();
+  source.replicaArena = {
+    status: 'released',
+    runtimeSummaries: [
+      { runtimeId: 'runtime-private', validity: 'valid' }
+    ]
+  };
+  source.resultV2 = {
+    absolute: { status: 'model-provisional' },
+    replica: {
+      status: 'released',
+      submittedMedian: 86,
+      runtimes: [{ runtimeId: 'runtime-private', valid: true, median: 71 }],
+      bestBaseline: { runtimeId: 'runtime-private', median: 71 },
+      delta: 15,
+      conservativeDelta: 12,
+      ci95: { confidenceLevel: 0.95, low: 12, high: 15 },
+      differenceStable: true
+    },
+    rating: { status: 'final', code: 'HARD', label: '夯', differenceStable: true }
+  };
+
+  const projection = projectEvaluation(source, { audience: 'public' });
+
+  assert.deepEqual(projection.resultV2.replica, {
+    status: 'sealed', validReplicaCount: 1, pendingAttributionCount: 0
+  });
+  assert.deepEqual(projection.resultV2.rating, { status: 'sealed' });
+  assert.equal(JSON.stringify(projection).includes('runtime-private'), false);
+  assert.equal(JSON.stringify(projection).includes('86'), false);
+});
+
 test('type-checks and redacts every projected leaf, including allowed summaries and findings', () => {
   const source = unsafeEvaluation();
   source.schemaVersion = { nested: 'top-level-object-secret' };

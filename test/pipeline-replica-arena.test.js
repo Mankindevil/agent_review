@@ -29,6 +29,39 @@ function lockedEvaluation() {
       status: 'sealed',
       runtimeSummaries: [{ runtimeId: 'alpha', validity: 'valid' }],
       releasedAt: null
+    },
+    testPlan: {
+      tests: [{
+        testId: 'test_1',
+        repeatCount: 1,
+        input: { parts: [{ type: 'text', text: 'Evaluate this.' }] }
+      }]
+    },
+    phase2Execution: {
+      testRuns: [{
+        testId: 'test_1',
+        repeatIndex: 0,
+        runs: [{
+          response: {
+            currentOutput: { text: 'Submitted output.', data: null, artifacts: [] }
+          }
+        }]
+      }]
+    },
+    replicaCheckpoint: {
+      status: 'sealed',
+      turns: {
+        'alpha:test_1:0:0': {
+          runtimeId: 'alpha',
+          testId: 'test_1',
+          repeatIndex: 0,
+          turnIndex: 0,
+          resultCommitment: {
+            evidenceId: 'ev_alpha_test_1',
+            recordHash: 'b'.repeat(64)
+          }
+        }
+      }
     }
   };
 }
@@ -48,6 +81,7 @@ test('releases a sealed arena using the locked absolute result without mutation'
   const absolute = evaluation.resultV2.absolute;
   const calls = [];
   const services = {
+    evidenceVault: sealedEvidenceVault(),
     runAnonymousArena: async ({ validReplicaIds }) => {
       calls.push(['arena', validReplicaIds]);
       return {
@@ -107,6 +141,69 @@ test('releases a sealed arena using the locked absolute result without mutation'
   assert.equal(calls[2][1].objectiveCoverage, 0.75);
 });
 
+test('loads sealed test and output material before invoking the default arena adapter', async () => {
+  const evaluation = lockedEvaluation();
+  let arenaOptions;
+  const released = await releaseReplicaArena(evaluation, {
+    evidenceVault: {
+      async get(evidenceId, recordHash) {
+        assert.equal(evidenceId, 'ev_alpha_test_1');
+        assert.equal(recordHash, 'b'.repeat(64));
+        return {
+          payload: {
+            result: {
+              messageParts: [{ type: 'text', text: 'Replica output.' }],
+              artifacts: []
+            }
+          }
+        };
+      },
+      async put(record) { return record; }
+    },
+    runAnonymousArena: async (options) => {
+      arenaOptions = options;
+      return {
+        scoringCube: [
+          { scores: { submitted: 88, 'replica:alpha': 70 } },
+          { scores: { submitted: 84, 'replica:alpha': 72 } }
+        ]
+      };
+    },
+    bootstrapReplicaAdvantage: () => ({
+      status: 'ready',
+      submittedMedian: 86,
+      bestReplicaId: 'alpha',
+      bestReplicaMedian: 71,
+      delta: 15,
+      conservativeDelta: 12,
+      interval: { confidenceLevel: 0.95, low: 12, high: 15 }
+    }),
+    classifyDualTrackRating: () => ({
+      status: 'final', code: 'HARD', label: '夯', differenceStable: true
+    }),
+    now: () => '2026-07-25T12:01:00.000Z'
+  });
+
+  assert.equal(released.replicaArena.status, 'released');
+  assert.deepEqual(arenaOptions.testPlan, evaluation.testPlan);
+  assert.deepEqual(arenaOptions.submittedOutputs, [{
+    testId: 'test_1',
+    repeatIndex: 0,
+    messageParts: [{ type: 'text', text: 'Submitted output.' }]
+  }]);
+  assert.deepEqual(arenaOptions.replicas, [{
+    runtimeId: 'alpha',
+    validity: 'valid',
+    outputs: [{
+      testId: 'test_1',
+      repeatIndex: 0,
+      messageParts: [{ type: 'text', text: 'Replica output.' }],
+      artifacts: []
+    }]
+  }]);
+  assert.equal(arenaOptions.evidenceVault.get instanceof Function, true);
+});
+
 test('marks a sealed arena without valid Replicas unavailable and pending', async () => {
   const evaluation = lockedEvaluation();
   evaluation.replicaArena.runtimeSummaries = [{
@@ -139,3 +236,21 @@ test('does not overwrite an already released arena', () => {
 
   assert.strictEqual(releaseReplicaArena(evaluation, {}), evaluation);
 });
+
+function sealedEvidenceVault() {
+  return {
+    async get(evidenceId, recordHash) {
+      assert.equal(evidenceId, 'ev_alpha_test_1');
+      assert.equal(recordHash, 'b'.repeat(64));
+      return {
+        payload: {
+          result: {
+            messageParts: [{ type: 'text', text: 'Replica output.' }],
+            artifacts: []
+          }
+        }
+      };
+    },
+    async put(record) { return record; }
+  };
+}

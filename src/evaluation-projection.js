@@ -55,7 +55,8 @@ export function projectEvaluation(evaluation, { audience = 'public', secrets = [
           evaluation.resultV2,
           secrets,
           false,
-          evaluation.replicaArena
+          evaluation.replicaArena,
+          evaluation.governance
         )
   };
   if (evaluation.archivedAt !== undefined) {
@@ -101,7 +102,19 @@ function projectAbsoluteReview(value, secrets, includeModelPanel = false) {
   }, secrets);
 }
 
-function projectResultV2(value, secrets, omitReplica = false, replicaArena = null) {
+function projectResultV2(
+  value,
+  secrets,
+  omitReplica = false,
+  replicaArena = null,
+  governance = null
+) {
+  const replicaStatus = value?.replica?.status || replicaArena?.status;
+  const absoluteLocked = hasAbsoluteLock(governance, value?.absolute);
+  const releaseAllowed = absoluteLocked &&
+    replicaStatus === 'released' &&
+    typeof governance?.replicaReleasedAt === 'string';
+  const staleRelease = replicaStatus === 'released' && !releaseAllowed;
   return pick(value, omitReplica
     ? ['absolute', 'rating']
     : ['absolute', 'replica', 'rating'], {
@@ -118,13 +131,16 @@ function projectResultV2(value, secrets, omitReplica = false, replicaArena = nul
       },
       nestedSecrets
     ),
-    replica: (item, nestedSecrets) => projectReplica(item, replicaArena, nestedSecrets),
-    rating: (item, nestedSecrets) => pick(
+    replica: (item, nestedSecrets) => projectReplica(
       item,
-      ['status', 'code', 'label', 'differenceStable'],
-      {},
-      nestedSecrets
-    )
+      replicaArena,
+      nestedSecrets,
+      releaseAllowed,
+      staleRelease
+    ),
+    rating: (item, nestedSecrets) => staleRelease
+      ? { status: 'sealed' }
+      : pick(item, ['status', 'code', 'label', 'differenceStable'], {}, nestedSecrets)
   }, secrets);
 }
 
@@ -139,9 +155,9 @@ function projectLockedDimensions(value, secrets) {
     }));
 }
 
-function projectReplica(value, replicaArena, secrets) {
+function projectReplica(value, replicaArena, secrets, releaseAllowed, staleRelease) {
   const status = projectPrimitive(value?.status || replicaArena?.status, secrets);
-  if (status === 'released') {
+  if (status === 'released' && releaseAllowed) {
     return pick(value, [
       'status', 'submittedMedian', 'runtimes', 'bestBaseline', 'delta',
       'conservativeDelta', 'ci95', 'differenceStable'
@@ -150,6 +166,18 @@ function projectReplica(value, replicaArena, secrets) {
       bestBaseline: projectReplicaBaseline,
       ci95: projectReplicaInterval
     }, secrets);
+  }
+  if (staleRelease) {
+    const summaries = Array.isArray(replicaArena?.runtimeSummaries)
+      ? replicaArena.runtimeSummaries
+      : [];
+    return {
+      status: 'sealed',
+      validReplicaCount: summaries.filter((item) => item?.validity === 'valid').length,
+      pendingAttributionCount: summaries.filter(
+        (item) => item?.validity === 'attribution-pending'
+      ).length
+    };
   }
   if (status !== 'sealed') return status === undefined ? undefined : { status };
   const summaries = Array.isArray(replicaArena?.runtimeSummaries)
@@ -162,6 +190,14 @@ function projectReplica(value, replicaArena, secrets) {
       (item) => item?.validity === 'attribution-pending'
     ).length
   };
+}
+
+function hasAbsoluteLock(governance, absolute) {
+  return governance?.phase === 'absolute_locked' &&
+    typeof governance.absoluteLockedAt === 'string' &&
+    /^[a-f0-9]{64}$/u.test(governance.resultHash || '') &&
+    absolute?.status === 'locked' &&
+    absolute.resultHash === governance.resultHash;
 }
 
 function projectReplicaRuntimes(value, secrets) {
