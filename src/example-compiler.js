@@ -117,6 +117,7 @@ function compileExample(example) {
     exampleId: example.id,
     domain,
     goal,
+    sourceTurns: structuredClone(example.turns),
     inputSummary: example.turns.map((turn, turnIndex) => ({
       turnIndex,
       partTypes: turn.input.parts.map((part) => part.type)
