@@ -112,7 +112,7 @@ test('runs fresh judges, recalculates totals, and preserves anonymous and reveal
           evidenceRisk: 60,
           artifactUsability: 50
         },
-        total: -1,
+        total: 70,
         rationale: 'Compared only supplied results.',
         uncertainties: []
       }))
@@ -130,6 +130,63 @@ test('runs fresh judges, recalculates totals, and preserves anonymous and reveal
   assert.equal(JSON.stringify(result.cells).includes('replica:cursor'), false);
   assert.equal(JSON.stringify(result.cells).includes('submitted'), false);
   assert.equal(JSON.stringify(vault.records[0].payload).includes('replica:cursor'), true);
+});
+
+test('strips caller-supplied task metadata from judge packets', () => {
+  const [cell] = buildArenaCells({
+    testPlan: TEST_PLAN,
+    submittedOutputs: SUBMITTED_OUTPUTS,
+    replicas: REPLICAS
+  });
+  cell.task = {
+    ...cell.task,
+    agentId: 'submitted-agent',
+    runtimeId: 'internal-runtime',
+    absoluteResult: { passed: true },
+    protocol: { version: 'A2A' },
+    revealMap: { 'candidate-1': 'submitted' },
+    latencyMs: 99,
+    a2aStatus: 'completed',
+    evidenceGrade: 'A',
+    sourceId: 'submitted'
+  };
+
+  const packet = createArenaJudgePacket(cell, { id: 'gpt' }, 23);
+
+  assert.deepEqual(packet.task, {
+    input: TEST_PLAN.tests[0].input,
+    constraints: TEST_PLAN.tests[0].constraints,
+    expectedDeliverable: TEST_PLAN.tests[0].expectedDeliverable
+  });
+});
+
+test('rejects URL snapshots with metadata outside the locked shape', () => {
+  const [cell] = buildArenaCells({
+    testPlan: TEST_PLAN,
+    submittedOutputs: SUBMITTED_OUTPUTS,
+    replicas: REPLICAS
+  });
+  cell.candidates[0].output.messageParts = [{
+    type: 'url',
+    url: 'https://files.example/report.csv',
+    snapshot: {
+      reference: 'snapshot_report',
+      mediaType: 'text/csv',
+      byteLength: 128,
+      sha256: 'a'.repeat(64),
+      runtimeId: 'internal-runtime',
+      latencyMs: 99,
+      sourceId: 'submitted',
+      revealMap: { 'candidate-1': 'submitted' }
+    }
+  }];
+
+  const packet = createArenaJudgePacket(cell, { id: 'gpt' }, 24);
+  const urlPart = packet.candidates
+    .flatMap((candidate) => candidate.output.messageParts ?? [])
+    .find((part) => part.type === 'url');
+
+  assert.equal(Object.hasOwn(urlPart, 'snapshot'), false);
 });
 
 test('rejects malformed judge payloads and retains only valid replica score keys', async () => {
@@ -175,6 +232,36 @@ test('rejects malformed judge payloads and retains only valid replica score keys
       }]
     })
   }), /candidate|0–100|range/iu);
+});
+
+test('rejects finite judge totals outside the score range', async () => {
+  const [cell] = buildArenaCells({
+    testPlan: TEST_PLAN,
+    submittedOutputs: SUBMITTED_OUTPUTS,
+    replicas: REPLICAS
+  });
+
+  for (const total of [-1, 101]) {
+    await assert.rejects(runAnonymousArena({
+      cells: [cell],
+      reviewers: [{ id: 'gpt' }],
+      evidenceVault: memoryVault(),
+      invokeJudge: async ({ packet }) => ({
+        scores: packet.candidates.map((candidate) => ({
+          candidateId: candidate.candidateId,
+          dimensions: {
+            taskConstraint: 80,
+            professionalQuality: 70,
+            evidenceRisk: 60,
+            artifactUsability: 50
+          },
+          total,
+          rationale: 'bad total',
+          uncertainties: []
+        }))
+      })
+    }), /total|0–100|range/iu);
+  }
 });
 
 function memoryVault() {

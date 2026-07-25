@@ -196,9 +196,7 @@ function normalizeArenaJudgement(value, expectedCandidateIds) {
       assertFiniteScore(dimensions[key], `arena score.dimensions.${key}`);
       return [key, dimensions[key]];
     }));
-    if (!Number.isFinite(item.total)) {
-      throw new TypeError('arena score.total must be a finite number');
-    }
+    assertFiniteScore(item.total, 'arena score.total');
     if (typeof item.rationale !== 'string') throw new TypeError('arena score.rationale must be a string');
     if (!Array.isArray(item.uncertainties)) throw new TypeError('arena score.uncertainties must be an array');
     if (item.uncertainties.some((uncertainty) => typeof uncertainty !== 'string')) {
@@ -227,9 +225,20 @@ function normalizeCell(cell) {
   return {
     testId: requiredText(value.testId, 'arena cell.testId'),
     repeatIndex: requiredNonNegativeInteger(value.repeatIndex, 'arena cell.repeatIndex'),
-    task: structuredClone(requiredObject(value.task, 'arena cell.task')),
+    task: projectTask(requiredObject(value.task, 'arena cell.task')),
     candidates
   };
+}
+
+function projectTask(value) {
+  const task = {
+    input: structuredClone(value.input),
+    constraints: Array.isArray(value.constraints) ? structuredClone(value.constraints) : []
+  };
+  if (typeof value.expectedDeliverable === 'string') {
+    task.expectedDeliverable = value.expectedDeliverable;
+  }
+  return task;
 }
 
 function projectOutput(value) {
@@ -258,16 +267,30 @@ function projectParts(parts) {
     const allowed = part.type === 'text' ? ['type', 'text', 'mediaType', 'filename']
       : part.type === 'data' ? ['type', 'data', 'mediaType', 'filename']
         : part.type === 'raw' ? ['type', 'raw', 'mediaType', 'filename']
-          : part.type === 'url' ? ['type', 'url', 'mediaType', 'filename', 'snapshot'] : [];
+          : part.type === 'url' ? ['type', 'url', 'mediaType', 'filename'] : [];
     if (!allowed.length) return null;
     const required = part.type === 'text' ? 'text'
       : part.type === 'data' ? 'data'
         : part.type === 'raw' ? 'raw' : 'url';
     if (part[required] === undefined) return null;
-    return Object.fromEntries(allowed
+    const projected = Object.fromEntries(allowed
       .filter((key) => part[key] !== undefined)
       .map((key) => [key, structuredClone(part[key])]));
+    if (part.type === 'url' && exactSnapshot(part.snapshot)) {
+      projected.snapshot = structuredClone(part.snapshot);
+    }
+    return projected;
   }).filter(Boolean);
+}
+
+function exactSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return false;
+  const keys = Object.keys(snapshot).sort();
+  if (JSON.stringify(keys) !== JSON.stringify(['byteLength', 'mediaType', 'reference', 'sha256'])) return false;
+  return typeof snapshot.reference === 'string' && /^snapshot_[A-Za-z0-9_-]{1,128}$/u.test(snapshot.reference)
+    && typeof snapshot.mediaType === 'string' && /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*(?:;\s*[A-Za-z0-9!#$&^_.+-]+=[^;\s]+)*$/u.test(snapshot.mediaType)
+    && Number.isSafeInteger(snapshot.byteLength) && snapshot.byteLength >= 0 && snapshot.byteLength <= 2 * 1024 * 1024
+    && typeof snapshot.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(snapshot.sha256);
 }
 
 function indexOutputs(outputs, field) {
