@@ -156,6 +156,7 @@ test('runs the complete V2 black-box evidence pipeline against a real A2A agent'
     ).card;
     Object.assign(process.env, {
       NODE_ENV: 'test',
+      MODEL_REVIEW_PANEL_MODE: 'demo',
       DATA_FILE: path.join(temporaryRoot, 'evaluations.json'),
       A2A_BLACK_BOX_V1_ENABLED: 'true',
       EVIDENCE_ENCRYPTION_KEY: evidenceKey.toString('base64'),

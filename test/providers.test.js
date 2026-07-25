@@ -168,8 +168,16 @@ test('fails closed for duplicate identities, literal secrets, or incomplete live
   );
 });
 
-test('throws when live panel credentials are incomplete and demo mode is not set', () => {
-  assert.throws(() => configuredReviewPanel({}), /OPENAI_|ARK_|REVIEW_MODEL_/iu);
+test('throws when live panel credentials are incomplete outside test env', () => {
+  assert.throws(
+    () => configuredReviewPanel({ NODE_ENV: 'production' }),
+    /OPENAI_|ARK_|REVIEW_MODEL_/iu
+  );
+});
+
+test('defaults to demo panel under NODE_ENV=test without explicit live mode', () => {
+  const panel = configuredReviewPanel({ NODE_ENV: 'test' });
+  assert.equal(panel.mode, 'demo');
 });
 
 test('builds live panel from gateway env without MODEL_REVIEW_PANEL_JSON', () => {

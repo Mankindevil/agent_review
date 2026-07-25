@@ -154,6 +154,7 @@ const {
 } = runtimeStatusModule;
 
 process.env.NODE_ENV = 'test';
+process.env.MODEL_REVIEW_PANEL_MODE = 'demo';
 process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-test-${process.pid}.json`);
 process.env.A2A_BLACK_BOX_V1_ENABLED = 'false';
 process.env.AGENT_DIAGNOSTICS_RATE_LIMIT = '100';

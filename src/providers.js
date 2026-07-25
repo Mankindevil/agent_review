@@ -17,14 +17,21 @@ export function configuredReviewPanel(env = process.env) {
   if (env.MODEL_REVIEW_PANEL_JSON) {
     return panelFromJson(env);
   }
+  const panelMode = String(env.MODEL_REVIEW_PANEL_MODE || '').trim().toLowerCase();
   // Explicit demo escape must win so tests can inject MODE=demo without
   // clearing ambient gateway keys from process.env.
-  if (String(env.MODEL_REVIEW_PANEL_MODE || '').trim().toLowerCase() === 'demo') {
+  if (panelMode === 'demo') {
     return demoReviewPanel();
   }
   const gateway = gatewayLiveStatus(env);
   if (gateway.ready) {
     return gatewayLivePanel(env);
+  }
+  const nodeEnv = String(env.NODE_ENV || process.env.NODE_ENV || '').trim().toLowerCase();
+  // Test harnesses import the server without full gateway secrets; keep demo
+  // unless MODE=live was requested (which still requires credentials above).
+  if (nodeEnv === 'test') {
+    return demoReviewPanel();
   }
   const missing = gateway.missing.length
     ? gateway.missing.join(', ')

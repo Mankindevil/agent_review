@@ -7,6 +7,7 @@ import path from 'node:path';
 
 const testRoot = await mkdtemp(path.join(tmpdir(), 'agent-roast-api-v2-'));
 process.env.NODE_ENV = 'test';
+process.env.MODEL_REVIEW_PANEL_MODE = 'demo';
 process.env.DATA_FILE = path.join(testRoot, 'evaluations.json');
 process.env.A2A_BLACK_BOX_V1_ENABLED = 'true';
 process.env.REVIEW_GOVERNANCE_ENABLED = 'true';

@@ -18,6 +18,7 @@ function importServer(overrides, source = "await import('./server.js')") {
     env: {
       ...process.env,
       NODE_ENV: 'test',
+      MODEL_REVIEW_PANEL_MODE: 'demo',
       DATA_FILE: path.join(tmpdir(), `startup-${process.pid}-${Math.random()}.json`),
       ...overrides
     }
