@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  absolutePanelPrompt,
   hiddenScopeReviewPrompt,
   hiddenVariantGenerationPrompt
 } from '../src/prompts.js';
@@ -48,4 +49,25 @@ test('scope prompt exposes candidate changes but not generator rationale', () =>
   assert.match(prompt, /sameDomain/u);
   assert.match(prompt, /noExternalTruthDependency/u);
   assert.match(prompt, /single JSON object/iu);
+});
+
+test('absolute panel prompt includes only evidence-safe fields and forbids outside fact checking', () => {
+  const prompt = absolutePanelPrompt(
+    [{ checkId: 'risk', subcriterionId: 'professionalism.evidenceReasoning' }],
+    {
+      submission: { redactedCard: { name: 'Agent' }, redactedExamples: [] },
+      testCatalog: [],
+      evidenceManifest: [{ evidenceId: 'ev_a' }],
+      redactedEvidence: [{ evidenceId: 'ev_a', text: 'result' }],
+      objectiveCapability: { score: 80 },
+      replicaArena: { secret: true },
+      runtimeBuild: { secret: true }
+    },
+    { disputedSubcriterionIds: [] }
+  );
+
+  assert.match(prompt, /no browsing|must not browse/iu);
+  assert.match(prompt, /outside fact|external fact/iu);
+  assert.match(prompt, /"evidenceId":"ev_a"/u);
+  assert.doesNotMatch(prompt, /replicaArena|runtimeBuild/u);
 });

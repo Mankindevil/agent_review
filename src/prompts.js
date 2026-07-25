@@ -79,3 +79,31 @@ ${JSON.stringify(compilation)}
 CANDIDATES:
 ${JSON.stringify(projectedCandidates)}`;
 }
+
+export function absolutePanelPrompt(rubricChecks, evidencePackage, options = {}) {
+  const packet = {
+    rubricVersion: options.rubricVersion || 'a2a-black-box-v1',
+    submission: evidencePackage.submission,
+    testCatalog: evidencePackage.testCatalog || [],
+    evidenceManifest: evidencePackage.evidenceManifest || [],
+    redactedEvidence: evidencePackage.redactedEvidence || [],
+    objectiveCapability: evidencePackage.objectiveCapability,
+    rubricChecks,
+    ...(Array.isArray(options.disputedSubcriterionIds) &&
+      options.disputedSubcriterionIds.length > 0
+      ? { disputedSubcriterionIds: options.disputedSubcriterionIds }
+      : {})
+  };
+  return `You are an independent evidence-grounded Agent evaluator.
+Return one JSON object only. You must not browse, call tools, or use outside facts.
+Use only the redacted Card, participant Agent examples, platform-captured A2A evidence,
+objective observations, and rubric checks in the packet.
+Do not treat claimed internal models, tools, memory, prompts, subagents, costs, or tokens
+as verified capability. Product novelty may use only observable interaction and product effect.
+When external truth is absent, judge completion, method, consistency, uncertainty, and usability,
+but do not claim factual correctness against the outside world.
+Return every requested subcriterion and every applicable check with evidence IDs.
+
+EVIDENCE_PACKET:
+${JSON.stringify(packet)}`;
+}
