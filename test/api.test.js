@@ -287,6 +287,9 @@ test('serves the scoring methodology document in the web UI', async () => {
   assert.match(html, /round\(59\.8\) = 60/);
   assert.match(html, /夯 \/ 人上人 \/ NPC \/ 拉/);
   assert.match(html, /最新结果替换旧结果/);
+  assert.match(html, /完整 Agent；每个 Runtime/);
+  assert.match(html, /bootstrap 95% 区间下界/);
+  assert.match(html, /待复刻/);
 });
 
 test('keeps the history count inline in the top navigation', async () => {
@@ -405,6 +408,9 @@ test('keeps V2 browser secrets memory-only and renders nested projections safely
   assert.match(script, /function stageOf\(item\)/);
   assert.match(script, /function progressOf\(item\)/);
   assert.match(script, /function renderV2Result\(item\)/);
+  assert.match(script, /function renderReleasedReplicaResult/);
+  assert.match(script, /复刻结果已密封，等待绝对分锁定/);
+  assert.match(script, /replica\.status === 'released'/);
   assert.match(script, /human_open/);
   assert.match(script, /非盲人工复核/);
   assert.match(script, /protocolRecovery/);

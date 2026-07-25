@@ -358,6 +358,66 @@ test('all pre-lock projections expose sealed Replica counts without runtime or e
   }
 });
 
+test('projects only server-released dual-track summaries after the absolute lock', () => {
+  const source = unsafeEvaluation();
+  source.governance = {
+    phase: 'absolute_locked',
+    absoluteLockedAt: '2026-07-25T12:00:00.000Z',
+    resultHash: 'a'.repeat(64),
+    replicaReleasedAt: '2026-07-25T12:01:00.000Z'
+  };
+  source.resultV2 = {
+    absolute: {
+      status: 'locked',
+      total: 82,
+      dimensions: {
+        scenarioValue: { score: 64 },
+        agentCapability: { objectiveCoverage: 0.75 }
+      },
+      resultHash: 'a'.repeat(64)
+    },
+    replica: {
+      status: 'released',
+      submittedMedian: 86,
+      runtimes: [{ runtimeId: 'alpha', valid: true, median: 71 }],
+      bestBaseline: { runtimeId: 'alpha', median: 71 },
+      delta: 15,
+      conservativeDelta: 12,
+      ci95: { confidenceLevel: 0.95, low: 12, high: 15 },
+      differenceStable: true,
+      output: 'must-not-project'
+    },
+    rating: {
+      status: 'final',
+      code: 'HARD',
+      label: '夯',
+      differenceStable: true,
+      reasons: ['locked reason']
+    }
+  };
+  source.replicaArena = { status: 'released', rawScores: 'must-not-project' };
+
+  const projection = projectEvaluation(source, { audience: 'public' });
+
+  assert.deepEqual(projection.resultV2.replica, {
+    status: 'released',
+    submittedMedian: 86,
+    runtimes: [{ runtimeId: 'alpha', valid: true, median: 71 }],
+    bestBaseline: { runtimeId: 'alpha', median: 71 },
+    delta: 15,
+    conservativeDelta: 12,
+    ci95: { confidenceLevel: 0.95, low: 12, high: 15 },
+    differenceStable: true
+  });
+  assert.deepEqual(projection.resultV2.rating, {
+    status: 'final',
+    code: 'HARD',
+    label: '夯',
+    differenceStable: true
+  });
+  assert.equal(JSON.stringify(projection).includes('must-not-project'), false);
+});
+
 test('type-checks and redacts every projected leaf, including allowed summaries and findings', () => {
   const source = unsafeEvaluation();
   source.schemaVersion = { nested: 'top-level-object-secret' };

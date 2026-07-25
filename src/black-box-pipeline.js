@@ -36,6 +36,8 @@ import {
   sealedReplicaProjection
 } from './replica-runner.js';
 
+export { releaseReplicaArena } from './arena-release.js';
+
 const MODULE_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..'

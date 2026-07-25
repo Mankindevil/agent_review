@@ -49,6 +49,7 @@
         <small>STAGE INDEX</small>
         <a href="#protocol"><i>00</i><span>A2A 准入</span></a>
         <a href="#black-box-v2"><i>V2</i><span>黑盒动态评测</span></a>
+        <a href="#replica-arena-v2"><i>V3</i><span>复刻对照</span></a>
         <a href="#necessity"><i>01</i><span>投研必要性</span></a>
         <a href="#professional"><i>02</i><span>金融专业度</span></a>
         <a href="#runtime"><i>03</i><span>Description 直出</span></a>
@@ -96,6 +97,28 @@
             <article class="rule-card"><h3>智能体能力</h3><p>只评价 A2A 黑盒可观察行为：任务完成、鲁棒性、多轮上下文、协议合规、效率与错误恢复。</p></article>
           </div>
           <div class="mode-callout"><b>当前发布边界</b><span>Phase 2 已完成动态测试与四模型初评，状态进入 <code>human_open</code>。在人工分数锁定前，分数保持 provisional，Replica Arena 关闭，夯 / 人上人 / NPC / 拉评级不提前产生。</span></div>
+        </section>
+
+        <section class="rule-section" id="replica-arena-v2">
+          <header><span>V3 / COUNTERFACTUAL ARENA</span><h2>复刻对照：公开信息是否足以替代完整 Agent</h2><p>这是一项反事实压力测试，不是对内部架构的逆向证明。提交物是完整 Agent；每个 Runtime 只能把公开 Card 语义和完整公开示例临时重建为一个 Skill。</p></header>
+          <div class="rule-grid two">
+            <article class="rule-card"><h3>相同输入，匿名看结果</h3><p>提交 Agent 与每个有效临时 Skill 收到同一份不可变当前测试输入。四位新鲜评审会话只看任务、约束、交付物和匿名候选输出，不看 Agent、Runtime、协议、延迟或内部实现。</p></article>
+            <article class="rule-card danger-card"><h3>它不能说明什么</h3><p>公开材料能否被现场临时复刻，不等于完整 Agent 的内部工具、记忆、提示词和编排方式可以被证明或替代。复刻包不包含端点、凭证、隐藏题、提交输出或评分。</p></article>
+          </div>
+          <div class="process-line">
+            <div><b>01</b><span>有效 Runtime</span><small>只纳入构建、隔离与首轮执行均有效的复刻。</small></div>
+            <div><b>02</b><span>最佳基线</span><small>每个 Runtime 取跨同题评分的中位数，再取最高有效中位数。</small></div>
+            <div><b>03</b><span>保守优势</span><small>对完整评分立方体 bootstrap 10,000 次；每次重选最佳复刻。</small></div>
+            <div><b>04</b><span>锁定后发布</span><small>绝对分与结果哈希锁定前，所有复刻证据保持密封。</small></div>
+          </div>
+          <div class="equation"><span>复刻保守优势</span><strong>Δc = bootstrap 95% 区间下界</strong><small>点估计为提交 Agent 中位数减去最佳有效 Runtime 中位数；评级只使用 Δc，而不是乐观点估计。</small></div>
+          <div class="verdict-ladder">
+            <article class="tier-hard"><i>夯</i><strong>夯</strong><code>总分 ≥ 80；场景 ≥ 60；覆盖率 ≥ 0.70；Δc ≥ 5</code><p>绝对质量与保守复刻优势都达标。</p></article>
+            <article class="tier-elite"><i>人</i><strong>人上人</strong><code>总分 ≥ 70；场景 ≥ 50；Δc ≥ −2</code><p>未满足“夯”时按此门槛判断。</p></article>
+            <article class="tier-npc"><i>N</i><strong>NPC</strong><code>总分 ≥ 55；场景 ≥ 36；Δc ≥ −10</code><p>未满足更高门槛时按此门槛判断。</p></article>
+            <article class="tier-flop"><i>拉</i><strong>拉</strong><code>其他情况</code><p>任何场景分低于 36 也归入此档。</p></article>
+          </div>
+          <div class="mode-callout warning"><b>无有效复刻</b><span>若所有 Runtime 都因基础设施、平台或构建问题无效，绝对结果仍可发布；复刻状态显示“待复刻”，不会据此声称提交 Agent 获胜。绝对分锁定前，界面只显示“复刻结果已密封，等待绝对分锁定”。</span></div>
         </section>
 
         <section class="rule-section" id="necessity">

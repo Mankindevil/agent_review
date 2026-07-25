@@ -1,0 +1,160 @@
+import { runAnonymousArena as runAnonymousArenaDefault } from './arena.js';
+import {
+  bootstrapReplicaAdvantage as bootstrapReplicaAdvantageDefault,
+  median
+} from './statistics.js';
+import { classifyDualTrackRating as classifyDualTrackRatingDefault } from './rating.js';
+
+const SHA256 = /^[a-f0-9]{64}$/u;
+
+/**
+ * Releases the counterfactual Replica comparison only after Phase 4 has
+ * committed an immutable absolute result. The absolute result is reused by
+ * reference and never recalculated from Replica evidence.
+ */
+export function releaseReplicaArena(evaluation, services = {}) {
+  assertAbsoluteLock(evaluation);
+  if (evaluation.replicaArena?.status === 'released') return evaluation;
+  if (evaluation.replicaArena?.status !== 'sealed') {
+    throw new Error('Replica Arena must be sealed before it can be released');
+  }
+  return releaseSealedArena(evaluation, services);
+}
+
+async function releaseSealedArena(evaluation, services) {
+  const now = services.now || (() => new Date().toISOString());
+  const releasedAt = now();
+  assertIso(releasedAt, 'replica release timestamp');
+  const absolute = evaluation.resultV2.absolute;
+  const validReplicaIds = validReplicaIdsFor(evaluation.replicaArena);
+  const next = {
+    ...evaluation,
+    governance: {
+      ...evaluation.governance,
+      replicaReleasedAt: releasedAt
+    },
+    replicaArena: {
+      ...evaluation.replicaArena,
+      releasedAt
+    },
+    resultV2: {
+      ...evaluation.resultV2,
+      // The Phase 4 immutable absolute score must never be copied,
+      // recomputed, or mixed with counterfactual Replica measurements.
+      absolute
+    }
+  };
+
+  if (validReplicaIds.length === 0) {
+    next.replicaArena.status = 'unavailable';
+    next.resultV2.replica = { status: 'unavailable' };
+    next.resultV2.rating = {
+      status: 'pending-replica',
+      code: 'PENDING_REPLICA',
+      label: '待复刻'
+    };
+    return next;
+  }
+
+  const runAnonymousArena =
+    services.runAnonymousArena || runAnonymousArenaDefault;
+  const bootstrapReplicaAdvantage =
+    services.bootstrapReplicaAdvantage || bootstrapReplicaAdvantageDefault;
+  const classifyDualTrackRating =
+    services.classifyDualTrackRating || classifyDualTrackRatingDefault;
+  const arena = await runAnonymousArena({
+    ...(services.arenaOptions || {}),
+    evaluation,
+    replicaArena: evaluation.replicaArena,
+    validReplicaIds
+  });
+  const scoringCube = Array.isArray(arena?.scoringCube)
+    ? arena.scoringCube
+    : arena?.scoreCells;
+  const advantage = bootstrapReplicaAdvantage(
+    scoringCube,
+    validReplicaIds,
+    services.bootstrapOptions || {}
+  );
+  if (advantage?.status !== 'ready') {
+    throw new Error('valid Replica Arena must produce a ready advantage');
+  }
+  const rating = classifyDualTrackRating({
+    eligibilityStatus: evaluation.qualification?.status,
+    absoluteTotal: absolute.total,
+    scenarioScore: absolute.dimensions.scenarioValue.score,
+    objectiveCoverage: absolute.dimensions.agentCapability.objectiveCoverage,
+    replicaAdvantage: advantage
+  });
+
+  next.replicaArena.status = 'released';
+  next.resultV2.replica = releasedReplica(
+    advantage,
+    validReplicaIds,
+    scoringCube,
+    rating
+  );
+  next.resultV2.rating = rating;
+  return next;
+}
+
+function releasedReplica(advantage, validReplicaIds, scoringCube, rating) {
+  const runtimeMedians = new Map(validReplicaIds.map((runtimeId) => [
+    runtimeId,
+    median(scoringCube.map((cell) => cell.scores[`replica:${runtimeId}`]))
+  ]));
+  return {
+    status: 'released',
+    submittedMedian: advantage.submittedMedian,
+    runtimes: [...runtimeMedians].map(([runtimeId, median]) => ({
+      runtimeId,
+      valid: true,
+      median
+    })),
+    bestBaseline: {
+      runtimeId: advantage.bestReplicaId,
+      median: advantage.bestReplicaMedian
+    },
+    delta: advantage.delta,
+    conservativeDelta: advantage.conservativeDelta,
+    ci95: advantage.interval,
+    differenceStable: rating.differenceStable
+  };
+}
+
+function validReplicaIdsFor(replicaArena) {
+  return (Array.isArray(replicaArena.runtimeSummaries)
+    ? replicaArena.runtimeSummaries
+    : []
+  ).flatMap((summary) =>
+    summary?.validity === 'valid' && typeof summary.runtimeId === 'string'
+      ? [summary.runtimeId]
+      : []
+  );
+}
+
+function assertAbsoluteLock(evaluation) {
+  if (!evaluation || typeof evaluation !== 'object') {
+    throw new TypeError('evaluation is required');
+  }
+  const governance = evaluation.governance;
+  const absolute = evaluation.resultV2?.absolute;
+  if (
+    governance?.phase !== 'absolute_locked' ||
+    !isIso(governance.absoluteLockedAt) ||
+    !SHA256.test(governance.resultHash || '') ||
+    !absolute ||
+    absolute.status !== 'locked' ||
+    absolute.resultHash !== governance.resultHash
+  ) {
+    throw new Error('Replica Arena release requires an immutable absolute locked result');
+  }
+}
+
+function assertIso(value, name) {
+  if (!isIso(value)) throw new TypeError(`${name} must be an ISO timestamp`);
+}
+
+function isIso(value) {
+  return typeof value === 'string' && new Date(value).toISOString() === value;
+}

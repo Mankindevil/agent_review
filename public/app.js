@@ -828,6 +828,8 @@ function renderV2Result(item) {
   const qualification = item.qualification || {};
   const objective = item.objectiveCapability || {};
   const absolute = item.resultV2?.absolute || {};
+  const replica = item.resultV2?.replica || {};
+  const rating = item.resultV2?.rating || {};
   const testSummary = absolute.testSummary || {};
   const variants = testSummary.variantCounts || {};
   const modelSummary = absolute.modelReviewSummary || {};
@@ -835,6 +837,8 @@ function renderV2Result(item) {
   const evidenceCount = item.evidenceManifest?.items?.length || 0;
   const objectiveReady = Number.isFinite(objective.score);
   const humanOpen = item.governance?.phase === 'human_open';
+  const replicaReleased = replica.status === 'released';
+  const replicaSealed = replica.status === 'sealed';
   const waitingModel = status === 'completed' &&
     qualification.status === 'eligible' &&
     !humanOpen;
@@ -874,11 +878,40 @@ function renderV2Result(item) {
         </div>` : ''}
       ${waitingModel ? '<p class="v2-state-notice waiting">动态测试已提交，等待四席模型评审锁定。</p>' : ''}
       ${humanOpen ? '<p class="v2-state-notice human-open">模型初评已锁定 · 等待非盲人工复核；当前分数仍为 provisional，不产生夯拉评级。</p>' : ''}
+      ${replicaSealed ? '<p class="v2-state-notice replica-sealed">复刻结果已密封，等待绝对分锁定</p>' : ''}
+      ${replicaReleased ? renderReleasedReplicaResult(absolute, replica, rating) : ''}
       ${ineligible ? `<p class="v2-state-notice ineligible">不具备正式评测资格 · ${escapeHtml(qualification.reason || 'endpoint-not-callable')}</p>` : ''}
       ${['credentials-required','interrupted'].includes(status) ? '<p class="v2-state-notice paused">证据采集已暂停，请使用 participant access token 恢复。</p>' : ''}
       ${status === 'cancelled' ? '<p class="v2-state-notice cancelled">本次证据采集已取消；已提交的证据承诺保持不变。</p>' : ''}
     </section>`;
   return false;
+}
+
+function renderReleasedReplicaResult(absolute, replica, rating) {
+  const baseline = replica.bestBaseline || {};
+  const ci95 = replica.ci95 || {};
+  const runtimeRows = Array.isArray(replica.runtimes)
+    ? replica.runtimes.map((runtime) => `
+      <li><span>${escapeHtml(runtime.runtimeId || 'unknown')}</span><b>${escapeHtml(runtime.median ?? '—')}</b></li>
+    `).join('')
+    : '';
+  return `
+    <section class="v2-replica-release" aria-label="已发布的复刻对照结果">
+      <header>
+        <div><small>COUNTERFACTUAL ARENA / RELEASED</small><h4>完整 Agent 与公开信息复刻的同题对照</h4></div>
+        <strong>${escapeHtml(rating.label || '待定')}</strong>
+      </header>
+      <div class="v2-replica-metrics">
+        <article><small>ABSOLUTE TOTAL</small><b>${escapeHtml(absolute.total ?? '—')}</b><span>绝对分独立锁定</span></article>
+        <article><small>SUBMITTED MEDIAN</small><b>${escapeHtml(replica.submittedMedian ?? '—')}</b><span>提交 Agent</span></article>
+        <article><small>BEST BASELINE</small><b>${escapeHtml(baseline.median ?? '—')}</b><span>${escapeHtml(baseline.runtimeId || '—')}</span></article>
+        <article><small>CONSERVATIVE Δ</small><b>${signed(replica.conservativeDelta)}</b><span>95% CI ${escapeHtml(ci95.low ?? '—')} → ${escapeHtml(ci95.high ?? '—')}</span></article>
+      </div>
+      <div class="v2-replica-footer">
+        <p>同一输入、匿名只看结果评分；最佳有效复刻基线为 ${escapeHtml(baseline.runtimeId || '—')}。${replica.differenceStable === false ? ' 区间跨越评级门槛，差异不稳定。' : ' 差异未跨越相关评级门槛。'}</p>
+        ${runtimeRows ? `<ul>${runtimeRows}</ul>` : ''}
+      </div>
+    </section>`;
 }
 
 function v2StatusCopy(item) {

@@ -107,8 +107,12 @@ function projectResultV2(value, secrets, omitReplica = false, replicaArena = nul
     : ['absolute', 'replica', 'rating'], {
     absolute: (item, nestedSecrets) => pick(
       item,
-      ['status', 'testSummary', 'modelReviewSummary'],
+      [
+        'status', 'total', 'dimensions', 'confidence', 'resultHash',
+        'testSummary', 'modelReviewSummary'
+      ],
       {
+        dimensions: projectLockedDimensions,
         testSummary: projectTestSummary,
         modelReviewSummary: projectModelReviewSummary
       },
@@ -117,15 +121,36 @@ function projectResultV2(value, secrets, omitReplica = false, replicaArena = nul
     replica: (item, nestedSecrets) => projectReplica(item, replicaArena, nestedSecrets),
     rating: (item, nestedSecrets) => pick(
       item,
-      ['status', 'code', 'label'],
+      ['status', 'code', 'label', 'differenceStable'],
       {},
       nestedSecrets
     )
   }, secrets);
 }
 
+function projectLockedDimensions(value, secrets) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return Object.fromEntries(['scenarioValue', 'professionalism', 'agentCapability']
+    .flatMap((key) => {
+      const projected = pick(value[key], [
+        'score', 'confidence', 'objectiveCoverage', 'provisional'
+      ], {}, secrets);
+      return Object.keys(projected).length ? [[key, projected]] : [];
+    }));
+}
+
 function projectReplica(value, replicaArena, secrets) {
   const status = projectPrimitive(value?.status || replicaArena?.status, secrets);
+  if (status === 'released') {
+    return pick(value, [
+      'status', 'submittedMedian', 'runtimes', 'bestBaseline', 'delta',
+      'conservativeDelta', 'ci95', 'differenceStable'
+    ], {
+      runtimes: projectReplicaRuntimes,
+      bestBaseline: projectReplicaBaseline,
+      ci95: projectReplicaInterval
+    }, secrets);
+  }
   if (status !== 'sealed') return status === undefined ? undefined : { status };
   const summaries = Array.isArray(replicaArena?.runtimeSummaries)
     ? replicaArena.runtimeSummaries
@@ -137,6 +162,21 @@ function projectReplica(value, replicaArena, secrets) {
       (item) => item?.validity === 'attribution-pending'
     ).length
   };
+}
+
+function projectReplicaRuntimes(value, secrets) {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((item) => pick(item, [
+    'runtimeId', 'valid', 'median'
+  ], {}, secrets));
+}
+
+function projectReplicaBaseline(value, secrets) {
+  return pick(value, ['runtimeId', 'median'], {}, secrets);
+}
+
+function projectReplicaInterval(value, secrets) {
+  return pick(value, ['confidenceLevel', 'low', 'high'], {}, secrets);
 }
 
 function projectTestSummary(value, secrets) {

@@ -31,6 +31,8 @@ import { EphemeralCredentialVault } from './src/credential-vault.js';
 import { EvidenceVault } from './src/evidence-vault.js';
 import { createPhase2Services } from './src/phase2-services.js';
 
+export { releaseReplicaArena } from './src/arena-release.js';
+
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.join(root, 'public');
 const LEGACY_EVALUATION_BODY_LIMIT = 1_000_000;
