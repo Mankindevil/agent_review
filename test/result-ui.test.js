@@ -31,8 +31,17 @@ test('publishes the ordered evidence-led dual-track result surface', async () =>
   assert.match(renderer, /差异未稳定/);
   assert.match(renderer, /待复刻/);
   assert.match(renderer, /same-track only/);
-  assert.match(app, /item\.resultV2\s*\?\s*renderV2ResultView\(item,\s*\{\s*escapeHtml\s*\}\)\s*:\s*renderLegacyResult\(item\)/);
+  assert.match(app, /function renderResult\(item\)/);
+  assert.match(
+    app,
+    /#result-content[\s\S]*?innerHTML\s*=\s*renderV2ResultView\(item,\s*\{\s*escapeHtml\s*\}\)/
+  );
+  assert.match(app, /renderLegacyResult\(item\)/);
   assert.doesNotMatch(app, /function renderV2Result\(item\)/);
+  assert.doesNotMatch(
+    app,
+    /return item\.resultV2\s*\?\s*renderV2ResultView\(item,\s*\{\s*escapeHtml\s*\}\)\s*:\s*renderLegacyResult\(item\)/
+  );
   assert.match(renderer, /absoluteReview\?\.modelPanel/);
   assert.match(renderer, /item\.resultV2\?\.humor/);
   assert.match(renderer, /item\.humanReviewAggregate/);

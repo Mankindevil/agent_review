@@ -778,9 +778,15 @@ function showEvaluation(item) {
 }
 
 function renderResult(item) {
-  return item.resultV2
-    ? renderV2ResultView(item, { escapeHtml })
-    : renderLegacyResult(item);
+  if (!item.resultV2) return renderLegacyResult(item);
+  const root = $('#result-content');
+  state.verdictRevealToken += 1;
+  state.completedRendered = null;
+  root.classList.remove('reveal');
+  root.classList.remove('verdict-pending');
+  root.classList.remove('streaming');
+  root.innerHTML = renderV2ResultView(item, { escapeHtml });
+  return false;
 }
 
 function renderLegacyResult(item) {
