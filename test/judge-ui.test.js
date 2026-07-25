@@ -86,6 +86,7 @@ test('open review desk renders absolute and replica review dossiers from the que
   assert.match(script, /同题对照/);
   assert.match(script, /请先填齐全部/);
   assert.match(script, /锁定失败/);
+  assert.match(script, /finalizePending/);
   assert.match(css, /\.review-dossier/);
   const replicaFormIdx = html.indexOf('data-role="replica-score-form"');
   const replicaDossierIdx = html.indexOf('data-role="replica-dossier"');

@@ -267,9 +267,14 @@ async function submitReplicaReview(event, item, form, cardRoot) {
     const lock = await tryLockReplicaHumanReview(item.id);
     cardRoot.classList.add('queue-card-resolved');
     form.classList.add('hidden');
-    const hint = lock.ok
-      ? '复刻人工打分已提交并锁定该轨道。'
-      : `复刻人工打分已提交，但锁定失败：${lock.error || '未知错误'}。请刷新后重试或联系管理员。`;
+    let hint = '复刻人工打分已提交。';
+    if (!lock.ok) {
+      hint = `复刻人工打分已提交，但锁定失败：${lock.error || '未知错误'}。请刷新后重试。`;
+    } else if (lock.finalizePending) {
+      hint = `复刻人工轨道已锁定；终审结算暂未完成（${lock.finalizeError || '可稍后在详情页重试结算'}）。`;
+    } else {
+      hint = '复刻人工打分已提交并锁定该轨道。';
+    }
     cardRoot.querySelector('.queue-card-replica-hint').replaceChildren(
       document.createTextNode(hint)
     );
@@ -295,7 +300,11 @@ async function tryLockReplicaHumanReview(evaluationId) {
     if (!response.ok) {
       return { ok: false, error: payload.error || `HTTP ${response.status}` };
     }
-    return { ok: true };
+    return {
+      ok: true,
+      finalizePending: Boolean(payload.finalizePending),
+      finalizeError: payload.finalizeError || null
+    };
   } catch (error) {
     return { ok: false, error: error.message || '锁定请求失败' };
   }

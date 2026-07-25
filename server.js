@@ -522,29 +522,48 @@ export const server = createServer(async (request, response) => {
       const fingerprint = governanceIdempotencyFingerprint(
         item.id, 'replica-human-review-lock', 'open', payload
       );
-      const committed = await store.mutate(item.id, undefined, async (current) => {
+      // Persist the replica-human lock even when dual-track finalize fails
+      // (e.g. Arena evidence retry / live judge errors). Finalize can be
+      // retried via POST .../finalize-dual-track without re-scoring.
+      const actor = { principalId: principal.principalId, idempotencyKey };
+      const committed = await store.mutate(item.id, undefined, (current) => {
         const replies = governanceIdempotency(current, 'replicaHumanReviewLocks');
         if (idempotencyResponse(replies, idempotencyKey, fingerprint)) return current;
-        const actor = { principalId: principal.principalId, idempotencyKey };
         const locked = lockReplicaHumanReview(current, actor);
-        let finalizeResult = null;
-        if (current.governance?.absoluteLockedAt) {
-          finalizeResult = await finalizeDualTrack(current, replicaReleaseServices(), actor);
-        }
         replies[idempotencyKey] = {
           fingerprint,
           response: {
             replicaHumanReviewAggregate: locked,
-            replica: finalizeResult?.replica ?? current.resultV2.replica,
-            rating: finalizeResult?.rating ?? current.resultV2.rating,
+            replica: current.resultV2?.replica,
+            rating: current.resultV2?.rating,
             phase: current.governance.phase
           }
         };
         return current;
       });
-      return json(response, 200, idempotencyResponse(
-        governanceIdempotency(committed, 'replicaHumanReviewLocks'), idempotencyKey, fingerprint
-      ));
+      let finalizeError = null;
+      let finalized = committed;
+      if (committed.governance?.absoluteLockedAt && !committed.governance?.dualTrackFinalizedAt) {
+        try {
+          finalized = await store.mutate(item.id, undefined, async (current) => {
+            await finalizeDualTrack(current, replicaReleaseServices(), actor);
+            return current;
+          });
+        } catch (error) {
+          finalizeError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      const reply = idempotencyResponse(
+        governanceIdempotency(finalized, 'replicaHumanReviewLocks'), idempotencyKey, fingerprint
+      );
+      if (finalizeError) {
+        return json(response, 200, {
+          ...reply,
+          finalizePending: true,
+          finalizeError
+        });
+      }
+      return json(response, 200, reply);
     }
     const finalizeDualTrackMatch =
       url.pathname.match(/^\/api\/evaluations\/([^/]+)\/finalize-dual-track$/);
