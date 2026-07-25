@@ -32,6 +32,10 @@ const rubric = {
 
 export const RUBRIC_V1 = deepFreeze(rubric);
 
+export function isExecutableCriterion(criterion) {
+  return Boolean(criterion) && criterion.type !== 'model';
+}
+
 function deepFreeze(value) {
   Object.freeze(value);
   for (const child of Object.values(value)) {

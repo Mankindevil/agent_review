@@ -316,7 +316,7 @@ function canonicalClone(value, path, ancestors = new Set()) {
   return result;
 }
 
-function hashCanonical(value) {
+export function hashCanonical(value) {
   return createHash('sha256').update(JSON.stringify(canonicalClone(value, 'value')), 'utf8').digest('hex');
 }
 
