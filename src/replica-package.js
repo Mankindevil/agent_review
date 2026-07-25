@@ -12,7 +12,7 @@ const EXCLUSIONS = Object.freeze([
   'other-replicas'
 ]);
 const FORBIDDEN_KEY = /^(?:auth(?:entication|orization)?|credentials?|passwords?|secrets?|tokens?|cookies?|endpoints?|providers?|documentation(?:urls?)?|metadata|signatures?|security(?:schemes)?|hiddentests?|hiddenvariants?|reviews?|scoringevidence|replicas?|otherreplicas?|replicaartifacts?|submittedoutputs?|executionevidence|executionoutputs?|modeloutputs?|capturedoutputs?|outputs?|evidence|testplan(?:id)?|sessionid)$/iu;
-const CREDENTIAL_KEY_SUFFIX = /(?:token|apikey|accesskey(?:id)?|secretkey|privatekey|credentials?|passwords?|cookies?)$/u;
+const CREDENTIAL_KEY_SUFFIX = /(?:token|apikey|accesskey(?:id)?|secret(?:key)?|privatekey|credentials?|passwords?|cookies?)$/u;
 const PLATFORM_SCORE_KEY = /(?:model|judge|absolute|replica|humanreview|review)score/u;
 const SECRET_VALUE = /(?:\bbearer\s+\S+|\b(?:authorization|cookie)\s*[:=]|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b)/iu;
 const SIGNED_QUERY_KEY = /(?:^|[-_])(?:sig(?:nature)?|jwt|cookie|access[-_]?token|api[-_]?key|client[-_]?secret|authorization|token|secret|password|policy|key)(?:$|[-_])|^x-amz-(?:algorithm|credential|date|expires|security-token|signature)$/iu;

@@ -195,7 +195,9 @@ test('classifies credential key families and raw YAML or HTTP headers without re
     'xApiKey', 'x_api_key', 'x-api-key', 'refreshToken', 'awsSecretAccessKey',
     'awsAccessKeyId', 'aws_access_key_id', 'sessionToken', 'security_token',
     'personalAccessToken', 'githubToken', 'accessToken', 'id_token', 'apiKey',
-    'secret_key', 'access-key', 'modelScore', 'modelScores', 'modelScoreValue',
+    'clientSecret', 'client_secret', 'client-secret', 'apiSecret',
+    'consumerSecret', 'sharedSecret', 'secret_key', 'access-key',
+    'modelScore', 'modelScores', 'modelScoreValue',
     'review_score', 'humanReviewScore', 'judge-score', 'judge_scores',
     'absoluteScore', 'absolute-scores', 'replica_score', 'replicaScores',
     'scoringEvidence'
@@ -212,7 +214,8 @@ test('classifies credential key families and raw YAML or HTTP headers without re
     '- api_key: opaque-credential',
     '- X-API-Key: opaque-credential',
     '  - refresh_token: opaque-credential',
-    '"api_key": opaque-credential'
+    '"api_key": opaque-credential',
+    "'clientSecret': opaque-credential"
   ]) {
     const credential = structuredClone(EXAMPLES);
     credential[0].turns[0].input.parts.push({
