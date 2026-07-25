@@ -318,6 +318,153 @@ test('enforces server-authenticated judge and admin projections for V2 routes', 
   assert.equal(admin.status, 200);
 });
 
+test('manages authenticated review assignments with assignment-scoped ETags', async () => {
+  const evaluation = structuredClone(v2Fixture);
+  evaluation.id = 'eval_v2_governance_api';
+  evaluation.createdAt = '2026-07-25T09:00:00.000Z';
+  evaluation.updatedAt = evaluation.createdAt;
+  evaluation.revision = 0;
+  evaluation.governance = { phase: 'waiting_model' };
+  evaluation.reviewAssignments = [];
+  evaluation.humanReviews = [];
+  evaluation.auditEvents = [];
+  const leaf = 'professionalism.evidenceReasoning';
+  evaluation.absoluteReview.modelPanel = {
+    status: 'model-locked',
+    primary: [0, 1, 2, 3].map((index) => ({
+      reviewRunId: `model_${index}`,
+      reviews: [{
+        subcriterionId: leaf,
+        score: 70,
+        checkEvidence: [{ checkId: 'evidence_reasoning', evidenceIds: ['ev_api'] }]
+      }]
+    })),
+    disputedSubcriterionIds: [],
+    arbitration: null
+  };
+  await evaluationStore.set(evaluation);
+  try {
+    const assigned = await fetch(
+      `${origin}/api/admin/evaluations/${evaluation.id}/review-assignments`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer admin-secret',
+          'content-type': 'application/json',
+          'idempotency-key': 'assign-governance-api-key'
+        },
+        body: JSON.stringify({
+          judgeId: 'judge-1',
+          role: 'primary',
+          criterionScope: [leaf]
+        })
+      }
+    );
+    const assignment = await assigned.json();
+    assert.equal(assigned.status, 201);
+    assert.equal(assignment.role, 'primary');
+
+    const replay = await fetch(
+      `${origin}/api/admin/evaluations/${evaluation.id}/review-assignments`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer admin-secret',
+          'content-type': 'application/json',
+          'idempotency-key': 'assign-governance-api-key'
+        },
+        body: JSON.stringify({
+          judgeId: 'judge-1',
+          role: 'primary',
+          criterionScope: [leaf]
+        })
+      }
+    );
+    assert.deepEqual(await replay.json(), assignment);
+
+    const detail = await fetch(
+      `${origin}/api/review-assignments/${evaluation.id}`,
+      { headers: { authorization: 'Bearer judge-secret' } }
+    );
+    const assignmentDetail = await detail.json();
+    assert.equal(detail.status, 200);
+    assert.equal(assignmentDetail.assignmentId, assignment.assignmentId);
+    const etag = detail.headers.get('etag');
+    assert.match(etag, /assignment:/);
+
+    const reviewPayload = {
+      assignmentId: assignment.assignmentId,
+      scores: {
+        [leaf]: {
+          score: 75,
+          evidenceIds: ['ev_api'],
+          checkEvidence: [{ checkId: 'evidence_reasoning', evidenceIds: ['ev_api'] }],
+          rationale: 'Captured evidence supports the score.',
+          modelDisposition: 'modify',
+          overrideReason: ''
+        }
+      }
+    };
+    const drafted = await fetch(
+      `${origin}/api/review-assignments/${evaluation.id}/draft`,
+      {
+        method: 'PUT',
+        headers: {
+          authorization: 'Bearer judge-secret',
+          'content-type': 'application/json',
+          'if-match': etag
+        },
+        body: JSON.stringify(reviewPayload)
+      }
+    );
+    assert.equal(drafted.status, 200);
+    const stale = await fetch(
+      `${origin}/api/review-assignments/${evaluation.id}/draft`,
+      {
+        method: 'PUT',
+        headers: {
+          authorization: 'Bearer judge-secret',
+          'content-type': 'application/json',
+          'if-match': etag
+        },
+        body: JSON.stringify(reviewPayload)
+      }
+    );
+    assert.equal(stale.status, 409);
+
+    const submitted = await fetch(
+      `${origin}/api/review-assignments/${evaluation.id}/submit`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer judge-secret',
+          'content-type': 'application/json',
+          'idempotency-key': 'submit-governance-api-key'
+        },
+        body: JSON.stringify(reviewPayload)
+      }
+    );
+    assert.equal(submitted.status, 200);
+    const submittedBody = await submitted.json();
+    assert.equal(submittedBody.status, 'submitted');
+    const submitReplay = await fetch(
+      `${origin}/api/review-assignments/${evaluation.id}/submit`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer judge-secret',
+          'content-type': 'application/json',
+          'idempotency-key': 'submit-governance-api-key'
+        },
+        body: JSON.stringify(reviewPayload)
+      }
+    );
+    assert.deepEqual(await submitReplay.json(), submittedBody);
+  } finally {
+    await evaluationStore.delete(evaluation.id);
+  }
+});
+
 test('returns participant projection for authenticated evaluation detail reads', async () => {
   const publicDetail = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
   const publicView = await publicDetail.json();

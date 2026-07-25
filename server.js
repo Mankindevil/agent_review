@@ -27,6 +27,13 @@ import {
   isReviewGovernanceEnabled,
   requireRole
 } from './src/review-access.js';
+import {
+  assignmentEtag,
+  assignHumanReviewer,
+  recuseHumanReviewer,
+  saveHumanDraft,
+  submitHumanReview
+} from './src/review-governance.js';
 import { getAccessAuditStore } from './src/access-audit-store.js';
 import {
   copyEvidenceEncryptionKey,
@@ -229,6 +236,116 @@ export const server = createServer(async (request, response) => {
         principal
       }));
     }
+    if (request.method === 'GET' && url.pathname === '/api/review-assignments') {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const principal = governancePrincipal(request);
+      const assignments = store.list()
+        .filter((item) => item.schemaVersion === 2)
+        .flatMap((item) => (item.reviewAssignments || [])
+          .filter((assignment) => principal.role === 'admin' || assignment.judgeId === principal.principalId)
+          .map((assignment) => projectAssignment(assignment)));
+      return json(response, 200, assignments);
+    }
+    const assignmentDetailMatch =
+      url.pathname.match(/^\/api\/review-assignments\/([^/]+)$/);
+    if (request.method === 'GET' && assignmentDetailMatch) {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const item = requireV2Evaluation(assignmentDetailMatch[1]);
+      const principal = requireRole(
+        authenticatePrincipal(request, item, process.env),
+        ['judge', 'admin']
+      );
+      const assignment = assignmentForPrincipal(item, principal);
+      response.setHeader('etag', assignmentEtag(assignment));
+      return json(response, 200, {
+        ...projectAssignment(assignment),
+        draft: projectOwnDraft(item, assignment)
+      });
+    }
+    const draftMatch =
+      url.pathname.match(/^\/api\/review-assignments\/([^/]+)\/draft$/);
+    if (request.method === 'PUT' && draftMatch) {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const item = requireV2Evaluation(draftMatch[1]);
+      const principal = requireRole(authenticatePrincipal(request, item, process.env), 'judge');
+      const payload = await readJsonBody(request, 250_000);
+      const expectedRevision = assignmentRevisionFromIfMatch(request.headers['if-match'], payload.assignmentId);
+      const committed = await store.mutate(item.id, undefined, (current) => {
+        const assignment = assignmentForPrincipal(current, principal, payload.assignmentId);
+        saveHumanDraft(current, assignment, payload, expectedRevision);
+        return current;
+      });
+      const assignment = committed.reviewAssignments.find(
+        (candidate) => candidate.assignmentId === payload.assignmentId
+      );
+      response.setHeader('etag', assignmentEtag(assignment));
+      return json(response, 200, projectAssignment(assignment));
+    }
+    const submitMatch =
+      url.pathname.match(/^\/api\/review-assignments\/([^/]+)\/submit$/);
+    if (request.method === 'POST' && submitMatch) {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const item = requireV2Evaluation(submitMatch[1]);
+      const principal = requireRole(authenticatePrincipal(request, item, process.env), 'judge');
+      const idempotencyKey = requiredIdempotencyKey(request);
+      const payload = await readJsonBody(request, 250_000);
+      const committed = await store.mutate(item.id, undefined, (current) => {
+        const replies = governanceIdempotency(current, 'submits');
+        if (replies[idempotencyKey]) return current;
+        const assignment = assignmentForPrincipal(current, principal, payload.assignmentId);
+        const review = submitHumanReview(current, assignment, payload);
+        replies[idempotencyKey] = projectSubmittedReview(review);
+        return current;
+      });
+      const reply = governanceIdempotency(committed, 'submits')[idempotencyKey];
+      return json(response, 200, reply);
+    }
+    const recuseMatch =
+      url.pathname.match(/^\/api\/review-assignments\/([^/]+)\/recuse$/);
+    if (request.method === 'POST' && recuseMatch) {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const item = requireV2Evaluation(recuseMatch[1]);
+      const principal = requireRole(authenticatePrincipal(request, item, process.env), 'judge');
+      const payload = await readJsonBody(request, 16_000);
+      const committed = await store.mutate(item.id, undefined, (current) => {
+        const assignment = assignmentForPrincipal(current, principal, payload.assignmentId);
+        recuseHumanReviewer(current, assignment);
+        return current;
+      });
+      const assignment = committed.reviewAssignments.find(
+        (candidate) => candidate.assignmentId === payload.assignmentId
+      );
+      return json(response, 200, projectAssignment(assignment));
+    }
+    const assignmentCreateMatch =
+      url.pathname.match(/^\/api\/admin\/evaluations\/([^/]+)\/review-assignments$/);
+    if (request.method === 'POST' && assignmentCreateMatch) {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const item = requireV2Evaluation(assignmentCreateMatch[1]);
+      const principal = requireRole(authenticatePrincipal(request, item, process.env), 'admin');
+      const idempotencyKey = requiredIdempotencyKey(request);
+      const payload = await readJsonBody(request, 16_000);
+      const committed = await store.mutate(item.id, undefined, (current) => {
+        const replies = governanceIdempotency(current, 'assignments');
+        if (replies[idempotencyKey]) return current;
+        const assignment = assignHumanReviewer(
+          current,
+          { principalId: payload.judgeId },
+          payload.role,
+          payload.criterionScope
+        );
+        replies[idempotencyKey] = projectAssignment(assignment);
+        return current;
+      });
+      const reply = governanceIdempotency(committed, 'assignments')[idempotencyKey];
+      return json(response, 201, reply);
+    }
     const evidenceMatch =
       url.pathname.match(/^\/api\/evaluations\/([^/]+)\/evidence\/([^/]+)$/);
     if (request.method === 'GET' && evidenceMatch) {
@@ -387,6 +504,93 @@ function projectionOptionsForRequest(evaluation, request) {
     throw Object.assign(new Error('review governance is disabled'), { statusCode: 403 });
   }
   return { audience: principal.role, principal };
+}
+
+function requireGovernanceEnabled() {
+  if (!isReviewGovernanceEnabled(process.env)) {
+    throw Object.assign(new Error('Review governance is disabled'), { statusCode: 403 });
+  }
+}
+
+function requireV2Evaluation(evaluationId) {
+  const item = store.get(evaluationId);
+  if (!item || item.schemaVersion !== 2) {
+    throw Object.assign(new Error('Evaluation does not exist'), { statusCode: 404 });
+  }
+  return item;
+}
+
+function governancePrincipal(request) {
+  const item = store.list().find((candidate) => candidate.schemaVersion === 2);
+  return requireRole(authenticatePrincipal(request, item, process.env), ['judge', 'admin']);
+}
+
+function assignmentForPrincipal(evaluation, principal, requestedId = null) {
+  const candidates = (evaluation.reviewAssignments || []).filter((assignment) =>
+    principal.role === 'admin' || assignment.judgeId === principal.principalId
+  );
+  const assignment = requestedId
+    ? candidates.find((candidate) => candidate.assignmentId === requestedId)
+    : candidates.find((candidate) => candidate.status !== 'submitted' && candidate.status !== 'recused') ||
+      candidates[0];
+  if (!assignment) throw Object.assign(new Error('Review assignment does not exist'), { statusCode: 404 });
+  return assignment;
+}
+
+function assignmentRevisionFromIfMatch(value, assignmentId) {
+  const escaped = String(assignmentId || '').replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const match = typeof value === 'string'
+    ? value.match(new RegExp(`^W/"assignment:${escaped}:(\\d+)"$`, 'u'))
+    : null;
+  if (!match) throw Object.assign(new Error('If-Match must contain the assignment ETag'), { statusCode: 409 });
+  return Number(match[1]);
+}
+
+function requiredIdempotencyKey(request) {
+  const value = request.headers['idempotency-key'];
+  if (typeof value !== 'string' || !value.trim()) {
+    throw Object.assign(new Error('Idempotency-Key is required'), { statusCode: 422 });
+  }
+  return value.trim();
+}
+
+function governanceIdempotency(evaluation, type) {
+  if (!evaluation.governance.idempotency) evaluation.governance.idempotency = {};
+  if (!evaluation.governance.idempotency[type]) evaluation.governance.idempotency[type] = {};
+  return evaluation.governance.idempotency[type];
+}
+
+function projectAssignment(assignment) {
+  return {
+    assignmentId: assignment.assignmentId,
+    evaluationId: assignment.evaluationId,
+    judgeId: assignment.judgeId,
+    role: assignment.role,
+    criterionScope: assignment.criterionScope,
+    status: assignment.status,
+    assignedAt: assignment.assignedAt,
+    submittedAt: assignment.submittedAt,
+    revision: assignment.revision
+  };
+}
+
+function projectOwnDraft(evaluation, assignment) {
+  const review = (evaluation.humanReviews || []).find(
+    (candidate) => candidate.assignmentId === assignment.assignmentId && candidate.status === 'draft'
+  );
+  return review
+    ? { reviewId: review.reviewId, status: review.status, scores: review.scores, payloadHash: review.payloadHash }
+    : null;
+}
+
+function projectSubmittedReview(review) {
+  return {
+    reviewId: review.reviewId,
+    assignmentId: review.assignmentId,
+    status: review.status,
+    submittedAt: review.submittedAt,
+    payloadHash: review.payloadHash
+  };
 }
 
 async function serveEvidenceItem(request, response, evaluationId, evidenceId) {
