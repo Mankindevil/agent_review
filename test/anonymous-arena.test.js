@@ -233,6 +233,45 @@ test('strips caller-supplied task metadata from judge packets', () => {
   });
 });
 
+test('replaces identity-bearing snapshot references with opaque judge-local handles', () => {
+  const [cell] = buildArenaCells({
+    testPlan: TEST_PLAN,
+    submittedOutputs: SUBMITTED_OUTPUTS,
+    replicas: REPLICAS
+  });
+  cell.candidates[0].output.messageParts = [{
+    type: 'url',
+    url: 'https://files.example/submitted-runtime-report.json',
+    snapshot: {
+      reference: 'snapshot_submitted_agent',
+      mediaType: 'application/json',
+      byteLength: 512,
+      sha256: 'b'.repeat(64)
+    }
+  }];
+
+  const packet = createArenaJudgePacket(cell, { id: 'gpt' }, 77);
+  const prompt = arenaComparisonPrompt(packet);
+  const urlPart = packet.candidates
+    .flatMap((candidate) => candidate.output.messageParts ?? [])
+    .find((part) => part.type === 'url');
+
+  assert.ok(urlPart);
+  assert.equal(urlPart.snapshot.mediaType, 'application/json');
+  assert.equal(urlPart.snapshot.byteLength, 512);
+  assert.equal(urlPart.snapshot.sha256, 'b'.repeat(64));
+  assert.match(urlPart.snapshot.reference, /^snapshot_[a-f0-9]{8}$/u);
+  for (const forbidden of [
+    'snapshot_submitted_agent',
+    'submitted',
+    'runtime',
+    'agent'
+  ]) {
+    assert.equal(JSON.stringify(packet).includes(forbidden), false, `packet leaks ${forbidden}`);
+    assert.equal(prompt.includes(forbidden), false, `prompt leaks ${forbidden}`);
+  }
+});
+
 test('rejects URL snapshots with metadata outside the locked shape', () => {
   const [cell] = buildArenaCells({
     testPlan: TEST_PLAN,

@@ -84,3 +84,12 @@ release path.
 - Added regressions that verify identity-bearing artifact metadata, runtime
   filenames, and endpoint hosts never reach packets or prompts, and that
   undersized or unapproved reviewer panels are rejected.
+
+## Repair round 3
+
+- Judge packets now replace URL snapshot `reference` values with deterministic
+  opaque handles derived from candidate label, part index, and content hash.
+  MIME type, byte length, and SHA-256 are preserved for usability comparison.
+- Added a regression that snapshot references containing identity substrings
+  such as `submitted`, `runtime`, or `agent` never appear in judge packets or
+  prompts.

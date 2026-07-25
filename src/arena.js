@@ -70,7 +70,7 @@ export function createArenaJudgePacket(cell, reviewer, seed) {
     const candidateId = opaqueCandidateId(labelSeed, reviewerId, candidate.sourceId);
     if (labels.has(candidateId)) throw new Error('opaque candidate label collision');
     labels.add(candidateId);
-    return { candidateId, output: structuredClone(candidate.output) };
+    return { candidateId, output: opaqueizeJudgeOutput(candidate.output, candidateId) };
   });
   return {
     task: structuredClone(normalizedCell.task),
@@ -286,6 +286,29 @@ function exactSnapshot(snapshot) {
     && typeof snapshot.mediaType === 'string' && /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*(?:;\s*[A-Za-z0-9!#$&^_.+-]+=[^;\s]+)*$/u.test(snapshot.mediaType)
     && Number.isSafeInteger(snapshot.byteLength) && snapshot.byteLength >= 0 && snapshot.byteLength <= 2 * 1024 * 1024
     && typeof snapshot.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(snapshot.sha256);
+}
+
+function opaqueizeJudgeOutput(output, candidateId) {
+  const projected = structuredClone(output);
+  let partIndex = 0;
+  const walk = (parts) => {
+    if (!Array.isArray(parts)) return;
+    for (const part of parts) {
+      if (part?.type === 'url' && exactSnapshot(part.snapshot)) {
+        part.snapshot.reference = opaqueSnapshotReference(candidateId, partIndex, part.snapshot);
+      }
+      partIndex += 1;
+    }
+  };
+  walk(projected.messageParts);
+  if (Array.isArray(projected.artifacts)) {
+    for (const artifact of projected.artifacts) walk(artifact.parts);
+  }
+  return projected;
+}
+
+function opaqueSnapshotReference(candidateId, partIndex, snapshot) {
+  return `snapshot_${hash({ candidateId, partIndex, sha256: snapshot.sha256 }).slice(0, 8)}`;
 }
 
 function resolveArenaReviewers(options) {
