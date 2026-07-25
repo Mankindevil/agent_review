@@ -55,13 +55,14 @@ export async function executeA2ATurn(options) {
     clock = () => Date.now(),
     sleep = wait,
     requestId: suppliedRequestId,
+    messageId: suppliedMessageId,
     runId: suppliedRunId
   } = options || {};
   const startedAt = clock();
   const deadline = startedAt + timeoutMs;
   const runId = suppliedRunId || `run_${crypto.randomUUID()}`;
   const requestId = suppliedRequestId || crypto.randomUUID();
-  const messageId = crypto.randomUUID();
+  const messageId = suppliedMessageId || crypto.randomUUID();
   let target = null;
   let initialRequest = null;
   let headersAt = null;
@@ -239,6 +240,93 @@ export async function executeA2ATurn(options) {
   }
 }
 
+export async function executeA2AProtocolRecoveryProbe(options = {}) {
+  const {
+    card,
+    input,
+    timeoutMs = 45_000,
+    authorization,
+    signal,
+    request = safeHttpRequest,
+    clock = () => Date.now()
+  } = options;
+  validateAuthorization(authorization);
+  const startedAt = clock();
+  const deadline = startedAt + timeoutMs;
+  const target = selectInterface(card);
+  if (!target) {
+    return executeA2ATurn({
+      ...options,
+      contextId: undefined,
+      taskId: undefined
+    });
+  }
+  const malformedRequestId = options.requestId
+    ? `${options.requestId}_malformed`
+    : crypto.randomUUID();
+  const template = buildA2ARequest(target, input, {
+    requestId: malformedRequestId,
+    messageId: options.messageId
+      ? `${options.messageId}_malformed`
+      : crypto.randomUUID(),
+    streaming: false
+  });
+  const malformedBody = target.binding === 'JSONRPC'
+    ? {
+        jsonrpc: '2.0',
+        id: malformedRequestId,
+        method: template.body.method,
+        params: {}
+      }
+    : { configuration: template.body.configuration || {} };
+  let malformedRejected = false;
+  let malformedHttpStatus = null;
+  let malformedResponseHash = null;
+  let malformedErrorCategory = null;
+  try {
+    const malformedResponse = await send({
+      ...template,
+      body: malformedBody
+    }, {
+      request,
+      authorization,
+      signal,
+      timeoutMs: Math.min(
+        10_000,
+        Math.max(1, Math.floor(timeoutMs / 3))
+      )
+    });
+    malformedHttpStatus = malformedResponse.status;
+    malformedResponseHash = sha256(malformedResponse.body || Buffer.alloc(0));
+    malformedRejected = isMalformedRequestRejection(
+      target,
+      malformedResponse,
+      malformedRequestId
+    );
+  } catch (error) {
+    malformedErrorCategory = classifyFailure(error).category;
+  }
+  const validRun = await executeA2ATurn({
+    ...options,
+    contextId: undefined,
+    taskId: undefined,
+    streaming: false,
+    timeoutMs: Math.max(1, deadline - clock()),
+    request
+  });
+  return {
+    ...validRun,
+    protocolRecovery: {
+      malformedRejected,
+      malformedRequestBodyHash: hashJson(malformedBody),
+      malformedHttpStatus,
+      malformedResponseHash,
+      malformedErrorCategory,
+      validRequestUsedFreshContext: true
+    }
+  };
+}
+
 export async function executeA2AExample({
   card,
   example,
@@ -293,6 +381,20 @@ export async function executeA2AExample({
     runs,
     contextCheck: { status: contextStatus, contextId: returnedContextId || null }
   };
+}
+
+function isMalformedRequestRejection(target, response, requestId) {
+  if (response?.status >= 400 && response.status < 500) return true;
+  if (target.binding !== 'JSONRPC') return false;
+  try {
+    const payload = JSON.parse(response.body.toString('utf8'));
+    return payload?.jsonrpc === '2.0' &&
+      payload?.id === requestId &&
+      payload?.error &&
+      Number.isInteger(payload.error.code);
+  } catch {
+    return false;
+  }
 }
 
 export function normalizeA2AResult(target, rawObjects) {

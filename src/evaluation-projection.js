@@ -13,7 +13,7 @@ const COMMON_RESULT_FIELDS = [
 const DIMENSION_FIELDS = new Set(['scenarioValue', 'professionalism', 'agentCapability']);
 
 export function projectEvaluation(evaluation, { audience = 'public', secrets = [] } = {}) {
-  if (audience !== 'public' && audience !== 'admin') {
+  if (!['public', 'admin', 'judge-preview'].includes(audience)) {
     throw new TypeError('unsupported evaluation projection audience');
   }
   if (!evaluation || typeof evaluation !== 'object' || Array.isArray(evaluation)) {
@@ -38,12 +38,24 @@ export function projectEvaluation(evaluation, { audience = 'public', secrets = [
       'replicaReleasedAt'
     ], secrets),
     qualification: projectQualification(evaluation.qualification, secrets),
-    evidenceManifest: projectManifest(evaluation.evidenceManifest, audience, secrets),
+    evidenceManifest: projectManifest(
+      evaluation.evidenceManifest,
+      audience === 'judge-preview' ? 'admin' : audience,
+      secrets
+    ),
     objectiveCapability: pickResult(evaluation.objectiveCapability, COMMON_RESULT_FIELDS, secrets),
-    absoluteReview: projectAbsoluteReview(evaluation.absoluteReview, secrets),
+    absoluteReview: projectAbsoluteReview(
+      evaluation.absoluteReview,
+      secrets,
+      audience === 'judge-preview'
+    ),
     resultV2: evaluation.resultV2 === null
       ? null
-      : projectResultV2(evaluation.resultV2, secrets)
+      : projectResultV2(
+          evaluation.resultV2,
+          secrets,
+          audience === 'judge-preview'
+        )
   };
   if (evaluation.archivedAt !== undefined) {
     projection.archivedAt = projectPrimitive(evaluation.archivedAt, secrets);
@@ -53,6 +65,8 @@ export function projectEvaluation(evaluation, { audience = 'public', secrets = [
     projection.submission = projectSubmissionMetadata(evaluation.submission, secrets);
     projection.auditEvents = (Array.isArray(evaluation.auditEvents) ? evaluation.auditEvents : [])
       .map((event) => projectAuditEvent(event, secrets));
+  } else if (audience === 'judge-preview') {
+    projection.submission = projectJudgeSubmission(evaluation.submission, secrets);
   }
   return projection;
 }
@@ -72,20 +86,33 @@ function projectQualification(value, secrets) {
   }, secrets);
 }
 
-function projectAbsoluteReview(value, secrets) {
-  return pick(value, ['status', 'confidence'], {
+function projectAbsoluteReview(value, secrets, includeModelPanel = false) {
+  return pick(value, includeModelPanel
+    ? ['status', 'confidence', 'modelPanel']
+    : ['status', 'confidence'], {
     confidence: (confidence, nestedSecrets) => pick(
       confidence,
       ['status', 'value'],
       {},
       nestedSecrets
-    )
+    ),
+    modelPanel: projectModelPanel
   }, secrets);
 }
 
-function projectResultV2(value, secrets) {
-  return pick(value, ['absolute', 'replica', 'rating'], {
-    absolute: (item, nestedSecrets) => pick(item, ['status'], {}, nestedSecrets),
+function projectResultV2(value, secrets, omitReplica = false) {
+  return pick(value, omitReplica
+    ? ['absolute', 'rating']
+    : ['absolute', 'replica', 'rating'], {
+    absolute: (item, nestedSecrets) => pick(
+      item,
+      ['status', 'testSummary', 'modelReviewSummary'],
+      {
+        testSummary: projectTestSummary,
+        modelReviewSummary: projectModelReviewSummary
+      },
+      nestedSecrets
+    ),
     replica: (item, nestedSecrets) => pick(item, ['status'], {}, nestedSecrets),
     rating: (item, nestedSecrets) => pick(
       item,
@@ -94,6 +121,120 @@ function projectResultV2(value, secrets) {
       nestedSecrets
     )
   }, secrets);
+}
+
+function projectTestSummary(value, secrets) {
+  return pick(value, [
+    'totalTests', 'repeatCount', 'plannedCells', 'completedCells',
+    'variantCounts'
+  ], {
+    variantCounts: (counts, nestedSecrets) => pick(counts, [
+      'original', 'equivalent', 'boundary', 'multiTurn', 'protocolRecovery'
+    ], {}, nestedSecrets)
+  }, secrets);
+}
+
+function projectModelReviewSummary(value, secrets) {
+  return pick(value, [
+    'primarySeatsLocked', 'arbitrationStatus'
+  ], {}, secrets);
+}
+
+function projectJudgeSubmission(submission, secrets) {
+  const metadata = projectSubmissionMetadata(submission, secrets);
+  if (!metadata) return undefined;
+  metadata.agentCard.value = projectAgentCard(
+    submission.agentCard?.value,
+    secrets
+  );
+  metadata.agentExamples.value = redactEvidence(
+    structuredClone(submission.agentExamples?.value || []),
+    secrets
+  );
+  return metadata;
+}
+
+function projectAgentCard(card, secrets) {
+  if (!card || typeof card !== 'object' || Array.isArray(card)) return {};
+  const safe = {};
+  for (const field of [
+    'name', 'description', 'version', 'capabilities',
+    'defaultInputModes', 'defaultOutputModes', 'skills'
+  ]) {
+    if (Object.hasOwn(card, field)) {
+      safe[field] = redactEvidence(structuredClone(card[field]), secrets);
+    }
+  }
+  return safe;
+}
+
+function projectModelPanel(panel, secrets) {
+  return pick(panel, [
+    'status', 'dimensions', 'primary', 'arbitration',
+    'disputedSubcriterionIds'
+  ], {
+    dimensions: projectPanelDimensions,
+    primary: projectPanelRuns,
+    arbitration: projectPanelRun,
+    disputedSubcriterionIds: projectPrimitiveArray
+  }, secrets);
+}
+
+function projectPanelDimensions(value, secrets) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return Object.fromEntries(Object.entries(value).flatMap(([key, item]) => {
+    const projected = pick(item, ['score'], {}, secrets);
+    return Object.keys(projected).length ? [[key, projected]] : [];
+  }));
+}
+
+function projectPanelRuns(value, secrets) {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((run) => projectPanelRun(run, secrets));
+}
+
+function projectPanelRun(value, secrets) {
+  if (value === null) return null;
+  return pick(value, ['reviewRunId', 'reviews'], {
+    reviews: projectPanelReviews
+  }, secrets);
+}
+
+function projectPanelReviews(value, secrets) {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((review) => pick(review, [
+    'subcriterionId', 'score', 'confidence', 'evidenceIds',
+    'checkEvidence', 'findings', 'counterEvidence', 'uncertainties',
+    'repairSuggestion', 'conclusions'
+  ], {
+    evidenceIds: projectPrimitiveArray,
+    checkEvidence: projectCheckEvidence,
+    findings: projectFindings,
+    counterEvidence: projectFindings,
+    uncertainties: projectPrimitiveArray,
+    conclusions: projectConclusions
+  }, secrets));
+}
+
+function projectCheckEvidence(value, secrets) {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((item) => pick(item, ['checkId', 'evidenceIds'], {
+    evidenceIds: projectPrimitiveArray
+  }, secrets));
+}
+
+function projectFindings(value, secrets) {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((item) => pick(
+    item,
+    ['findingId', 'text', 'evidenceIds'],
+    { evidenceIds: projectPrimitiveArray },
+    secrets
+  ));
+}
+
+function projectConclusions(value, secrets) {
+  return pick(value, ['taskCompleted', 'criticalRisk'], {}, secrets);
 }
 
 function projectManifest(manifest, audience, secrets) {

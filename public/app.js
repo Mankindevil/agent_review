@@ -751,11 +751,19 @@ function renderV2Result(item) {
   const root = $('#result-content');
   const qualification = item.qualification || {};
   const objective = item.objectiveCapability || {};
+  const absolute = item.resultV2?.absolute || {};
+  const testSummary = absolute.testSummary || {};
+  const variants = testSummary.variantCounts || {};
+  const modelSummary = absolute.modelReviewSummary || {};
   const status = statusOf(item);
   const evidenceCount = item.evidenceManifest?.items?.length || 0;
   const objectiveReady = Number.isFinite(objective.score);
-  const waitingModel = status === 'completed' && qualification.status === 'eligible';
+  const humanOpen = item.governance?.phase === 'human_open';
+  const waitingModel = status === 'completed' &&
+    qualification.status === 'eligible' &&
+    !humanOpen;
   const ineligible = status === 'completed' && qualification.status === 'ineligible';
+  const hasPhase2Summary = Number.isFinite(testSummary.totalTests);
   root.classList.remove('streaming', 'reveal', 'verdict-pending');
   root.innerHTML = `
     <section class="v2-docket-result">
@@ -770,7 +778,26 @@ function renderV2Result(item) {
         <div><dt>Evidence manifest</dt><dd>${evidenceCount}</dd><small>仅公开承诺与脱敏摘要</small></div>
         ${objectiveReady ? `<div><dt>Objective capability</dt><dd>${escapeHtml(objective.score)}</dd><small>coverage ${escapeHtml(objective.coverage ?? '—')} · ${objective.provisional ? 'provisional' : 'committed'}</small></div>` : ''}
       </dl>
-      ${waitingModel ? '<p class="v2-state-notice waiting">等待模型评审 · Phase 1 不生成最终评分、置信度或副本对战结果。</p>' : ''}
+      ${hasPhase2Summary ? `
+        <div class="v2-review-relay" aria-label="V2 评审交接状态">
+          <article>
+            <small>01 / DYNAMIC MATRIX</small>
+            <strong>${escapeHtml(testSummary.completedCells ?? 0)} / ${escapeHtml(testSummary.plannedCells ?? 0)}</strong>
+            <p>原始 ${escapeHtml(variants.original ?? 0)} · 等价 ${escapeHtml(variants.equivalent ?? 0)} · 边界 ${escapeHtml(variants.boundary ?? 0)} · 多轮 ${escapeHtml(variants.multiTurn ?? 0)} · 协议恢复 ${escapeHtml(variants.protocolRecovery ?? 0)}</p>
+          </article>
+          <article>
+            <small>02 / MODEL PANEL</small>
+            <strong>${escapeHtml(modelSummary.primarySeatsLocked ?? 0)} / 4</strong>
+            <p>四席独立评审已锁定 · 仲裁 ${escapeHtml(modelSummary.arbitrationStatus || 'pending')}</p>
+          </article>
+          <article class="${humanOpen ? 'is-open' : ''}">
+            <small>03 / HUMAN REVIEW</small>
+            <strong>${humanOpen ? 'OPEN' : 'WAIT'}</strong>
+            <p>${humanOpen ? '非盲人工复核已开放：先看模型意见，再独立打分并说明调整。' : '模型结果锁定后开放人工复核。'}</p>
+          </article>
+        </div>` : ''}
+      ${waitingModel ? '<p class="v2-state-notice waiting">动态测试已提交，等待四席模型评审锁定。</p>' : ''}
+      ${humanOpen ? '<p class="v2-state-notice human-open">模型初评已锁定 · 等待非盲人工复核；当前分数仍为 provisional，不产生夯拉评级。</p>' : ''}
       ${ineligible ? `<p class="v2-state-notice ineligible">不具备正式评测资格 · ${escapeHtml(qualification.reason || 'endpoint-not-callable')}</p>` : ''}
       ${['credentials-required','interrupted'].includes(status) ? '<p class="v2-state-notice paused">证据采集已暂停，请使用 participant access token 恢复。</p>' : ''}
       ${status === 'cancelled' ? '<p class="v2-state-notice cancelled">本次证据采集已取消；已提交的证据承诺保持不变。</p>' : ''}
@@ -785,7 +812,8 @@ function v2StatusCopy(item) {
   if (status === 'interrupted') return '公开端点采集已中断，可由 participant 恢复。';
   if (status === 'cancelled') return '证据采集已取消。';
   if (item.qualification?.status === 'ineligible') return `资格检查未通过：${item.qualification.reason || 'endpoint-not-callable'}`;
-  if (status === 'completed') return 'Phase 1 客观能力已提交，等待模型评审。';
+  if (item.governance?.phase === 'human_open') return '四席模型初评已锁定，等待非盲人工复核。';
+  if (status === 'completed') return '动态测试已完成，等待四席模型评审锁定。';
   return '正在提交可验证的 A2A 证据与清单承诺。';
 }
 

@@ -5,10 +5,12 @@ import { inputForTurn } from './test-plan.js';
 export async function executeTestPlan(testPlan, options = {}) {
   if (!Array.isArray(testPlan?.tests)) throw new TypeError('testPlan.tests is required');
   const executeTurn = requiredFunction(options.executeTurn, 'executeTurn');
+  const executeProtocolRecovery = options.executeProtocolRecovery || executeTurn;
   const evaluateAcceptance = options.evaluateAcceptance || evaluateAcceptanceDefault;
   const persistTurn = options.persistTurn || (async () => {});
-  const createId = options.createId || (() => crypto.randomUUID());
+  const persistCell = options.persistCell || (async () => {});
   const existing = indexExisting(options.existingRunIndex || []);
+  const partial = indexPartial(options.existingPartialIndex || []);
   const testRuns = [];
   const reusedCells = [];
 
@@ -25,12 +27,19 @@ export async function executeTestPlan(testPlan, options = {}) {
       const testRun = await executeCell(test, repeatIndex, {
         ...options,
         executeTurn,
+        executeProtocolRecovery,
         evaluateAcceptance,
         persistTurn,
-        createId,
-        cellIdentity
+        cellIdentity,
+        priorPartial: partial.get(cellKey)?.partialTestRun
       });
       testRuns.push(testRun);
+      await persistCell({
+        test,
+        repeatIndex,
+        cellIdentity,
+        testRun: structuredClone(testRun)
+      });
     }
   }
   return {
@@ -38,6 +47,7 @@ export async function executeTestPlan(testPlan, options = {}) {
       ? 'attribution-pending'
       : 'completed',
     testRuns,
+    partialCells: [],
     reusedCells
   };
 }
@@ -136,9 +146,17 @@ export function buildObjectiveInputFromExecution(testPlan, execution) {
     (test) => test.variantType === 'protocol-recovery'
   )) {
     for (const testRun of runsByTest.get(probe.testId) || []) {
+      const selected = (testRun.runs || []).at(-1);
+      const recovery = selected?.protocolRecovery;
       errorHandlingChecks.push({
         id: safeId(`error_${probe.testId}_${testRun.repeatIndex}`),
-        status: testRun.status === 'scored-agent' ? 'passed' : 'unavailable',
+        status: testRun.status !== 'scored-agent'
+          ? 'unavailable'
+          : recovery?.malformedRejected === true &&
+              recovery?.validRequestUsedFreshContext === true &&
+              selected?.outcome?.status === 'succeeded'
+            ? 'passed'
+            : 'failed',
         weight: 1,
         evidenceIds: stableSafeIds(
           (testRun.runs || []).flatMap((run) => run.evidenceIds || [])
@@ -157,8 +175,20 @@ export function buildObjectiveInputFromExecution(testPlan, execution) {
 
 async function executeCell(test, repeatIndex, context) {
   const attempts = [];
+  const priorAttempts = new Map(
+    (context.priorPartial?.attempts || []).map((attempt) => [
+      attempt.attemptIndex,
+      attempt
+    ])
+  );
   for (let attemptIndex = 0; attemptIndex < 2; attemptIndex += 1) {
-    const attempt = await executeAttempt(test, repeatIndex, attemptIndex, context);
+    const attempt = await executeAttempt(
+      test,
+      repeatIndex,
+      attemptIndex,
+      context,
+      priorAttempts.get(attemptIndex)
+    );
     attempts.push(attempt);
     if (attempt.attribution !== 'platform') break;
   }
@@ -182,26 +212,76 @@ async function executeCell(test, repeatIndex, context) {
   };
 }
 
-async function executeAttempt(test, repeatIndex, attemptIndex, context) {
-  const runs = [];
-  let returnedContextId;
-  let contextStatus = 'unavailable';
-  let attribution = 'agent';
-  for (let turnIndex = 0; turnIndex < test.turns.length; turnIndex += 1) {
+async function executeAttempt(
+  test,
+  repeatIndex,
+  attemptIndex,
+  context,
+  priorAttempt
+) {
+  const runs = structuredClone(priorAttempt?.runs || []);
+  if (runs.length > test.turns.length) {
+    throw new TypeError('partial cell has more runs than planned turns');
+  }
+  let returnedContextId =
+    runs.at(-1)?.response?.normalized?.contextId || undefined;
+  let continuationTaskId =
+    runs.at(-1)?.outcome?.lifecycle === 'interrupted'
+      ? runs.at(-1)?.response?.normalized?.taskId || undefined
+      : undefined;
+  let contextStatus = deriveContextStatus(runs, test.turns.length);
+  let attribution = runs.length
+    ? classifyAttribution(runs.at(-1))
+    : 'agent';
+  const priorEnded = attribution !== 'agent' ||
+    (runs.length > 0 && runs.at(-1)?.outcome?.status !== 'succeeded');
+  for (
+    let turnIndex = priorEnded ? test.turns.length : runs.length;
+    turnIndex < test.turns.length;
+    turnIndex += 1
+  ) {
     const sentContextId = returnedContextId;
-    const runId = context.createId('run');
-    const run = await context.executeTurn({
+    const runId = stableExecutionId(
+      'run',
+      context.executionNamespace,
+      context.cellIdentity,
+      attemptIndex,
+      turnIndex
+    );
+    const run = await (
+      test.protocolProbe?.malformedFirst === true
+        ? context.executeProtocolRecovery
+        : context.executeTurn
+    )({
       card: context.card,
       input: inputForTurn(test, turnIndex),
       ...(returnedContextId ? { contextId: returnedContextId } : {}),
+      ...(continuationTaskId ? { taskId: continuationTaskId } : {}),
       streaming: context.streaming === true,
       timeoutMs: test.timing.timeoutMs,
       authorization: context.authorization,
       signal: context.signal,
       runId,
+      requestId: stableExecutionId(
+        'request',
+        context.executionNamespace,
+        context.cellIdentity,
+        attemptIndex,
+        turnIndex
+      ),
+      messageId: stableExecutionId(
+        'message',
+        context.executionNamespace,
+        context.cellIdentity,
+        attemptIndex,
+        turnIndex
+      ),
       testId: test.testId,
       turnIndex,
-      repeatIndex
+      repeatIndex,
+      ...(test.protocolProbe ? {
+        protocolProbe: structuredClone(test.protocolProbe)
+      } : {})
     });
     const runAttribution = classifyAttribution(run);
     const acceptance = runAttribution === 'agent'
@@ -227,6 +307,10 @@ async function executeAttempt(test, repeatIndex, attemptIndex, context) {
         : 'failed';
     }
     returnedContextId = run.response?.normalized?.contextId || undefined;
+    const returnedTaskId = run.response?.normalized?.taskId || undefined;
+    continuationTaskId = run.outcome?.lifecycle === 'interrupted'
+      ? returnedTaskId
+      : undefined;
     if (runAttribution !== 'agent') {
       attribution = runAttribution;
       break;
@@ -274,6 +358,44 @@ function indexExisting(entries) {
   return result;
 }
 
+function indexPartial(entries) {
+  const result = new Map();
+  for (const entry of entries) {
+    if (!entry?.cellIdentity || !entry.partialTestRun) continue;
+    const key = hashCanonical(entry.cellIdentity);
+    if (result.has(key)) throw new TypeError('duplicate partial planned cell');
+    result.set(key, entry);
+  }
+  return result;
+}
+
+function stableExecutionId(
+  kind,
+  executionNamespace,
+  cellIdentity,
+  attemptIndex,
+  turnIndex
+) {
+  return `${kind}_${hashCanonical({
+    executionNamespace: executionNamespace || null,
+    cellIdentity,
+    attemptIndex,
+    turnIndex,
+    kind
+  }).slice(0, 32)}`;
+}
+
+function deriveContextStatus(runs, turnCount) {
+  if (turnCount <= 1 || runs.length <= 1) return 'unavailable';
+  let status = 'unavailable';
+  for (let index = 1; index < runs.length; index += 1) {
+    const previous = runs[index - 1]?.response?.normalized?.contextId;
+    const current = runs[index]?.response?.normalized?.contextId;
+    status = previous && current === previous ? 'passed' : 'failed';
+  }
+  return status;
+}
+
 function requiredFunction(value, field) {
   if (typeof value !== 'function') throw new TypeError(`${field} is required`);
   return value;
@@ -283,7 +405,15 @@ function normalizeCellAcceptance(test, acceptance, attribution) {
   const executable = (test.criteria || []).filter(
     (criterion) => criterion.required !== false && criterion.type !== 'model'
   );
-  if (attribution === 'agent' && acceptance) return structuredClone(acceptance);
+  if (attribution === 'agent' && acceptance) {
+    return {
+      ...structuredClone(acceptance),
+      checks: acceptance.checks.map((check) => ({
+        ...structuredClone(check),
+        id: safeId(check.id)
+      }))
+    };
+  }
   const checks = (test.criteria || []).map((criterion) => ({
     id: safeId(criterion.id),
     type: criterion.type,

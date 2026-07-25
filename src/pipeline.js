@@ -26,9 +26,9 @@ import { queryPandaData } from './panda-data.js';
 const PIPELINE_PRIVATE = new WeakMap();
 const V2_CONFIG = Object.freeze({
   rubricVersion: 'a2a-black-box-v1',
-  hiddenTestPackageVersion: null,
-  modelConfigVersion: null,
-  runtimeConfigVersion: 'phase1-black-box-runtime/v1'
+  hiddenTestPackageVersion: 'black-box-test-plan/v1',
+  modelConfigVersion: 'panel-v1',
+  runtimeConfigVersion: 'phase2-black-box-runtime/v1'
 });
 const V2_CREATE_FIELDS = new Set([
   'schemaVersion', 'agentCard', 'agentExamples', 'agentAuthorization'

@@ -131,6 +131,59 @@ test('reuses only exact locked existing cells and executes missing hidden cells 
   assert.equal(result.reusedCells.length, 3);
 });
 
+test('resumes a partially committed cell at its first missing turn with stable identities', async () => {
+  const multi = {
+    ...plan().tests.at(-1),
+    repeatCount: 1
+  };
+  const cellIdentity = {
+    testId: multi.testId,
+    repeatIndex: 0,
+    inputHash: multi.normalizedInputHash,
+    timingPolicyHash: 'timing-v1',
+    seed: 123,
+    protocolConfigHash: 'protocol-v1',
+    rubricVersion: 'a2a-black-box-v1'
+  };
+  const firstRun = succeeded({
+    runId: 'persisted-run',
+    testId: multi.testId,
+    turnIndex: 0,
+    repeatIndex: 0
+  });
+  const calls = [];
+  const result = await executeTestPlan(
+    { ...plan(), tests: [multi] },
+    {
+      ...baseOptions,
+      timingPolicyHash: 'timing-v1',
+      existingPartialIndex: [{
+        cellIdentity,
+        partialTestRun: {
+          testId: multi.testId,
+          repeatIndex: 0,
+          attempts: [{
+            attemptIndex: 0,
+            runs: [firstRun]
+          }]
+        }
+      }],
+      executeTurn: async (options) => {
+        calls.push(structuredClone(options));
+        return succeeded(options);
+      }
+    }
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].turnIndex, 1);
+  assert.equal(calls[0].contextId, firstRun.response.normalized.contextId);
+  assert.match(calls[0].runId, /^run_[a-f0-9]{32}$/u);
+  assert.match(calls[0].requestId, /^request_[a-f0-9]{32}$/u);
+  assert.match(calls[0].messageId, /^message_[a-f0-9]{32}$/u);
+  assert.equal(result.testRuns[0].runs[0].runId, 'persisted-run');
+});
+
 test('retains Agent failures, replaces one platform failure, and leaves unknown attribution pending', async () => {
   const oneCellPlan = plan();
   oneCellPlan.tests = [oneCellPlan.tests[0]];
@@ -195,6 +248,99 @@ test('persists each completed turn before dispatching the next one', async () =>
   );
 
   assert.deepEqual(events, ['run:0', 'persist:0', 'run:1', 'persist:1']);
+});
+
+test('continues an interrupted Task only on the immediately following turn', async () => {
+  const calls = [];
+  const multi = {
+    ...plan().tests.at(-1),
+    repeatCount: 1,
+    turns: [
+      { input: { parts: [{ type: 'text', text: 'first' }] } },
+      { input: { parts: [{ type: 'text', text: 'continue' }] } },
+      { input: { parts: [{ type: 'text', text: 'new task' }] } }
+    ]
+  };
+  await executeTestPlan(
+    { ...plan(), tests: [multi] },
+    {
+      ...baseOptions,
+      executeTurn: async (options) => {
+        calls.push(structuredClone(options));
+        const run = succeeded(options);
+        run.response.normalized.taskId = `task-${options.turnIndex}`;
+        run.outcome.lifecycle = options.turnIndex === 0
+          ? 'interrupted'
+          : 'completed';
+        return run;
+      }
+    }
+  );
+
+  assert.equal(calls[0].taskId, undefined);
+  assert.equal(calls[1].taskId, 'task-0');
+  assert.equal(calls[2].taskId, undefined);
+});
+
+test('persists each completed cell before dispatching the next cell', async () => {
+  const events = [];
+  const original = plan().tests[0];
+  await executeTestPlan(
+    { ...plan(), tests: [{ ...original, repeatCount: 2 }] },
+    {
+      ...baseOptions,
+      executeTurn: async (options) => {
+        events.push(`run:${options.repeatIndex}`);
+        return succeeded(options);
+      },
+      persistCell: async ({ testRun }) => {
+        events.push(`cell:${testRun.repeatIndex}`);
+      }
+    }
+  );
+
+  assert.deepEqual(events, ['run:0', 'cell:0', 'run:1', 'cell:1']);
+});
+
+test('routes protocol recovery probes through the malformed-request executor', async () => {
+  const recovery = {
+    ...plan(),
+    tests: [{
+      ...plan().tests[0],
+      testId: 'protocol_error_recovery',
+      variantType: 'protocol-recovery',
+      repeatCount: 1,
+      criteria: [],
+      protocolProbe: {
+        malformedFirst: true,
+        nextValidInputUsesFreshContext: true
+      }
+    }]
+  };
+  let normalCalls = 0;
+  let recoveryCalls = 0;
+  const execution = await executeTestPlan(recovery, {
+    ...baseOptions,
+    executeTurn: async (options) => {
+      normalCalls += 1;
+      return succeeded(options);
+    },
+    executeProtocolRecovery: async (options) => {
+      recoveryCalls += 1;
+      return {
+        ...succeeded(options),
+        protocolRecovery: {
+          malformedRejected: true,
+          validRequestUsedFreshContext: true
+        }
+      };
+    }
+  });
+  const objective = buildObjectiveInputFromExecution(recovery, execution);
+
+  assert.equal(normalCalls, 0);
+  assert.equal(recoveryCalls, 1);
+  assert.equal(objective.errorHandlingChecks[0].status, 'passed');
 });
 
 test('projects repeated execution into all six objective capability metrics', async () => {

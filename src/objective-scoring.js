@@ -422,7 +422,9 @@ function buildEfficiency(tests) {
   return metricResult('efficiency', {
     applicable: true,
     coverage: totalPlannedWeight === 0 ? 0 : denominator / totalPlannedWeight,
-    score: denominator === 0 ? null : numerator / denominator,
+    score: denominator === 0
+      ? null
+      : Math.min(100, Math.max(0, numerator / denominator)),
     numerator,
     denominator,
     evidenceIds: evidenceFromTests(tests),
@@ -817,8 +819,9 @@ function metricWeight(id) {
 }
 
 function normalizeUnit(value) {
-  if (Math.abs(value) < Number.EPSILON) return 0;
-  if (Math.abs(1 - value) < Number.EPSILON) return 1;
+  const tolerance = 1e-12;
+  if (value >= -tolerance && value <= tolerance) return 0;
+  if (value >= 1 - tolerance && value <= 1 + tolerance) return 1;
   return value;
 }
 

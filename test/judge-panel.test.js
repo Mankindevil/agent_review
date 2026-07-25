@@ -126,6 +126,46 @@ test('runs four isolated primary reviewers and sends disputed IDs only to the ar
   assert.equal(JSON.stringify(arbitration.packet).includes('p0'), false);
 });
 
+test('allocates each registered fallback to at most one failed primary seat', async () => {
+  const primary = [0, 1, 2, 3].map((index) => ({
+    id: `p${index}`,
+    identityKey: `mock:p${index}:model`
+  }));
+  const fallbacks = [0, 1].map((index) => ({
+    id: `f${index}`,
+    identityKey: `mock:f${index}:model`
+  }));
+  const calls = [];
+  const result = await runModelPanel({
+    panel: {
+      primary,
+      fallbacks,
+      arbitrator: { id: 'arb', identityKey: 'mock:arb:model' }
+    },
+    contract,
+    evidencePackage: { evidenceManifest: [] },
+    invoke: async (reviewer) => {
+      calls.push(reviewer.id);
+      if (reviewer.id === 'p0' || reviewer.id === 'p1') {
+        throw new Error('primary unavailable');
+      }
+      return answer(70);
+    }
+  });
+
+  assert.equal(calls.filter((id) => id === 'p0').length, 2);
+  assert.equal(calls.filter((id) => id === 'p1').length, 2);
+  assert.deepEqual(
+    result.primary.map((run) => run.reviewRunId).sort(),
+    [
+      'primary_0_f0',
+      'primary_1_f1',
+      'primary_2_p2',
+      'primary_3_p3'
+    ]
+  );
+});
+
 test('aggregates medians per subcriterion instead of averaging whole answer sheets', () => {
   const primary = [40, 60, 59, 55].map((score, index) =>
     normalizePanelReview(answer(score), contract, { reviewRunId: `r${index}` })

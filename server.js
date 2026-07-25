@@ -29,6 +29,7 @@ import {
 } from './src/black-box-pipeline.js';
 import { EphemeralCredentialVault } from './src/credential-vault.js';
 import { EvidenceVault } from './src/evidence-vault.js';
+import { createPhase2Services } from './src/phase2-services.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.join(root, 'public');
@@ -53,6 +54,7 @@ export const pipeline = new EvaluationPipeline(evaluationStore, events, {
   resumeMacKey,
   blackBoxServices: blackBoxRuntimeConfig.enabled
     ? {
+        phase2: createPhase2Services({ env: process.env }),
         evidenceVaultFactory: (evaluationId) => {
           const key = copyEvidenceEncryptionKey(blackBoxRuntimeConfig);
           try {
@@ -177,6 +179,29 @@ export const server = createServer(async (request, response) => {
         ? json(response, 202, serializeEvaluationForResponse(item))
         : json(response, 404, { error: '评测不存在' });
     }
+    const judgePreviewMatch =
+      url.pathname.match(/^\/api\/evaluations\/([^/]+)\/judge-preview$/);
+    if (request.method === 'GET' && judgePreviewMatch) {
+      response.setHeader('cache-control', 'no-store');
+      const accessKey = process.env.JUDGE_PREVIEW_ACCESS_KEY;
+      if (!accessKey) {
+        return json(response, 503, {
+          error: 'Judge preview access is not configured'
+        });
+      }
+      if (!authorizedBearer(request, accessKey)) {
+        return json(response, 401, {
+          error: 'Judge preview authorization failed'
+        });
+      }
+      const item = store.get(judgePreviewMatch[1]);
+      if (!item || item.schemaVersion !== 2) {
+        return json(response, 404, { error: 'Evaluation does not exist' });
+      }
+      return json(response, 200, projectEvaluation(item, {
+        audience: 'judge-preview'
+      }));
+    }
     const skillMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/builds\/([^/]+)\/skill$/);
     if (request.method === 'GET' && skillMatch) {
       const item = store.get(skillMatch[1]);
@@ -284,6 +309,15 @@ function authorizedDataRequest(request, expected) {
   const supplied = authorization.startsWith('Bearer ')
     ? authorization.slice(7)
     : String(request.headers['x-panda-data-access-key'] || '');
+  const left = Buffer.from(supplied);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+function authorizedBearer(request, expected) {
+  const authorization = String(request.headers.authorization || '');
+  const supplied = authorization.startsWith('Bearer ')
+    ? authorization.slice(7)
+    : '';
   const left = Buffer.from(supplied);
   const right = Buffer.from(expected);
   return left.length === right.length && timingSafeEqual(left, right);

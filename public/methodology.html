@@ -26,7 +26,7 @@
     <section class="method-hero" id="overview">
       <div class="method-hero__index"><span>SPEC</span><strong>01</strong><small>SCORING<br>CONTRACT</small></div>
       <div class="method-hero__copy">
-        <div class="method-kicker"><span>PUBLIC EVALUATION SPECIFICATION</span><span>IMPLEMENTED / V0.1</span></div>
+        <div class="method-kicker"><span>PUBLIC EVALUATION SPECIFICATION</span><span>V2 / PHASE 2 ACTIVE</span></div>
         <h1>一条净值曲线，<br>到底有几分可信？</h1>
         <p>这不是一句“模型觉得不错”。下面公开当前代码实际执行的 A2A 校验、金融研究硬指标、失败处理和最终分档顺序。看完后，你应该能分清研究设计审查与真实数据验算的边界。</p>
       </div>
@@ -48,6 +48,7 @@
       <aside class="method-toc" aria-label="本页目录">
         <small>STAGE INDEX</small>
         <a href="#protocol"><i>00</i><span>A2A 准入</span></a>
+        <a href="#black-box-v2"><i>V2</i><span>黑盒动态评测</span></a>
         <a href="#necessity"><i>01</i><span>投研必要性</span></a>
         <a href="#professional"><i>02</i><span>金融专业度</span></a>
         <a href="#runtime"><i>03</i><span>Description 直出</span></a>
@@ -78,6 +79,23 @@
               <small>支持 HTTP+JSON、A2A 1.0 JSON-RPC <code>SendMessage</code> 和 0.3 <code>message/send</code>。</small>
             </article>
           </div>
+        </section>
+
+        <section class="rule-section" id="black-box-v2">
+          <header><span>V2 / BLACK-BOX FOUNDATION</span><h2>只凭 Agent Card 与使用示例，先测后审</h2><p>参赛者提交一个满足 A2A 的 Agent Card JSON 和该 Agent 的真实使用示例。平台不假定它是量化模型，也不读取内部工具、记忆、提示词或编排日志。</p></header>
+          <div class="process-line">
+            <div><b>01</b><span>示例合同化</span><small>把每轮输入、可执行验收条件和只能由模型判断的专业要求分开。</small></div>
+            <div><b>02</b><span>闭域动态题</span><small>每个示例生成等价、边界、多轮三类隐藏变体，由独立模型做五项越界审查。</small></div>
+            <div><b>03</b><span>黑盒重复执行</span><small>原始、等价、边界、多轮与协议恢复探针均重复 3 次；平台故障最多替换 1 次，Agent 失败不重抽。</small></div>
+            <div><b>04</b><span>模型先评</span><small>四个独立模型逐子项给分、引用证据、写反证与修复建议；分差或结论冲突触发第五模型仲裁。</small></div>
+            <div><b>05</b><span>人工非盲复核</span><small>人类评委在模型结果锁定后进入，可见脱敏提交、证据索引和模型意见，再从三大维度独立打分并解释调整。</small></div>
+          </div>
+          <div class="rule-grid three">
+            <article class="rule-card"><h3>场景价值</h3><p>看任务是否值得使用 Agent、是否解决真实投研问题，以及协作或产品形态是否有新意。</p></article>
+            <article class="rule-card"><h3>专业性</h3><p>看信息密度、数据与方法纪律、结论推导、风险披露和可复核程度。</p></article>
+            <article class="rule-card"><h3>智能体能力</h3><p>只评价 A2A 黑盒可观察行为：任务完成、鲁棒性、多轮上下文、协议合规、效率与错误恢复。</p></article>
+          </div>
+          <div class="mode-callout"><b>当前发布边界</b><span>Phase 2 已完成动态测试与四模型初评，状态进入 <code>human_open</code>。在人工分数锁定前，分数保持 provisional，Replica Arena 关闭，夯 / 人上人 / NPC / 拉评级不提前产生。</span></div>
         </section>
 
         <section class="rule-section" id="necessity">

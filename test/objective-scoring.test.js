@@ -465,6 +465,25 @@ test('scores non-streaming, streaming, timeout, platform, and pending efficiency
   assert.ok(efficiency.gaps.includes('pending:pending:0'));
 });
 
+test('keeps perfect efficiency inside 0..100 across fractional test weights', () => {
+  const plannedTests = Array.from({ length: 8 }, (_, testIndex) =>
+    plannedTest({
+      testId: `fractional-${testIndex}`,
+      weight: 0.125,
+      repeatCount: 3,
+      runs: Array.from({ length: 3 }, (_, repeatIndex) => run({
+        runId: `fractional-${testIndex}-${repeatIndex}`,
+        repeatIndex
+      }))
+    })
+  );
+  const metrics = buildObjectiveMetrics(metricInput({ plannedTests }));
+  const efficiency = byId(metrics, 'efficiency');
+
+  assert.equal(efficiency.score, 100);
+  assert.doesNotThrow(() => aggregateObjectiveCapability(metrics));
+});
+
 test('missing streaming first-event timing is unavailable rather than coerced', () => {
   const metrics = buildObjectiveMetrics(metricInput({
     plannedTests: [plannedTest({

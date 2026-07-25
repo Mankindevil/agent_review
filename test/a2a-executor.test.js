@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   executeA2AExample,
+  executeA2AProtocolRecoveryProbe,
   executeA2ATurn,
   normalizeA2AResult,
   snapshotUrlParts,
@@ -36,6 +37,50 @@ const streamingHttpCard = {
     protocolVersion: '1.0'
   }]
 };
+
+test('sends one bounded malformed request before a valid request with fresh context', async () => {
+  const bodies = [];
+  const run = await executeA2AProtocolRecoveryProbe({
+    card: rpcCard,
+    input: { parts: [{ type: 'text', text: 'recover now' }] },
+    timeoutMs: 5_000,
+    runId: 'run_recovery',
+    testId: 'protocol_error_recovery',
+    turnIndex: 0,
+    repeatIndex: 0,
+    request: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      bodies.push(body);
+      if (bodies.length === 1) {
+        return jsonResponse({
+          jsonrpc: '2.0',
+          id: body.id,
+          error: { code: -32602, message: 'Invalid params' }
+        });
+      }
+      return jsonResponse({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          message: {
+            messageId: 'reply-recovery',
+            contextId: 'ctx-fresh',
+            role: 'ROLE_AGENT',
+            parts: [{ text: 'recovered' }]
+          }
+        }
+      });
+    }
+  });
+
+  assert.equal(bodies.length, 2);
+  assert.deepEqual(bodies[0].params, {});
+  assert.equal(bodies[1].params.message.contextId, undefined);
+  assert.equal(bodies[1].params.message.taskId, undefined);
+  assert.equal(run.protocolRecovery.malformedRejected, true);
+  assert.equal(run.protocolRecovery.validRequestUsedFreshContext, true);
+  assert.equal(run.outcome.status, 'succeeded');
+});
 
 test('captures a blocking Message with stable hashes, timing, and no authorization evidence', async () => {
   let observedAuthorization;
@@ -86,6 +131,8 @@ test('locks a caller-supplied run ID and exposes only current direct Message out
   const run = await executeA2ATurn({
     card: rpcCard,
     runId: 'run_locked',
+    requestId: 'request_locked',
+    messageId: 'message_locked',
     input: { parts: [{ type: 'text', text: 'user input must not return' }] },
     testId: 'test_locked',
     turnIndex: 1,
@@ -109,6 +156,9 @@ test('locks a caller-supplied run ID and exposes only current direct Message out
     }
   });
   assert.equal(run.runId, 'run_locked');
+  assert.equal(run.request.requestId, 'request_locked');
+  assert.equal(run.request.messageId, 'message_locked');
+  assert.equal(run.request.body.params.message.messageId, 'message_locked');
   assert.deepEqual(run.response.currentOutput, {
     text: '{"looks":"json"}',
     data: { current: true },

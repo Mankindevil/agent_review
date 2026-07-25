@@ -9,9 +9,13 @@ import { decodeEvidenceEncryptionKey } from './evidence-vault.js';
 import {
   canonicalJson,
   createEvidenceManifestItem,
-  createEvidenceRecord
+  createEvidenceRecord,
+  redactEvidence
 } from './evidence.js';
-import { executeA2ATurn } from './a2a-executor.js';
+import {
+  executeA2AProtocolRecoveryProbe,
+  executeA2ATurn
+} from './a2a-executor.js';
 import { evaluateAcceptance as evaluateAcceptanceDefault } from './acceptance.js';
 import {
   aggregateObjectiveCapability as aggregateObjectiveCapabilityDefault,
@@ -19,6 +23,12 @@ import {
 } from './objective-scoring.js';
 import { validateAgentCard } from './a2a.js';
 import { RUBRIC_V1 } from './rubric.js';
+import { compileAgentExamples } from './example-compiler.js';
+import { finalizeTestPlan } from './test-plan.js';
+import {
+  buildObjectiveInputFromExecution,
+  executeTestPlan
+} from './test-executor.js';
 
 const MODULE_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -168,6 +178,8 @@ export async function runBlackBoxFoundation(evaluation, services = {}) {
     'credentialVault'
   );
   const executeTurn = services.executeTurn || executeA2ATurn;
+  const executeProtocolRecovery = services.executeProtocolRecovery ||
+    (services.executeTurn ? services.executeTurn : executeA2AProtocolRecoveryProbe);
   const evaluateAcceptance =
     services.evaluateAcceptance || evaluateAcceptanceDefault;
   const buildObjectiveMetrics =
@@ -197,6 +209,7 @@ export async function runBlackBoxFoundation(evaluation, services = {}) {
       clock,
       policy,
       executeTurn,
+      executeProtocolRecovery,
       evaluateAcceptance,
       attributeFormalRun: services.attributeFormalRun,
       snapshotRequest: services.snapshotRequest,
@@ -348,6 +361,10 @@ export async function runBlackBoxFoundation(evaluation, services = {}) {
         progress: 20
       }
     }));
+    current = store.get(evaluation.id);
+    if (services.phase2?.enabled === true && isFormalPhase2Submission(current.submission)) {
+      return await runFormalPhase2(current, context, services, evidenceVault);
+    }
     await executeFormalCells(context);
 
     current = store.get(evaluation.id);
@@ -399,6 +416,510 @@ export async function runBlackBoxFoundation(evaluation, services = {}) {
   } finally {
     credentialVault.delete(evaluation.id);
   }
+}
+
+async function runFormalPhase2(evaluation, context, services, evidenceVault) {
+  const phase2 = services.phase2;
+  const resumed = context.store.get(context.evaluationId);
+  if (resumed.absoluteReview?.status === 'model-locked') return resumed;
+  await mutateCurrent(context, (record) => ({
+    ...record,
+    execution: {
+      ...record.execution,
+      status: 'running',
+      stage: 'example_compilation',
+      progress: 25
+    }
+  }));
+  const currentBeforePlan = context.store.get(context.evaluationId);
+  const compilation = currentBeforePlan.exampleCompilation ||
+    compileAgentExamples(
+      evaluation.submission.agentCard.value,
+      evaluation.submission.agentExamples.value,
+      { rubricVersion: evaluation.submission.config.rubricVersion }
+    );
+  let testPlan = currentBeforePlan.testPlan;
+  if (!testPlan) {
+    const candidates = [];
+    const decisions = [];
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await mutateCurrent(context, (record) => ({
+        ...record,
+        execution: {
+          ...record.execution,
+          stage: attempt === 0 ? 'hidden_generation' : 'hidden_generation_retry',
+          progress: 30 + attempt * 3
+        }
+      }));
+      const generated = await phase2.generateHidden(compilation, { attempt });
+      const roundCandidates = namespacePhase2Candidates(
+        generated.candidates || generated,
+        attempt
+      );
+      await mutateCurrent(context, (record) => ({
+        ...record,
+        execution: {
+          ...record.execution,
+          stage: 'scope_review',
+          progress: 34 + attempt * 3
+        }
+      }));
+      const reviewed = await phase2.reviewScopes(compilation, roundCandidates, {
+        attempt
+      });
+      const roundDecisions = reviewed.decisions || reviewed;
+      candidates.push(...roundCandidates);
+      decisions.push(...roundDecisions);
+      if (hasEveryApprovedSlot(compilation, candidates, decisions)) break;
+    }
+
+    testPlan = finalizeTestPlan(compilation, candidates, decisions, {
+      generatedAt: context.now(),
+      generatorIdentity: phase2.generatorIdentity,
+      scopeReviewerIdentity: phase2.scopeReviewerIdentity,
+      timingPolicy: phase2.timingPolicy
+    });
+    await mutateCurrent(context, (record) => ({
+      ...record,
+      exampleCompilation: compilation,
+      testPlan,
+      phase2Execution: testPlan.status === 'ready'
+        ? {
+            status: 'running',
+            testRuns: [],
+            partialCells: [],
+            reusedCells: []
+          }
+        : record.phase2Execution,
+      execution: {
+        ...record.execution,
+        stage: testPlan.status === 'ready' ? 'test_execution' : 'scope-incomplete',
+        progress: testPlan.status === 'ready' ? 45 : 100,
+        ...(testPlan.status === 'ready' ? {} : {
+          status: 'completed',
+          completedAt: context.now()
+        })
+      },
+      auditEvents: appendAudit(record.auditEvents, {
+        id: context.createId('audit'),
+        type: testPlan.status === 'ready' ? 'test-plan-locked' : 'scope-incomplete',
+        occurredAt: context.now(),
+        summary: testPlan.status === 'ready'
+          ? 'Closed-scope dynamic test plan locked'
+          : 'A required hidden-test slot remained unapproved'
+      })
+    }));
+  } else {
+    await mutateCurrent(context, (record) => ({
+      ...record,
+      execution: {
+        ...record.execution,
+        stage: testPlan.status === 'ready' ? 'test_execution' : 'scope-incomplete',
+        progress: testPlan.status === 'ready' ? 45 : 100
+      }
+    }));
+  }
+  if (testPlan.status !== 'ready') return context.store.get(context.evaluationId);
+
+  const snapshotBundles = new Map();
+  const existingRunIndex = (
+    context.store.get(context.evaluationId).phase2Execution?.testRuns || []
+  ).map((testRun) => ({
+    cellIdentity: testRun.cellIdentity,
+    testRun
+  }));
+  const existingPartialIndex =
+    context.store.get(context.evaluationId).phase2Execution?.partialCells || [];
+  const phase2Execution = await (phase2.executeTestPlan || executeTestPlan)(
+    testPlan,
+    {
+      card: evaluation.submission.agentCard.value,
+      authorization: context.authorization,
+      signal: context.signal,
+      seed: phase2.seed ?? null,
+      executionNamespace: context.evaluationId,
+      existingRunIndex,
+      existingPartialIndex,
+      protocolConfigHash: hashCanonical({
+        binding: evaluation.submission.selectedInterface.binding,
+        version: evaluation.submission.selectedInterface.version,
+        endpointHash: hashText(evaluation.submission.selectedInterface.url)
+      }),
+      createId: context.createId,
+      executeTurn: async (options) => {
+        const snapshotPersistence = createSnapshotPersistence(context, {
+          runId: options.runId,
+          testId: options.testId,
+          turnIndex: options.turnIndex,
+          repeatIndex: options.repeatIndex
+        });
+        snapshotBundles.set(options.runId, snapshotPersistence);
+        return context.executeTurn({
+          ...options,
+          persistSnapshot: snapshotPersistence.persistSnapshot,
+          ...(context.snapshotRequest
+            ? { snapshotRequest: context.snapshotRequest }
+            : {})
+        });
+      },
+      executeProtocolRecovery: async (options) => {
+        const snapshotPersistence = createSnapshotPersistence(context, {
+          runId: options.runId,
+          testId: options.testId,
+          turnIndex: options.turnIndex,
+          repeatIndex: options.repeatIndex
+        });
+        snapshotBundles.set(options.runId, snapshotPersistence);
+        return context.executeProtocolRecovery({
+          ...options,
+          persistSnapshot: snapshotPersistence.persistSnapshot,
+          ...(context.snapshotRequest
+            ? { snapshotRequest: context.snapshotRequest }
+            : {})
+        });
+      },
+      evaluateAcceptance: context.evaluateAcceptance,
+      persistTurn: async ({
+        test,
+        run,
+        repeatIndex,
+        attemptIndex,
+        cellIdentity
+      }) => {
+        const evidence = await persistRunEvidence(run, {
+          ...context,
+          testId: test.testId,
+          turnIndex: run.turnIndex,
+          repeatIndex,
+          visibility: test.visibility === 'public' ? 'public' : 'admin'
+        });
+        const snapshots = snapshotBundles.get(run.runId);
+        if (snapshots) mergeEvidenceBundle(evidence, snapshots);
+        run.evidenceIds = evidence.evidenceIds;
+        await mutateCurrent(context, (record) => ({
+          ...record,
+          evidenceManifest: appendManifest(
+            record.evidenceManifest,
+            evidence.manifestItems
+          ),
+          phase2Execution: appendPhase2PartialTurn(
+            record.phase2Execution,
+            {
+              test,
+              repeatIndex,
+              attemptIndex,
+              cellIdentity,
+              run
+            }
+          ),
+          evaluationWindow: {
+            ...record.evaluationWindow,
+            lastRunAt: context.now()
+          }
+        }));
+      },
+      persistCell: async ({ testRun }) => {
+        await mutateCurrent(context, (record) => ({
+          ...record,
+          phase2Execution: appendPhase2TestRun(
+            record.phase2Execution,
+            testRun
+          )
+        }));
+      }
+    }
+  );
+  const objectiveInput = buildObjectiveInputFromExecution(
+    testPlan,
+    phase2Execution
+  );
+  const objectiveMetrics = (services.buildObjectiveMetrics ||
+    buildObjectiveMetricsDefault)(objectiveInput);
+  const objectiveCapability = (services.aggregateObjectiveCapability ||
+    aggregateObjectiveCapabilityDefault)(
+    objectiveMetrics,
+    services.rubric || RUBRIC_V1
+  );
+  await mutateCurrent(context, (record) => ({
+    ...record,
+    phase2Execution,
+    objectiveCapability,
+    execution: {
+      ...record.execution,
+      stage: 'model_review',
+      progress: 78
+    }
+  }));
+
+  const current = context.store.get(context.evaluationId);
+  const applicableChecks = compilation.rubricChecks.filter(
+    (check) => check.applicable
+  );
+  const modelContract = {
+    subcriterionIds: [...new Set(
+      applicableChecks.map((check) => check.subcriterionId)
+    )],
+    checks: applicableChecks,
+    evidenceIds: current.evidenceManifest.items.map((item) => item.evidenceId),
+    rubric: services.rubric || RUBRIC_V1
+  };
+  const evidencePackage = await buildPhase2EvidencePackage(
+    current,
+    evidenceVault,
+    testPlan,
+    context.authorization
+  );
+  const modelPanel = await phase2.runPanel({
+    contract: modelContract,
+    evidencePackage
+  });
+  if (modelPanel.status !== 'model-locked') {
+    throw new Error('model panel did not lock four valid primary reviews');
+  }
+  const lockedAt = context.now();
+  const confidenceValues = Object.values(modelPanel.subcriteria || {})
+    .map((item) => item.confidence)
+    .filter(Number.isFinite);
+  const modelConfidence = confidenceValues.length === 0
+    ? null
+    : confidenceValues.reduce((sum, value) => sum + value, 0) /
+      confidenceValues.length;
+  const testSummary = summarizePhase2Execution(testPlan, phase2Execution);
+  const arbitrationRequired =
+    (modelPanel.disputedSubcriterionIds || []).length > 0;
+  await mutateCurrent(context, (record) => ({
+    ...record,
+    execution: {
+      status: 'completed',
+      stage: 'human-open',
+      progress: 100,
+      completedAt: lockedAt
+    },
+    governance: {
+      ...record.governance,
+      phase: 'human_open',
+      modelLockedAt: lockedAt
+    },
+    absoluteReview: {
+      status: 'model-locked',
+      modelPanel,
+      confidence: {
+        status: 'pending-human-review',
+        value: modelConfidence
+      }
+    },
+    replicaArena: { status: 'disabled' },
+    resultV2: {
+      absolute: {
+        status: 'model-provisional',
+        dimensions: modelPanel.dimensions,
+        testSummary,
+        modelReviewSummary: {
+          primarySeatsLocked: 4,
+          arbitrationStatus: arbitrationRequired
+            ? modelPanel.arbitration
+              ? 'completed'
+              : 'required'
+            : 'not-required'
+        }
+      },
+      replica: { status: 'disabled' },
+      rating: {
+        status: 'pending-human',
+        code: null,
+        label: null
+      }
+    },
+    auditEvents: appendAudit(record.auditEvents, {
+      id: context.createId('audit'),
+      type: 'model-seat-locked',
+      occurredAt: lockedAt,
+      summary: 'Four independent model reviews locked; human review opened'
+    })
+  }));
+  return context.store.get(context.evaluationId);
+}
+
+function namespacePhase2Candidates(candidates, attempt) {
+  if (!Array.isArray(candidates)) {
+    throw new TypeError('hidden generator candidates must be an array');
+  }
+  return candidates.map((candidate, index) => ({
+    ...structuredClone(candidate),
+    generatorCandidateId: candidate.candidateId,
+    candidateId: `phase2_${attempt}_${index}_${hashCanonical({
+      candidateId: candidate.candidateId,
+      sourceExampleId: candidate.sourceExampleId,
+      variantType: candidate.variantType
+    }).slice(0, 16)}`
+  }));
+}
+
+function summarizePhase2Execution(testPlan, execution) {
+  const variantCounts = {
+    original: 0,
+    equivalent: 0,
+    boundary: 0,
+    multiTurn: 0,
+    protocolRecovery: 0
+  };
+  for (const test of testPlan.tests) {
+    const key = test.variantType === 'multi-turn'
+      ? 'multiTurn'
+      : test.variantType === 'protocol-recovery'
+        ? 'protocolRecovery'
+        : test.variantType;
+    if (Object.hasOwn(variantCounts, key)) variantCounts[key] += 1;
+  }
+  return {
+    totalTests: testPlan.tests.length,
+    repeatCount: testPlan.defaultRepeatCount,
+    plannedCells: testPlan.tests.reduce(
+      (sum, test) => sum + test.repeatCount,
+      0
+    ),
+    completedCells: execution.testRuns.length,
+    variantCounts
+  };
+}
+
+function isFormalPhase2Submission(submission) {
+  return Boolean(
+    submission?.config?.hiddenTestPackageVersion &&
+    submission?.config?.modelConfigVersion &&
+    submission?.config?.runtimeConfigVersion === 'phase2-black-box-runtime/v1'
+  );
+}
+
+function hasEveryApprovedSlot(compilation, candidates, decisions) {
+  const decisionById = new Map(
+    decisions.map((decision) => [decision.candidateId, decision])
+  );
+  const approvedSlots = new Set(candidates.flatMap((candidate) => {
+    const decision = decisionById.get(candidate.candidateId);
+    const approved = decision?.approved === true &&
+      Object.values(decision.checks || {}).every((value) => value === true);
+    return approved
+      ? [`${candidate.sourceExampleId}:${candidate.variantType}`]
+      : [];
+  }));
+  return compilation.contracts.every((contract) =>
+    ['equivalent', 'boundary', 'multi-turn'].every((variantType) =>
+      approvedSlots.has(`${contract.exampleId}:${variantType}`)
+    )
+  );
+}
+
+function appendPhase2TestRun(execution, testRun) {
+  const current = execution || {
+    status: 'running',
+    testRuns: [],
+    reusedCells: []
+  };
+  const identityHash = hashCanonical(testRun.cellIdentity);
+  const testRuns = current.testRuns || [];
+  if (testRuns.some((item) =>
+    hashCanonical(item.cellIdentity) === identityHash
+  )) {
+    return current;
+  }
+  return {
+    ...current,
+    status: 'running',
+    testRuns: [...testRuns, structuredClone(testRun)],
+    partialCells: (current.partialCells || []).filter(
+      (item) => hashCanonical(item.cellIdentity) !== identityHash
+    )
+  };
+}
+
+function appendPhase2PartialTurn(execution, {
+  test,
+  repeatIndex,
+  attemptIndex,
+  cellIdentity,
+  run
+}) {
+  const current = execution || {
+    status: 'running',
+    testRuns: [],
+    partialCells: [],
+    reusedCells: []
+  };
+  const identityHash = hashCanonical(cellIdentity);
+  const partialCells = structuredClone(current.partialCells || []);
+  let partial = partialCells.find(
+    (item) => hashCanonical(item.cellIdentity) === identityHash
+  );
+  if (!partial) {
+    partial = {
+      cellIdentity: structuredClone(cellIdentity),
+      partialTestRun: {
+        testId: test.testId,
+        repeatIndex,
+        attempts: []
+      }
+    };
+    partialCells.push(partial);
+  }
+  let attempt = partial.partialTestRun.attempts.find(
+    (item) => item.attemptIndex === attemptIndex
+  );
+  if (!attempt) {
+    attempt = { attemptIndex, runs: [] };
+    partial.partialTestRun.attempts.push(attempt);
+  }
+  if (!attempt.runs.some((item) => item.runId === run.runId)) {
+    attempt.runs.push(structuredClone(run));
+  }
+  return {
+    ...current,
+    status: 'running',
+    partialCells
+  };
+}
+
+async function buildPhase2EvidencePackage(
+  evaluation,
+  evidenceVault,
+  testPlan,
+  authorization
+) {
+  const redactedEvidence = [];
+  for (const item of evaluation.evidenceManifest.items) {
+    const record = await evidenceVault.get(item.evidenceId, item.recordHash);
+    redactedEvidence.push({
+      evidenceId: item.evidenceId,
+      grade: item.grade,
+      kind: item.kind,
+      payload: redactEvidence(
+        record.payload,
+        authorization ? [authorization] : []
+      )
+    });
+  }
+  return {
+    submission: {
+      redactedCard: redactEvidence(
+        evaluation.submission.agentCard.value,
+        authorization ? [authorization] : []
+      ),
+      redactedExamples: redactEvidence(
+        evaluation.submission.agentExamples.value,
+        authorization ? [authorization] : []
+      )
+    },
+    testCatalog: testPlan.tests.map((test) => ({
+      testId: test.testId,
+      variantType: test.variantType,
+      criteriaKinds: [...new Set((test.criteria || []).map(
+        (criterion) => criterion.type
+      ))]
+    })),
+    evidenceManifest: evaluation.evidenceManifest.items,
+    redactedEvidence,
+    objectiveCapability: evaluation.objectiveCapability
+  };
 }
 
 async function executeFormalCells(context) {
@@ -709,6 +1230,7 @@ async function persistRunEvidence(run, context) {
     ['A', 'platform-timing', run.timing, 'Captured platform timing'],
     ['A', 'transport-fact', {
       protocol: run.protocol,
+      protocolRecovery: run.protocolRecovery || null,
       httpStatus: run.response.httpStatus,
       mediaType: run.response.mediaType,
       byteLength: run.response.byteLength,
@@ -794,7 +1316,7 @@ async function storeEvidence(input) {
   await input.evidenceVault.put(record);
   const manifestItem = createEvidenceManifestItem(record, {
     summary: input.summary,
-    visibility: 'public',
+    visibility: input.visibility || 'public',
     secrets: input.authorization ? [input.authorization] : []
   });
   return { record, manifestItem };

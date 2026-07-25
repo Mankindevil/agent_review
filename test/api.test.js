@@ -22,6 +22,7 @@ const {
 
 process.env.NODE_ENV = 'test';
 process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-test-${process.pid}.json`);
+process.env.A2A_BLACK_BOX_V1_ENABLED = 'false';
 process.env.AGENT_DIAGNOSTICS_RATE_LIMIT = '100';
 process.env.ALLOW_PRIVATE_AGENT_URLS = 'true';
 process.env.ALLOW_PRIVATE_DIAGNOSTICS_URLS = 'true';
@@ -404,6 +405,9 @@ test('keeps V2 browser secrets memory-only and renders nested projections safely
   assert.match(script, /function stageOf\(item\)/);
   assert.match(script, /function progressOf\(item\)/);
   assert.match(script, /function renderV2Result\(item\)/);
+  assert.match(script, /human_open/);
+  assert.match(script, /非盲人工复核/);
+  assert.match(script, /protocolRecovery/);
   assert.match(script, /function renderV2HistoryItem\(item\)/);
   assert.match(script, /schemaVersion:\s*2,\s*agentCard,\s*agentExamples/);
   assert.match(script, /participantAccessToken/);

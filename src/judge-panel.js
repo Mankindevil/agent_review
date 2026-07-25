@@ -1,5 +1,3 @@
-import { requestReviewerWithFallback } from './providers.js';
-
 const COMPLETION_VALUES = new Set(['yes', 'partial', 'no', 'not-applicable']);
 const RISK_VALUES = new Set(['yes', 'no', 'uncertain', 'not-applicable']);
 const INTERNAL_VERIFICATION =
@@ -107,16 +105,17 @@ export async function runModelPanel({
     throw new TypeError('four primary reviewers are required');
   }
   if (typeof invoke !== 'function') throw new TypeError('invoke is required');
+  let nextFallbackIndex = 0;
+  const claimFallback = () => panel.fallbacks?.[nextFallbackIndex++] || null;
   const primary = await Promise.all(panel.primary.map(async (reviewer, index) => {
     const packet = {
       contract: structuredClone(contract),
       evidencePackage: structuredClone(evidencePackage)
     };
-    const requested = await requestReviewerWithFallback({
+    const requested = await requestPanelSeat({
       reviewer,
-      fallbacks: panel.fallbacks || [],
       invoke: (current) => invoke(current, structuredClone(packet)),
-      maxSameReviewerAttempts: 2
+      claimFallback
     });
     return normalizePanelReview(requested.value, contract, {
       reviewRunId: `primary_${index}_${safeId(requested.reviewer.id)}`
@@ -153,6 +152,35 @@ export async function runModelPanel({
     primary,
     arbitration,
     disputedSubcriterionIds
+  };
+}
+
+async function requestPanelSeat({ reviewer, invoke, claimFallback }) {
+  const failures = [];
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return { reviewer, value: await invoke(reviewer), failures };
+    } catch (error) {
+      failures.push(panelFailure(reviewer, error));
+    }
+  }
+  for (let fallback = claimFallback(); fallback; fallback = claimFallback()) {
+    try {
+      return { reviewer: fallback, value: await invoke(fallback), failures };
+    } catch (error) {
+      failures.push(panelFailure(fallback, error));
+    }
+  }
+  throw new AggregateError(
+    failures.map((failure) => new Error(failure.message)),
+    'no distinct registered reviewer remains for the failed panel seat'
+  );
+}
+
+function panelFailure(reviewer, error) {
+  return {
+    reviewerId: reviewer?.id || null,
+    message: error instanceof Error ? error.message : String(error)
   };
 }
 

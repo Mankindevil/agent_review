@@ -461,9 +461,10 @@ V2 不会锁定模型席；同一主审先以相同配置重试一次，随后�
 | `NODE_ENV` | `development` | 运行环境标识 |
 | `PORT` | `4173` | HTTP 端口 |
 | `DATA_FILE` | `data/evaluations.json` | 评测持久化文件 |
-| `A2A_BLACK_BOX_V1_ENABLED` | `false` | 精确设为 `true` 时启用 Phase 1 V2 黑盒证据管线 |
+| `A2A_BLACK_BOX_V1_ENABLED` | `false` | 精确设为 `true` 时启用 V2 黑盒证据管线（当前含 Phase 1–2） |
 | `EVIDENCE_ENCRYPTION_KEY` | 空 | V2 必需的 canonical base64 32-byte AES-256 key；只存于密钥管理或本机 `.env` |
 | `EVIDENCE_ROOT` | `data/evidence` | V2 加密证据 envelope 的根目录 |
+| `JUDGE_PREVIEW_ACCESS_KEY` | 空 | 非盲人工评审预览 API 的 Bearer 密钥；未配置时入口保持关闭 |
 | `ALLOW_PRIVATE_AGENT_URLS` | `false` | 是否为测试入口、Card 发现和正式测评 A2A 请求统一允许平台服务器可达的 localhost/私网地址；仅私人或受控部署开启 |
 | `ALLOW_PRIVATE_DIAGNOSTICS_URLS` | `false` | 是否仅为 `/agent-check` 的 Card 获取和 A2A 调用允许内网/本机地址 |
 | `AGENT_DIAGNOSTICS_RATE_LIMIT` | `6` | Agent 诊断每分钟的全局调用上限 |

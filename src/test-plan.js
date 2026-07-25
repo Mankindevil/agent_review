@@ -31,6 +31,7 @@ export function finalizeTestPlan(compilation, candidates, decisions, policy = {}
   const approved = [];
   const rejected = [];
   for (const candidate of candidates) {
+    validateCandidate(candidate, compilation);
     const decision = decisionById.get(candidate.candidateId);
     if (!decision) throw new TypeError(`missing scope decision for ${candidate.candidateId}`);
     const valid = isApprovedDecision(decision);
@@ -79,6 +80,37 @@ export function finalizeTestPlan(compilation, candidates, decisions, policy = {}
     tests,
     scopeAudit: { approved, rejected }
   });
+}
+
+function validateCandidate(candidate, compilation) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    throw new TypeError('hidden candidate must be an object');
+  }
+  requireString(candidate.candidateId, 'candidateId');
+  const source = compilation.contracts.find(
+    (contract) => contract.exampleId === candidate.sourceExampleId
+  );
+  if (!source) throw new TypeError('hidden candidate has an unknown source example');
+  if (!REQUIRED_VARIANTS.includes(candidate.variantType)) {
+    throw new TypeError('hidden candidate has an unsupported variant type');
+  }
+  if (!Array.isArray(candidate.turns) || candidate.turns.length === 0) {
+    throw new TypeError('hidden candidate turns are required');
+  }
+  const expectedTimingClass = candidate.variantType === 'multi-turn'
+    ? 'multiTurn'
+    : 'singleTurn';
+  if (
+    candidate.variantType === 'multi-turn' &&
+    candidate.turns.length < 2
+  ) {
+    throw new TypeError('multi-turn hidden candidates require at least two turns');
+  }
+  if (candidate.timingClass !== expectedTimingClass) {
+    throw new TypeError(
+      `hidden candidate timingClass must be ${expectedTimingClass}`
+    );
+  }
 }
 
 export function inputForTurn(test, turnIndex) {

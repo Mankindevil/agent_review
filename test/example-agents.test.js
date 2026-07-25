@@ -238,77 +238,80 @@ test('runs the complete V2 black-box evidence pipeline against a real A2A agent'
     assert.equal(createResponse.status, 202);
     assert.match(created.participantAccessToken, /^[A-Za-z0-9_-]{43}$/u);
 
-    let completed;
-    for (let attempt = 0; attempt < 200; attempt += 1) {
-      completed = apiModule.evaluationStore.get(created.id);
-      if (
-        ['completed', 'cancelled', 'interrupted'].includes(
-          completed?.execution?.status
-        )
-      ) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    const completed = await waitForTerminalEvaluation(
+      apiModule.evaluationStore,
+      created.id
+    );
 
-    assert.equal(completed.execution.status, 'completed');
+    assert.equal(
+      completed.execution.status,
+      'completed',
+      JSON.stringify({
+        execution: completed.execution,
+        testPlanStatus: completed.testPlan?.status,
+        completedCells: completed.phase2Execution?.testRuns?.length,
+        lastAudit: completed.auditEvents?.at(-1)
+      })
+    );
     assert.equal(completed.qualification.status, 'eligible');
-    assert.equal(completed.runtimeState.runIndex.length, 6);
+    assert.equal(completed.testPlan.status, 'ready');
+    assert.equal(completed.testPlan.tests.length, 9);
+    assert.equal(completed.phase2Execution.testRuns.length, 27);
+    assert.equal(completed.absoluteReview.status, 'model-locked');
+    assert.equal(completed.governance.phase, 'human_open');
     await waitForNoActiveRuns(apiModule.pipeline);
 
-    const cellsByExample = [0, 1].map((exampleIndex) =>
-      completed.runtimeState.runIndex.filter(
-        (cell) => cell.exampleIndex === exampleIndex
-      )
+    const cellsByExample = ['factor-multipart', 'model-only'].map(
+      (sourceExampleId) => {
+        const testIds = new Set(completed.testPlan.tests
+          .filter((planned) => planned.sourceExampleId === sourceExampleId)
+          .map((planned) => planned.testId));
+        return completed.phase2Execution.testRuns.filter(
+          (testRun) => testIds.has(testRun.testId)
+        );
+      }
     );
     for (const cells of cellsByExample) {
-      assert.equal(cells.length, 3);
+      assert.equal(cells.length, 12);
       assert.deepEqual(
-        cells.map((cell) => cell.identity.repeatIndex),
+        [...new Set(cells.map((cell) => cell.repeatIndex))],
         [0, 1, 2]
       );
       assert.equal(
-        cells.every(
-          (cell) =>
-            cell.status === 'completed' &&
-            cell.selectedAttemptIndex !== null
-        ),
+        cells.every((cell) => cell.status === 'scored-agent'),
         true
       );
     }
 
     const allInitialContexts = [];
-    for (const cell of completed.runtimeState.runIndex) {
-      const attempt = cell.attempts[cell.selectedAttemptIndex];
-      const firstTurn = attempt.turns[0];
-      assert.equal(firstTurn.sentContextId, null);
-      assert.equal(firstTurn.sentTaskId, null);
-      assert.ok(firstTurn.contextId);
-      allInitialContexts.push(firstTurn.contextId);
+    for (const cell of completed.phase2Execution.testRuns) {
+      const firstTurn = cell.runs[0];
+      assert.ok(firstTurn.response.normalized.contextId);
+      allInitialContexts.push(firstTurn.response.normalized.contextId);
     }
-    assert.equal(new Set(allInitialContexts).size, 6);
+    assert.equal(new Set(allInitialContexts).size, 27);
 
-    const multipartContexts = cellsByExample[0].map((cell) => {
-      const attempt = cell.attempts[cell.selectedAttemptIndex];
-      assert.equal(attempt.turns.length, 2);
-      const [firstTurn, secondTurn] = attempt.turns;
-      assert.equal(secondTurn.sentContextId, firstTurn.contextId);
-      assert.equal(secondTurn.sentTaskId, null);
-      assert.equal(secondTurn.contextId, firstTurn.contextId);
-      return firstTurn.contextId;
-    });
-    assert.equal(new Set(multipartContexts).size, 3);
+    const multipartCells = cellsByExample[0].filter(
+      (cell) => cell.runs.length > 1
+    );
+    assert.equal(multipartCells.length, 12);
+    assert.equal(
+      multipartCells.every((cell) => cell.contextCheck.status === 'passed'),
+      true
+    );
 
     for (const cell of cellsByExample[1]) {
-      const attempt = cell.attempts[cell.selectedAttemptIndex];
-      assert.equal(attempt.acceptance.semanticSuccess, null);
-      assert.equal(attempt.acceptance.requiredExecutable, 0);
+      const acceptance = cell.runs.at(-1).acceptance;
+      assert.equal(acceptance.semanticSuccess, null);
+      assert.equal(acceptance.requiredExecutable, 0);
     }
 
     const selectedTurn =
-      cellsByExample[0][0]
-        .attempts[cellsByExample[0][0].selectedAttemptIndex]
-        .turns[0];
+      cellsByExample[0].find((cell) =>
+        completed.testPlan.tests.find((testItem) =>
+          testItem.testId === cell.testId
+        )?.variantType === 'original'
+      ).runs[0];
     const requestManifest = completed.evidenceManifest.items.find(
       (item) =>
         item.kind === 'protocol-request' &&
@@ -371,9 +374,15 @@ test('runs the complete V2 black-box evidence pipeline against a real A2A agent'
     sseAbort.abort();
 
     for (const projection of [getProjection, sseProjection]) {
+      assert.ok(
+        projection.evidenceManifest.items.length <
+          completed.evidenceManifest.items.length
+      );
       assert.equal(
-        projection.evidenceManifest.items.length,
-        completed.evidenceManifest.items.length
+        projection.evidenceManifest.items.every(
+          (item) => item.visibility === 'public'
+        ),
+        true
       );
       const projectedRequest = projection.evidenceManifest.items.find(
         (item) => item.evidenceId === requestManifest.evidenceId
@@ -439,6 +448,21 @@ async function waitForNoActiveRuns(pipeline, timeoutMs = 5_000) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.equal(pipeline.activeRuns.size, 0, 'V2 worker did not settle');
+}
+
+async function waitForTerminalEvaluation(store, evaluationId, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let current = store.get(evaluationId);
+  while (
+    !['completed', 'cancelled', 'interrupted'].includes(
+      current?.execution?.status
+    ) &&
+    Date.now() < deadline
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    current = store.get(evaluationId);
+  }
+  return current;
 }
 
 async function shutdownApiFixture(

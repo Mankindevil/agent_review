@@ -480,6 +480,12 @@ test('creates non-idempotent V2 records with one store set and returns each part
     assert.equal(created.evaluation.schemaVersion, 2);
     assert.equal(created.evaluation.execution.status, 'queued');
     assert.equal(created.evaluation.runtimeState.runIndex.length, 3);
+    assert.deepEqual(created.evaluation.submission.config, {
+      rubricVersion: 'a2a-black-box-v1',
+      hiddenTestPackageVersion: 'black-box-test-plan/v1',
+      modelConfigVersion: 'panel-v1',
+      runtimeConfigVersion: 'phase2-black-box-runtime/v1'
+    });
     const stored = JSON.stringify(store.get(created.evaluation.id));
     assert.equal(stored.includes(created.participantAccessToken), false);
     assert.equal(stored.includes('agent-create-secret'), false);

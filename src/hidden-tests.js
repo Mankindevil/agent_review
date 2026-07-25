@@ -2,6 +2,10 @@ import {
   hiddenScopeReviewPrompt,
   hiddenVariantGenerationPrompt
 } from './prompts.js';
+import {
+  normalizeAgentExamples,
+  SUBMISSION_LIMITS
+} from './submission.js';
 
 const VARIANT_TYPES = Object.freeze(['equivalent', 'boundary', 'multi-turn']);
 const SCOPE_CHECKS = Object.freeze([
@@ -135,7 +139,10 @@ function normalizeCandidate(compilation, candidate, index) {
   if (!Array.isArray(candidate.turns) || candidate.turns.length === 0) {
     throw new TypeError(`candidate ${candidateId} turns are required`);
   }
-  const turns = structuredClone(candidate.turns);
+  if (candidate.variantType === 'multi-turn' && candidate.turns.length < 2) {
+    throw new TypeError(`candidate ${candidateId} multi-turn variants require at least two turns`);
+  }
+  const turns = normalizeHiddenTurns(candidate.turns, candidateId);
   assertCandidateUrls(source, turns);
   const inheritedCriteriaIds = normalizeStringArray(
     candidate.inheritedCriteriaIds || [],
@@ -151,12 +158,32 @@ function normalizeCandidate(compilation, candidate, index) {
   if (!Array.isArray(candidate.proposedCriteria)) {
     throw new TypeError(`candidate ${candidateId} proposedCriteria must be an array`);
   }
-  const proposedCriteria = structuredClone(candidate.proposedCriteria);
-  if (EXTERNAL_TRUTH_PATTERN.test(JSON.stringify(proposedCriteria))) {
+  const proposedCriteria = normalizeProposedCriteria(
+    candidate.proposedCriteria,
+    candidateId
+  );
+  const candidatePayload = { turns, proposedCriteria };
+  if (
+    Buffer.byteLength(JSON.stringify(candidatePayload), 'utf8') >
+      SUBMISSION_LIMITS.totalCanonicalBytes
+  ) {
+    throw new RangeError(
+      `candidate ${candidateId} exceeds total canonical bytes limit`
+    );
+  }
+  if (EXTERNAL_TRUTH_PATTERN.test(JSON.stringify(candidatePayload))) {
     throw new TypeError(`candidate ${candidateId} introduces external truth`);
   }
   if (!['singleTurn', 'multiTurn'].includes(candidate.timingClass)) {
     throw new TypeError(`candidate ${candidateId} has an invalid timingClass`);
+  }
+  const expectedTimingClass = candidate.variantType === 'multi-turn'
+    ? 'multiTurn'
+    : 'singleTurn';
+  if (candidate.timingClass !== expectedTimingClass) {
+    throw new TypeError(
+      `candidate ${candidateId} timingClass must be ${expectedTimingClass}`
+    );
   }
   return {
     candidateId,
@@ -171,6 +198,35 @@ function normalizeCandidate(compilation, candidate, index) {
     proposedCriteria,
     timingClass: candidate.timingClass
   };
+}
+
+function normalizeHiddenTurns(turns, candidateId) {
+  const [normalized] = normalizeAgentExamples([{
+    id: 'hidden-candidate',
+    name: 'Hidden candidate',
+    turns
+  }]);
+  return structuredClone(normalized.turns);
+}
+
+function normalizeProposedCriteria(criteria, candidateId) {
+  if (!Array.isArray(criteria)) {
+    throw new TypeError(`candidate ${candidateId} proposedCriteria must be an array`);
+  }
+  if (criteria.some((criterion) => criterion?.type !== 'model')) {
+    throw new TypeError(
+      `candidate ${candidateId} proposed criteria may only add non-executable model checks`
+    );
+  }
+  const [normalized] = normalizeAgentExamples([{
+    id: 'hidden-criteria',
+    name: 'Hidden criteria',
+    turns: [{
+      input: { parts: [{ type: 'text', text: 'schema validation sentinel' }] },
+      acceptanceCriteria: criteria
+    }]
+  }]);
+  return structuredClone(normalized.turns[0].acceptanceCriteria);
 }
 
 function assertRequiredSlots(compilation, candidates) {

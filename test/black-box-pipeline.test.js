@@ -254,6 +254,148 @@ test('qualifies separately, executes exactly three formal samples, persists befo
   }
 });
 
+test('orchestrates a formal Phase 2 evaluation through model lock and opens human review', async () => {
+  const snapshot = freezeSubmission({
+    agentCard: CARD,
+    agentExamples: EXAMPLES,
+    config: {
+      rubricVersion: 'a2a-black-box-v1',
+      hiddenTestPackageVersion: 'black-box-test-plan/v1',
+      modelConfigVersion: 'panel-v1',
+      runtimeConfigVersion: 'phase2-black-box-runtime/v1'
+    },
+    frozenAt: '2026-07-25T10:00:00.000Z'
+  });
+  const evaluation = createEvaluationRecord(snapshot, {
+    id: 'eval_phase2',
+    createdAt: '2026-07-25T10:00:00.000Z',
+    participantAccess: {
+      tokenHash: 'a'.repeat(64),
+      createdAt: '2026-07-25T10:00:00.000Z'
+    },
+    authorizationRequired: false,
+    endpointHash: 'b'.repeat(64),
+    agentVersion: '1.2.3',
+    serviceBuildId: null,
+    runIndex: []
+  });
+  const store = memoryStore(evaluation);
+  const candidate = (variantType, suffix = '') => ({
+    candidateId: `unsafe-${variantType}${suffix}`,
+    sourceExampleId: 'unsafe example id',
+    variantType,
+    changeSummary: `${variantType} in-scope variation`,
+    turns: variantType === 'multi-turn'
+      ? [{
+          input: { parts: [{ type: 'text', text: 'ping multi-turn first' }] }
+        }, {
+          input: { parts: [{ type: 'text', text: 'ping multi-turn second' }] }
+        }]
+      : [{
+          input: { parts: [{ type: 'text', text: `ping ${variantType}` }] }
+        }],
+    inheritedCriteriaIds: ['contains output'],
+    proposedCriteria: [],
+    timingClass: variantType === 'multi-turn' ? 'multiTurn' : 'singleTurn'
+  });
+  let round = 0;
+  const phase2 = {
+    enabled: true,
+    generatorIdentity: 'mock:generator:model',
+    scopeReviewerIdentity: 'mock:scope:model',
+    generateHidden: async () => {
+      round += 1;
+      return {
+        candidates: [
+          candidate('equivalent'),
+          candidate('boundary'),
+          candidate('multi-turn')
+        ]
+      };
+    },
+    reviewScopes: async (_compilation, candidates) => ({
+      decisions: candidates.map((item) => ({
+        candidateId: item.candidateId,
+        checks: {
+          sameDomain: !(round === 1 && item.variantType === 'boundary'),
+          declaredOrDemonstratedCapabilityOnly: true,
+          noExternalTruthDependency: true,
+          difficultyFromAllowedTransformation: true,
+          sameInputForAgentAndReplica: true
+        },
+        approved: !(round === 1 && item.variantType === 'boundary'),
+        reasons: round === 1 && item.variantType === 'boundary'
+          ? ['Rejected first out-of-scope attempt.']
+          : []
+      }))
+    }),
+    runPanel: async ({ contract }) => ({
+      status: 'model-locked',
+      dimensions: {
+        scenarioValue: { score: 70 },
+        professionalism: { score: 75 },
+        agentCapability: { score: 80 }
+      },
+      subcriteria: Object.fromEntries(
+        contract.subcriterionIds.map((id) => [id, {
+          score: 75,
+          confidence: 0.8
+        }])
+      ),
+      checkEvidenceIndex: {}
+    })
+  };
+
+  await runBlackBoxFoundation(evaluation, workerServices(store, {
+    phase2,
+    executeTurn: async (options) => successfulRun(
+      options,
+      options.contextId || `ctx-${options.testId}-${options.repeatIndex}`
+    )
+  }));
+
+  const result = store.get(evaluation.id);
+  assert.equal(result.exampleCompilation.compilationVersion, 'example-compilation/v1');
+  assert.equal(result.testPlan.status, 'ready');
+  assert.equal(result.testPlan.tests.every((item) => item.repeatCount === 3), true);
+  assert.equal(result.testPlan.scopeAudit.rejected.length, 1);
+  assert.equal(
+    result.testPlan.scopeAudit.rejected[0].candidate.generatorCandidateId,
+    'unsafe-boundary'
+  );
+  assert.equal(
+    result.testPlan.tests.find(
+      (item) => item.variantType === 'boundary'
+    ).candidateId.startsWith('phase2_1_'),
+    true
+  );
+  assert.equal(result.absoluteReview.status, 'model-locked');
+  assert.equal(result.governance.phase, 'human_open');
+  assert.equal(result.resultV2.absolute.status, 'model-provisional');
+  assert.deepEqual(result.resultV2.absolute.testSummary.variantCounts, {
+    original: 1,
+    equivalent: 1,
+    boundary: 1,
+    multiTurn: 1,
+    protocolRecovery: 1
+  });
+  assert.equal(result.resultV2.absolute.testSummary.plannedCells, 15);
+  assert.equal(result.resultV2.absolute.testSummary.completedCells, 15);
+  assert.equal(
+    result.resultV2.absolute.modelReviewSummary.primarySeatsLocked,
+    4
+  );
+  assert.equal(result.resultV2.rating.status, 'pending-human');
+  assert.equal(result.replicaArena.status, 'disabled');
+  assert.deepEqual(result.phase2Execution.partialCells, []);
+  assert.equal(
+    store.commits.some((commit) =>
+      commit.manifestDelta > 0 && commit.phase2PartialCells > 0
+    ),
+    true
+  );
+});
+
 test('deletes ephemeral credentials when worker evidence or credential setup throws', async () => {
   for (const failure of ['evidence-factory', 'credential-get']) {
     const { evaluation, store } = workerFixture();
@@ -1842,7 +1984,9 @@ function memoryStore(initial) {
         manifestDelta:
           next.evidenceManifest.items.length - value.evidenceManifest.items.length,
         completedTurnDelta:
-          countCompletedTurns(next) - countCompletedTurns(value)
+          countCompletedTurns(next) - countCompletedTurns(value),
+        phase2PartialCells:
+          next.phase2Execution?.partialCells?.length || 0
       });
       next.revision = value.revision + 1;
       next.updatedAt = '2026-07-24T10:00:00.000Z';

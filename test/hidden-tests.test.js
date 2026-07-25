@@ -55,14 +55,27 @@ function candidate(variantType, overrides = {}) {
     sourceExampleId: 'risk',
     variantType,
     changeSummary: `${variantType} transformation`,
-    turns: [{
-      input: {
-        parts: [
-          { type: 'text', text: `Review supplied holdings: ${variantType}.` },
-          { type: 'url', url: 'https://files.example/holdings.csv' }
-        ]
-      }
-    }],
+    turns: variantType === 'multi-turn'
+      ? [{
+          input: {
+            parts: [
+              { type: 'text', text: 'Review supplied holdings.' },
+              { type: 'url', url: 'https://files.example/holdings.csv' }
+            ]
+          }
+        }, {
+          input: {
+            parts: [{ type: 'text', text: 'Now explain the largest risk.' }]
+          }
+        }]
+      : [{
+          input: {
+            parts: [
+              { type: 'text', text: `Review supplied holdings: ${variantType}.` },
+              { type: 'url', url: 'https://files.example/holdings.csv' }
+            ]
+          }
+        }],
     inheritedCriteriaIds: ['risk-word'],
     proposedCriteria: [],
     timingClass: variantType === 'multi-turn' ? 'multiTurn' : 'singleTurn',
@@ -115,6 +128,79 @@ test('rejects generated inputs that expand URLs, domains, or expected truth', as
         })
       }),
       /scope|source|URL|external|candidate/iu
+    );
+  }
+});
+
+test('rejects fake multi-turn variants and timing classes that disagree with the variant', async () => {
+  const invalidCases = [
+    candidate('multi-turn', {
+      turns: [{ input: { parts: [{ type: 'text', text: 'Only one turn.' }] } }]
+    }),
+    candidate('multi-turn', { timingClass: 'singleTurn' }),
+    candidate('boundary', { timingClass: 'multiTurn' })
+  ];
+
+  for (const invalid of invalidCases) {
+    await assert.rejects(
+      generateHiddenVariants(compilation, {
+        generator,
+        requestJson: async () => ({
+          candidates: [
+            candidate('equivalent'),
+            candidate('boundary'),
+            candidate('multi-turn'),
+            invalid
+          ].filter((item, index, all) =>
+            all.findLastIndex((candidateItem) =>
+              candidateItem.variantType === item.variantType
+            ) === index
+          )
+        })
+      }),
+      /multi-turn|timingClass/iu
+    );
+  }
+});
+
+test('rejects hidden inputs and proposed checks outside the frozen submission schema', async () => {
+  const invalidCases = [
+    candidate('equivalent', {
+      turns: [{
+        input: { parts: [{ type: 'shell', command: 'whoami' }] }
+      }]
+    }),
+    candidate('equivalent', {
+      turns: Array.from({ length: 21 }, (_, index) => ({
+        input: { parts: [{ type: 'text', text: `turn ${index}` }] }
+      }))
+    }),
+    candidate('equivalent', {
+      proposedCriteria: [{
+        id: 'generated-executable',
+        type: 'json-schema',
+        description: 'Generated executable answer key.',
+        schema: {
+          type: 'array',
+          items: { $ref: '#' }
+        }
+      }]
+    })
+  ];
+
+  for (const invalid of invalidCases) {
+    await assert.rejects(
+      generateHiddenVariants(compilation, {
+        generator,
+        requestJson: async () => ({
+          candidates: [
+            invalid,
+            candidate('boundary'),
+            candidate('multi-turn')
+          ]
+        })
+      }),
+      /part type|turns exceeds|proposed criteria|criterion/iu
     );
   }
 });

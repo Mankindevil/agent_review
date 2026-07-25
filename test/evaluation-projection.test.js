@@ -219,6 +219,121 @@ test('admin projection adds only safe submission metadata and audit summaries', 
   assert.throws(() => projectEvaluation(unsafeEvaluation(), { audience: 'judge' }), /audience/i);
 });
 
+test('judge preview exposes redacted submission and locked model reviews without replica material', () => {
+  const source = unsafeEvaluation();
+  source.submission.agentCard.value = {
+    name: 'Research Agent',
+    description: 'Reviews supplied evidence.',
+    supportedInterfaces: [{
+      url: 'https://private-agent.example/a2a',
+      protocolBinding: 'HTTP+JSON',
+      protocolVersion: '1.0'
+    }],
+    skills: [{ id: 'review', name: 'Review', description: 'Review evidence.' }]
+  };
+  source.submission.agentExamples.value = [{
+    id: 'example-1',
+    turns: [{
+      input: { parts: [{ type: 'text', text: 'Use token=judge-secret' }] }
+    }]
+  }];
+  source.absoluteReview.modelPanel = {
+    status: 'model-locked',
+    dimensions: { professionalism: { score: 78 } },
+    primary: [{
+      reviewRunId: 'primary_0_gpt',
+      reviews: [{
+        subcriterionId: 'professionalism.evidenceReasoning',
+        score: 78,
+        confidence: 0.8,
+        evidenceIds: ['ev_public'],
+        checkEvidence: [{ checkId: 'reasoning', evidenceIds: ['ev_public'] }],
+        findings: [{
+          findingId: 'finding_1',
+          text: 'Evidence is cited.',
+          evidenceIds: ['ev_public']
+        }],
+        counterEvidence: [],
+        uncertainties: ['External truth is unavailable.'],
+        repairSuggestion: 'State the method.',
+        conclusions: { taskCompleted: 'yes', criticalRisk: 'no' }
+      }]
+    }],
+    arbitration: null,
+    disputedSubcriterionIds: []
+  };
+
+  const projection = projectEvaluation(source, {
+    audience: 'judge-preview',
+    secrets: ['judge-secret']
+  });
+  const serialized = JSON.stringify(projection);
+
+  assert.equal(projection.submission.agentCard.value.name, 'Research Agent');
+  assert.match(
+    projection.submission.agentExamples.value[0].turns[0].input.parts[0].text,
+    /REDACTED/u
+  );
+  assert.equal(
+    projection.absoluteReview.modelPanel.primary[0].reviews[0].score,
+    78
+  );
+  assert.equal(Object.hasOwn(projection, 'replicaArena'), false);
+  assert.equal(Object.hasOwn(projection.resultV2, 'replica'), false);
+  assert.equal(serialized.includes('private-agent.example'), false);
+  assert.equal(serialized.includes('replica-seal-secret'), false);
+  assert.equal(serialized.includes('judge-secret'), false);
+});
+
+test('public projection exposes only the safe Phase 2 completion summary', () => {
+  const source = unsafeEvaluation();
+  source.resultV2.absolute = {
+    status: 'model-provisional',
+    testSummary: {
+      totalTests: 5,
+      repeatCount: 3,
+      plannedCells: 15,
+      completedCells: 15,
+      variantCounts: {
+        original: 1,
+        equivalent: 1,
+        boundary: 1,
+        multiTurn: 1,
+        protocolRecovery: 1
+      },
+      hiddenPrompts: ['must-not-project']
+    },
+    modelReviewSummary: {
+      primarySeatsLocked: 4,
+      arbitrationStatus: 'not-required',
+      reviewerIdentities: ['must-not-project']
+    }
+  };
+
+  const projection = projectEvaluation(source, { audience: 'public' });
+
+  assert.deepEqual(projection.resultV2.absolute, {
+    status: 'model-provisional',
+    testSummary: {
+      totalTests: 5,
+      repeatCount: 3,
+      plannedCells: 15,
+      completedCells: 15,
+      variantCounts: {
+        original: 1,
+        equivalent: 1,
+        boundary: 1,
+        multiTurn: 1,
+        protocolRecovery: 1
+      }
+    },
+    modelReviewSummary: {
+      primarySeatsLocked: 4,
+      arbitrationStatus: 'not-required'
+    }
+  });
+});
+
 test('type-checks and redacts every projected leaf, including allowed summaries and findings', () => {
   const source = unsafeEvaluation();
   source.schemaVersion = { nested: 'top-level-object-secret' };

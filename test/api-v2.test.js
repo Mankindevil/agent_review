@@ -11,6 +11,7 @@ process.env.DATA_FILE = path.join(testRoot, 'evaluations.json');
 process.env.A2A_BLACK_BOX_V1_ENABLED = 'true';
 process.env.EVIDENCE_ENCRYPTION_KEY = randomBytes(32).toString('base64');
 process.env.EVIDENCE_ROOT = path.join(testRoot, 'evidence');
+process.env.JUDGE_PREVIEW_ACCESS_KEY = 'judge-preview-test-key';
 
 const {
   evaluationStore,
@@ -65,6 +66,31 @@ test('returns a flat one-time V2 create token with no-store caching', async () =
     false
   );
   await pipeline.cancel(body.id, body.participantAccessToken);
+});
+
+test('protects the non-blind judge preview and returns no replica material', async () => {
+  const created = await (await createEvaluation()).json();
+  await pipeline.cancel(created.id, created.participantAccessToken);
+
+  const unauthorized = await fetch(
+    `${origin}/api/evaluations/${created.id}/judge-preview`
+  );
+  const authorized = await fetch(
+    `${origin}/api/evaluations/${created.id}/judge-preview`,
+    {
+      headers: {
+        authorization: 'Bearer judge-preview-test-key'
+      }
+    }
+  );
+  const body = await authorized.json();
+
+  assert.equal(unauthorized.status, 401);
+  assert.equal(authorized.status, 200);
+  assert.equal(authorized.headers.get('cache-control'), 'no-store');
+  assert.equal(body.submission.agentCard.value.name, CARD.name);
+  assert.equal(Object.hasOwn(body, 'replicaArena'), false);
+  assert.equal(Object.hasOwn(body.resultV2 || {}, 'replica'), false);
 });
 
 test('preserves the legacy 413 limit for oversized malformed create bodies when V2 is enabled', async () => {

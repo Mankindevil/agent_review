@@ -98,6 +98,19 @@ test('retains rejected attempts in audit and fails closed when a slot is missing
   assert.equal(plan.tests.some((item) => item.candidateId === 'format-boundary'), false);
 });
 
+test('fails closed when a direct caller supplies a fake multi-turn candidate', () => {
+  const invalid = structuredClone(candidates);
+  invalid[2].turns = [invalid[2].turns[0]];
+  assert.throws(
+    () => finalizeTestPlan(compilation, invalid, decisions, {
+      generatedAt: '2026-07-25T00:00:00.000Z',
+      generatorIdentity: 'provider:generator:model',
+      scopeReviewerIdentity: 'provider:scope:model'
+    }),
+    /multi-turn|two turns/iu
+  );
+});
+
 test('returns cloned byte-identical turn input for submitted Agent and later Replica use', () => {
   const plan = finalizeTestPlan(compilation, candidates, decisions, {
     generatedAt: '2026-07-25T00:00:00.000Z',
