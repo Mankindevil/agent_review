@@ -1,4 +1,5 @@
 import { createReplicaPackage } from './replica-package.js';
+import { createHash } from 'node:crypto';
 import { REPLICA_BUILD_BUDGET_V1, REPLICA_RUN_BUDGET_V1 } from './replica-budgets.js';
 import { classifyReplicaFailure } from './replica-failures.js';
 import { normalizeReplicaResult, validateReplicaArtifact } from './replica-adapter.js';
@@ -34,6 +35,11 @@ export async function buildReplicas(options = {}) {
     }
   );
   const packageHash = replicaPackage.manifest.contentHash;
+  if (options.resume?.packageHash && options.resume.packageHash !== packageHash) {
+    throw replicaError('CHECKPOINT_COMMITMENT_MISMATCH', 'Replica checkpoint package hash did not match the rebuilt public package');
+  }
+  await checkpoint(options, { version: 'replica-checkpoint/v1', type: 'package-locked', packageHash });
+  const resumeBuilds = options.resume?.builds || {};
   const sealedManifestItems = [];
   const records = [];
   const summaries = [];
@@ -41,6 +47,17 @@ export async function buildReplicas(options = {}) {
   for (const runtime of runtimes) {
     const runtimeId = requiredString(runtime?.id, 'runtime.id');
     const adapter = resolveAdapter(options, runtime);
+    const resumed = resumeBuilds[runtimeId];
+    if (resumed?.artifactCommitment) {
+      const artifact = await loadCommittedArtifact(evidenceVault, resumed.artifactCommitment, packageHash);
+      const summary = {
+        runtimeId, validity: resumed.validity || 'pending-first-run', artifact,
+        artifactEvidenceIds: [resumed.artifactCommitment.evidenceId],
+        artifactCommitment: structuredClone(resumed.artifactCommitment), failureCategory: resumed.failureCategory || null
+      };
+      summaries.push(summary);
+      continue;
+    }
     if (!adapter) {
       const summary = invalidRuntime(runtimeId, 'invalid-infrastructure', {
         code: 'ADAPTER_CONFIG_INVALID'
@@ -74,7 +91,7 @@ export async function buildReplicas(options = {}) {
       const artifact = await adapter.build(
         structuredClone(replicaPackage),
         REPLICA_BUILD_BUDGET_V1,
-        buildOptions(options, runtimeId)
+        buildOptions(options, runtimeId, packageHash)
       );
       validateReplicaArtifact(artifact, REPLICA_BUILD_BUDGET_V1, { packageHash });
       const evidence = await persistEvidence({
@@ -82,7 +99,7 @@ export async function buildReplicas(options = {}) {
         createId,
         now,
         runtimeId,
-        runId: createId('run'),
+        operationId: stableOperationId('build', packageHash, runtimeId),
         testId: 'replica_evidence',
         payload: { phase: 'build', runtimeId, artifact, health },
         secrets: options.secrets
@@ -94,10 +111,11 @@ export async function buildReplicas(options = {}) {
         validity: 'pending-first-run',
         artifact: structuredClone(artifact),
         artifactEvidenceIds: [evidence.record.evidenceId],
+        artifactCommitment: commitmentFor(evidence.record),
         failureCategory: null
       };
       summaries.push(summary);
-      await checkpoint(options, { phase: 'build', runtimeId, validity: summary.validity, evidenceIds: summary.artifactEvidenceIds });
+      await checkpoint(options, { version: 'replica-checkpoint/v1', type: 'build-complete', runtimeId, validity: summary.validity, artifactCommitment: summary.artifactCommitment });
     } catch (error) {
       const classification = classifyReplicaFailure(error, {
         ready: true,
@@ -135,6 +153,7 @@ export async function executeReplicas(options = {}) {
   const now = options.now || (() => new Date().toISOString());
   const createId = options.createId || defaultId;
   const submittedInput = options.submittedInputForTurn || inputForTurn;
+  const resumeTurns = options.resume?.turns || {};
   if (testPlan.defaultRepeatCount !== 3) {
     throw new TypeError('Replica execution requires exactly three planned repeats');
   }
@@ -173,16 +192,26 @@ export async function executeReplicas(options = {}) {
             if (canonicalJson(currentInput) !== canonicalJson(submitted)) {
               throw replicaError('INPUT_PARITY_MISMATCH', 'Replica current input must equal submitted-Agent input');
             }
+            const inputHash = hashCanonical(currentInput);
+            const turnKey = stableOperationId('turn', replicas.packageHash || replica.artifact?.manifest?.packageHash, replica.runtimeId, test.testId, repeatIndex, turnIndex, inputHash);
             let normalized;
             try {
-              const output = await adapter.run(
-                replica.artifact,
-                currentInput,
-                context,
-                { ...REPLICA_RUN_BUDGET_V1, wallClockMs: test.timing?.timeoutMs },
-                { seed: options.seed ?? null }
-              );
-              normalized = normalizeReplicaResult(output);
+              const prior = resumeTurns[turnKey];
+              if (prior?.resultCommitment) {
+                const record = await evidenceVault.get(prior.resultCommitment.evidenceId, prior.resultCommitment.recordHash);
+                if (record.payloadHash !== prior.resultCommitment.payloadHash || record.payload?.inputHash !== inputHash) throw replicaError('CHECKPOINT_COMMITMENT_MISMATCH', 'Replica turn checkpoint did not match current input');
+                normalized = normalizeReplicaResult(record.payload.result);
+              } else {
+                await checkpoint(options, { version: 'replica-checkpoint/v1', type: 'turn-dispatching', turnKey, runtimeId: replica.runtimeId, testId: test.testId, repeatIndex, turnIndex, inputHash, operationId: opaqueId(turnKey) });
+                const output = await adapter.run(
+                  replica.artifact,
+                  currentInput,
+                  context,
+                  { ...REPLICA_RUN_BUDGET_V1, wallClockMs: test.timing?.timeoutMs },
+                  { seed: options.seed ?? null, idempotencyKey: opaqueId(turnKey) }
+                );
+                normalized = normalizeReplicaResult(output);
+              }
               if (normalized.status === 'invalid-output') {
                 throw replicaError('INVALID_REPLICA_OUTPUT', normalized.error?.message);
               }
@@ -217,9 +246,9 @@ export async function executeReplicas(options = {}) {
               createId,
               now,
               runtimeId: replica.runtimeId,
-              runId: createId('run'),
+              operationId: turnKey,
               testId: 'replica_evidence',
-              payload: { phase: 'run', runtimeId: replica.runtimeId, input: currentInput, result: normalized },
+              payload: { phase: 'run', runtimeId: replica.runtimeId, inputHash, input: currentInput, result: normalized },
               secrets: options.secrets
             });
             sealedManifestItems.push(evidence.manifestItem);
@@ -229,6 +258,7 @@ export async function executeReplicas(options = {}) {
               status: normalized.status, evidenceId: evidence.record.evidenceId
             });
             result.turnCount += 1;
+            await checkpoint(options, { version: 'replica-checkpoint/v1', type: 'turn-evidence-committed', turnKey, runtimeId: replica.runtimeId, testId: test.testId, repeatIndex, turnIndex, inputHash, resultCommitment: commitmentFor(evidence.record), validity: result.validity });
             context.history.push({ input: structuredClone(currentInput), output: structuredClone(normalized.messageParts) });
             completedCell = true;
           }
@@ -244,7 +274,7 @@ export async function executeReplicas(options = {}) {
         if (completedCell && result.validity === 'valid') {
           result.runCount += 1;
         }
-        await checkpoint(options, { phase: 'cell', runtimeId: replica.runtimeId, testId: test.testId, repeatIndex, validity: result.validity, runCount: result.runCount, turnCount: result.turnCount });
+        await checkpoint(options, { version: 'replica-checkpoint/v1', type: 'cell-complete', runtimeId: replica.runtimeId, testId: test.testId, repeatIndex, validity: result.validity, runCount: result.runCount, turnCount: result.turnCount });
       }
     }
   }
@@ -290,14 +320,20 @@ export function sealedReplicaProjection(replicaArena) {
   };
 }
 
-async function persistEvidence({ evidenceVault, createId, now, runtimeId, runId, testId, turnIndex, repeatIndex, payload, secrets }) {
+async function persistEvidence({ evidenceVault, createId, now, runtimeId, operationId, testId = 'replica_evidence', turnIndex, repeatIndex, payload, secrets }) {
+  const evidenceId = `ev_${hashCanonical({ operationId, phase: payload.phase })}`.slice(0, 80);
   const record = createEvidenceRecord({
-    evidenceId: createId('ev'), runId, grade: 'C', kind: 'agent-output', testId,
+    evidenceId, runId: `run_${hashCanonical({ operationId }).slice(0, 32)}`, grade: 'C', kind: 'agent-output', testId,
     ...(turnIndex === undefined ? {} : { turnIndex }),
     ...(repeatIndex === undefined ? {} : { repeatIndex }),
-    capturedAt: now(), payload: structuredClone(payload)
+    capturedAt: deterministicTimestamp(operationId), payload: structuredClone(payload)
   });
-  await evidenceVault.put(record);
+  try { await evidenceVault.put(record); }
+  catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+    const existing = await evidenceVault.get(record.evidenceId, record.recordHash);
+    if (existing.payloadHash !== record.payloadHash) throw error;
+  }
   const manifestItem = createEvidenceManifestItem(record, {
     summary: 'Replica evidence sealed',
     visibility: 'admin', secrets: secrets || []
@@ -316,7 +352,7 @@ async function attachFailureEvidence(summary, { evidenceVault, createId, now, ru
   try {
     const evidence = await persistEvidence({
       evidenceVault, createId, now, runtimeId,
-      runId: createId('run'), testId: 'replica_evidence',
+      operationId: stableOperationId('failure', runtimeId, error?.code || 'UNKNOWN_REPLICA_FAILURE'),
       payload: { phase: 'failure', runtimeId, error: { code: error?.code || 'UNKNOWN_REPLICA_FAILURE', message: String(error?.message || '') }, health }
     });
     summary.artifactEvidenceIds.push(evidence.record.evidenceId);
@@ -334,9 +370,15 @@ function resolveAdapter(options, runtime) {
 function isHardHealthy(value) {
   return value?.ready === true && canonicalJson(value.budgetEnforcement) === canonicalJson(HARD_ENFORCEMENT);
 }
-function buildOptions(options, runtimeId) {
-  return { seed: options.seed ?? null, temperature: options.temperature ?? 0, runtimeId };
+function buildOptions(options, runtimeId, packageHash) {
+  return { seed: options.seed ?? null, temperature: options.temperature ?? 0, idempotencyKey: opaqueId(stableOperationId('build', packageHash, runtimeId)) };
 }
+async function loadCommittedArtifact(vault, commitment, packageHash) { const record = await vault.get(commitment.evidenceId, commitment.recordHash); if (record.payloadHash !== commitment.payloadHash) throw replicaError('CHECKPOINT_COMMITMENT_MISMATCH', 'Replica artifact commitment mismatch'); const artifact = structuredClone(record.payload?.artifact); validateReplicaArtifact(artifact, REPLICA_BUILD_BUDGET_V1, { packageHash }); return artifact; }
+function commitmentFor(record) { return { evidenceId: record.evidenceId, recordHash: record.recordHash, payloadHash: record.payloadHash }; }
+function hashCanonical(value) { return createHash('sha256').update(canonicalJson(value)).digest('hex'); }
+function stableOperationId(...parts) { return hashCanonical(parts); }
+function opaqueId(value) { return `op_${hashCanonical(value).slice(0, 32)}`; }
+function deterministicTimestamp(operationId) { const seconds = Number.parseInt(hashCanonical(operationId).slice(0, 8), 16) % 2_000_000_000; return new Date(seconds * 1000).toISOString(); }
 function deepFreeze(value) { if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.freeze(value); for (const child of Object.values(value)) deepFreeze(child); } return value; }
 function requiredArray(value, name) { if (!Array.isArray(value)) throw new TypeError(`${name} is required`); return value; }
 function requiredObject(value, name) { if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError(`${name} is required`); return value; }

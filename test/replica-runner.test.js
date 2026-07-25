@@ -150,7 +150,8 @@ test('freezes pristine current input, uses opaque adapter metadata, and holds un
     assert.equal(Object.isFrozen(input), true);
     assert.equal(Object.isFrozen(input.parts), true);
     assert.match(context.id, /^ctx_/u);
-    assert.deepEqual(Object.keys(options).sort(), ['seed']);
+    assert.deepEqual(Object.keys(options).sort(), ['idempotencyKey', 'seed']);
+    assert.match(options.idempotencyKey, /^op_[a-f0-9]{32}$/u);
     assert.throws(() => { input.parts[0].text = 'mutated'; }, TypeError);
     throw Object.assign(new Error('unclassified runtime state'), { code: 'UNCLASSIFIED' });
   };
@@ -174,6 +175,35 @@ test('freezes pristine current input, uses opaque adapter metadata, and holds un
   assert.equal(executed.runtimes[0].validity, 'attribution-pending');
   assert.equal(executed.runtimes[0].runCount, 0);
   assert.equal(executed.runtimes[0].turnCount, 0);
+});
+
+test('resumes committed builds and turns from vault commitments without replaying adapters or evidence', async () => {
+  const vault = memoryVault();
+  const builds = [];
+  const calls = [];
+  const checkpoints = [];
+  const adapter = fakeAdapter('runtime-a', { builds, calls });
+  const common = {
+    agentCard: CARD, agentExamples: EXAMPLES, runtimes: [{ id: 'runtime-a' }],
+    adapters: { 'runtime-a': adapter }, evidenceVault: vault, rubricVersion: 'a2a-black-box-v1',
+    now: () => '2026-07-25T12:00:00.000Z', createId: ids(), checkpoint: async (entry) => checkpoints.push(entry)
+  };
+  const firstBuild = await buildReplicas(common);
+  const buildCheckpoint = checkpoints.find((entry) => entry.type === 'build-complete');
+  const firstRun = await executeReplicas({ ...common, testPlan: structuredClone(TEST_PLAN), replicas: firstBuild });
+  const turns = Object.fromEntries(checkpoints
+    .filter((entry) => entry.type === 'turn-evidence-committed')
+    .map((entry) => [entry.turnKey, { resultCommitment: entry.resultCommitment }]));
+  const recordCount = vault.records.length;
+  const resumedBuild = await buildReplicas({ ...common, resume: { builds: {
+    'runtime-a': { artifactCommitment: buildCheckpoint.artifactCommitment, validity: 'pending-first-run' }
+  } } });
+  const resumedRun = await executeReplicas({ ...common, testPlan: structuredClone(TEST_PLAN), replicas: resumedBuild, resume: { turns } });
+
+  assert.equal(builds.length, 1);
+  assert.equal(calls.length, 6);
+  assert.equal(vault.records.length, recordCount);
+  assert.equal(resumedRun.runtimes[0].turnCount, firstRun.runtimes[0].turnCount);
 });
 
 function fakeAdapter(runtimeId, { builds = [], calls = [], disposed = [] } = {}) {
@@ -205,7 +235,21 @@ function artifact(runtimeId, packageHash) {
 }
 
 function memoryVault() {
-  return { records: [], async put(record) { this.records.push(record); return record; } };
+  const records = new Map();
+  return {
+    records: [],
+    async put(record) {
+      if (records.has(record.evidenceId)) {
+        const error = new Error('already exists'); error.code = 'EEXIST'; throw error;
+      }
+      records.set(record.evidenceId, record); this.records.push(record); return record;
+    },
+    async get(evidenceId, recordHash) {
+      const record = records.get(evidenceId);
+      if (!record || record.recordHash !== recordHash) throw new Error('missing evidence');
+      return record;
+    }
+  };
 }
 
 function ids() {

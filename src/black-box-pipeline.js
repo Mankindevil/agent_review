@@ -643,16 +643,19 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
   if (services.phase3?.enabled === true) {
     const phase3 = services.phase3;
     const existingCheckpoint = context.store.get(context.evaluationId).replicaCheckpoint;
+    if (
+      existingCheckpoint?.status === 'running' &&
+      existingCheckpoint.testPlanHash !== hashCanonical(testPlan)
+    ) {
+      throw new Error('Replica checkpoint test-plan commitment mismatch');
+    }
     if (existingCheckpoint?.status === 'sealed' && existingCheckpoint.arena) {
       replicaArena = structuredClone(existingCheckpoint.arena);
     } else {
       const checkpoint = async (step) => {
         await mutateCurrent(context, (record) => ({
           ...record,
-          replicaCheckpoint: {
-            status: 'running',
-            steps: [...(record.replicaCheckpoint?.steps || []), structuredClone(step)]
-          }
+          replicaCheckpoint: mergeReplicaCheckpoint(record.replicaCheckpoint, step, testPlan)
         }));
       };
       const built = await buildReplicas({
@@ -664,7 +667,8 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
         now: context.now,
         createId: context.createId,
         signal: context.signal,
-        checkpoint
+        checkpoint,
+        resume: existingCheckpoint
       });
       const executed = await executeReplicas({
         ...phase3,
@@ -674,7 +678,8 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
         now: context.now,
         createId: context.createId,
         signal: context.signal,
-        checkpoint
+        checkpoint,
+        resume: existingCheckpoint
       });
       replicaArena = await sealReplicaArena({
         packageHash: built.packageHash,
@@ -813,6 +818,39 @@ function namespacePhase2Candidates(candidates, attempt) {
       variantType: candidate.variantType
     }).slice(0, 16)}`
   }));
+}
+
+function mergeReplicaCheckpoint(previous, step, testPlan) {
+  const current = previous?.status === 'running' ? previous : {};
+  const next = {
+    version: 'replica-checkpoint/v1',
+    status: 'running',
+    packageHash: current.packageHash || null,
+    testPlanHash: hashCanonical(testPlan),
+    builds: { ...(current.builds || {}) },
+    turns: { ...(current.turns || {}) },
+    cells: { ...(current.cells || {}) }
+  };
+  if (step.type === 'package-locked') next.packageHash = step.packageHash;
+  if (step.type === 'build-complete') {
+    next.builds[step.runtimeId] = {
+      validity: step.validity,
+      artifactCommitment: structuredClone(step.artifactCommitment || null)
+    };
+  }
+  if (step.type === 'turn-evidence-committed') {
+    next.turns[step.turnKey] = {
+      resultCommitment: structuredClone(step.resultCommitment),
+      validity: step.validity,
+      inputHash: step.inputHash
+    };
+  }
+  if (step.type === 'cell-complete') {
+    next.cells[`${step.runtimeId}:${step.testId}:${step.repeatIndex}`] = {
+      validity: step.validity, runCount: step.runCount, turnCount: step.turnCount
+    };
+  }
+  return next;
 }
 
 function summarizePhase2Execution(testPlan, execution) {
