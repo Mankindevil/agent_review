@@ -4,7 +4,7 @@ import {
   computeSubcriterionConfidence,
   computeTotalConfidence
 } from './confidence.js';
-import { releaseReplicaArena } from './arena-release.js';
+import { finalizeDualTrack, validReplicaIdsFor } from './arena-release.js';
 import { generateLockedHumor } from './humor.js';
 import { RUBRIC_V1 } from './rubric.js';
 
@@ -180,11 +180,24 @@ export function lockAbsoluteResult(evaluation, result, actor) {
   return locked;
 }
 
+/**
+ * Locks the absolute result and, only when the dual-track gate is already
+ * met (the replica track is locked or there are no valid Replicas to
+ * score), opportunistically finalizes the dual-track rating in the same
+ * call. This function never finalizes a rating while a valid Replica still
+ * needs replica-human review — see `finalizeDualTrack` for the explicit
+ * gate. Kept for existing call sites; new code should call
+ * `lockAbsoluteResult` and `finalizeDualTrack` directly.
+ */
 export async function lockAndReleaseAbsoluteResult(evaluation, services, actor) {
   const absolute = lockAbsoluteResult(evaluation, undefined, actor);
   const humor = await generateLockedHumor(evaluation, services);
-  const released = await releaseReplicaArena(evaluation, services);
-  Object.assign(evaluation, released);
+  const validReplicaIds = validReplicaIdsFor(evaluation.replicaArena || {});
+  const dualTrackReady = validReplicaIds.length === 0 ||
+    Boolean(evaluation.governance?.replicaHumanLockedAt);
+  if (dualTrackReady) {
+    await finalizeDualTrack(evaluation, services, actor);
+  }
   return {
     absolute,
     humor,

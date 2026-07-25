@@ -7,6 +7,12 @@ export {
 } from './result-v2.js';
 
 export {
+  finalizeDualTrack,
+  releaseReplicaArena,
+  runSealedModelArena
+} from './arena-release.js';
+
+export {
   DEFAULT_REPLICA_REVIEW_POLICY,
   REPLICA_REVIEW_VISIBILITIES,
   getReplicaReviewPolicy,

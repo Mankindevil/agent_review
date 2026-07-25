@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { collapseCubeToScoreCells, mergeHumanJudgesIntoCube } from './arena-cube-merge.js';
 import { runAnonymousArena as runAnonymousArenaDefault } from './arena.js';
 import {
   bootstrapReplicaAdvantage as bootstrapReplicaAdvantageDefault,
@@ -9,66 +10,34 @@ import { classifyDualTrackRating as classifyDualTrackRatingDefault } from './rat
 const SHA256 = /^[a-f0-9]{64}$/u;
 
 /**
- * Releases the counterfactual Replica comparison only after Phase 4 has
- * committed an immutable absolute result. The absolute result is reused by
- * reference and never recalculated from Replica evidence.
+ * Runs the anonymous model Arena over the sealed Replica materials and
+ * stores the raw per-judge scoring cube on `evaluation.replicaArena`. This
+ * does NOT require the absolute result to be locked (see the parallel
+ * dual-track design): the sealed Replica track scores independently of the
+ * absolute human review track. Idempotent — a second call is a no-op once
+ * the cube is present.
  */
-export function releaseReplicaArena(evaluation, services = {}) {
-  assertAbsoluteLock(evaluation);
-  if (evaluation.replicaArena?.status === 'released') return evaluation;
+export async function runSealedModelArena(evaluation, services = {}) {
+  assertEvaluationObject(evaluation);
   if (evaluation.replicaArena?.status !== 'sealed') {
-    throw new Error('Replica Arena must be sealed before it can be released');
+    throw conflict('the Replica Arena must be sealed before running the model Arena');
   }
-  return releaseSealedArena(evaluation, services);
-}
+  if (Array.isArray(evaluation.replicaArena.modelScoringCube)) return evaluation;
 
-async function releaseSealedArena(evaluation, services) {
   const now = services.now || (() => new Date().toISOString());
-  const releasedAt = now();
-  assertIso(releasedAt, 'replica release timestamp');
-  const absolute = evaluation.resultV2.absolute;
   const validReplicaIds = validReplicaIdsFor(evaluation.replicaArena);
-  const next = {
-    ...evaluation,
-    governance: {
-      ...evaluation.governance,
-      replicaReleasedAt: releasedAt
-    },
-    replicaArena: {
-      ...evaluation.replicaArena,
-      releasedAt
-    },
-    resultV2: {
-      ...evaluation.resultV2,
-      // The Phase 4 immutable absolute score must never be copied,
-      // recomputed, or mixed with counterfactual Replica measurements.
-      absolute
-    }
-  };
-
   if (validReplicaIds.length === 0) {
-    next.replicaArena.status = 'unavailable';
-    next.resultV2.replica = { status: 'unavailable' };
-    next.resultV2.rating = {
-      status: 'pending-replica',
-      code: 'PENDING_REPLICA',
-      label: '待复刻'
+    evaluation.replicaArena = {
+      ...evaluation.replicaArena,
+      modelScoringCube: [],
+      modelArenaValidReplicaIds: [],
+      modelArenaRanAt: now()
     };
-    transitionToFinal(next, releasedAt, false);
-    return next;
+    return evaluation;
   }
 
-  const runAnonymousArena =
-    services.runAnonymousArena || runAnonymousArenaDefault;
-  const bootstrapReplicaAdvantage =
-    services.bootstrapReplicaAdvantage || bootstrapReplicaAdvantageDefault;
-  const classifyDualTrackRating =
-    services.classifyDualTrackRating || classifyDualTrackRatingDefault;
-  const materials = await loadSealedArenaMaterials(
-    evaluation,
-    validReplicaIds,
-    services
-  );
+  const runAnonymousArena = services.runAnonymousArena || runAnonymousArenaDefault;
+  const materials = await loadSealedArenaMaterials(evaluation, validReplicaIds, services);
   const arena = await runAnonymousArena({
     ...(services.arenaOptions || {}),
     ...materials,
@@ -76,17 +45,133 @@ async function releaseSealedArena(evaluation, services) {
     replicaArena: evaluation.replicaArena,
     validReplicaIds
   });
-  const scoringCube = Array.isArray(arena?.scoringCube)
-    ? arena.scoringCube
-    : arena?.scoreCells;
+  const modelScoringCube = Array.isArray(arena?.scoringCube) ? arena.scoringCube : arena?.scoreCells;
+  if (!Array.isArray(modelScoringCube) || modelScoringCube.length === 0) {
+    throw new Error('sealed model Arena must produce a non-empty scoring cube');
+  }
+  evaluation.replicaArena = {
+    ...evaluation.replicaArena,
+    modelScoringCube,
+    modelArenaValidReplicaIds: [...validReplicaIds],
+    modelArenaRanAt: now()
+  };
+  return evaluation;
+}
+
+/**
+ * Finalizes the dual-track rating: merges the sealed model Arena cube with
+ * any locked replica-human judge channels, bootstraps the Δ/Δc advantage,
+ * classifies the rating, and transitions governance to `final`. Succeeds
+ * only when the absolute result is locked AND (the replica-human track is
+ * locked OR there are no valid Replicas to score). Idempotent by
+ * `actor.idempotencyKey`.
+ */
+export async function finalizeDualTrack(evaluation, services = {}, actor = {}) {
+  assertEvaluationObject(evaluation);
+  assertAbsoluteLock(evaluation);
+  const actorId = requiredText(actor?.principalId, 'actor identity');
+  const key = requiredText(actor?.idempotencyKey, 'idempotency key');
+
+  const validReplicaIds = validReplicaIdsFor(evaluation.replicaArena || {});
+  assertReplicaTrackGate(evaluation, validReplicaIds);
+
+  const receipt = evaluation.governance?.dualTrackFinalizeReceipt;
+  if (evaluation.governance?.dualTrackFinalizedAt) {
+    if (receipt?.key === key) {
+      return { replica: evaluation.resultV2.replica, rating: evaluation.resultV2.rating };
+    }
+    throw conflict('dual-track finalize is already complete with a different idempotency key');
+  }
+
+  const outcome = validReplicaIds.length === 0
+    ? unavailableOutcome()
+    : await finalizeWithValidReplicas(evaluation, validReplicaIds, services);
+
+  const now = services.now || (() => new Date().toISOString());
+  const finalizedAt = now();
+  assertIso(finalizedAt, 'dual-track finalize timestamp');
+
+  evaluation.replicaArena = {
+    ...evaluation.replicaArena,
+    status: outcome.released ? 'released' : 'unavailable',
+    ...(outcome.released ? { releasedAt: finalizedAt } : {})
+  };
+  evaluation.resultV2 = {
+    ...evaluation.resultV2,
+    replica: outcome.replica,
+    rating: outcome.rating
+  };
+  evaluation.governance = {
+    ...evaluation.governance,
+    ...(outcome.released ? { replicaReleasedAt: finalizedAt } : {}),
+    dualTrackFinalizedAt: finalizedAt,
+    dualTrackFinalizeReceipt: {
+      key,
+      payloadHash: hash(canonical({ replica: outcome.replica, rating: outcome.rating }))
+    }
+  };
+  transitionToFinal(evaluation, finalizedAt, outcome.released);
+  appendAudit(evaluation, 'dual-track-finalized', actorId, {
+    idempotencyKey: key,
+    replicaStatus: outcome.replica.status,
+    ratingCode: outcome.rating.code ?? null
+  });
+  return { replica: outcome.replica, rating: outcome.rating };
+}
+
+/**
+ * Deprecated compatibility helper. Use `finalizeDualTrack` directly for new
+ * call sites. Only succeeds once both tracks are ready — it never finalizes
+ * a rating from the absolute lock alone while a valid Replica still needs
+ * replica-human review.
+ */
+export async function releaseReplicaArena(evaluation, services = {}) {
+  assertAbsoluteLock(evaluation);
+  if (evaluation.replicaArena?.status === 'released' || evaluation.replicaArena?.status === 'unavailable') {
+    return evaluation;
+  }
+  if (evaluation.replicaArena?.status !== 'sealed') {
+    throw new Error('Replica Arena must be sealed before it can be released');
+  }
+  const validReplicaIds = validReplicaIdsFor(evaluation.replicaArena);
+  assertReplicaTrackGate(evaluation, validReplicaIds);
+  const actor = {
+    principalId: 'system',
+    idempotencyKey: `legacy-release:${requiredText(evaluation.id, 'evaluation.id')}`
+  };
+  await finalizeDualTrack(evaluation, services, actor);
+  return evaluation;
+}
+
+function unavailableOutcome() {
+  return {
+    replica: { status: 'unavailable' },
+    rating: { status: 'pending-replica', code: 'PENDING_REPLICA', label: '待复刻' },
+    released: false
+  };
+}
+
+async function finalizeWithValidReplicas(evaluation, validReplicaIds, services) {
+  await runSealedModelArena(evaluation, services);
+  const modelScoringCube = evaluation.replicaArena.modelScoringCube;
+  if (!Array.isArray(modelScoringCube) || modelScoringCube.length === 0) {
+    throw new Error('sealed model Arena must produce a non-empty scoring cube');
+  }
+  const humanReviews = humanReviewsForMerge(evaluation);
+  const mergedCube = mergeHumanJudgesIntoCube(modelScoringCube, humanReviews, validReplicaIds);
+  const scoreCells = collapseCubeToScoreCells(mergedCube);
+
+  const bootstrapReplicaAdvantage = services.bootstrapReplicaAdvantage || bootstrapReplicaAdvantageDefault;
+  const classifyDualTrackRating = services.classifyDualTrackRating || classifyDualTrackRatingDefault;
   const advantage = bootstrapReplicaAdvantage(
-    scoringCube,
+    scoreCells,
     validReplicaIds,
     services.bootstrapOptions || {}
   );
   if (advantage?.status !== 'ready') {
     throw new Error('valid Replica Arena must produce a ready advantage');
   }
+  const absolute = evaluation.resultV2.absolute;
   const rating = classifyDualTrackRating({
     eligibilityStatus: evaluation.qualification?.status,
     absoluteTotal: absolute.total,
@@ -94,17 +179,28 @@ async function releaseSealedArena(evaluation, services) {
     objectiveCoverage: absolute.dimensions.agentCapability.objectiveCoverage,
     replicaAdvantage: advantage
   });
+  return {
+    replica: releasedReplica(advantage, validReplicaIds, scoreCells, rating),
+    rating,
+    released: true
+  };
+}
 
-  next.replicaArena.status = 'released';
-  next.resultV2.replica = releasedReplica(
-    advantage,
-    validReplicaIds,
-    scoringCube,
-    rating
-  );
-  next.resultV2.rating = rating;
-  transitionToFinal(next, releasedAt, true);
-  return next;
+function humanReviewsForMerge(evaluation) {
+  return (evaluation.replicaHumanReviews || [])
+    .filter((review) => review?.status === 'submitted')
+    .map((review) => ({
+      principalId: requiredText(review.principalId, 'replicaHumanReview.principalId'),
+      scores: Object.fromEntries(
+        Object.entries(review.scores || {}).map(([sourceId, entry]) => [sourceId, entry.total])
+      )
+    }));
+}
+
+function assertReplicaTrackGate(evaluation, validReplicaIds) {
+  if (validReplicaIds.length > 0 && !evaluation.governance?.replicaHumanLockedAt) {
+    throw conflict('dual-track finalize requires the replica-human review to be locked while valid Replicas exist');
+  }
 }
 
 function transitionToFinal(evaluation, at, replicaReleased) {
@@ -131,6 +227,22 @@ function appendPhaseTransition(evaluation, from, to, at) {
   };
   event.eventHash = hash(canonical(event));
   evaluation.auditEvents.push(event);
+}
+
+function appendAudit(evaluation, type, actorId, payload) {
+  if (!Array.isArray(evaluation.auditEvents)) evaluation.auditEvents = [];
+  const previousEventHash = evaluation.auditEvents.at(-1)?.eventHash || null;
+  const event = {
+    eventId: `audit_${randomUUID().replaceAll('-', '')}`,
+    type,
+    actorId,
+    at: new Date().toISOString(),
+    payloadHash: hash(canonical(payload)),
+    previousEventHash
+  };
+  event.eventHash = hash(canonical(event));
+  evaluation.auditEvents.push(event);
+  return event;
 }
 
 async function loadSealedArenaMaterials(evaluation, validReplicaIds, services) {
@@ -254,8 +366,8 @@ function releasedReplica(advantage, validReplicaIds, scoringCube, rating) {
   };
 }
 
-function validReplicaIdsFor(replicaArena) {
-  return (Array.isArray(replicaArena.runtimeSummaries)
+export function validReplicaIdsFor(replicaArena) {
+  return (Array.isArray(replicaArena?.runtimeSummaries)
     ? replicaArena.runtimeSummaries
     : []
   ).flatMap((summary) =>
@@ -272,14 +384,19 @@ function assertAbsoluteLock(evaluation) {
   const governance = evaluation.governance;
   const absolute = evaluation.resultV2?.absolute;
   if (
-    governance?.phase !== 'absolute_locked' ||
-    !isIso(governance.absoluteLockedAt) ||
-    !SHA256.test(governance.resultHash || '') ||
+    !isIso(governance?.absoluteLockedAt) ||
+    !SHA256.test(governance?.resultHash || '') ||
     !absolute ||
     absolute.status !== 'locked' ||
     absolute.resultHash !== governance.resultHash
   ) {
     throw new Error('Replica Arena release requires an immutable absolute locked result');
+  }
+}
+
+function assertEvaluationObject(evaluation) {
+  if (!evaluation || typeof evaluation !== 'object' || Array.isArray(evaluation)) {
+    throw new TypeError('evaluation must be an object');
   }
 }
 
@@ -303,4 +420,8 @@ function canonical(value) {
 
 function hash(value) {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function conflict(message) {
+  return Object.assign(new Error(message), { statusCode: 409 });
 }
