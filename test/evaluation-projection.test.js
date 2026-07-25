@@ -413,10 +413,16 @@ test('all pre-lock projections expose sealed Replica counts without runtime or e
   };
   source.resultV2.replica = { status: 'sealed', runtimeId: 'runtime-private', output: 'must-not-project' };
 
-  for (const audience of ['public', 'admin', 'judge-preview']) {
+  for (const audience of ['public', 'participant', 'judge', 'admin', 'judge-preview']) {
     const projection = projectEvaluation(source, {
       audience,
-      principal: audience === 'admin' ? { principalId: 'admin-1', role: 'admin' } : null
+      principal: audience === 'admin'
+        ? { principalId: 'admin-1', role: 'admin' }
+        : audience === 'participant'
+          ? { principalId: 'participant', role: 'participant' }
+          : audience === 'judge'
+            ? { principalId: 'judge-1', role: 'judge' }
+            : null
     });
     assert.deepEqual(projection.resultV2.replica, {
       status: 'sealed', validReplicaCount: 1, pendingAttributionCount: 1

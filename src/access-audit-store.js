@@ -6,6 +6,17 @@ const EVENT_FIELDS = ['principalId', 'evaluationId', 'evidenceId', 'role', 'cont
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const ROLES = new Set(['participant', 'judge', 'admin']);
 
+let accessAuditStoreSingleton = null;
+
+export function getAccessAuditStore(env = process.env) {
+  if (!accessAuditStoreSingleton) {
+    accessAuditStoreSingleton = new AccessAuditStore({
+      root: env.ACCESS_AUDIT_ROOT || path.resolve('data/access-audit')
+    });
+  }
+  return accessAuditStoreSingleton;
+}
+
 export class AccessAuditStore {
   constructor({ root = path.resolve('data/access-audit'), now = () => new Date().toISOString() } = {}) {
     this.root = path.resolve(root);

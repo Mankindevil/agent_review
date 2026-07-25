@@ -24,8 +24,10 @@ import { resolveServerAddress } from './src/server-address.js';
 import { projectEvaluation } from './src/evaluation-projection.js';
 import {
   authenticatePrincipal,
+  isReviewGovernanceEnabled,
   requireRole
 } from './src/review-access.js';
+import { getAccessAuditStore } from './src/access-audit-store.js';
 import {
   copyEvidenceEncryptionKey,
   copyResumeMacKey,
@@ -54,6 +56,7 @@ const credentialVault = blackBoxRuntimeConfig.enabled
   ? new EphemeralCredentialVault()
   : null;
 const resumeMacKey = copyResumeMacKey(blackBoxRuntimeConfig);
+export const accessAuditStore = getAccessAuditStore(process.env);
 export const pipeline = new EvaluationPipeline(evaluationStore, events, {
   blackBoxEnabled: blackBoxRuntimeConfig.enabled,
   credentialVault,
@@ -191,6 +194,9 @@ export const server = createServer(async (request, response) => {
       url.pathname.match(/^\/api\/evaluations\/([^/]+)\/judge-preview$/);
     if (request.method === 'GET' && judgePreviewMatch) {
       response.setHeader('cache-control', 'no-store');
+      if (!isReviewGovernanceEnabled(process.env)) {
+        return json(response, 403, { error: 'Review governance is disabled' });
+      }
       const item = store.get(judgePreviewMatch[1]);
       if (!item || item.schemaVersion !== 2) {
         return json(response, 404, { error: 'Evaluation does not exist' });
@@ -207,6 +213,9 @@ export const server = createServer(async (request, response) => {
     const adminEvaluationMatch = url.pathname.match(/^\/api\/admin\/evaluations\/([^/]+)$/);
     if (request.method === 'GET' && adminEvaluationMatch) {
       response.setHeader('cache-control', 'no-store');
+      if (!isReviewGovernanceEnabled(process.env)) {
+        return json(response, 403, { error: 'Review governance is disabled' });
+      }
       const item = store.get(adminEvaluationMatch[1]);
       if (!item || item.schemaVersion !== 2) {
         return json(response, 404, { error: 'Evaluation does not exist' });
@@ -219,6 +228,11 @@ export const server = createServer(async (request, response) => {
         audience: 'admin',
         principal
       }));
+    }
+    const evidenceMatch =
+      url.pathname.match(/^\/api\/evaluations\/([^/]+)\/evidence\/([^/]+)$/);
+    if (request.method === 'GET' && evidenceMatch) {
+      return serveEvidenceItem(request, response, evidenceMatch[1], evidenceMatch[2]);
     }
     const skillMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/builds\/([^/]+)\/skill$/);
     if (request.method === 'GET' && skillMatch) {
@@ -366,7 +380,48 @@ function projectionOptionsForRequest(evaluation, request) {
   if (!request.headers.authorization) return { audience: 'public' };
   const principal = authenticatePrincipal(request, evaluation, process.env);
   if (!principal) throw Object.assign(new Error('authentication required'), { statusCode: 401 });
+  if (
+    (principal.role === 'judge' || principal.role === 'admin') &&
+    !isReviewGovernanceEnabled(process.env)
+  ) {
+    throw Object.assign(new Error('review governance is disabled'), { statusCode: 403 });
+  }
   return { audience: principal.role, principal };
+}
+
+async function serveEvidenceItem(request, response, evaluationId, evidenceId) {
+  response.setHeader('cache-control', 'no-store');
+  const item = store.get(evaluationId);
+  if (!item || item.schemaVersion !== 2) {
+    return json(response, 404, { error: 'Evaluation does not exist' });
+  }
+  const principal = authenticatePrincipal(request, item, process.env);
+  if (!principal) {
+    return json(response, 401, { error: 'authentication required' });
+  }
+  if (
+    (principal.role === 'judge' || principal.role === 'admin') &&
+    !isReviewGovernanceEnabled(process.env)
+  ) {
+    return json(response, 403, { error: 'Review governance is disabled' });
+  }
+  const projected = projectEvaluation(item, {
+    audience: principal.role,
+    principal
+  });
+  const manifestItem = projected.evidenceManifest?.items?.find(
+    (entry) => entry.evidenceId === evidenceId
+  );
+  if (!manifestItem) {
+    return json(response, 404, { error: 'Evidence does not exist' });
+  }
+  await accessAuditStore.append({
+    principalId: principal.principalId,
+    evaluationId: item.id,
+    evidenceId: manifestItem.evidenceId,
+    role: principal.role
+  });
+  return json(response, 200, { item: manifestItem });
 }
 
 function bearerToken(value) {

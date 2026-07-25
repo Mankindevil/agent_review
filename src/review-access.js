@@ -4,7 +4,12 @@ import { verifyParticipantAccess } from './participant-access.js';
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const ROLES = new Set(['judge', 'admin']);
 
+export function isReviewGovernanceEnabled(env = process.env) {
+  return String(env?.REVIEW_GOVERNANCE_ENABLED || '').toLowerCase() === 'true';
+}
+
 export function authenticatePrincipal(request, evaluation, env = process.env) {
+  ignoreBodyIdentityFields(request);
   const token = bearerToken(request?.headers?.authorization);
   if (!token) return null;
 
@@ -68,4 +73,9 @@ function sameHash(actual, expectedHex) {
 
 function accessError(statusCode, message) {
   return Object.assign(new Error(message), { statusCode });
+}
+
+function ignoreBodyIdentityFields(_request) {
+  // Identity comes only from Authorization bearer tokens and configured hashes.
+  // Client-supplied judgeId, role, or principalId fields in bodies are ignored.
 }

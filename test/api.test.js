@@ -37,6 +37,8 @@ process.env.REVIEW_PRINCIPALS_JSON = JSON.stringify([{
   role: 'admin',
   tokenSha256: createHash('sha256').update('admin-secret', 'utf8').digest('hex')
 }]);
+process.env.REVIEW_GOVERNANCE_ENABLED = 'true';
+process.env.ACCESS_AUDIT_ROOT = path.join(tmpdir(), `agent-roast-audit-${process.pid}`);
 const API_UNSECURED_JWT = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ.';
 const V2_FIXTURE_PARTICIPANT_TOKEN = 'T'.repeat(43);
 const apiEvidenceRecord = createEvidenceRecord({
@@ -73,13 +75,52 @@ const v2Fixture = {
     authorization: 'api-auth-secret'
   },
   governance: { phase: 'waiting_model', anonymousMapping: { A: 'api-mapping-secret' } },
+  submission: {
+    submissionVersion: '1.0',
+    frozenAt: '2026-07-24T09:00:00.000Z',
+    agentCard: {
+      sha256: 'a'.repeat(64),
+      value: {
+        name: 'API Research Agent',
+        description: 'Reviews supplied evidence for the API fixture.',
+        skills: [{ id: 'review', name: 'Review', description: 'Review evidence.' }]
+      }
+    },
+    agentExamples: {
+      sha256: 'b'.repeat(64),
+      value: [{ id: 'example-1', turns: [{ input: { parts: [{ type: 'text', text: 'Use token=api-example-secret' }] } }] }]
+    },
+    config: { rubricVersion: 'rubric-v1', modelConfigVersion: 'model-v1' }
+  },
   qualification: { status: 'passed', attemptRunIds: ['run_api'], hiddenInput: 'api-hidden-secret' },
   evidenceManifest: {
     version: '1.0',
     items: [apiEvidenceManifestItem]
   },
   objectiveCapability: { status: 'pending', score: null },
-  absoluteReview: { status: 'pending-model-review' },
+  absoluteReview: {
+    status: 'pending-model-review',
+    modelPanel: {
+      status: 'model-locked',
+      dimensions: { professionalism: { score: 81 } },
+      primary: [{
+        reviewRunId: 'primary_0_gpt',
+        reviews: [{
+          subcriterionId: 'professionalism.evidenceReasoning',
+          score: 81,
+          confidence: 0.82,
+          evidenceIds: ['ev_api'],
+          findings: [{
+            findingId: 'finding_api_1',
+            text: 'Evidence is cited in the API fixture.',
+            evidenceIds: ['ev_api']
+          }]
+        }]
+      }],
+      arbitration: null,
+      disputedSubcriterionIds: []
+    }
+  },
   replicaArena: { status: 'sealed', seal: 'api-seal-secret' },
   resultV2: { status: 'pending', score: null },
   agentCard: { description: 'api-card-secret' },
@@ -104,6 +145,7 @@ test.after(async () => {
   await new Promise((resolve) => server.close(resolve));
   await rm(process.env.DATA_FILE, { force: true });
   await rm(`${process.env.DATA_FILE}.tmp`, { force: true });
+  await rm(process.env.ACCESS_AUDIT_ROOT, { force: true, recursive: true });
 });
 
 test('health endpoint responds', async () => {
@@ -257,7 +299,12 @@ test('enforces server-authenticated judge and admin projections for V2 routes', 
   });
   const judgeView = await judge.json();
   assert.equal(judge.status, 200);
-  assert.equal(judgeView.submission, undefined);
+  assert.equal(judgeView.submission.agentCard.value.name, 'API Research Agent');
+  assert.equal(
+    judgeView.absoluteReview.modelPanel.primary[0].reviews[0].score,
+    81
+  );
+  assert.equal(JSON.stringify(judgeView).includes('api-example-secret'), false);
   assert.equal(JSON.stringify(judgeView).includes('api-seal-secret'), false);
 
   const forbiddenAdmin = await fetch(`${origin}/api/admin/evaluations/${v2Fixture.id}`, {
@@ -269,6 +316,88 @@ test('enforces server-authenticated judge and admin projections for V2 routes', 
     headers: { authorization: 'Bearer admin-secret' }
   });
   assert.equal(admin.status, 200);
+});
+
+test('returns participant projection for authenticated evaluation detail reads', async () => {
+  const publicDetail = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
+  const publicView = await publicDetail.json();
+  assert.equal(publicDetail.status, 200);
+  assert.equal(Object.hasOwn(publicView, 'submission'), false);
+
+  const participantDetail = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`, {
+    headers: { authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}` }
+  });
+  const participantView = await participantDetail.json();
+  assert.equal(participantDetail.status, 200);
+  assert.deepEqual(participantView.submission, {
+    submissionVersion: '1.0',
+    frozenAt: '2026-07-24T09:00:00.000Z',
+    agentCard: { sha256: 'a'.repeat(64) },
+    agentExamples: { sha256: 'b'.repeat(64) },
+    config: {
+      rubricVersion: 'rubric-v1',
+      modelConfigVersion: 'model-v1'
+    }
+  });
+  assert.equal(Object.hasOwn(participantView.submission.agentCard, 'value'), false);
+  assert.equal(Object.hasOwn(participantView.absoluteReview, 'modelPanel'), false);
+});
+
+test('fails closed for judge and admin elevation when review governance is disabled', async () => {
+  const previous = process.env.REVIEW_GOVERNANCE_ENABLED;
+  process.env.REVIEW_GOVERNANCE_ENABLED = 'false';
+  try {
+    const judgePreview = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/judge-preview`, {
+      headers: { authorization: 'Bearer judge-secret' }
+    });
+    assert.equal(judgePreview.status, 403);
+
+    const adminDetail = await fetch(`${origin}/api/admin/evaluations/${v2Fixture.id}`, {
+      headers: { authorization: 'Bearer admin-secret' }
+    });
+    assert.equal(adminDetail.status, 403);
+
+    const judgeDetail = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`, {
+      headers: { authorization: 'Bearer judge-secret' }
+    });
+    assert.equal(judgeDetail.status, 403);
+
+    const publicDetail = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
+    assert.equal(publicDetail.status, 200);
+
+    const participantDetail = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`, {
+      headers: { authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}` }
+    });
+    const participantView = await participantDetail.json();
+    assert.equal(participantDetail.status, 200);
+    assert.equal(participantView.submission.submissionVersion, '1.0');
+  } finally {
+    if (previous === undefined) delete process.env.REVIEW_GOVERNANCE_ENABLED;
+    else process.env.REVIEW_GOVERNANCE_ENABLED = previous;
+  }
+});
+
+test('records evidence-view audit events without returning vault content', async () => {
+  const { readdir, readFile } = await import('node:fs/promises');
+  const response = await fetch(
+    `${origin}/api/evaluations/${v2Fixture.id}/evidence/${apiEvidenceRecord.evidenceId}`,
+    { headers: { authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}` } }
+  );
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.item.evidenceId, 'ev_api');
+  assert.equal(body.item.recordHash, apiEvidenceRecord.recordHash);
+  assert.equal(Object.hasOwn(body.item, 'payload'), false);
+
+  const auditDir = process.env.ACCESS_AUDIT_ROOT;
+  const auditFile = (await readdir(auditDir)).find((name) => name.endsWith('.ndjson'));
+  const auditLog = await readFile(path.join(auditDir, auditFile), 'utf8');
+  const lastEvent = JSON.parse(auditLog.trim().split('\n').at(-1));
+  assert.equal(lastEvent.type, 'evidence-viewed');
+  assert.equal(lastEvent.evaluationId, v2Fixture.id);
+  assert.equal(lastEvent.evidenceId, 'ev_api');
+  assert.equal(lastEvent.role, 'participant');
+  assert.equal(JSON.stringify(lastEvent).includes('durationMs'), false);
 });
 
 test('reports PandaAI data source status without credentials', async () => {

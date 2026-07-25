@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
   authenticatePrincipal,
+  isReviewGovernanceEnabled,
   requireRole
 } from '../src/review-access.js';
 
@@ -61,6 +62,25 @@ test('returns no principal for missing, malformed, or invalid tokens', () => {
   assert.equal(authenticatePrincipal(request(judgeToken), evaluation, {
     REVIEW_PRINCIPALS_JSON: '{not-json}'
   }), null);
+});
+
+test('ignores client-supplied judgeId in the request body', () => {
+  const principal = authenticatePrincipal({
+    headers: { authorization: `Bearer ${judgeToken}` },
+    body: { judgeId: 'judge-2', role: 'admin', principalId: 'judge-2' }
+  }, evaluation, env);
+
+  assert.deepEqual(principal, {
+    principalId: 'judge-1',
+    displayName: '评委一',
+    role: 'judge'
+  });
+});
+
+test('treats review governance as opt-in via REVIEW_GOVERNANCE_ENABLED', () => {
+  assert.equal(isReviewGovernanceEnabled({ REVIEW_GOVERNANCE_ENABLED: 'true' }), true);
+  assert.equal(isReviewGovernanceEnabled({ REVIEW_GOVERNANCE_ENABLED: 'false' }), false);
+  assert.equal(isReviewGovernanceEnabled({}), false);
 });
 
 test('requires a server-authenticated matching role', () => {
