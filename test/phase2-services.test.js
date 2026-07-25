@@ -26,7 +26,7 @@ const compilation = compileAgentExamples({
 }]);
 
 test('demo Phase 2 services deterministically generate, scope, and lock five model identities', async () => {
-  const services = createPhase2Services({ env: {} });
+  const services = createPhase2Services({ env: { MODEL_REVIEW_PANEL_MODE: 'demo' } });
   const generated = await services.generateHidden(compilation, { attempt: 0 });
   const scoped = await services.reviewScopes(compilation, generated.candidates);
   const applicable = compilation.rubricChecks.filter((item) => item.applicable);
@@ -83,6 +83,7 @@ test('demo Phase 2 services deterministically generate, scope, and lock five mod
 test('demo Phase 2 services omit multi-turn when disabled by env', async () => {
   const services = createPhase2Services({
     env: {
+      MODEL_REVIEW_PANEL_MODE: 'demo',
       A2A_MULTI_TURN_ENABLED: 'false',
       A2A_REPEAT_COUNT: '1'
     }

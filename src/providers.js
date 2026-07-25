@@ -14,24 +14,122 @@ non-abusive humor. You may not add facts, scores, score changes, numbers, named 
 tools, models, or capability claims. Return JSON only.`;
 
 export function configuredReviewPanel(env = process.env) {
-  if (!env.MODEL_REVIEW_PANEL_JSON) {
-    const primary = DEFAULT_REVIEWERS.map((reviewer) =>
-      withIdentity({ ...reviewer, baseUrl: `mock://${reviewer.id}` })
-    );
-    return deepFreeze({
-      version: 'panel-v1',
-      mode: 'demo',
-      primary,
-      arbitrator: withIdentity({
-        id: 'arbitrator',
-        name: 'Deterministic arbitration reviewer',
-        model: 'Arbitrator Mock',
-        kind: 'mock',
-        baseUrl: 'mock://arbitrator'
-      }),
-      fallbacks: []
-    });
+  if (env.MODEL_REVIEW_PANEL_JSON) {
+    return panelFromJson(env);
   }
+  // Explicit demo escape must win so tests can inject MODE=demo without
+  // clearing ambient gateway keys from process.env.
+  if (String(env.MODEL_REVIEW_PANEL_MODE || '').trim().toLowerCase() === 'demo') {
+    return demoReviewPanel();
+  }
+  const gateway = gatewayLiveStatus(env);
+  if (gateway.ready) {
+    return gatewayLivePanel(env);
+  }
+  const missing = gateway.missing.length
+    ? gateway.missing.join(', ')
+    : 'OPENAI_*, ARK_*, REVIEW_MODEL_*';
+  throw new TypeError(
+    'model review panel requires MODEL_REVIEW_PANEL_JSON or complete gateway credentials (missing: '
+      + missing
+      + '). Set MODEL_REVIEW_PANEL_MODE=demo only for explicit local/test mock panels.'
+  );
+}
+
+function demoReviewPanel() {
+  const primary = DEFAULT_REVIEWERS.map((reviewer) =>
+    withIdentity({ ...reviewer, baseUrl: 'mock://' + reviewer.id })
+  );
+  return deepFreeze({
+    version: 'panel-v1',
+    mode: 'demo',
+    primary,
+    arbitrator: withIdentity({
+      id: 'arbitrator',
+      name: 'Deterministic arbitration reviewer',
+      model: 'Arbitrator Mock',
+      kind: 'mock',
+      baseUrl: 'mock://arbitrator'
+    }),
+    fallbacks: []
+  });
+}
+
+function gatewayLivePanel(env) {
+  const llmx = {
+    kind: 'openai-compatible',
+    baseUrl: env.OPENAI_BASE_URL,
+    apiKeyEnv: 'OPENAI_API_KEY'
+  };
+  const ark = {
+    kind: 'openai-compatible',
+    baseUrl: env.ARK_BASE_URL,
+    apiKeyEnv: 'ARK_API_KEY'
+  };
+  const primary = [
+    withIdentity({
+      ...llmx,
+      id: 'gpt',
+      name: 'OpenAI 评审',
+      model: env.REVIEW_MODEL_OPENAI
+    }),
+    withIdentity({
+      ...llmx,
+      id: 'claude',
+      name: 'Anthropic 评审',
+      model: env.REVIEW_MODEL_ANTHROPIC
+    }),
+    withIdentity({
+      ...ark,
+      id: 'doubao',
+      name: '豆包评审',
+      model: env.REVIEW_MODEL_DOUBAO
+    }),
+    withIdentity({
+      ...ark,
+      id: 'deepseek',
+      name: 'DeepSeek 评审',
+      model: env.REVIEW_MODEL_DEEPSEEK
+    })
+  ];
+  const arbitrator = withIdentity({
+    ...ark,
+    id: 'arbitrator',
+    name: 'Arbitration reviewer',
+    model: env.REVIEW_MODEL_DEEPSEEK
+  }, { seatSalt: 'arbitrator' });
+  const identities = [...primary, arbitrator].map((reviewer) => reviewer.identityKey);
+  if (new Set(identities).size !== identities.length) {
+    throw new TypeError('model review panel requires distinct reviewer identities');
+  }
+  return deepFreeze({
+    version: 'panel-v1',
+    mode: 'live',
+    primary,
+    arbitrator,
+    fallbacks: []
+  });
+}
+
+function gatewayLiveStatus(env) {
+  const required = [
+    'OPENAI_BASE_URL',
+    'OPENAI_API_KEY',
+    'ARK_BASE_URL',
+    'ARK_API_KEY',
+    'REVIEW_MODEL_OPENAI',
+    'REVIEW_MODEL_ANTHROPIC',
+    'REVIEW_MODEL_DOUBAO',
+    'REVIEW_MODEL_DEEPSEEK'
+  ];
+  const missing = required.filter((key) => {
+    const value = env[key];
+    return typeof value !== 'string' || !value.trim();
+  });
+  return { ready: missing.length === 0, missing };
+}
+
+function panelFromJson(env) {
   let parsed;
   try {
     parsed = JSON.parse(env.MODEL_REVIEW_PANEL_JSON);
@@ -46,11 +144,11 @@ export function configuredReviewPanel(env = process.env) {
     throw new TypeError('model review panel requires exactly four primary reviewers');
   }
   const primary = parsed.primary.map((reviewer, index) =>
-    normalizePanelReviewer(reviewer, env, `primary[${index}]`)
+    normalizePanelReviewer(reviewer, env, 'primary[' + index + ']')
   );
   const arbitrator = normalizePanelReviewer(parsed.arbitrator, env, 'arbitrator');
   const fallbacks = (parsed.fallbacks || []).map((reviewer, index) =>
-    normalizePanelReviewer(reviewer, env, `fallbacks[${index}]`)
+    normalizePanelReviewer(reviewer, env, 'fallbacks[' + index + ']')
   );
   const identities = [...primary, arbitrator, ...fallbacks].map(
     (reviewer) => reviewer.identityKey
@@ -266,7 +364,7 @@ function normalizePanelReviewer(value, env, field) {
   return withIdentity(reviewer);
 }
 
-function withIdentity(reviewer) {
+function withIdentity(reviewer, { seatSalt } = {}) {
   let host;
   if (reviewer.kind === 'mock') {
     host = reviewer.id;
@@ -277,9 +375,12 @@ function withIdentity(reviewer) {
       throw new TypeError('reviewer baseUrl must be an absolute URL');
     }
   }
+  const salt = typeof seatSalt === 'string' && seatSalt.trim()
+    ? `:${seatSalt.trim()}`
+    : '';
   return {
     ...reviewer,
-    identityKey: `${reviewer.kind}:${host}:${reviewer.model}`
+    identityKey: `${reviewer.kind}:${host}:${reviewer.model}${salt}`
   };
 }
 

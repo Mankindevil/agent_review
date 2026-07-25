@@ -168,8 +168,37 @@ test('fails closed for duplicate identities, literal secrets, or incomplete live
   );
 });
 
-test('provides five deterministic mock identities when no live panel is configured', () => {
-  const panel = configuredReviewPanel({});
+test('throws when live panel credentials are incomplete and demo mode is not set', () => {
+  assert.throws(() => configuredReviewPanel({}), /OPENAI_|ARK_|REVIEW_MODEL_/iu);
+});
+
+test('builds live panel from gateway env without MODEL_REVIEW_PANEL_JSON', () => {
+  const env = {
+    OPENAI_BASE_URL: 'https://llmx.example/v1',
+    OPENAI_API_KEY: 'o',
+    ARK_BASE_URL: 'https://ark.example/v3',
+    ARK_API_KEY: 'a',
+    REVIEW_MODEL_OPENAI: 'g5.4',
+    REVIEW_MODEL_ANTHROPIC: 'cs4.6',
+    REVIEW_MODEL_DOUBAO: 'ep-doubao',
+    REVIEW_MODEL_DEEPSEEK: 'ep-deepseek'
+  };
+  const panel = configuredReviewPanel(env);
+  assert.equal(panel.mode, 'live');
+  assert.equal(panel.primary.length, 4);
+  assert.equal(panel.primary[0].kind, 'openai-compatible');
+  assert.equal(panel.primary[0].model, 'g5.4');
+  assert.equal(panel.primary[2].apiKeyEnv, 'ARK_API_KEY');
+  assert.equal(panel.arbitrator.id, 'arbitrator');
+  assert.notEqual(panel.arbitrator.identityKey, panel.primary[3].identityKey);
+  assert.equal(new Set([
+    ...panel.primary.map((item) => item.identityKey),
+    panel.arbitrator.identityKey
+  ]).size, 5);
+});
+
+test('allows demo panel only when MODEL_REVIEW_PANEL_MODE=demo', () => {
+  const panel = configuredReviewPanel({ MODEL_REVIEW_PANEL_MODE: 'demo' });
   assert.equal(panel.mode, 'demo');
   assert.equal(panel.primary.length, 4);
   assert.equal(panel.arbitrator.kind, 'mock');
