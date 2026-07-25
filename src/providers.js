@@ -63,6 +63,14 @@ export function configuredReviewPanel(env = process.env) {
   });
 }
 
+/**
+ * Returns the frozen primary panel for independent anonymous arena sessions.
+ * Arbitration and fallback identities are deliberately excluded.
+ */
+export function configuredArenaReviewers(env = process.env) {
+  return configuredReviewPanel(env).primary;
+}
+
 export function configuredReviewers() {
   if (process.env.MODEL_REVIEWERS_JSON) {
     try {

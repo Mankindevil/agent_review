@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  ANONYMOUS_ARENA_SYSTEM_PROMPT,
   absolutePanelPrompt,
+  arenaComparisonPrompt,
   hiddenScopeReviewPrompt,
   hiddenVariantGenerationPrompt,
   replicaBuildPrompt,
@@ -72,6 +74,25 @@ test('absolute panel prompt includes only evidence-safe fields and forbids outsi
   assert.match(prompt, /outside fact|external fact/iu);
   assert.match(prompt, /"evidenceId":"ev_a"/u);
   assert.doesNotMatch(prompt, /replicaArena|runtimeBuild/u);
+});
+
+test('arena prompt compares anonymous results only and requires one strict JSON result', () => {
+  const prompt = arenaComparisonPrompt({
+    task: {
+      input: { parts: [{ type: 'text', text: 'Review supplied positions.' }] },
+      constraints: ['Use only supplied positions.'],
+      expectedDeliverable: 'Risk review.'
+    },
+    candidates: [{ candidateId: 'candidate-abc12345', output: { messageParts: [{ type: 'text', text: 'Result.' }] } }]
+  });
+
+  assert.match(ANONYMOUS_ARENA_SYSTEM_PROMPT, /compare.*task result quality/iu);
+  assert.match(ANONYMOUS_ARENA_SYSTEM_PROMPT, /protocol.*latency.*identity/iu);
+  assert.match(ANONYMOUS_ARENA_SYSTEM_PROMPT, /do not browse|must not browse/iu);
+  assert.match(ANONYMOUS_ARENA_SYSTEM_PROMPT, /JSON object only|one JSON object/iu);
+  assert.match(prompt, /candidate-abc12345/u);
+  assert.match(prompt, /taskConstraint/u);
+  assert.match(prompt, /artifactUsability/u);
 });
 
 test('replica prompts contain only supplied public build material and current-turn context history', () => {

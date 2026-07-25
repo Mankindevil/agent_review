@@ -7,6 +7,34 @@ export const PROFESSIONAL_REVIEW_SYSTEM_PROMPT = `你是苛刻、独立的金融
 输出必须是单个 JSON 对象，首字符必须是 {，尾字符必须是 }。不要输出 Markdown、代码围栏、思考过程或 JSON 之外的解释。结构严格如下：
 {"score":0,"dimensions":{"researchRigor":0,"dataDiscipline":0,"backtestIntegrity":0,"riskCompliance":0,"reproducibility":0},"comment":"","risk":""}`;
 
+export const ANONYMOUS_ARENA_SYSTEM_PROMPT = `You are an independent anonymous comparison judge.
+Compare only the task result quality shared by all candidates. Ignore protocol implementation, latency, identity, presumed internal architecture, and any unsupported claim about a candidate.
+Do not browse, call tools, or inject outside facts. When external truth is uncertain, explain the
+uncertainty in the rationale instead of inventing a verdict.
+Return one JSON object only, with no Markdown or prose outside it. Its exact shape is:
+{"scores":[{"candidateId":"","dimensions":{"taskConstraint":0,"professionalQuality":0,"evidenceRisk":0,"artifactUsability":0},"total":0,"rationale":"","uncertainties":[]}]}
+Score every dimension from 0 through 100. Include every supplied candidate exactly once.`;
+
+export function arenaComparisonPrompt(packet) {
+  const task = packet?.task || {};
+  const candidates = Array.isArray(packet?.candidates) ? packet.candidates.map((candidate) => ({
+    candidateId: candidate?.candidateId,
+    output: candidate?.output
+  })) : [];
+  return `Compare the anonymous candidate outputs for the one shared task below. Return scores with
+taskConstraint, professionalQuality, evidenceRisk, and artifactUsability for each candidate.
+
+SHARED_TASK:
+${JSON.stringify({
+  input: task.input,
+  constraints: Array.isArray(task.constraints) ? task.constraints : [],
+  expectedDeliverable: task.expectedDeliverable
+})}
+
+ANONYMOUS_CANDIDATES:
+${JSON.stringify(candidates)}`;
+}
+
 export function professionalReviewPrompt(card, complexity) {
   return `请按金融 A2A 黑客松标准评审以下 Agent Card。必要性规则初评为 ${complexity.score}/100，该分数仅作背景，不得直接复制为专业度分数。
 

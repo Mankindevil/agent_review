@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  configuredArenaReviewers,
   configuredReviewPanel,
   configuredReviewers,
   DEFAULT_REVIEWERS,
@@ -176,6 +177,32 @@ test('provides five deterministic mock identities when no live panel is configur
     ...panel.primary.map((item) => item.identityKey),
     panel.arbitrator.identityKey
   ]).size, 5);
+});
+
+test('arena reuses exactly the frozen primary panel identities and excludes arbitration', () => {
+  const reviewer = (id, model) => ({
+    id,
+    name: id,
+    kind: 'openai-compatible',
+    baseUrl: `https://${id}.models.example/v1`,
+    model,
+    apiKeyEnv: `${id.toUpperCase()}_KEY`
+  });
+  const env = {
+    A_KEY: 'a', B_KEY: 'b', C_KEY: 'c', D_KEY: 'd', E_KEY: 'e', FALLBACK_KEY: 'f',
+    MODEL_REVIEW_PANEL_JSON: JSON.stringify({
+      version: 'panel-v1',
+      primary: ['a', 'b', 'c', 'd'].map((id) => reviewer(id, `model-${id}`)),
+      arbitrator: reviewer('e', 'model-e'),
+      fallbacks: [reviewer('fallback', 'model-f')]
+    })
+  };
+
+  const panel = configuredReviewPanel(env);
+  const arena = configuredArenaReviewers(env);
+  assert.deepEqual(arena, panel.primary);
+  assert.equal(arena.some((item) => item.id === 'e' || item.id === 'fallback'), false);
+  assert.equal(Object.isFrozen(arena), true);
 });
 
 test('requestJson uses the shared live adapter and caller sampling limits', async () => {

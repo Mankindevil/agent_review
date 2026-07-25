@@ -1,0 +1,188 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  aggregateArenaScores,
+  buildArenaCells,
+  createArenaJudgePacket,
+  runAnonymousArena
+} from '../src/arena.js';
+
+const TEST_PLAN = {
+  tests: [{
+    testId: 'portfolio_review',
+    repeatCount: 2,
+    input: { parts: [{ type: 'text', text: 'Review this supplied portfolio.' }] },
+    constraints: ['Use only supplied holdings.'],
+    expectedDeliverable: 'A concise risk review.'
+  }]
+};
+
+const SUBMITTED_OUTPUTS = [
+  { testId: 'portfolio_review', repeatIndex: 0, messageParts: [{ type: 'text', text: 'Response zero.' }] },
+  { testId: 'portfolio_review', repeatIndex: 1, messageParts: [{ type: 'text', text: 'Response one.' }] }
+];
+
+const REPLICAS = [{
+  runtimeId: 'cursor',
+  validity: 'valid',
+  outputs: [
+    { testId: 'portfolio_review', repeatIndex: 0, messageParts: [{ type: 'text', text: 'Replica zero.' }] },
+    { testId: 'portfolio_review', repeatIndex: 1, messageParts: [{ type: 'text', text: 'Replica one.' }] }
+  ]
+}, {
+  runtimeId: 'broken-runtime',
+  validity: 'invalid-infrastructure',
+  outputs: []
+}];
+
+test('builds one shared-input arena cell per test and repeat for submitted and valid replicas', () => {
+  const cells = buildArenaCells({
+    testPlan: TEST_PLAN,
+    submittedOutputs: SUBMITTED_OUTPUTS,
+    replicas: REPLICAS
+  });
+
+  assert.equal(cells.length, 2);
+  assert.deepEqual(cells.map((cell) => [cell.testId, cell.repeatIndex]), [
+    ['portfolio_review', 0],
+    ['portfolio_review', 1]
+  ]);
+  assert.deepEqual(cells[0].task, {
+    input: TEST_PLAN.tests[0].input,
+    constraints: TEST_PLAN.tests[0].constraints,
+    expectedDeliverable: TEST_PLAN.tests[0].expectedDeliverable
+  });
+  assert.deepEqual(cells[0].candidates.map((candidate) => candidate.sourceId), [
+    'submitted',
+    'replica:cursor'
+  ]);
+});
+
+test('creates a deterministic anonymous packet with independently shuffled candidate order', () => {
+  const [cell] = buildArenaCells({
+    testPlan: TEST_PLAN,
+    submittedOutputs: SUBMITTED_OUTPUTS,
+    replicas: REPLICAS
+  });
+  cell.candidates[0].output.messageParts[0].runtimeId = 'metadata-runtime-sentinel';
+  cell.candidates[0].output.artifacts = [{
+    artifactId: 'internal-artifact-sentinel',
+    parts: [{ type: 'text', text: 'Useful artifact.' }],
+    latencyMs: 44
+  }];
+  const reviewer = { id: 'gpt', name: 'OpenAI reviewer', model: 'hidden-model' };
+  const first = createArenaJudgePacket(cell, reviewer, 123);
+  const repeated = createArenaJudgePacket(cell, reviewer, 123);
+  const secondJudge = createArenaJudgePacket(cell, { ...reviewer, id: 'claude' }, 456);
+
+  assert.deepEqual(first, repeated);
+  assert.match(first.candidates[0].candidateId, /^candidate-[a-f0-9]{8}$/u);
+  assert.deepEqual(first.task, cell.task);
+  assert.notEqual(
+    JSON.stringify(first.candidates.map((candidate) => candidate.candidateId)),
+    JSON.stringify(secondJudge.candidates.map((candidate) => candidate.candidateId))
+  );
+  for (const forbidden of [
+    'submitted', 'cursor', 'OpenAI reviewer', 'hidden-model',
+    'runtimeId', 'protocol', 'latency', 'a2a', 'reveal',
+    'metadata-runtime-sentinel', 'internal-artifact-sentinel'
+  ]) {
+    assert.equal(JSON.stringify(first).toLowerCase().includes(forbidden.toLowerCase()), false, forbidden);
+  }
+});
+
+test('runs fresh judges, recalculates totals, and preserves anonymous and revealed score cubes separately', async () => {
+  const vault = memoryVault();
+  const result = await runAnonymousArena({
+    testPlan: TEST_PLAN,
+    submittedOutputs: SUBMITTED_OUTPUTS,
+    replicas: REPLICAS,
+    reviewers: [
+      { id: 'gpt', kind: 'mock' },
+      { id: 'claude', kind: 'mock' }
+    ],
+    seed: 32,
+    evidenceVault: vault,
+    invokeJudge: async ({ packet }) => ({
+      scores: packet.candidates.map((candidate, index) => ({
+        candidateId: candidate.candidateId,
+        dimensions: {
+          taskConstraint: 80 + index,
+          professionalQuality: 70,
+          evidenceRisk: 60,
+          artifactUsability: 50
+        },
+        total: -1,
+        rationale: 'Compared only supplied results.',
+        uncertainties: []
+      }))
+    })
+  });
+
+  assert.equal(result.arenaVersion, 'anonymous-arena/v1');
+  assert.equal(result.cells.length, 4);
+  assert.equal(result.scoringCube.length, 4);
+  assert.equal(vault.records.length, 4);
+  assert.deepEqual(Object.keys(result.scoringCube[0].scores).sort(), [
+    'replica:cursor', 'submitted'
+  ]);
+  assert.equal(result.cells[0].anonymousScores[0].total, 70);
+  assert.equal(JSON.stringify(result.cells).includes('replica:cursor'), false);
+  assert.equal(JSON.stringify(result.cells).includes('submitted'), false);
+  assert.equal(JSON.stringify(vault.records[0].payload).includes('replica:cursor'), true);
+});
+
+test('rejects malformed judge payloads and retains only valid replica score keys', async () => {
+  const judgement = {
+    testId: 'portfolio_review',
+    repeatIndex: 0,
+    judgeId: 'gpt',
+    scores: {
+      submitted: 75,
+      'replica:cursor': 70,
+      'replica:invalid': 99
+    }
+  };
+  assert.deepEqual(aggregateArenaScores([judgement], ['cursor']), [{
+    testId: 'portfolio_review',
+    repeatIndex: 0,
+    judgeId: 'gpt',
+    scores: { submitted: 75, 'replica:cursor': 70 }
+  }]);
+
+  const [cell] = buildArenaCells({
+    testPlan: TEST_PLAN,
+    submittedOutputs: SUBMITTED_OUTPUTS,
+    replicas: REPLICAS
+  });
+  const packet = createArenaJudgePacket(cell, { id: 'gpt' }, 12);
+  await assert.rejects(runAnonymousArena({
+    cells: [cell],
+    reviewers: [{ id: 'gpt' }],
+    evidenceVault: memoryVault(),
+    invokeJudge: async () => ({
+      scores: [{
+        candidateId: packet.candidates[0].candidateId,
+        dimensions: {
+          taskConstraint: 101,
+          professionalQuality: 1,
+          evidenceRisk: 1,
+          artifactUsability: 1
+        },
+        total: 1,
+        rationale: 'bad',
+        uncertainties: []
+      }]
+    })
+  }), /candidate|0–100|range/iu);
+});
+
+function memoryVault() {
+  return {
+    records: [],
+    async put(record) {
+      this.records.push(record);
+      return record;
+    }
+  };
+}
