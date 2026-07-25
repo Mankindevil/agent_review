@@ -8,4 +8,6 @@ node_modules/
 .venv/
 .worktrees/
 .superpowers/
+/.cache/agent-check-runtimes/
+/dist/agent-check/
 npm-debug.log*

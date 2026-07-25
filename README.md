@@ -24,6 +24,16 @@ Production systemd units are in `deploy/`; the operator runbook is
 `docs/PRODUCTION_OPERATIONS.md`, and the full agent contract is
 `docs/MARKET_ANALYST_AGENT.md`.
 
+## Agent Card 自测台独立包
+
+组织者可生成只包含 `/agent-check` 自测台的 Windows 与 macOS 独立包：
+
+```bash
+npm run bundle:agent-check
+```
+
+产物内置 Node.js，选手无需安装 Docker 或 Node.js。独立包不包含主测评平台代码；构建、离线缓存和发布检查见 [独立包构建指南](./docs/AGENT_CHECK_LOCAL_BUNDLE.md)。
+
 On Windows, create `.venv` with an installed `python` or `py` launcher and set
 `PANDA_DATA_PYTHON` to `.\.venv\Scripts\python.exe` when the interpreter is not
 discoverable from `PATH`. The data requirements pin the Parquet engine used by

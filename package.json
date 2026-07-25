@@ -15,6 +15,7 @@
     "market-agent": "node agents/market-analyst/server.js",
     "market-report": "node agents/market-analyst/cli.js",
     "market:smoke": "node scripts/market-agent-live-smoke.js",
+    "bundle:agent-check": "node scripts/build-agent-check-bundles.js",
     "test": "node scripts/run-tests.js && node scripts/run-market-worker-tests.js",
     "test:node": "node scripts/run-tests.js",
     "test:market-worker": "node scripts/run-market-worker-tests.js",

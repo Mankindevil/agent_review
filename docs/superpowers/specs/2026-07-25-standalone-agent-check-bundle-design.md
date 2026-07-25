@@ -2,7 +2,7 @@
 
 ## 目标
 
-为参赛选手提供 Windows 与 macOS 两套可解压即用的 Agent Card 自测台离线安装包。安装包内置 Node.js 运行时，不要求预装 Docker 或 Node.js；选手通过双击启动脚本，在本机浏览器访问 `http://127.0.0.1:4173/agent-check`。
+为参赛选手提供 Windows 与 macOS 两套可解压即用的 Agent Card 自测台离线安装包。安装包内置 Node.js 运行时，不要求预装 Docker 或 Node.js；选手通过双击启动脚本，在本机浏览器访问 `http://localhost:4173/agent-check`。
 
 打包产物只包含 Agent Card 自测台及其运行依赖。主测评平台的首页、评测记录、模型评审、评分、Runtime 对测、数据源和运维部署内容不得进入产物。
 
@@ -107,7 +107,7 @@ Windows 使用 `start.bat`，macOS 使用 `start.command`。启动脚本：
 默认配置：
 
 ```dotenv
-HOST=127.0.0.1
+HOST=localhost
 PORT=4173
 AGENT_DIAGNOSTICS_RATE_LIMIT=30
 AGENT_DIAGNOSTICS_CONCURRENCY=4
@@ -122,7 +122,7 @@ ALLOW_PRIVATE_DIAGNOSTICS_URLS=true
 
 - 自测台不创建评测记录，不写入 Card、Agent Token 或诊断结果。
 - 独立包不包含主项目 `.env` 或任何生产凭据。
-- 服务仅监听 `127.0.0.1`。
+- 服务仅监听部署机器的 `localhost` 回环地址。
 - Agent Bearer Token 只存在于本次浏览器请求和服务内存中。
 - 使用说明明确提醒：仅在可信电脑使用 Token；本地 HTTP 只适用于 loopback，禁止将监听地址改为公网地址。
 
@@ -135,7 +135,7 @@ Windows 与 macOS 目录分别包含中文 `使用说明.md`，覆盖：
 - Apple Silicon 与 Intel 自动适配；
 - 页面入口和停止方法；
 - 端口修改；
-- 本机 Agent 地址中 `127.0.0.1` 的含义；
+- 本机 Agent 地址中 `localhost` 的含义；
 - Docker/Node.js 均无需安装；
 - 常见错误：端口占用、Card URL 不可达、Agent 超时、Token 错误；
 - 安全注意事项。
