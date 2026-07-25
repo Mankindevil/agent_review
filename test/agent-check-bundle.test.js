@@ -217,10 +217,12 @@ test('assembles both platform runtime layouts through injected build boundaries'
       'runtime:mac-x64'
     );
 
-    const windowsScript = await readFile(
-      path.join(outputRoot, 'windows/start.bat'),
-      'utf8'
+    const windowsScriptBytes = await readFile(
+      path.join(outputRoot, 'windows/start.bat')
     );
+    const windowsScript = windowsScriptBytes.toString('utf8');
+    assert.match(windowsScript, /\r\n/u);
+    assert.doesNotMatch(windowsScript, /(?<!\r)\n/u);
     assert.match(windowsScript, /runtime\\node\.exe/i);
     assert.match(windowsScript, /ENV_FILE=.*config\.env/i);
     assert.match(windowsScript, /api\/health/i);

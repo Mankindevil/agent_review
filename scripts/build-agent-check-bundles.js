@@ -231,7 +231,13 @@ async function copyPlatformAssets(outputRoot) {
   for (const [source, destination] of copies) {
     const target = safeJoin(outputRoot, destination);
     await mkdir(path.dirname(target), { recursive: true });
-    await copyFile(safeJoin(templateRoot, source), target);
+    const template = safeJoin(templateRoot, source);
+    if (destination.endsWith('.bat')) {
+      const content = await readFile(template, 'utf8');
+      await writeFile(target, content.replace(/\r?\n/gu, '\r\n'), 'utf8');
+    } else {
+      await copyFile(template, target);
+    }
   }
   await chmod(path.join(outputRoot, 'mac', 'start.command'), 0o755);
 }
