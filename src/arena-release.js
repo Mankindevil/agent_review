@@ -271,7 +271,7 @@ function appendAudit(evaluation, type, actorId, payload) {
   return event;
 }
 
-async function loadSealedArenaMaterials(evaluation, validReplicaIds, services) {
+export async function loadSealedArenaMaterials(evaluation, validReplicaIds, services) {
   const testPlan = evaluation.testPlan;
   if (!testPlan || !Array.isArray(testPlan.tests)) {
     throw new TypeError('sealed Replica release requires the committed test plan');
