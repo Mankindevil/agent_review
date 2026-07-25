@@ -305,6 +305,10 @@ export class EvaluationPipeline {
 
   queueV2(evaluation) {
     const state = privateState(this);
+    const previous = this.activeRuns.get(evaluation.id);
+    if (previous && !previous.signal.aborted) {
+      previous.abort(new Error('Superseded by a newer V2 dispatch'));
+    }
     const controller = new AbortController();
     this.activeRuns.set(evaluation.id, controller);
     queueMicrotask(() => state.runBlackBox(evaluation, {

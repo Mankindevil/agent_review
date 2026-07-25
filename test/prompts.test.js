@@ -17,6 +17,9 @@ const compilation = {
   contracts: [{
     exampleId: 'portfolio-risk',
     goal: 'Analyze supplied holdings for concentration.',
+    turnCount: 1,
+    executableCriteria: [{ criterionId: 'risk-word', type: 'contains' }],
+    modelCriteria: [],
     sourceTurns: [{
       input: { parts: [{ type: 'text', text: 'Analyze supplied holdings.' }] }
     }]
@@ -26,13 +29,17 @@ const compilation = {
 test('hidden generation prompt freezes scope and requests JSON-only allowed transformations', () => {
   const prompt = hiddenVariantGenerationPrompt(compilation);
 
-  assert.match(prompt, /single JSON object/iu);
+  assert.match(prompt, /ONE JSON object|single JSON object/iu);
   assert.match(prompt, /equivalent/iu);
   assert.match(prompt, /boundary/iu);
   assert.match(prompt, /multi-turn/iu);
-  assert.match(prompt, /no browsing|must not browse/iu);
+  assert.match(prompt, /must not browse|Forbidden: browse/iu);
   assert.match(prompt, /new domain/iu);
   assert.match(prompt, /external (?:facts|truth|answer)/iu);
+  assert.match(prompt, /ALLOWED_SLOTS/u);
+  assert.match(prompt, /allowedInheritedCriteriaIds/u);
+  assert.match(prompt, /"risk-word"/u);
+  assert.match(prompt, /Do NOT invent criterion ids/u);
   assert.match(prompt, /"allowedDomains":\["portfolio-risk"\]/u);
 });
 

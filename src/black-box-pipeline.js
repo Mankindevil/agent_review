@@ -2736,19 +2736,33 @@ async function markFirstDispatch(context) {
 }
 
 async function mutateCurrent(context, updater) {
-  const current = context.store.get(context.evaluationId);
-  if (context.worker && current.execution?.status === 'cancelled') {
-    const error = new Error('V2 evaluation was cancelled');
-    error.name = 'AbortError';
-    throw error;
+  const maxAttempts = 8;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const current = context.store.get(context.evaluationId);
+    if (context.worker && current.execution?.status === 'cancelled') {
+      const error = new Error('V2 evaluation was cancelled');
+      error.name = 'AbortError';
+      throw error;
+    }
+    try {
+      const committed = await context.store.mutate(
+        context.evaluationId,
+        current.revision,
+        updater
+      );
+      context.events?.emit?.(context.evaluationId, committed);
+      return committed;
+    } catch (error) {
+      if (
+        error?.statusCode !== 409 ||
+        error?.message !== 'revision conflict' ||
+        attempt === maxAttempts - 1
+      ) {
+        throw error;
+      }
+    }
   }
-  const committed = await context.store.mutate(
-    context.evaluationId,
-    current.revision,
-    updater
-  );
-  context.events?.emit?.(context.evaluationId, committed);
-  return committed;
+  throw Object.assign(new Error('revision conflict'), { statusCode: 409 });
 }
 
 function withRunProgress(record, context, options = {}) {

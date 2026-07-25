@@ -116,6 +116,24 @@ test('synthesizes candidateId when live generator omits it', async () => {
   );
 });
 
+test('drops unknown inheritedCriteriaIds instead of aborting', async () => {
+  const result = await generateHiddenVariants(compilation, {
+    generator,
+    requestJson: async () => ({
+      candidates: ['equivalent', 'boundary', 'multi-turn'].map((variantType) =>
+        candidate(variantType, {
+          inheritedCriteriaIds: ['risk-word', 'invented-by-model']
+        })
+      )
+    })
+  });
+
+  assert.deepEqual(
+    result.candidates.map((item) => item.inheritedCriteriaIds),
+    [['risk-word'], ['risk-word'], ['risk-word']]
+  );
+});
+
 test('rejects generated inputs that expand URLs, domains, or expected truth', async () => {
   const attempts = [
     candidate('equivalent', {

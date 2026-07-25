@@ -43,7 +43,9 @@ export async function generateHiddenVariants(compilation, {
   const required = Object.freeze([...requiredVariants]);
   const value = await requestJson(
     generator,
-    'Generate closed-scope hidden tests. JSON only.',
+    'Generate closed-scope hidden tests. Return one JSON object only. '
+      + 'Copy sourceExampleId and inheritedCriteriaIds verbatim from ALLOWED_SLOTS. '
+      + 'Never invent criterion ids.',
     hiddenVariantGenerationPrompt(compilation)
   );
   if (!isPlainObject(value) || !Array.isArray(value.candidates)) {
@@ -147,24 +149,22 @@ function normalizeCandidate(compilation, candidate, index) {
   }
   const turns = normalizeHiddenTurns(candidate.turns, candidateId);
   assertCandidateUrls(source, turns);
-  const inheritedCriteriaIds = normalizeStringArray(
-    candidate.inheritedCriteriaIds || [],
-    `candidate ${candidateId} inheritedCriteriaIds`
-  );
   const knownCriteria = new Set([
     ...source.executableCriteria.map((criterion) => criterion.criterionId),
     ...source.modelCriteria.map((criterion) => criterion.criterionId)
   ]);
-  if (inheritedCriteriaIds.some((id) => !knownCriteria.has(id))) {
-    throw new TypeError(`candidate ${candidateId} inherits an unknown criterion`);
-  }
-  if (!Array.isArray(candidate.proposedCriteria)) {
+  // Live generators often invent criterion ids; keep only ids that exist on the
+  // closed source contract instead of aborting the whole evaluation.
+  const inheritedCriteriaIds = normalizeStringArray(
+    candidate.inheritedCriteriaIds || candidate.inherited_criteria_ids || [],
+    `candidate ${candidateId} inheritedCriteriaIds`
+  ).filter((id) => knownCriteria.has(id));
+  const rawProposed =
+    candidate.proposedCriteria ?? candidate.proposed_criteria ?? [];
+  if (!Array.isArray(rawProposed)) {
     throw new TypeError(`candidate ${candidateId} proposedCriteria must be an array`);
   }
-  const proposedCriteria = normalizeProposedCriteria(
-    candidate.proposedCriteria,
-    candidateId
-  );
+  const proposedCriteria = normalizeProposedCriteria(rawProposed, candidateId);
   const candidatePayload = { turns, proposedCriteria };
   if (
     Buffer.byteLength(JSON.stringify(candidatePayload), 'utf8') >
