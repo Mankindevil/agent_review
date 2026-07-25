@@ -90,7 +90,7 @@ export function inputForTurn(test, turnIndex) {
 
 function buildOriginalTest(contract, weight, policy) {
   return buildTest({
-    testId: `${contract.exampleId}:original`,
+    testId: `${safeSegment(contract.exampleId)}__original`,
     sourceExampleId: contract.exampleId,
     variantType: 'original',
     visibility: 'public',
@@ -106,7 +106,7 @@ function buildHiddenTest(contract, candidate, weight, policy) {
   const sourceCriteria = flattenCriteria(contract.sourceTurns);
   const inherited = new Set(candidate.inheritedCriteriaIds);
   return buildTest({
-    testId: `${contract.exampleId}:${candidate.variantType}`,
+    testId: `${safeSegment(contract.exampleId)}__${safeSegment(candidate.variantType)}`,
     candidateId: candidate.candidateId,
     sourceExampleId: contract.exampleId,
     variantType: candidate.variantType,
@@ -124,7 +124,7 @@ function buildHiddenTest(contract, candidate, weight, policy) {
 
 function buildProtocolRecoveryProbe(policy) {
   return buildTest({
-    testId: 'protocol:error-recovery',
+    testId: 'protocol_error_recovery',
     sourceExampleId: null,
     variantType: 'protocol-recovery',
     visibility: 'hidden',
@@ -171,6 +171,11 @@ function requireString(value, field) {
     throw new TypeError(`${field} must be a non-empty string`);
   }
   return value;
+}
+
+function safeSegment(value) {
+  const normalized = String(value).replace(/[^A-Za-z0-9_-]/gu, '_');
+  return /^[A-Za-z0-9]/u.test(normalized) ? normalized : `id_${normalized}`;
 }
 
 function deepFreeze(value) {

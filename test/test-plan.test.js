@@ -73,6 +73,7 @@ test('locks a complete four-type matrix with three repeats and exact weights', (
     ['original', 'equivalent', 'boundary', 'multi-turn']
   );
   assert.equal(scored.every((item) => item.repeatCount === 3), true);
+  assert.equal(plan.tests.every((item) => /^[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(item.testId)), true);
   assert.equal(scored.reduce((sum, item) => sum + item.weight, 0), 1);
   assert.equal(scored.every((item) => item.weight === 0.25), true);
   assert.equal(plan.tests.at(-1).variantType, 'protocol-recovery');
