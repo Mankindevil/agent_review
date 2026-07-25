@@ -130,6 +130,12 @@
             <small>只发往 Agent 端点；请求进入内存后立即清空，不会写入浏览器存储。</small>
             <input id="agent-authorization" type="password" autocomplete="off" spellcheck="false" placeholder="例如 Bearer …">
           </label>
+
+          <label class="skip-human-review-panel" for="skip-human-review">
+            <input id="skip-human-review" type="checkbox">
+            <span>跳过人工打分</span>
+            <small>模型四席评审锁定后直接以模型中位数结算终审，不进入人工评审阶段。</small>
+          </label>
         </section>
 
         <div class="form-actions single"><button class="primary-button" id="start-evaluation" type="button" disabled><span>正在确认评测模式</span><i>↗</i></button></div>

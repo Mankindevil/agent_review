@@ -154,6 +154,12 @@ h1 em::after { content: ""; position: absolute; left: 0; bottom: -5px; width: 10
 .agent-auth-panel { display:grid; gap:5px; margin-top:18px; padding:14px; border-left:4px solid var(--lime); background:var(--ink); color:white; }
 .agent-auth-panel > span { color:var(--lime); font:800 8px var(--mono); letter-spacing:.1em; }.agent-auth-panel > b { font-size:12px; }.agent-auth-panel > small { color:#aeb9b6; font-size:9px; line-height:1.55; }
 .agent-auth-panel input { width:100%; border:1px solid #526461; background:#071d1d; color:var(--lime); padding:10px; font:10px var(--mono); }
+.skip-human-review-panel { display:grid; grid-template-columns:auto 1fr; column-gap:10px; row-gap:4px; margin-top:12px; padding:14px; border-left:4px solid var(--ink); background:#f4f4f0; cursor:pointer; }
+.skip-human-review-panel input { width:16px; height:16px; margin-top:2px; }
+.skip-human-review-panel span { font-weight:800; font-size:12px; }
+.skip-human-review-panel small { grid-column:2; color:#5a5a52; font-size:9px; line-height:1.55; }
+.v2-skip-panel { border-left:4px solid var(--lime); }
+.v2-skip-panel [data-skip-human-review] { margin:0 18px 16px; padding:10px 16px; border:1px solid var(--ink); background:var(--ink); color:white; font-weight:800; }
 .form-actions { display: grid; grid-template-columns: .8fr 1.25fr; gap: 10px; margin-top: 18px; }
 .form-actions.single { grid-template-columns: 1fr; }
 .sample-button, .primary-button { min-height: 50px; border: 1px solid var(--ink); cursor: pointer; font-weight: 800; }

@@ -13,7 +13,10 @@ export function createEvaluationRecord(snapshot, options) {
     createdAt: options.createdAt,
     updatedAt: options.createdAt,
     execution: { status: 'queued', stage: 'qualification', progress: 0 },
-    governance: { phase: 'waiting_model' },
+    governance: {
+      phase: 'waiting_model',
+      skipHumanReview: Boolean(options.skipHumanReview)
+    },
     submission: snapshot,
     ...(options.participantAccess !== undefined
       ? { participantAccess: options.participantAccess }

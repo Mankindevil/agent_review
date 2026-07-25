@@ -90,7 +90,7 @@ export function saveHumanDraft(evaluation, assignment, payload, expectedRevision
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== current.revision) {
     throw conflict('assignment revision conflict');
   }
-  const scores = normalizeScores(evaluation, current, payload);
+  const scores = normalizeScores(evaluation, current.criterionScope, payload);
   const reviews = reviewsOf(evaluation);
   const existing = reviews.find((review) => review.assignmentId === current.assignmentId);
   const review = {
@@ -119,7 +119,7 @@ export function submitHumanReview(evaluation, assignment, payload) {
   const current = assertAssignment(evaluation, assignment);
   if (current.status === 'submitted') throw conflict('submitted reviews are immutable');
   if (current.status === 'recused') throw conflict('recused assignments cannot be submitted');
-  const scores = normalizeScores(evaluation, current, payload);
+  const scores = normalizeScores(evaluation, current.criterionScope, payload);
   const reviews = reviewsOf(evaluation);
   const review = {
     reviewId: reviews.find((item) => item.assignmentId === current.assignmentId)?.reviewId ||
@@ -210,6 +210,83 @@ export function aggregateHumanReviews(evaluation) {
   return aggregate;
 }
 
+export function skipHumanReview(evaluation, principal) {
+  assertEvaluation(evaluation);
+  const actorId = requiredId(principal?.principalId, 'actor');
+  const panel = evaluation.absoluteReview?.modelPanel;
+  if (!modelReviewComplete(panel)) {
+    throw conflict('four valid model reviews and required fifth-model decisions are required before skipping human review');
+  }
+  if (evaluation.humanReviewAggregate?.status === 'complete') {
+    return evaluation.humanReviewAggregate;
+  }
+  const leaves = applicableLeaves(evaluation);
+  const aggregate = { status: 'complete', leaves: {} };
+  for (const criterionId of leaves) {
+    const primaryScores = panel.primary
+      .map((run) => run.reviews.find((review) => review.subcriterionId === criterionId)?.score)
+      .filter(Number.isFinite);
+    const arbitrationScore = panel.arbitration?.reviews?.find(
+      (review) => review.subcriterionId === criterionId
+    )?.score;
+    const values = Number.isFinite(arbitrationScore)
+      ? [...primaryScores, arbitrationScore]
+      : primaryScores;
+    aggregate.leaves[criterionId] = {
+      status: 'resolved',
+      values,
+      spread: values.length ? Math.max(...values) - Math.min(...values) : 0,
+      score: median(values)
+    };
+  }
+  evaluation.humanReviewAggregate = aggregate;
+  if (!evaluation.governance) evaluation.governance = {};
+  evaluation.governance.arbitrationRequired = [];
+  evaluation.governance.humanReviewSkipped = true;
+  appendAudit(evaluation, 'human-review-skipped', actorId, {
+    criterionScope: leaves
+  });
+  return aggregate;
+}
+
+export function submitOpenHumanReview(evaluation, principal, payload) {
+  assertEvaluation(evaluation);
+  const reviewerId = requiredId(principal?.principalId, 'reviewer');
+  advanceGovernance(evaluation);
+  if (evaluation.governance.phase !== 'human_open') {
+    throw conflict('open human review is only accepted while human review is open');
+  }
+  if (reviewsOf(evaluation).some((review) => review.status === 'submitted')) {
+    throw conflict('a human review has already been submitted for this evaluation');
+  }
+  const leaves = applicableLeaves(evaluation);
+  const scores = normalizeScores(evaluation, leaves, payload);
+  const review = {
+    reviewId: `review_${randomUUID().replaceAll('-', '')}`,
+    assignmentId: null,
+    judgeId: reviewerId,
+    role: 'primary',
+    status: 'submitted',
+    rubricVersion: 'a2a-black-box-v1',
+    scores,
+    submittedAt: new Date().toISOString(),
+    payloadHash: payloadHash({ scores })
+  };
+  reviewsOf(evaluation).push(review);
+  appendAudit(evaluation, 'human-review-submitted-open', reviewerId, {
+    reviewId: review.reviewId,
+    payloadHash: review.payloadHash
+  });
+  const aggregate = { status: 'complete', leaves: {} };
+  for (const criterionId of leaves) {
+    const value = scores[criterionId]?.score;
+    aggregate.leaves[criterionId] = { status: 'resolved', values: [value], spread: 0, score: value };
+  }
+  evaluation.humanReviewAggregate = aggregate;
+  evaluation.governance.arbitrationRequired = [];
+  return { review, aggregate };
+}
+
 export function recuseHumanReviewer(evaluation, assignment) {
   const current = assertAssignment(evaluation, assignment);
   if (current.status === 'submitted') throw conflict('submitted reviews are immutable');
@@ -261,7 +338,7 @@ function arbitrationLeaves(evaluation) {
   return leaves;
 }
 
-function normalizeScores(evaluation, assignment, payload) {
+function normalizeScores(evaluation, criterionScope, payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
       !payload.scores || typeof payload.scores !== 'object' || Array.isArray(payload.scores)) {
     throw validation('review payload must contain scores');
@@ -270,14 +347,14 @@ function normalizeScores(evaluation, assignment, payload) {
     if (Object.hasOwn(payload, forbidden)) throw validation(`client-supplied ${forbidden} is forbidden`);
   }
   const scoreIds = Object.keys(payload.scores);
-  if (!sameMembers(scoreIds, assignment.criterionScope)) {
+  if (!sameMembers(scoreIds, criterionScope)) {
     throw validation('scores must contain every and only assigned leaf');
   }
   const validEvidence = new Set((evaluation.evidenceManifest?.items || [])
     .filter((item) => item.visibility === 'public')
     .map((item) => item.evidenceId));
   const expectedChecks = checksByLeaf(evaluation);
-  return Object.fromEntries(assignment.criterionScope.map((criterionId) => {
+  return Object.fromEntries(criterionScope.map((criterionId) => {
     const score = payload.scores[criterionId];
     if (!score || typeof score !== 'object' || Array.isArray(score) ||
         !Number.isFinite(score.score) || score.score < 0 || score.score > 100) {

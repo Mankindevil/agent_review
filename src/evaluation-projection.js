@@ -31,6 +31,7 @@ export function projectEvaluation(evaluation, { audience = 'public', principal =
     evaluation.governance,
     evaluation.resultV2?.absolute
   );
+  const modelLocked = evaluation.absoluteReview?.modelPanel?.status === 'model-locked';
 
   const projection = {
     schemaVersion: projectPrimitive(evaluation.schemaVersion, secrets),
@@ -59,7 +60,7 @@ export function projectEvaluation(evaluation, { audience = 'public', principal =
     absoluteReview: projectAbsoluteReview(
       evaluation.absoluteReview,
       secrets,
-      audience === 'judge' || audience === 'judge-preview' || absoluteLocked
+      audience === 'judge' || audience === 'judge-preview' || absoluteLocked || modelLocked
     ),
     resultV2: evaluation.resultV2 === null
       ? null

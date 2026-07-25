@@ -70,15 +70,19 @@ test('returns a flat V2 create projection with no-store caching', async () => {
   await pipeline.cancel(body.id);
 });
 
-test('protects the non-blind judge preview and returns no replica material', async () => {
+test('serves a non-blind judge view without a token while never leaking raw replica material', async () => {
   const created = await (await createEvaluation()).json();
   await pipeline.cancel(created.id);
 
-  const unauthorized = await fetch(
-    `${origin}/api/evaluations/${created.id}/judge-preview`
-  );
+  const unauthenticated = await fetch(`${origin}/api/evaluations/${created.id}`);
+  const unauthenticatedBody = await unauthenticated.json();
+  assert.equal(unauthenticated.status, 200);
+  assert.equal(Object.hasOwn(unauthenticatedBody.submission.agentCard, 'value'), false);
+  assert.equal(Object.hasOwn(unauthenticatedBody, 'replicaArena'), false);
+  assert.equal(Object.hasOwn(unauthenticatedBody.resultV2 || {}, 'replica'), false);
+
   const authorized = await fetch(
-    `${origin}/api/evaluations/${created.id}/judge-preview`,
+    `${origin}/api/evaluations/${created.id}`,
     {
       headers: {
         authorization: 'Bearer judge-preview-test-key'
@@ -87,9 +91,7 @@ test('protects the non-blind judge preview and returns no replica material', asy
   );
   const body = await authorized.json();
 
-  assert.equal(unauthorized.status, 401);
   assert.equal(authorized.status, 200);
-  assert.equal(authorized.headers.get('cache-control'), 'no-store');
   assert.equal(body.submission.agentCard.value.name, CARD.name);
   assert.equal(Object.hasOwn(body, 'replicaArena'), false);
   assert.equal(Object.hasOwn(body.resultV2 || {}, 'replica'), false);

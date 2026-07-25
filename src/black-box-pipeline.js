@@ -43,6 +43,10 @@ import {
   runLogFilePath,
   sanitizeLogText
 } from './run-log.js';
+import {
+  lockAndReleaseAbsoluteResult,
+  skipHumanReview
+} from './review-governance.js';
 
 export { releaseReplicaArena } from './arena-release.js';
 
@@ -1128,7 +1132,31 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
     },
     activeWork: null
   }));
-  return context.store.get(context.evaluationId);
+  const lockedRecord = context.store.get(context.evaluationId);
+  if (lockedRecord.governance?.skipHumanReview === true) {
+    return autoSkipHumanReview(lockedRecord, context);
+  }
+  return lockedRecord;
+}
+
+async function autoSkipHumanReview(evaluation, context) {
+  const actor = {
+    principalId: 'system',
+    idempotencyKey: `auto-skip-human-review:${evaluation.id}`
+  };
+  try {
+    return await mutateCurrent(context, async (current) => {
+      skipHumanReview(current, { principalId: 'system' });
+      await lockAndReleaseAbsoluteResult(current, {
+        evidenceVault: context.evidenceVault,
+        now: context.now
+      }, actor);
+      return current;
+    });
+  } catch (error) {
+    console.error(`[v2-pipeline] auto-skip human review failed for ${evaluation.id}`, error);
+    return context.store.get(context.evaluationId);
+  }
 }
 
 function namespacePhase2Candidates(candidates, attempt) {

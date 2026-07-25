@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="锐评局非盲人工评审工作台">
-  <title>锐评局 · 非盲评审席</title>
+  <meta name="description" content="锐评局公开人工评审工作台">
+  <title>锐评局 · 公开评审席</title>
   <link rel="stylesheet" href="/judge.css">
 </head>
 <body>
@@ -16,9 +16,9 @@
   <main>
     <section class="intro">
       <div>
-        <p class="kicker">CUSTODY / HUMAN SEAT</p>
-        <h1>拿证据，<em>给判断。</em></h1>
-        <p>模型先评；人工不盲审。查看已脱敏的提交证据、模型意见与分歧，再逐项落笔。这里不排榜，也不看复刻结果。</p>
+        <p class="kicker">CUSTODY / OPEN SEAT</p>
+        <h1>不设门槛，<em>只看证据。</em></h1>
+        <p>模型四席评审锁定后即进入公开人工复核；任何人都可以查看已脱敏的证据与模型意见，提交一次打分，或直接跳过并以模型中位数结算终审。</p>
       </div>
       <aside class="seal-card" id="replica-seal-notice">
         <span>SEALED ARENA</span>
@@ -27,56 +27,52 @@
       </aside>
     </section>
 
-    <form class="access-strip" id="judge-access-form">
-      <label for="judge-token">评委 Bearer token<input id="judge-token" type="password" autocomplete="off" spellcheck="false" required></label>
-      <button type="submit">进入评审席</button>
-      <output id="access-status" role="status" aria-live="polite">Token 仅留在当前页面内存中。</output>
-    </form>
-
     <section class="rules-strip" aria-label="评审规则">
-      <span>模型先评</span><span>人工不盲审</span><span>两位主评</span><span>分差大于 15 分进入仲裁</span>
+      <span>模型先评</span><span>公开评审</span><span>一次提交即可结算</span><span>可随时跳过</span>
     </section>
 
-    <section class="bench" aria-label="人工评审工作台">
-      <aside class="column evidence-column">
-        <header class="column-head"><span>01 / EVIDENCE</span><h2>证据账本</h2></header>
-        <div class="assignment-box">
-          <label for="assignment-list">当前委派</label>
-          <select id="assignment-list" disabled><option>先验证身份</option></select>
-          <label for="test-filter">筛选测试 / 重复</label>
-          <select id="test-filter" disabled><option value="">全部已见证据</option></select>
-        </div>
-        <section id="submission-panel" class="submission-panel" aria-label="提交 Agent 信息">
-          <p class="empty-copy">选择委派后查看 Agent Card、使用示例与测试范围。</p>
-        </section>
-        <section class="timeline-panel">
-          <div class="section-label"><span>A2A TRACE</span><small>选择条目查看脱敏快照</small></div>
-          <div id="evidence-timeline" class="evidence-timeline" aria-live="polite"></div>
-        </section>
-      </aside>
-
-      <section class="column model-column">
-        <header class="column-head"><span>02 / MODEL PANEL</span><h2>模型已读意见</h2></header>
-        <div id="disagreement-summary" class="disagreement-summary">载入委派后显示四模型意见与分歧。</div>
-        <div id="model-opinions" class="model-opinions" aria-live="polite"></div>
-      </section>
-
-      <section class="column score-column">
-        <header class="column-head"><span>03 / HUMAN SEAT</span><h2>逐叶复核</h2></header>
-        <p class="score-note">分数、证据和理由一同保存。服务端核验范围、权重和证据归属；浏览器不计算总分。</p>
-        <form id="human-score-form" novalidate>
-          <div id="score-leaves"></div>
-          <p id="draft-status" role="status" aria-live="polite">尚未载入草稿。</p>
-          <button type="button" id="reload-assignment" class="reload-assignment" hidden>重新载入服务器草稿</button>
-          <p id="form-error" role="alert"></p>
-          <div class="review-actions">
-            <button type="button" id="recuse-review" disabled>申请回避</button>
-            <button type="submit" id="submit-review" disabled>确认并提交不可修改的评审</button>
-          </div>
-        </form>
-      </section>
+    <section class="queue-panel" aria-label="待复核评测列表">
+      <header class="column-head"><span>OPEN QUEUE</span><h2>等待人工复核</h2></header>
+      <p id="queue-status" role="status" aria-live="polite">正在读取列表…</p>
+      <div id="queue-list" class="queue-list"></div>
     </section>
   </main>
+  <template id="queue-card-template">
+    <article class="queue-card">
+      <header>
+        <div><small class="queue-card-id"></small><b class="queue-card-heading">评测详情</b></div>
+        <a class="queue-card-view" target="_blank" rel="noopener">查看详情 ↗</a>
+      </header>
+      <div class="queue-card-dimensions"></div>
+      <div class="queue-card-actions">
+        <button type="button" class="queue-card-toggle" data-action="toggle-score">展开打分</button>
+        <button type="button" class="queue-card-skip" data-action="skip">跳过人工打分</button>
+      </div>
+      <form class="queue-card-form hidden" data-role="score-form">
+        <div class="queue-card-leaves"></div>
+        <p class="queue-card-error" role="alert"></p>
+        <div class="queue-card-form-actions">
+          <button type="submit">提交人工打分</button>
+        </div>
+      </form>
+    </article>
+  </template>
+  <template id="queue-leaf-template">
+    <fieldset class="leaf-form">
+      <h3 class="leaf-name"></h3>
+      <label>评分（0–100）<input type="number" min="0" max="100" required class="leaf-score"></label>
+      <label>引用可见证据 ID（逗号分隔，可留空）<input type="text" class="leaf-evidence"></label>
+      <label>评审理由<textarea required class="leaf-rationale"></textarea></label>
+      <label>相对模型结论
+        <select class="leaf-disposition">
+          <option value="affirm">接受</option>
+          <option value="modify" selected>调整</option>
+          <option value="overturn">推翻</option>
+        </select>
+      </label>
+      <label class="leaf-override-label hidden">推翻理由（推翻时必填）<textarea class="leaf-override"></textarea></label>
+    </fieldset>
+  </template>
   <script type="module" src="/judge.js"></script>
 </body>
 </html>

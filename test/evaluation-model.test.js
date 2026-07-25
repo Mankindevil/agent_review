@@ -43,7 +43,7 @@ test('creates the exact queued V2 evaluation record', () => {
     createdAt: '2026-07-24T10:01:00.000Z',
     updatedAt: '2026-07-24T10:01:00.000Z',
     execution: { status: 'queued', stage: 'qualification', progress: 0 },
-    governance: { phase: 'waiting_model' },
+    governance: { phase: 'waiting_model', skipHumanReview: false },
     submission: snapshot,
     participantAccess: {
       tokenHash: 'a'.repeat(64),

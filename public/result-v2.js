@@ -22,8 +22,10 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
     item.humanReviews,
     escapeHtml
   );
+  const skipPanel = renderSkipHumanReviewPanel(item, escapeHtml);
 
   return `
+    ${skipPanel}
     <article class="v2-result-report" data-result-section="absolute-total">
       <header class="v2-result-report__head">
         <div><small>LOCKED / ABSOLUTE RESULT</small><h3>三维绝对分：Agent 本身做得怎么样</h3></div>
@@ -65,6 +67,16 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
       <header><div><small>UNCERTAINTY REGISTER</small><h3>不可验证声明与证据缺口</h3></div></header>
       <p>${absolute.evidenceGaps?.length ? escapeHtml(absolute.evidenceGaps.join(' · ')) : '当前没有已记录的证据缺口。'}</p>
       <a href="/evidence.html#${encodeURIComponent(item.id)}">打开脱敏证据回放</a>
+    </article>`;
+}
+
+function renderSkipHumanReviewPanel(item, escapeHtml) {
+  if (item.governance?.phase !== 'human_open') return '';
+  return `
+    <article class="v2-result-report v2-skip-panel" data-result-section="human-review-skip">
+      <header><div><small>HUMAN REVIEW OPEN</small><h3>人工复核开放中</h3></div></header>
+      <p>模型四席评审已锁定；任何人都可以提交一次人工打分，或直接跳过并以模型中位数结算终审。</p>
+      <button type="button" class="text-button" data-skip-human-review="${escapeHtml(item.id)}">跳过人工打分</button>
     </article>`;
 }
 

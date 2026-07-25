@@ -27,7 +27,7 @@ const V2_CONFIG = Object.freeze({
   runtimeConfigVersion: 'phase2-black-box-runtime/v1'
 });
 const V2_CREATE_FIELDS = new Set([
-  'schemaVersion', 'agentCard', 'agentExamples', 'agentAuthorization'
+  'schemaVersion', 'agentCard', 'agentExamples', 'agentAuthorization', 'skipHumanReview'
 ]);
 const V2_RESUME_FIELDS = new Set(['agentAuthorization']);
 
@@ -100,6 +100,9 @@ export class EvaluationPipeline {
     if (input.agentAuthorization !== undefined) {
       assertAgentAuthorization(input.agentAuthorization);
     }
+    if (input.skipHumanReview !== undefined && typeof input.skipHumanReview !== 'boolean') {
+      throw httpError(400, 'skipHumanReview must be a boolean');
+    }
 
     const createdAt = state.now();
     const cardValidation = validateAgentCard(input.agentCard);
@@ -138,7 +141,8 @@ export class EvaluationPipeline {
       endpointHash: sha256(submission.selectedInterface.url),
       agentVersion: submission.agentCard.value.version ?? null,
       serviceBuildId: null,
-      runIndex
+      runIndex,
+      skipHumanReview: input.skipHumanReview === true
     });
     evaluation.auditEvents.push({
       id: state.createId('audit'),

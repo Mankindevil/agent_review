@@ -113,6 +113,8 @@ function bindEvents() {
     if (retry) { retryStep(retry); return; }
     const deleteControl = event.target.closest('[data-delete-evaluation]');
     if (deleteControl) { deleteEvaluation(deleteControl); return; }
+    const skipControl = event.target.closest('[data-skip-human-review]');
+    if (skipControl) { skipHumanReview(skipControl); return; }
     const skillDetail = event.target.closest('[data-skill-detail]');
     if (skillDetail) { toggleSkillDetail(skillDetail); return; }
     const skillFile = event.target.closest('[data-skill-file]');
@@ -549,9 +551,11 @@ async function submitV2Evaluation(agentCard) {
   catch (error) { return showError(error.message); }
   const authorizationInput = $('#agent-authorization');
   const agentAuthorization = authorizationInput.value.trim();
+  const skipHumanReview = Boolean($('#skip-human-review')?.checked);
   const request = {
     schemaVersion: 2, agentCard, agentExamples,
-    ...(agentAuthorization ? { agentAuthorization } : {})
+    ...(agentAuthorization ? { agentAuthorization } : {}),
+    skipHumanReview
   };
   const requestBody = JSON.stringify(request);
   $('#agent-authorization').value = '';
@@ -837,6 +841,32 @@ function renderResumePanel(item) {
   if (!resumable) {
     $('#resume-agent-authorization').value = '';
     $('#resume-error').textContent = '';
+  }
+}
+
+async function skipHumanReview(button) {
+  const id = button.dataset.skipHumanReview;
+  if (!id || button.disabled) return;
+  button.disabled = true;
+  const label = $('span', button) || button;
+  const idleText = button.textContent;
+  label.textContent = '正在跳过人工打分…';
+  try {
+    const response = await fetch(`/api/evaluations/${id}/skip-human-review`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': crypto.randomUUID()
+      },
+      body: JSON.stringify({})
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || '跳过人工打分失败');
+    await openEvaluation(id);
+  } catch (error) {
+    label.textContent = idleText;
+    button.disabled = false;
+    showError(error.message);
   }
 }
 

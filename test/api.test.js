@@ -12,6 +12,79 @@ import {
   createEvidenceRecord
 } from '../src/evidence.js';
 import { EvidenceVault } from '../src/evidence-vault.js';
+import { RUBRIC_V1 } from '../src/rubric.js';
+
+const RUBRIC_LEAVES = Object.entries(RUBRIC_V1.dimensions).flatMap(([dimensionId, weights]) =>
+  Object.keys(weights).map((leafId) => `${dimensionId}.${leafId}`)
+);
+
+function openReviewEvaluationFixture(id, phase = 'human_open') {
+  const primary = Array.from({ length: 4 }, (_, index) => ({
+    reviewRunId: `model_${index}`,
+    reviews: RUBRIC_LEAVES.map((subcriterionId) => ({
+      subcriterionId,
+      score: 70,
+      confidence: 0.8,
+      checkEvidence: [{ checkId: `${subcriterionId}:check`, evidenceIds: [] }],
+      findings: [{
+        findingId: `finding_${index}_${subcriterionId.replace('.', '_')}_0`,
+        text: 'Captured evidence supports only a partial, reusable workflow.'
+      }]
+    }))
+  }));
+  return {
+    schemaVersion: 2,
+    id,
+    createdAt: '2026-07-26T00:00:00.000Z',
+    updatedAt: '2026-07-26T00:00:00.000Z',
+    revision: 0,
+    governance: { phase, modelLockedAt: '2026-07-26T00:00:00.000Z' },
+    submission: {
+      submissionVersion: '1.0',
+      frozenAt: '2026-07-26T00:00:00.000Z',
+      agentCard: { sha256: 'a'.repeat(64), value: { name: 'Open Review Agent', description: 'desc', skills: [] } },
+      agentExamples: { sha256: 'b'.repeat(64), value: [] },
+      config: { rubricVersion: 'rubric-v1', modelConfigVersion: 'model-v1' }
+    },
+    evidenceManifest: { version: '1.0', items: [] },
+    objectiveCapability: {
+      status: 'complete',
+      score: 90,
+      coverage: 0.8,
+      provisional: false,
+      metrics: Object.entries(RUBRIC_V1.dimensions.agentCapability).map(([leafId, weight]) => ({
+        id: leafId,
+        weight,
+        applicable: true,
+        coverage: 0.8,
+        score: 90,
+        numerator: 0.9,
+        denominator: 1,
+        evidenceIds: [],
+        gaps: []
+      }))
+    },
+    absoluteReview: {
+      status: 'pending-model-review',
+      modelPanel: {
+        status: 'model-locked',
+        primary,
+        disputedSubcriterionIds: [],
+        arbitration: null
+      }
+    },
+    replicaArena: { status: 'sealed', runtimeSummaries: [] },
+    humanReviewAggregate: { status: 'pending' },
+    humanReviews: [],
+    reviewAssignments: [],
+    resultV2: {
+      absolute: { status: 'model-provisional' },
+      replica: { status: 'sealed' },
+      rating: { status: 'pending-human' }
+    },
+    auditEvents: []
+  };
+}
 
 const {
   cachedRuntimeReadiness,
@@ -474,16 +547,19 @@ test('projects every V2 list, detail, and SSE read and hard-deletes terminal V2 
   assert.equal(missingAfterDelete.status, 404);
 });
 
-test('enforces server-authenticated judge and admin projections for V2 routes', async () => {
-  const missing = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/judge-preview`);
-  assert.equal(missing.status, 401);
+test('serves results without a judge token while still elevating authenticated judge/admin views', async () => {
+  const anonymous = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
+  const anonymousView = await anonymous.json();
+  assert.equal(anonymous.status, 200);
+  assert.equal(Object.hasOwn(anonymousView.submission.agentCard, 'value'), false);
+  assert.equal(anonymousView.absoluteReview.modelPanel.status, 'model-locked');
 
-  const invalid = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/judge-preview`, {
+  const invalid = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`, {
     headers: { authorization: 'Bearer wrong-secret' }
   });
-  assert.equal(invalid.status, 401);
+  assert.equal(invalid.status, 200);
 
-  const judge = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/judge-preview`, {
+  const judge = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`, {
     headers: { authorization: 'Bearer judge-secret' }
   });
   const judgeView = await judge.json();
@@ -507,208 +583,99 @@ test('enforces server-authenticated judge and admin projections for V2 routes', 
   assert.equal(admin.status, 200);
 });
 
-test('manages authenticated review assignments with assignment-scoped ETags', async () => {
-  const evaluation = structuredClone(v2Fixture);
-  evaluation.id = 'eval_v2_governance_api';
-  evaluation.createdAt = '2026-07-25T09:00:00.000Z';
-  evaluation.updatedAt = evaluation.createdAt;
-  evaluation.revision = 0;
-  evaluation.governance = { phase: 'waiting_model' };
-  evaluation.reviewAssignments = [];
-  evaluation.humanReviews = [];
-  evaluation.auditEvents = [];
-  const leaf = 'professionalism.evidenceReasoning';
-  evaluation.absoluteReview.modelPanel = {
-    status: 'model-locked',
-    primary: [0, 1, 2, 3].map((index) => ({
-      reviewRunId: `model_${index}`,
-      reviews: [{
-        subcriterionId: leaf,
-        score: 70,
-        checkEvidence: [{ checkId: 'evidence_reasoning', evidenceIds: ['ev_api'] }]
-      }]
-    })),
-    disputedSubcriterionIds: [],
-    arbitration: null
-  };
+test('lists every open evaluation on the public review queue and skips human review without a token', async () => {
+  const evaluation = openReviewEvaluationFixture('eval_v2_open_queue_api');
   await evaluationStore.set(evaluation);
   try {
-    const assigned = await fetch(
-      `${origin}/api/admin/evaluations/${evaluation.id}/review-assignments`,
+    const queue = await fetch(`${origin}/api/review-queue`);
+    const queueItems = await queue.json();
+    assert.equal(queue.status, 200);
+    assert.ok(queueItems.some((item) => item.id === evaluation.id));
+
+    const missingKey = await fetch(
+      `${origin}/api/evaluations/${evaluation.id}/skip-human-review`,
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }
+    );
+    assert.equal(missingKey.status, 422);
+
+    const skipped = await fetch(
+      `${origin}/api/evaluations/${evaluation.id}/skip-human-review`,
       {
         method: 'POST',
         headers: {
-          authorization: 'Bearer admin-secret',
           'content-type': 'application/json',
-          'idempotency-key': 'assign-governance-api-key'
+          'idempotency-key': 'skip-open-queue-1'
         },
-        body: JSON.stringify({
-          judgeId: 'judge-1',
-          role: 'primary',
-          criterionScope: [leaf]
-        })
+        body: '{}'
       }
     );
-    const assignment = await assigned.json();
-    assert.equal(assigned.status, 201);
-    assert.equal(assignment.role, 'primary');
-
-    const changedReplay = await fetch(
-      `${origin}/api/admin/evaluations/${evaluation.id}/review-assignments`,
-      {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer admin-secret',
-          'content-type': 'application/json',
-          'idempotency-key': 'assign-governance-api-key'
-        },
-        body: JSON.stringify({
-          judgeId: 'judge-2',
-          role: 'primary',
-          criterionScope: [leaf]
-        })
-      }
-    );
-    assert.equal(changedReplay.status, 409);
-
-    for (const judgeId of ['admin-1', 'unknown-judge']) {
-      const invalidJudge = await fetch(
-        `${origin}/api/admin/evaluations/${evaluation.id}/review-assignments`,
-        {
-          method: 'POST',
-          headers: {
-            authorization: 'Bearer admin-secret',
-            'content-type': 'application/json',
-            'idempotency-key': `invalid-judge-${judgeId}`
-          },
-          body: JSON.stringify({
-            judgeId,
-            role: 'primary',
-            criterionScope: [leaf]
-          })
-        }
-      );
-      assert.equal(invalidJudge.status, 422);
-    }
+    const skippedBody = await skipped.json();
+    assert.equal(skipped.status, 200);
+    assert.equal(skippedBody.phase, 'final');
 
     const replay = await fetch(
-      `${origin}/api/admin/evaluations/${evaluation.id}/review-assignments`,
+      `${origin}/api/evaluations/${evaluation.id}/skip-human-review`,
       {
         method: 'POST',
         headers: {
-          authorization: 'Bearer admin-secret',
           'content-type': 'application/json',
-          'idempotency-key': 'assign-governance-api-key'
+          'idempotency-key': 'skip-open-queue-1'
         },
-        body: JSON.stringify({
-          judgeId: 'judge-1',
-          role: 'primary',
-          criterionScope: [leaf]
-        })
+        body: '{}'
       }
     );
-    assert.deepEqual(await replay.json(), assignment);
+    assert.deepEqual(await replay.json(), skippedBody);
 
-    const detail = await fetch(
-      `${origin}/api/review-assignments/${evaluation.id}`,
-      { headers: { authorization: 'Bearer judge-secret' } }
-    );
-    const assignmentDetail = await detail.json();
-    assert.equal(detail.status, 200);
-    assert.equal(assignmentDetail.assignmentId, assignment.assignmentId);
-    const etag = detail.headers.get('etag');
-    assert.match(etag, /assignment:/);
+    const detail = await fetch(`${origin}/api/evaluations/${evaluation.id}`);
+    const detailView = await detail.json();
+    assert.equal(detailView.governance.phase, 'final');
+    assert.equal(detailView.humanReviewAggregate.status, 'complete');
 
-    const reviewPayload = {
-      assignmentId: assignment.assignmentId,
-      scores: {
-        [leaf]: {
-          score: 75,
-          evidenceIds: ['ev_api'],
-          checkEvidence: [{ checkId: 'evidence_reasoning', evidenceIds: ['ev_api'] }],
-          rationale: 'Captured evidence supports the score.',
-          modelDisposition: 'modify',
-          overrideReason: ''
-        }
-      }
-    };
-    const drafted = await fetch(
-      `${origin}/api/review-assignments/${evaluation.id}/draft`,
-      {
-        method: 'PUT',
-        headers: {
-          authorization: 'Bearer judge-secret',
-          'content-type': 'application/json',
-          'if-match': etag
-        },
-        body: JSON.stringify(reviewPayload)
-      }
-    );
-    assert.equal(drafted.status, 200);
-    const stale = await fetch(
-      `${origin}/api/review-assignments/${evaluation.id}/draft`,
-      {
-        method: 'PUT',
-        headers: {
-          authorization: 'Bearer judge-secret',
-          'content-type': 'application/json',
-          'if-match': etag
-        },
-        body: JSON.stringify(reviewPayload)
-      }
-    );
-    assert.equal(stale.status, 409);
+    const stored = evaluationStore.get(evaluation.id);
+    assert.equal(stored.governance.humanReviewSkipped, true);
+    assert.deepEqual(stored.governance.arbitrationRequired, []);
+    assert.ok(stored.auditEvents.some((event) => event.type === 'human-review-skipped'));
 
-    const submitted = await fetch(
-      `${origin}/api/review-assignments/${evaluation.id}/submit`,
+    const queueAfter = await fetch(`${origin}/api/review-queue`);
+    const queueAfterItems = await queueAfter.json();
+    assert.equal(queueAfterItems.some((item) => item.id === evaluation.id), false);
+  } finally {
+    await evaluationStore.delete(evaluation.id);
+  }
+});
+
+test('accepts one anonymous open human review submission and locks the absolute result', async () => {
+  const evaluation = openReviewEvaluationFixture('eval_v2_open_submit_api');
+  await evaluationStore.set(evaluation);
+  try {
+    const scores = Object.fromEntries(RUBRIC_LEAVES.map((subcriterionId) => [
+      subcriterionId,
       {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer judge-secret',
-          'content-type': 'application/json',
-          'idempotency-key': 'submit-governance-api-key'
-        },
-        body: JSON.stringify(reviewPayload)
+        score: 78,
+        evidenceIds: [],
+        checkEvidence: [{ checkId: `${subcriterionId}:check`, evidenceIds: [] }],
+        rationale: 'Reviewed the visible model evidence directly.',
+        modelDisposition: 'affirm',
+        overrideReason: ''
       }
-    );
-    assert.equal(submitted.status, 200);
+    ]));
+
+    const submitted = await fetch(`${origin}/api/evaluations/${evaluation.id}/human-reviews`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scores })
+    });
     const submittedBody = await submitted.json();
+    assert.equal(submitted.status, 201);
     assert.equal(submittedBody.status, 'submitted');
-    const submitReplay = await fetch(
-      `${origin}/api/review-assignments/${evaluation.id}/submit`,
-      {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer judge-secret',
-          'content-type': 'application/json',
-          'idempotency-key': 'submit-governance-api-key'
-        },
-        body: JSON.stringify(reviewPayload)
-      }
-    );
-    assert.deepEqual(await submitReplay.json(), submittedBody);
+    assert.equal(submittedBody.governance.phase, 'final');
 
-    const changedSubmitReplay = await fetch(
-      `${origin}/api/review-assignments/${evaluation.id}/submit`,
-      {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer judge-secret',
-          'content-type': 'application/json',
-          'idempotency-key': 'submit-governance-api-key'
-        },
-        body: JSON.stringify({
-          ...reviewPayload,
-          scores: {
-            [leaf]: {
-              ...reviewPayload.scores[leaf],
-              score: 76
-            }
-          }
-        })
-      }
-    );
-    assert.equal(changedSubmitReplay.status, 409);
+    const again = await fetch(`${origin}/api/evaluations/${evaluation.id}/human-reviews`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scores })
+    });
+    assert.equal(again.status, 409);
   } finally {
     await evaluationStore.delete(evaluation.id);
   }
@@ -729,7 +696,10 @@ test('returns participant projection for unauthenticated evaluation detail reads
     }
   });
   assert.equal(Object.hasOwn(view.submission.agentCard, 'value'), false);
-  assert.equal(Object.hasOwn(view.absoluteReview, 'modelPanel'), false);
+  // Once the model panel is locked, results and model opinions are public;
+  // no judge/admin token is required to see them.
+  assert.equal(view.absoluteReview.modelPanel.status, 'model-locked');
+  assert.equal(view.absoluteReview.modelPanel.primary[0].reviews[0].score, 81);
   assert.ok(view.appealTargets);
 });
 
@@ -737,11 +707,6 @@ test('fails closed for judge and admin elevation when review governance is disab
   const previous = process.env.REVIEW_GOVERNANCE_ENABLED;
   process.env.REVIEW_GOVERNANCE_ENABLED = 'false';
   try {
-    const judgePreview = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/judge-preview`, {
-      headers: { authorization: 'Bearer judge-secret' }
-    });
-    assert.equal(judgePreview.status, 403);
-
     const adminDetail = await fetch(`${origin}/api/admin/evaluations/${v2Fixture.id}`, {
       headers: { authorization: 'Bearer admin-secret' }
     });
@@ -752,9 +717,13 @@ test('fails closed for judge and admin elevation when review governance is disab
     });
     assert.equal(judgeDetail.status, 403);
 
+    // Public/participant results remain visible even while judge/admin
+    // elevation is disabled.
     const publicDetail = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
     assert.equal(publicDetail.status, 200);
-    assert.ok((await publicDetail.json()).appealTargets);
+    const publicView = await publicDetail.json();
+    assert.ok(publicView.appealTargets);
+    assert.equal(publicView.absoluteReview.modelPanel.status, 'model-locked');
   } finally {
     if (previous === undefined) delete process.env.REVIEW_GOVERNANCE_ENABLED;
     else process.env.REVIEW_GOVERNANCE_ENABLED = previous;
@@ -935,12 +904,13 @@ test('keeps the history count inline in the top navigation', async () => {
   assert.match(css, /\.nav-button\s*\{[^}]*display:flex;[^}]*white-space:nowrap;/);
 });
 
-test('serves the judge workbench without exposing a Replica preview', async () => {
+test('serves the open review desk without a token gate or Replica preview', async () => {
   const response = await fetch(`${origin}/judge`);
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(response.headers.get('content-type'), /text\/html/);
-  assert.match(html, /judge-access-form/);
+  assert.match(html, /queue-list/);
+  assert.doesNotMatch(html, /judge-access-form/);
   assert.match(html, /复刻结果.*绝对分锁定.*密封/u);
   assert.doesNotMatch(html, /replicaArena|revealMap|runtimeId/u);
 });

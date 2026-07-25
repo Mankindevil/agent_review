@@ -300,11 +300,15 @@ function assertHumanReviewComplete(evaluation) {
       (evaluation.governance?.arbitrationRequired || []).length > 0) {
     throw conflict('human arbitration and aggregation must be complete before absolute lock');
   }
+  // Human review may be skipped (synthesized from the locked model panel) or
+  // finalized from a single open submission; either path already produced a
+  // complete aggregate above, so no further reviewer count is required.
+  if (evaluation.governance?.humanReviewSkipped === true) return;
   const submittedPrimary = (evaluation.humanReviews || []).filter((review) =>
     review.role === 'primary' && review.status === 'submitted'
   );
-  if (new Set(submittedPrimary.map((review) => review.judgeId)).size !== 2) {
-    throw conflict('two distinct complete primary human reviews are required');
+  if (new Set(submittedPrimary.map((review) => review.judgeId)).size < 1) {
+    throw conflict('at least one completed primary human review is required');
   }
 }
 
