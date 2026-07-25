@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
-import { callA2AAgent, validateAgentCard } from './a2a.js';
+import { callA2AAgent, callA2AAgentExample, validateAgentCard } from './a2a.js';
 import { validateAgentAuthorization } from './a2a-executor.js';
 import {
   compileBlackBoxRunPlan,
@@ -10,7 +10,9 @@ import { canonicalJson } from './evidence.js';
 import { createEvaluationRecord } from './evaluation-model.js';
 import {
   assertFrozenSubmissionIntegrity,
-  freezeSubmission
+  deriveCasesFromAgentExamples,
+  freezeSubmission,
+  normalizeAgentExamples
 } from './submission.js';
 import { configuredReviewers, reviewAgent } from './providers.js';
 import { buildRoast, judgeOutput, scoreComplexity } from './scoring.js';
@@ -60,27 +62,58 @@ export class EvaluationPipeline {
     }
     const validation = validateAgentCard(input.agentCard);
     if (!validation.valid) throw Object.assign(new Error(`Agent Card 校验失败：${validation.errors.join('；')}`), { statusCode: 400 });
-    if (!Array.isArray(input.cases) || !input.cases.length || input.cases.some((item) => typeof item?.prompt !== 'string' || !item.prompt.trim())) {
-      throw Object.assign(new Error('至少提供一个包含 prompt 的使用实例'), { statusCode: 400 });
-    }
     if (input.seed !== undefined && (!Number.isSafeInteger(Number(input.seed)) || Number(input.seed) < 0 || Number(input.seed) > 2_147_483_646)) {
       throw Object.assign(new Error('Seed 必须是 0–2147483646 的整数'), { statusCode: 400 });
     }
-    const cases = normalizeTestCases(input.cases);
+    if (input.agentAuthorization !== undefined) {
+      assertAgentAuthorization(input.agentAuthorization);
+    }
+
+    let agentExamples;
+    let cases;
+    if (input.agentExamples !== undefined) {
+      try {
+        agentExamples = normalizeAgentExamples(input.agentExamples);
+        cases = normalizeTestCases(deriveCasesFromAgentExamples(agentExamples));
+      } catch (error) {
+        throw Object.assign(new Error(error.message || 'agentExamples 无效'), { statusCode: 400 });
+      }
+    } else if (
+      Array.isArray(input.cases) &&
+      input.cases.length &&
+      input.cases.every((item) => typeof item?.prompt === 'string' && item.prompt.trim())
+    ) {
+      cases = normalizeTestCases(input.cases);
+    } else {
+      throw Object.assign(new Error('至少提供 agentExamples，或一个包含 prompt 的使用实例'), { statusCode: 400 });
+    }
+
     const seed = normalizeSeed(input.seed ?? process.env.EVALUATION_SEED);
     const temperature = normalizeTemperature(process.env.MODEL_TEMPERATURE, 0);
     const reviewPlan = publicReviewPlan(configuredReviewers());
     const runtimePlan = publicRuntimePlan();
     const evaluation = {
       id: id(), createdAt: now(), updatedAt: now(), status: 'queued', mode: input.mode === 'live' ? 'live' : 'demo',
-      agentCard: input.agentCard, cases, validation, seed, temperature, reviewPlan, runtimePlan, progress: 0, stage: '等待评测舱', activeWork: null, logs: []
+      agentCard: input.agentCard, cases, validation, seed, temperature, reviewPlan, runtimePlan, progress: 0, stage: '等待评测舱', activeWork: null, logs: [],
+      ...(agentExamples ? { agentExamples } : {}),
+      ...(input.agentAuthorization !== undefined ? { authorizationRequired: true } : {})
     };
     await this.store.set(evaluation);
+    const state = privateState(this);
+    if (input.agentAuthorization !== undefined) {
+      if (!state.credentialVault) {
+        throw Object.assign(new Error('Agent authorization vault is unavailable'), { statusCode: 503 });
+      }
+      state.credentialVault.put(evaluation.id, input.agentAuthorization);
+    }
     const controller = new AbortController();
     this.activeRuns.set(evaluation.id, controller);
     queueMicrotask(() => this.run(evaluation.id, controller.signal)
       .catch((error) => this.fail(evaluation.id, error))
-      .finally(() => { if (this.activeRuns.get(evaluation.id) === controller) this.activeRuns.delete(evaluation.id); }));
+      .finally(() => {
+        state.credentialVault?.delete(evaluation.id);
+        if (this.activeRuns.get(evaluation.id) === controller) this.activeRuns.delete(evaluation.id);
+      }));
     return evaluation;
   }
 
@@ -553,6 +586,23 @@ export class EvaluationPipeline {
     await this.replaceBenchmarkEntry(item, step.caseIndex, step.key, signal);
   }
 
+  async runSubmittedAgent(item, caseIndex, signal) {
+    const authorization = privateState(this).credentialVault?.get(item.id);
+    const example = Array.isArray(item.agentExamples) ? item.agentExamples[caseIndex] : null;
+    if (example) {
+      return callA2AAgentExample(item.agentCard, example, {
+        timeoutMs: 45_000,
+        signal,
+        authorization
+      });
+    }
+    const prompt = item.cases?.[caseIndex]?.prompt;
+    if (typeof prompt !== 'string' || !prompt.trim()) {
+      throw new Error(`用例 ${caseIndex + 1} 缺少 prompt`);
+    }
+    return callA2AAgent(item.agentCard, prompt, 45_000, signal, { authorization });
+  }
+
   async replaceBenchmarkEntry(item, caseIndex, competitorId, signal) {
     const roundItem = item.benchmark?.[caseIndex];
     if (!roundItem) throw new Error(`用例 ${caseIndex + 1} 不存在`);
@@ -562,7 +612,9 @@ export class EvaluationPipeline {
     let name = item.agentCard.name;
     try {
       if (competitorId === 'submitted') {
-        output = item.mode === 'live' ? (await callA2AAgent(item.agentCard, testCase.prompt, 45_000, signal)).text : mockSubmittedOutput(item.agentCard, testCase);
+        output = item.mode === 'live'
+          ? (await this.runSubmittedAgent(item, caseIndex, signal)).text
+          : mockSubmittedOutput(item.agentCard, testCase);
       } else {
         const build = item.builds?.find((candidate) => candidate.runtimeId === competitorId);
         if (!build || build.error) throw new Error(build?.error || '对应 Runtime Skill 尚未生成');
@@ -690,7 +742,7 @@ export class EvaluationPipeline {
       }, { level: 'info', source: 'A2A', phase: 'benchmark', text: `${item.agentCard.name} 开始执行「${testCase.name}」`, mode: item.mode });
       try {
         submittedOutput = item.mode === 'live'
-          ? (await callA2AAgent(item.agentCard, testCase.prompt, 45_000, signal)).text
+          ? (await this.runSubmittedAgent(item, index, signal)).text
           : mockSubmittedOutput(item.agentCard, testCase);
       } catch (error) {
         if (signal?.aborted) throw signal.reason || error;

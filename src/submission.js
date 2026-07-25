@@ -19,6 +19,28 @@ export const SUBMISSION_LIMITS = Object.freeze({ ...INTERNAL_SUBMISSION_LIMITS }
 export const PART_TYPES = new Set(PART_TYPE_VALUES);
 export const CRITERION_TYPES = new Set(CRITERION_TYPE_VALUES);
 
+/** Derive V1 arena cases (name + prompt) from normalized agentExamples. */
+export function deriveCasesFromAgentExamples(examples) {
+  if (!Array.isArray(examples) || examples.length === 0) {
+    throw new TypeError('agentExamples must be a non-empty array');
+  }
+  return examples.map((example) => ({
+    name: example.name,
+    prompt: example.turns.map((turn) => turnInputToPrompt(turn.input)).join('\n\n---\n\n'),
+    exampleId: example.id
+  }));
+}
+
+function turnInputToPrompt(input) {
+  return (input?.parts || []).map((part) => {
+    if (part.type === 'text') return part.text;
+    if (part.type === 'data') return JSON.stringify(part.data);
+    if (part.type === 'raw') return `[raw ${part.mediaType || 'application/octet-stream'}]`;
+    if (part.type === 'url') return part.url;
+    return '';
+  }).filter(Boolean).join('\n');
+}
+
 export function normalizeAgentExamples(rawExamples) {
   if (!Array.isArray(rawExamples)) {
     if (isObject(rawExamples) && Object.hasOwn(rawExamples, 'cases')) {

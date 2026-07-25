@@ -94,9 +94,7 @@ const events = new EventEmitter();
 events.setMaxListeners(100);
 let injectedAppealRecalculationServices = null;
 let injectedReplicaReleaseServices = null;
-const credentialVault = blackBoxRuntimeConfig.enabled
-  ? new EphemeralCredentialVault()
-  : null;
+const credentialVault = new EphemeralCredentialVault();
 const resumeMacKey = copyResumeMacKey(blackBoxRuntimeConfig);
 export const accessAuditStore = getAccessAuditStore(process.env);
 export const pipeline = new EvaluationPipeline(evaluationStore, events, {

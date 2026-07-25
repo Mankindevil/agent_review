@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="金融 A2A Agent 公开评测：审数据、查回测、压基线，判断一套投研智能体到底夯不夯。">
   <title>锐评局 · 金融 Agent 研究终审台</title>
-  <link rel="stylesheet" href="/styles.css?v=20260725-results1">
+  <link rel="stylesheet" href="/styles.css?v=20260726-v1examples1">
 </head>
 <body>
   <div class="noise" aria-hidden="true"></div>
@@ -98,17 +98,17 @@
           <button type="button" data-example="portfolio">组合风控台</button>
         </div>
 
-        <div class="cases-head legacy-only">
+        <div class="cases-head legacy-cases hidden" hidden>
           <div><b>同题对测用例</b><small>所有选手收到完全相同的 prompt</small></div>
           <button class="text-button" id="add-case" type="button">＋ 添加用例</button>
         </div>
-        <div id="case-list" class="case-list legacy-only"></div>
+        <div id="case-list" class="case-list legacy-cases hidden" hidden></div>
 
         <section id="v2-intake" class="a2a-intake hidden" aria-labelledby="v2-examples-heading">
           <div class="a2a-section-heading">
             <span>CUSTODY / CONTRACT 02</span>
             <b id="v2-examples-heading">Agent 使用示例</b>
-            <small>按 Example → Turn → Part → Criterion 的执行顺序登记公开样本；每个 Example 固定采样三次。</small>
+            <small id="v2-examples-blurb">按 Example → Turn → Part → Criterion 登记公开样本。</small>
           </div>
           <div class="a2a-example-import">
             <div class="a2a-example-import-actions">
@@ -131,13 +131,13 @@
             <input id="agent-authorization" type="password" autocomplete="off" spellcheck="false" placeholder="例如 Bearer …">
           </label>
 
-          <label class="skip-human-review-panel" for="skip-human-review">
+          <label class="skip-human-review-panel v2-only hidden" for="skip-human-review">
             <input id="skip-human-review" type="checkbox">
             <span>跳过人工打分</span>
             <small>模型四席评审锁定后直接以模型中位数结算终审，不进入人工评审阶段。</small>
           </label>
 
-          <fieldset class="replica-policy-panel" id="replica-policy-panel">
+          <fieldset class="replica-policy-panel v2-only hidden" id="replica-policy-panel">
             <legend>复刻人工评审策略（可选，双轨并行）</legend>
             <label>可见性
               <select id="replica-policy-visibility">
@@ -237,6 +237,6 @@
     </div>
   </template>
 
-  <script type="module" src="/app.js?v=20260725-results1"></script>
+  <script type="module" src="/app.js?v=20260726-v1examples1"></script>
 </body>
 </html>

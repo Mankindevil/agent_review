@@ -6,6 +6,7 @@ import {
   PART_TYPES,
   SUBMISSION_LIMITS,
   assertFrozenSubmissionIntegrity,
+  deriveCasesFromAgentExamples,
   freezeSubmission,
   normalizeAgentExamples
 } from '../src/submission.js';
@@ -69,6 +70,22 @@ test('ships a closed JSON Schema for the normalized example contract', async () 
   assert.deepEqual(contains.properties.caseSensitive, { type: 'boolean' });
   assert.deepEqual(schema.$defs.turn.required, ['input']);
   assert.equal(schema.$defs.turn.properties.acceptanceCriteria.minItems, 0);
+});
+
+test('derives V1 arena cases from multi-turn agentExamples', () => {
+  const normalized = normalizeAgentExamples([{
+    id: 'multi',
+    name: '多轮任务',
+    turns: [
+      { input: { parts: [{ type: 'text', text: '第一轮' }] } },
+      { input: { parts: [{ type: 'text', text: '第二轮' }, { type: 'data', data: { k: 1 } }] } }
+    ]
+  }]);
+  assert.deepEqual(deriveCasesFromAgentExamples(normalized), [{
+    name: '多轮任务',
+    prompt: '第一轮\n\n---\n\n第二轮\n{"k":1}',
+    exampleId: 'multi'
+  }]);
 });
 
 test('normalizes optional deliverable, criteria, and constraints without inventing values', () => {

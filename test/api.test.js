@@ -1197,8 +1197,8 @@ test('serves localized loading effects with reduced-motion support', async () =>
   assert.match(app, /review-card-queued/);
   const indexResponse = await fetch(`${origin}/`);
   const index = await indexResponse.text();
-  assert.match(index, /app\.js\?v=20260725-results1/);
-  assert.match(index, /styles\.css\?v=20260725-results1/);
+  assert.match(index, /app\.js\?v=20260726-v1examples1/);
+  assert.match(index, /styles\.css\?v=20260726-v1examples1/);
 });
 
 test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
@@ -1224,6 +1224,7 @@ test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
   assert.match(html, /id="v2-example-list"/);
   assert.match(html, /id="add-v2-example"/);
   assert.match(html, /id="agent-authorization"[^>]*type="password"/);
+  assert.match(html, /class="[^"]*v2-only[^"]*"/);
   assert.doesNotMatch(html, /participant-token-receipt/);
   assert.doesNotMatch(html, /Skill 使用示例|skillId/);
 
@@ -1242,6 +1243,9 @@ test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
   assert.match(script, /evaluationModeFromHealth\(payload\)/);
   assert.match(script, /function setBlackBoxMode/);
   assert.match(script, /function setBlackBoxModeUnavailable/);
+  assert.match(script, /\$\('#v2-intake'\)\.classList\.remove\('hidden'\)/);
+  assert.match(script, /function submitV1Evaluation/);
+  assert.match(script, /agentExamples,\s*mode:\s*state\.mode/);
   assert.match(script, /nextAvailableEditorId\(/);
   assert.match(script, /data-record-kind="v2"/);
   assert.match(script, /recordActionCopy\(isV2\)/);
@@ -2011,6 +2015,61 @@ test('creates and completes a demo evaluation', async () => {
   assert.equal(deleteResponse.status, 200);
   assert.deepEqual(await deleteResponse.json(), { id: created.id, deleted: true });
   assert.equal((await fetch(`${origin}/api/evaluations/${created.id}`)).status, 404);
+});
+
+test('creates a V1 demo evaluation from agentExamples and optional authorization', async () => {
+  const card = {
+    name: 'Example Contract Agent',
+    description: 'Accepts structured Agent use examples on the legacy path.',
+    supportedInterfaces: [{ url: 'https://example.com/a2a', protocolBinding: 'HTTP+JSON', protocolVersion: '1.0' }],
+    skills: [{
+      id: 'research',
+      name: 'Research',
+      description: 'Answer research prompts.',
+      examples: ['Summarize risk for this book.']
+    }]
+  };
+  const agentExamples = [{
+    id: 'example-1',
+    name: '风险摘要',
+    turns: [{
+      input: { parts: [{ type: 'text', text: 'Summarize risk for this book.' }] },
+      acceptanceCriteria: [{
+        id: 'mentions-risk',
+        type: 'contains',
+        description: '提到风险',
+        expected: ['risk'],
+        required: true
+      }]
+    }]
+  }];
+  const createdResponse = await fetch(`${origin}/api/evaluations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      agentCard: card,
+      agentExamples,
+      agentAuthorization: 'Bearer demo-agent-token',
+      mode: 'demo',
+      seed: 4242
+    })
+  });
+  assert.equal(createdResponse.status, 202);
+  const created = await createdResponse.json();
+  assert.equal(created.cases[0].name, '风险摘要');
+  assert.match(created.cases[0].prompt, /Summarize risk/);
+  assert.equal(created.agentExamples[0].id, 'example-1');
+  assert.equal(created.authorizationRequired, true);
+  assert.equal(Object.hasOwn(created, 'agentAuthorization'), false);
+  let result;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    result = await (await fetch(`${origin}/api/evaluations/${created.id}`)).json();
+    if (result.status === 'completed') break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(result.status, 'completed');
+  assert.equal(result.seed, 4242);
+  assert.equal(result.benchmark[0].case.name, '风险摘要');
 });
 
 test('returns 404 when stopping an unknown evaluation', async () => {

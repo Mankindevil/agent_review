@@ -468,13 +468,22 @@ function parseEditorJson(value, label) {
   catch { throw new Error(`${label} 不是合法 JSON。`); }
 }
 
-function loadSample(id = 'contract') {
+function loadSample(id = 'factor') {
   const example = exampleCatalog[id];
   setSourceType('direct');
   $('#agent-card').value = JSON.stringify(example.card, null, 2);
   $('#file-name').textContent = `已载入：${example.card.name}.a2a.json`;
   $('#case-list').innerHTML = '';
   example.cases.forEach((testCase) => addCase(testCase.name, testCase.prompt, testCase.dataQueries));
+  const drafts = example.cases.map((testCase, index) => ({
+    id: `example-${index + 1}`,
+    name: testCase.name,
+    turns: [{
+      parts: [{ type: 'text', text: testCase.prompt }],
+      criteria: []
+    }]
+  }));
+  replaceV2ExamplesWithDrafts(drafts, `已载入本地样本「${example.card.name}」的 ${drafts.length} 个示例。`);
 }
 
 function setSourceType(sourceType) {
@@ -526,25 +535,48 @@ async function submitEvaluation() {
     try { agentCard = state.resolvedCard || await resolveRemoteCard(); } catch { return; }
   }
   if (state.blackBoxEnabled) return submitV2Evaluation(agentCard);
-  const cases = $$('.case-row').map((row, index) => ({
-    name: $('.case-name', row).value.trim() || `案例 ${index + 1}`,
-    prompt: $('.case-prompt', row).value.trim(),
-    ...(row.dataset.dataQueries ? { dataQueries: JSON.parse(row.dataset.dataQueries) } : {})
-  })).filter((item) => item.prompt);
-  if (!cases.length) return showError('至少填写一个测试 prompt。');
+  return submitV1Evaluation(agentCard);
+}
+
+async function submitV1Evaluation(agentCard) {
+  let agentExamples;
+  try { agentExamples = collectAgentExamples(); }
+  catch (error) { return showError(error.message); }
+  const authorizationInput = $('#agent-authorization');
+  const agentAuthorization = authorizationInput.value.trim();
   const seedValue = $('#evaluation-seed').value.trim();
   const seed = seedValue === '' ? undefined : Number(seedValue);
-  if (seed !== undefined && (!Number.isSafeInteger(seed) || seed < 0 || seed > 2_147_483_646)) return showError('Seed 必须是 0–2147483646 的整数。');
+  if (seed !== undefined && (!Number.isSafeInteger(seed) || seed < 0 || seed > 2_147_483_646)) {
+    return showError('Seed 必须是 0–2147483646 的整数。');
+  }
+  const request = {
+    agentCard,
+    agentExamples,
+    mode: state.mode,
+    ...(seed !== undefined ? { seed } : {}),
+    ...(agentAuthorization ? { agentAuthorization } : {})
+  };
+  const requestBody = JSON.stringify(request);
+  authorizationInput.value = '';
   const button = $('#start-evaluation');
-  button.disabled = true; $('span', button).textContent = '正在封舱';
+  button.disabled = true;
+  $('span', button).textContent = '正在封舱';
   try {
-    const response = await fetch('/api/evaluations', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agentCard, cases, mode: state.mode, seed }) });
+    const response = await fetch('/api/evaluations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: requestBody
+    });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || '创建评测失败');
     await loadHistory();
     openEvaluation(payload.id);
-  } catch (error) { showError(error.message); }
-  finally { button.disabled = false; $('span', button).textContent = '送进评测舱'; }
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    button.disabled = false;
+    $('span', button).textContent = '送进研究终审台';
+  }
 }
 
 async function submitV2Evaluation(agentCard) {
@@ -1338,7 +1370,15 @@ function setBlackBoxMode(enabled) {
   state.healthResolved = true;
   $$('.legacy-only').forEach((element) => element.classList.toggle('hidden', enabled));
   $('#v2-card-heading').classList.toggle('hidden', !enabled);
-  $('#v2-intake').classList.toggle('hidden', !enabled);
+  // Example editor + agent token are shared by V1 and V2; skip-human / replica stay V2-only.
+  $('#v2-intake').classList.remove('hidden');
+  $$('.v2-only').forEach((element) => element.classList.toggle('hidden', !enabled));
+  const blurb = $('#v2-examples-blurb');
+  if (blurb) {
+    blurb.textContent = enabled
+      ? '按 Example → Turn → Part → Criterion 的执行顺序登记公开样本；每个 Example 固定采样三次。'
+      : '按 Example → Turn → Part → Criterion 登记公开样本；live 时按 turn 顺序调用并复用 context。';
+  }
   const button = $('#start-evaluation');
   button.disabled = false;
   $('span', button).textContent = enabled ? '启动 A2A 证据评测' : '送进研究终审台';

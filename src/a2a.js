@@ -309,13 +309,14 @@ export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000, o
   return { card, resolvedUrl: target.toString(), validation };
 }
 
-export async function callA2AAgent(card, prompt, timeoutMs = 45_000, signal) {
+export async function callA2AAgent(card, prompt, timeoutMs = 45_000, signal, options = {}) {
   const { executeA2ATurn } = await import('./a2a-executor.js');
   const run = await executeA2ATurn({
     card,
     input: { parts: [{ type: 'text', text: String(prompt) }] },
     timeoutMs,
-    signal
+    signal,
+    ...(options.authorization !== undefined ? { authorization: options.authorization } : {})
   });
   if (run.outcome.status !== 'succeeded') throw new Error(run.error?.message || 'A2A execution failed');
   return {
@@ -323,6 +324,25 @@ export async function callA2AAgent(card, prompt, timeoutMs = 45_000, signal) {
     text: run.response.normalized.text,
     run
   };
+}
+
+/** Run one Agent Example with true multi-turn context reuse. */
+export async function callA2AAgentExample(card, example, options = {}) {
+  const { executeA2AExample } = await import('./a2a-executor.js');
+  const result = await executeA2AExample({
+    card,
+    example,
+    policy: { timeoutMs: options.timeoutMs ?? 45_000 },
+    authorization: options.authorization,
+    signal: options.signal
+  });
+  const failed = result.runs.find((run) => run.outcome?.status !== 'succeeded');
+  if (failed) throw new Error(failed.error?.message || 'A2A execution failed');
+  const text = result.runs
+    .map((run) => run.response?.normalized?.text)
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join('\n\n');
+  return { text, result };
 }
 
 export function buildA2ARequest(target, input, options = {}) {
