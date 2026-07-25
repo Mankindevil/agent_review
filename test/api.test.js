@@ -316,8 +316,8 @@ test('serves localized loading effects with reduced-motion support', async () =>
   assert.match(app, /review-card-queued/);
   const indexResponse = await fetch(`${origin}/`);
   const index = await indexResponse.text();
-  assert.match(index, /app\.js\?v=20260725-a2a1/);
-  assert.match(index, /styles\.css\?v=20260725-a2a1/);
+  assert.match(index, /app\.js\?v=20260725-examples1/);
+  assert.match(index, /styles\.css\?v=20260725-examples1/);
 });
 
 test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
@@ -506,7 +506,7 @@ test('serves an Agent Card upload readiness console with isolated credentials an
   assert.match(script, /service-url/);
   assert.match(script, /\/api\/agent-cards\/resolve/);
   assert.match(helper, /promptForAgentCard/);
-  assert.match(helper, /skills/);
+  assert.match(helper, /allSkillExampleTexts/);
   assert.match(script, /confirmAuthorizationTarget/);
   assert.match(script, /MAX_CARD_BYTES/);
   assert.doesNotMatch(script, /platformKey|platform-key/);
