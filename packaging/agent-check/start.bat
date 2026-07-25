@@ -10,22 +10,22 @@ set "CHECK_URL=http://localhost:4173/api/health"
 set "OPEN_URL=http://localhost:4173/agent-check"
 
 if not exist "%NODE%" (
-  echo [错误] 找不到内置 Node.js：%NODE%
-  echo 请重新解压完整的 Windows 安装包。
+  echo [ERROR] Bundled Node.js was not found: %NODE%
+  echo Please extract the complete Windows package and try again.
   pause
   exit /b 1
 )
 
 if not exist "%APP%" (
-  echo [错误] 找不到自测台程序：%APP%
-  echo 请重新解压完整的 Windows 安装包。
+  echo [ERROR] Agent Check application was not found: %APP%
+  echo Please extract the complete Windows package and try again.
   pause
   exit /b 1
 )
 
-echo 正在启动 Agent Card 自测台……
-echo 页面地址：%OPEN_URL%
-echo 停止服务：回到此窗口按 Ctrl+C。
+echo Starting Agent Card Check...
+echo Page: %OPEN_URL%
+echo To stop: return to this window and press Ctrl+C.
 
 start "" /b powershell.exe -NoProfile -WindowStyle Hidden -Command ^
   "$health='%CHECK_URL%'; $page='%OPEN_URL%';" ^
@@ -36,8 +36,8 @@ set "EXIT_CODE=%ERRORLEVEL%"
 
 if not "%EXIT_CODE%"=="0" (
   echo.
-  echo [错误] 自测台启动失败，退出码：%EXIT_CODE%
-  echo 常见原因：4173 端口已被占用，或安装包文件不完整。
+  echo [ERROR] Agent Card Check exited with code %EXIT_CODE%.
+  echo Port 4173 may already be in use, or the package may be incomplete.
   pause
 )
 

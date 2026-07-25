@@ -223,6 +223,7 @@ test('assembles both platform runtime layouts through injected build boundaries'
     const windowsScript = windowsScriptBytes.toString('utf8');
     assert.match(windowsScript, /\r\n/u);
     assert.doesNotMatch(windowsScript, /(?<!\r)\n/u);
+    assert.equal(windowsScriptBytes.every((byte) => byte < 0x80), true);
     assert.match(windowsScript, /runtime\\node\.exe/i);
     assert.match(windowsScript, /ENV_FILE=.*config\.env/i);
     assert.match(windowsScript, /api\/health/i);
