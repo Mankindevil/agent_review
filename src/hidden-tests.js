@@ -126,22 +126,23 @@ export async function reviewHiddenVariantScopes(compilation, candidates, {
 
 function normalizeCandidate(compilation, candidate, index) {
   if (!isPlainObject(candidate)) throw new TypeError(`candidate ${index} must be an object`);
-  const candidateId = requireString(candidate.candidateId, `candidate ${index} candidateId`);
   const sourceExampleId = requireString(
-    candidate.sourceExampleId,
+    candidate.sourceExampleId ?? candidate.source_example_id,
     `candidate ${index} sourceExampleId`
   );
+  const candidateId = resolveCandidateId(candidate, sourceExampleId, index);
   const source = compilation.contracts?.find(
     (contract) => contract.exampleId === sourceExampleId
   );
   if (!source) throw new TypeError(`candidate ${candidateId} has an unknown source example`);
-  if (!VARIANT_TYPES.includes(candidate.variantType)) {
+  const variantType = candidate.variantType ?? candidate.variant_type;
+  if (!VARIANT_TYPES.includes(variantType)) {
     throw new TypeError(`candidate ${candidateId} has an unsupported variant type`);
   }
   if (!Array.isArray(candidate.turns) || candidate.turns.length === 0) {
     throw new TypeError(`candidate ${candidateId} turns are required`);
   }
-  if (candidate.variantType === 'multi-turn' && candidate.turns.length < 2) {
+  if (variantType === 'multi-turn' && candidate.turns.length < 2) {
     throw new TypeError(`candidate ${candidateId} multi-turn variants require at least two turns`);
   }
   const turns = normalizeHiddenTurns(candidate.turns, candidateId);
@@ -176,13 +177,14 @@ function normalizeCandidate(compilation, candidate, index) {
   if (EXTERNAL_TRUTH_PATTERN.test(JSON.stringify(candidatePayload))) {
     throw new TypeError(`candidate ${candidateId} introduces external truth`);
   }
-  if (!['singleTurn', 'multiTurn'].includes(candidate.timingClass)) {
+  const timingClass = candidate.timingClass ?? candidate.timing_class;
+  if (!['singleTurn', 'multiTurn'].includes(timingClass)) {
     throw new TypeError(`candidate ${candidateId} has an invalid timingClass`);
   }
-  const expectedTimingClass = candidate.variantType === 'multi-turn'
+  const expectedTimingClass = variantType === 'multi-turn'
     ? 'multiTurn'
     : 'singleTurn';
-  if (candidate.timingClass !== expectedTimingClass) {
+  if (timingClass !== expectedTimingClass) {
     throw new TypeError(
       `candidate ${candidateId} timingClass must be ${expectedTimingClass}`
     );
@@ -190,15 +192,15 @@ function normalizeCandidate(compilation, candidate, index) {
   return {
     candidateId,
     sourceExampleId,
-    variantType: candidate.variantType,
+    variantType,
     changeSummary: requireString(
-      candidate.changeSummary,
+      candidate.changeSummary ?? candidate.change_summary,
       `candidate ${candidateId} changeSummary`
     ),
     turns,
     inheritedCriteriaIds,
     proposedCriteria,
-    timingClass: candidate.timingClass
+    timingClass
   };
 }
 
@@ -265,6 +267,23 @@ function collectUrls(value) {
 function normalizeStringArray(value, field) {
   if (!Array.isArray(value)) throw new TypeError(`${field} must be an array`);
   return value.map((item) => requireString(item, field));
+}
+
+function resolveCandidateId(candidate, sourceExampleId, index) {
+  const raw =
+    candidate.candidateId ??
+    candidate.candidate_id ??
+    candidate.id;
+  if (typeof raw === 'string' && raw.trim()) return raw.trim();
+  const variantType = typeof candidate.variantType === 'string'
+    ? candidate.variantType.trim()
+    : typeof candidate.variant_type === 'string'
+      ? candidate.variant_type.trim()
+      : '';
+  if (!VARIANT_TYPES.includes(variantType)) {
+    throw new TypeError(`candidate ${index} candidateId must be a non-empty string`);
+  }
+  return `${sourceExampleId}_${variantType.replace(/-/g, '_')}_${index}`;
 }
 
 function requireString(value, field) {

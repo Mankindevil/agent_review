@@ -98,6 +98,24 @@ test('normalizes exactly one candidate for every required hidden variant slot', 
   assert.equal(Object.isFrozen(result), true);
 });
 
+test('synthesizes candidateId when live generator omits it', async () => {
+  const result = await generateHiddenVariants(compilation, {
+    generator,
+    requestJson: async () => ({
+      candidates: ['equivalent', 'boundary', 'multi-turn'].map((variantType) => {
+        const item = candidate(variantType);
+        delete item.candidateId;
+        return item;
+      })
+    })
+  });
+
+  assert.deepEqual(
+    result.candidates.map((item) => item.candidateId),
+    ['risk_equivalent_0', 'risk_boundary_1', 'risk_multi_turn_2']
+  );
+});
+
 test('rejects generated inputs that expand URLs, domains, or expected truth', async () => {
   const attempts = [
     candidate('equivalent', {
