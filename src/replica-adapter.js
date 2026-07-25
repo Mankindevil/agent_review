@@ -72,6 +72,9 @@ export function createReplicaAdapter(runtime, mode, dependencies = {}) {
     },
     async run(replicaArtifact, testInput, logicalHandle, runBudget, options = {}) {
       const context = contextFor(logicalHandle, objectContexts, valueContexts);
+      context.history = Array.isArray(logicalHandle?.history)
+        ? structuredClone(logicalHandle.history)
+        : [];
       try {
         await assertHardHealth(options);
         validateReplicaArtifact(replicaArtifact, runBudget);

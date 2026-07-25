@@ -421,6 +421,7 @@ test('seals Phase 3 replica work after the immutable test plan without exposing 
     inheritedCriteriaIds: ['contains output'], proposedCriteria: []
   });
   let builds = 0;
+  const replicaVault = strictMemoryVault();
   const phase2 = {
     enabled: true, generatorIdentity: 'generator', scopeReviewerIdentity: 'scope',
     generateHidden: async () => ({ candidates: ['equivalent', 'boundary', 'multi-turn'].map(candidate) }),
@@ -446,6 +447,7 @@ test('seals Phase 3 replica work after the immutable test plan without exposing 
 
   await runBlackBoxFoundation(evaluation, workerServices(store, {
     phase2, phase3,
+    evidenceVaultFactory: () => replicaVault,
     executeTurn: async (options) => successfulRun(options, options.contextId || `ctx-${options.testId}-${options.repeatIndex}`)
   }));
 
@@ -459,6 +461,98 @@ test('seals Phase 3 replica work after the immutable test plan without exposing 
     false
   );
   assert.equal(Object.hasOwn(result, 'replicaCheckpoint'), true);
+  assert.equal(result.replicaCheckpoint.status, 'sealed');
+  assert.equal(result.replicaCheckpoint.packageHash, result.replicaArena.packageHash);
+  assert.equal(result.replicaCheckpoint.testPlanHash, result.replicaArena.testPlanHash);
+  assert.equal(result.replicaCheckpoint.packageGeneratedAt, result.replicaArena.packageGeneratedAt);
+  assert.equal(Object.keys(result.replicaCheckpoint.builds).length, 1);
+  assert.equal(Object.keys(result.replicaCheckpoint.turns).length > 0, true);
+  assert.equal(Array.isArray(result.replicaCheckpoint.evidenceCommitments), true);
+  for (const commitment of result.replicaCheckpoint.evidenceCommitments) {
+    const record = await replicaVault.get(
+      commitment.evidenceId,
+      commitment.recordHash
+    );
+    assert.equal(record.payloadHash, commitment.payloadHash);
+  }
+});
+
+for (const fault of [
+  'build-dispatch',
+  'build-complete',
+  'turn-dispatch',
+  'turn-evidence',
+  'cell',
+  'seal'
+]) {
+  test(`resumes Phase 3 after a ${fault} checkpoint CAS failure without duplicate logical work or evidence`, async () => {
+    const fixture = phase3ResumeFixture();
+    injectReplicaCommitFailure(fixture.store, fault);
+
+    await assert.rejects(
+      runBlackBoxFoundation(
+        fixture.evaluation,
+        fixture.services
+      ),
+      /injected replica checkpoint conflict/iu
+    );
+    const interrupted = fixture.store.get(fixture.evaluation.id);
+    assert.equal(interrupted.execution.status, 'interrupted');
+    const packageGeneratedAt =
+      interrupted.replicaCheckpoint.packageGeneratedAt;
+
+    const result = await runBlackBoxFoundation(
+      interrupted,
+      fixture.services
+    );
+    assert.equal(result.replicaCheckpoint.status, 'sealed');
+    assert.equal(
+      result.replicaCheckpoint.packageGeneratedAt,
+      packageGeneratedAt
+    );
+    assert.equal(result.replicaArena.status, 'sealed');
+    assert.equal(result.replicaArena.runtimeSummaries.length, 1);
+    assert.equal(result.replicaArena.runtimeSummaries[0].validity, 'valid');
+    assert.equal(result.resultV2.replica.pendingAttributionCount, 0);
+    assert.equal(fixture.effects.physicalBuilds, 1);
+    assert.equal(
+      fixture.effects.physicalRuns,
+      result.replicaArena.runtimeSummaries[0].turnCount
+    );
+    assert.equal(
+      new Set(fixture.vault.records.map((record) => record.evidenceId)).size,
+      fixture.vault.records.length
+    );
+    assert.equal(
+      new Set(
+        result.replicaCheckpoint.evidenceCommitments.map(
+          (item) => item.evidenceId
+        )
+      ).size,
+      result.replicaCheckpoint.evidenceCommitments.length
+    );
+  });
+}
+
+test('reuses the sealed Replica checkpoint when model review fails after sealing', async () => {
+  const fixture = phase3ResumeFixture({ failRunPanelOnce: true });
+
+  await assert.rejects(
+    runBlackBoxFoundation(fixture.evaluation, fixture.services),
+    /injected model panel failure/iu
+  );
+  const interrupted = fixture.store.get(fixture.evaluation.id);
+  assert.equal(interrupted.replicaCheckpoint.status, 'sealed');
+  const recordsBefore = fixture.vault.records.length;
+
+  const result = await runBlackBoxFoundation(interrupted, fixture.services);
+  assert.equal(result.replicaArena.status, 'sealed');
+  assert.equal(fixture.effects.physicalBuilds, 1);
+  assert.equal(
+    fixture.effects.physicalRuns,
+    result.replicaArena.runtimeSummaries[0].turnCount
+  );
+  assert.equal(fixture.vault.records.length, recordsBefore);
 });
 
 test('deletes ephemeral credentials when worker evidence or credential setup throws', async () => {
@@ -2243,6 +2337,226 @@ function replicaArtifact(runtimeId, packageHash) {
     },
     buildEvidence: { budgetUsage: { tokens: 1 } }
   };
+}
+
+function phase3ResumeFixture({ failRunPanelOnce = false } = {}) {
+  const snapshot = freezeSubmission({
+    agentCard: CARD,
+    agentExamples: EXAMPLES,
+    config: {
+      rubricVersion: 'a2a-black-box-v1',
+      hiddenTestPackageVersion: 'black-box-test-plan/v1',
+      modelConfigVersion: 'panel-v1',
+      runtimeConfigVersion: 'phase2-black-box-runtime/v1'
+    },
+    frozenAt: '2026-07-25T10:00:00.000Z'
+  });
+  const evaluation = createEvaluationRecord(snapshot, {
+    id: `eval_phase3_resume_${Math.random().toString(16).slice(2)}`,
+    createdAt: '2026-07-25T10:00:00.000Z',
+    participantAccess: {
+      tokenHash: 'a'.repeat(64),
+      createdAt: '2026-07-25T10:00:00.000Z'
+    },
+    authorizationRequired: false,
+    endpointHash: 'b'.repeat(64),
+    agentVersion: '1.2.3',
+    serviceBuildId: null,
+    runIndex: []
+  });
+  const store = memoryStore(evaluation);
+  const vault = strictMemoryVault();
+  const effects = {
+    physicalBuilds: 0,
+    physicalRuns: 0
+  };
+  const buildResults = new Map();
+  const runResults = new Map();
+  const candidate = (variantType) => ({
+    candidateId: `resume-${variantType}`,
+    sourceExampleId: 'unsafe example id',
+    variantType,
+    changeSummary: 'in-scope',
+    timingClass:
+      variantType === 'multi-turn' ? 'multiTurn' : 'singleTurn',
+    turns: variantType === 'multi-turn'
+      ? [
+          { input: { parts: [{ type: 'text', text: 'first' }] } },
+          { input: { parts: [{ type: 'text', text: 'second' }] } }
+        ]
+      : [{
+          input: {
+            parts: [{ type: 'text', text: variantType }]
+          }
+        }],
+    inheritedCriteriaIds: ['contains output'],
+    proposedCriteria: []
+  });
+  let panelFailed = false;
+  const phase2 = {
+    enabled: true,
+    generatorIdentity: 'generator',
+    scopeReviewerIdentity: 'scope',
+    generateHidden: async () => ({
+      candidates: [
+        'equivalent',
+        'boundary',
+        'multi-turn'
+      ].map(candidate)
+    }),
+    reviewScopes: async (_compilation, candidates) => ({
+      decisions: candidates.map((item) => ({
+        candidateId: item.candidateId,
+        checks: {
+          sameDomain: true,
+          declaredOrDemonstratedCapabilityOnly: true,
+          noExternalTruthDependency: true,
+          difficultyFromAllowedTransformation: true,
+          sameInputForAgentAndReplica: true
+        },
+        approved: true,
+        reasons: []
+      }))
+    }),
+    runPanel: async ({ contract }) => {
+      if (failRunPanelOnce && !panelFailed) {
+        panelFailed = true;
+        throw new Error('injected model panel failure');
+      }
+      return {
+        status: 'model-locked',
+        dimensions: {},
+        subcriteria: Object.fromEntries(
+          contract.subcriterionIds.map((id) => [
+            id,
+            { score: 70, confidence: 0.8 }
+          ])
+        ),
+        checkEvidenceIndex: {}
+      };
+    }
+  };
+  const adapter = {
+    health: async () => ({
+      ready: true,
+      budgetEnforcement: {
+        wallClock: 'hard',
+        tokens: 'hard',
+        outputBytes: 'hard',
+        network: 'hard'
+      }
+    }),
+    build: async (packet, _budget, options) => {
+      if (!buildResults.has(options.idempotencyKey)) {
+        effects.physicalBuilds += 1;
+        buildResults.set(
+          options.idempotencyKey,
+          replicaArtifact(
+            'sealed-runtime',
+            packet.manifest.contentHash
+          )
+        );
+      }
+      return structuredClone(buildResults.get(options.idempotencyKey));
+    },
+    run: async (_artifact, input, _context, _budget, options) => {
+      if (!runResults.has(options.idempotencyKey)) {
+        effects.physicalRuns += 1;
+        runResults.set(options.idempotencyKey, {
+          status: 'completed',
+          messageParts: [{
+            type: 'text',
+            text: input.parts[0].text
+          }],
+          artifacts: [],
+          durationMs: 1,
+          error: null,
+          budgetUsage: { tokens: 1 },
+          evidence: {}
+        });
+      }
+      return structuredClone(runResults.get(options.idempotencyKey));
+    },
+    disposeContext: async () => {}
+  };
+  const services = workerServices(store, {
+    phase2,
+    phase3: {
+      enabled: true,
+      runtimes: [{ id: 'sealed-runtime' }],
+      adapters: { 'sealed-runtime': adapter }
+    },
+    evidenceVaultFactory: () => vault,
+    executeTurn: async (options) => successfulRun(
+      options,
+      options.contextId ||
+        `ctx-${options.testId}-${options.repeatIndex}`
+    )
+  });
+  return { evaluation, store, vault, effects, services };
+}
+
+function injectReplicaCommitFailure(store, fault) {
+  const mutate = store.mutate.bind(store);
+  let fired = false;
+  store.mutate = async (id, expectedRevision, updater) => {
+    if (!fired) {
+      const before = store.get(id);
+      const candidate = await updater(structuredClone(before));
+      if (replicaTransitionOccurred(before, candidate, fault)) {
+        fired = true;
+        const error = new Error(
+          `injected replica checkpoint conflict: ${fault}`
+        );
+        error.code = 'REVISION_CONFLICT';
+        throw error;
+      }
+    }
+    return mutate(id, expectedRevision, updater);
+  };
+}
+
+function replicaTransitionOccurred(before, after, fault) {
+  const previous = before.replicaCheckpoint || {};
+  const next = after.replicaCheckpoint || {};
+  const grew = (field) =>
+    Object.keys(next[field] || {}).length >
+      Object.keys(previous[field] || {}).length;
+  if (fault === 'build-dispatch') return grew('buildDispatches');
+  if (fault === 'build-complete') return grew('builds');
+  if (fault === 'turn-dispatch') return grew('turnDispatches');
+  if (fault === 'turn-evidence') return grew('turns');
+  if (fault === 'cell') return grew('cells');
+  if (fault === 'seal') {
+    return previous.status !== 'sealed' && next.status === 'sealed';
+  }
+  return false;
+}
+
+function strictMemoryVault() {
+  const records = new Map();
+  const api = {
+    records: [],
+    async put(record) {
+      if (records.has(record.evidenceId)) {
+        const error = new Error('already exists');
+        error.code = 'EEXIST';
+        throw error;
+      }
+      const copy = structuredClone(record);
+      records.set(record.evidenceId, copy);
+      api.records.push(copy);
+      return structuredClone(copy);
+    },
+    async get(evidenceId, recordHash) {
+      const record = records.get(evidenceId);
+      if (!record || record.recordHash !== recordHash) {
+        throw new Error('missing committed evidence');
+      }
+      return structuredClone(record);
+    }
+  };
+  return api;
 }
 
 function incrementingClock(step) {

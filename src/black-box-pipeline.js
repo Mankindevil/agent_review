@@ -644,7 +644,7 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
     const phase3 = services.phase3;
     const existingCheckpoint = context.store.get(context.evaluationId).replicaCheckpoint;
     if (
-      existingCheckpoint?.status === 'running' &&
+      ['running', 'sealed'].includes(existingCheckpoint?.status) &&
       existingCheckpoint.testPlanHash !== hashCanonical(testPlan)
     ) {
       throw new Error('Replica checkpoint test-plan commitment mismatch');
@@ -683,15 +683,27 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
       });
       replicaArena = await sealReplicaArena({
         packageHash: built.packageHash,
+        packageGeneratedAt: built.packageGeneratedAt,
+        testPlanHash: hashCanonical(testPlan),
         built,
         executed
       });
       await mutateCurrent(context, (record) => ({
         ...record,
         replicaCheckpoint: {
+          ...structuredClone(record.replicaCheckpoint),
+          version: 'replica-checkpoint/v1',
           status: 'sealed',
+          packageHash: built.packageHash,
+          packageGeneratedAt: built.packageGeneratedAt,
+          testPlanHash: hashCanonical(testPlan),
           arena: structuredClone(replicaArena),
-          sealedEvidenceIds: [...replicaArena.encryptedArenaEvidenceIds]
+          evidenceCommitments: structuredClone(
+            replicaArena.evidenceCommitments
+          ),
+          sealedEvidenceIds: [
+            ...replicaArena.encryptedArenaEvidenceIds
+          ]
         }
       }));
     }
@@ -826,29 +838,109 @@ function mergeReplicaCheckpoint(previous, step, testPlan) {
     version: 'replica-checkpoint/v1',
     status: 'running',
     packageHash: current.packageHash || null,
+    packageGeneratedAt: current.packageGeneratedAt || null,
     testPlanHash: hashCanonical(testPlan),
+    buildDispatches: { ...(current.buildDispatches || {}) },
     builds: { ...(current.builds || {}) },
+    cellDispatches: { ...(current.cellDispatches || {}) },
+    turnDispatches: { ...(current.turnDispatches || {}) },
     turns: { ...(current.turns || {}) },
+    failures: { ...(current.failures || {}) },
     cells: { ...(current.cells || {}) }
   };
-      if (step.type === 'package-locked') next.packageHash = step.packageHash;
-  if (step.type === 'package-locked') next.packageGeneratedAt = step.packageGeneratedAt;
+  if (step.type === 'package-locked') {
+    next.packageHash = step.packageHash;
+    next.packageGeneratedAt = step.packageGeneratedAt;
+  }
+  if (step.type === 'build-dispatching') {
+    next.buildDispatches[step.runtimeId] = {
+      runtimeId: step.runtimeId,
+      packageHash: step.packageHash,
+      operationId: step.operationId,
+      capturedAt: step.capturedAt
+    };
+  }
   if (step.type === 'build-complete') {
     next.builds[step.runtimeId] = {
       validity: step.validity,
-      artifactCommitment: structuredClone(step.artifactCommitment || null)
+      failureCategory: step.failureCategory || null,
+      storageFailureCategory: step.storageFailureCategory || null,
+      artifactCommitment: structuredClone(
+        step.artifactCommitment || null
+      ),
+      failureEvidenceCommitments: structuredClone(
+        step.failureEvidenceCommitments || []
+      ),
+      evidenceCommitments: structuredClone(
+        step.evidenceCommitments || []
+      )
+    };
+  }
+  if (step.type === 'cell-dispatching') {
+    next.cellDispatches[step.cellKey] = {
+      cellKey: step.cellKey,
+      capturedAt: step.capturedAt,
+      runtimeId: step.runtimeId,
+      packageHash: step.packageHash,
+      testPlanHash: step.testPlanHash,
+      testId: step.testId,
+      repeatIndex: step.repeatIndex
+    };
+  }
+  if (step.type === 'turn-dispatching') {
+    next.turnDispatches[step.turnKey] = {
+      operationId: step.operationId,
+      capturedAt: step.capturedAt,
+      runtimeId: step.runtimeId,
+      packageHash: step.packageHash,
+      testPlanHash: step.testPlanHash,
+      testId: step.testId,
+      repeatIndex: step.repeatIndex,
+      turnIndex: step.turnIndex,
+      inputHash: step.inputHash
     };
   }
   if (step.type === 'turn-evidence-committed') {
     next.turns[step.turnKey] = {
       resultCommitment: structuredClone(step.resultCommitment),
       validity: step.validity,
+      runtimeId: step.runtimeId,
+      packageHash: step.packageHash,
+      testPlanHash: step.testPlanHash,
+      testId: step.testId,
+      repeatIndex: step.repeatIndex,
+      turnIndex: step.turnIndex,
+      inputHash: step.inputHash
+    };
+  }
+  if (step.type === 'failure-evidence-committed') {
+    next.failures[step.failureKey] = {
+      failureCommitment: structuredClone(step.failureCommitment),
+      failurePhase: step.failurePhase,
+      runtimeId: step.runtimeId,
+      packageHash: step.packageHash,
+      testPlanHash: step.testPlanHash,
+      testId: step.testId,
+      repeatIndex: step.repeatIndex,
+      turnIndex: step.turnIndex,
       inputHash: step.inputHash
     };
   }
   if (step.type === 'cell-complete') {
     next.cells[`${step.runtimeId}:${step.testId}:${step.repeatIndex}`] = {
-      validity: step.validity, runCount: step.runCount, turnCount: step.turnCount
+      cellKey: step.cellKey,
+      runtimeId: step.runtimeId,
+      packageHash: step.packageHash,
+      testPlanHash: step.testPlanHash,
+      testId: step.testId,
+      repeatIndex: step.repeatIndex,
+      validity: step.validity,
+      failureCategory: step.failureCategory || null,
+      runCount: step.runCount,
+      turnCount: step.turnCount,
+      evidenceCommitments: structuredClone(
+        step.evidenceCommitments || []
+      )
     };
   }
   return next;
