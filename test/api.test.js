@@ -26,6 +26,17 @@ process.env.A2A_BLACK_BOX_V1_ENABLED = 'false';
 process.env.AGENT_DIAGNOSTICS_RATE_LIMIT = '100';
 process.env.ALLOW_PRIVATE_AGENT_URLS = 'true';
 process.env.ALLOW_PRIVATE_DIAGNOSTICS_URLS = 'true';
+process.env.REVIEW_PRINCIPALS_JSON = JSON.stringify([{
+  principalId: 'judge-1',
+  displayName: '评委一',
+  role: 'judge',
+  tokenSha256: createHash('sha256').update('judge-secret', 'utf8').digest('hex')
+}, {
+  principalId: 'admin-1',
+  displayName: '管理员',
+  role: 'admin',
+  tokenSha256: createHash('sha256').update('admin-secret', 'utf8').digest('hex')
+}]);
 const API_UNSECURED_JWT = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ.';
 const V2_FIXTURE_PARTICIPANT_TOKEN = 'T'.repeat(43);
 const apiEvidenceRecord = createEvidenceRecord({
@@ -230,6 +241,34 @@ test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes'
   assert.equal(archivedResponse.status, 200);
   assert.equal(typeof archived.archivedAt, 'string');
   assert.equal(archived.revision, 1);
+});
+
+test('enforces server-authenticated judge and admin projections for V2 routes', async () => {
+  const missing = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/judge-preview`);
+  assert.equal(missing.status, 401);
+
+  const invalid = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/judge-preview`, {
+    headers: { authorization: 'Bearer wrong-secret' }
+  });
+  assert.equal(invalid.status, 401);
+
+  const judge = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/judge-preview`, {
+    headers: { authorization: 'Bearer judge-secret' }
+  });
+  const judgeView = await judge.json();
+  assert.equal(judge.status, 200);
+  assert.equal(judgeView.submission, undefined);
+  assert.equal(JSON.stringify(judgeView).includes('api-seal-secret'), false);
+
+  const forbiddenAdmin = await fetch(`${origin}/api/admin/evaluations/${v2Fixture.id}`, {
+    headers: { authorization: 'Bearer judge-secret' }
+  });
+  assert.equal(forbiddenAdmin.status, 403);
+
+  const admin = await fetch(`${origin}/api/admin/evaluations/${v2Fixture.id}`, {
+    headers: { authorization: 'Bearer admin-secret' }
+  });
+  assert.equal(admin.status, 200);
 });
 
 test('reports PandaAI data source status without credentials', async () => {

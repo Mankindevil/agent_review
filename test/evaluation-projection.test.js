@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { projectEvaluation } from '../src/evaluation-projection.js';
+import {
+  assertNoReplicaLeak,
+  assertNoSecretShape,
+  projectEvaluation
+} from '../src/evaluation-projection.js';
 import {
   createEvidenceManifestItem,
   createEvidenceRecord
@@ -198,7 +202,10 @@ test('constructs a public V2 projection from explicit allow-listed fields', () =
 });
 
 test('admin projection adds only safe submission metadata and audit summaries', () => {
-  const projection = projectEvaluation(unsafeEvaluation(), { audience: 'admin' });
+  const projection = projectEvaluation(unsafeEvaluation(), {
+    audience: 'admin',
+    principal: { principalId: 'admin-1', role: 'admin' }
+  });
   const serialized = JSON.stringify(projection);
 
   assert.deepEqual(projection.submission, {
@@ -217,6 +224,66 @@ test('admin projection adds only safe submission metadata and audit summaries', 
   assert.equal(serialized.includes('hidden-v1'), false);
   assert.equal(serialized.includes('sensitive-log-secret'), false);
   assert.throws(() => projectEvaluation(unsafeEvaluation(), { audience: 'judge' }), /audience/i);
+});
+
+test('projects distinct participant and judge allow-lists before the absolute lock', () => {
+  const source = unsafeEvaluation();
+  source.submission.agentCard.value = {
+    name: 'Research Agent',
+    description: 'Reviews supplied evidence.',
+    url: 'https://private-agent.example/a2a'
+  };
+  source.submission.agentExamples.value = [{ input: 'token=agent-example-secret' }];
+  source.absoluteReview.modelPanel = {
+    status: 'model-locked',
+    primary: [{
+      reviewRunId: 'primary_0',
+      reviews: [{
+        subcriterionId: 'professionalism.evidenceReasoning',
+        score: 78,
+        evidenceIds: ['ev_public'],
+        findings: [{ findingId: 'finding_1', text: 'Evidence is cited.' }]
+      }]
+    }]
+  };
+
+  const participant = projectEvaluation(source, {
+    audience: 'participant',
+    principal: { principalId: 'participant', role: 'participant' },
+    secrets: ['agent-example-secret']
+  });
+  const judge = projectEvaluation(source, {
+    audience: 'judge',
+    principal: { principalId: 'judge-1', role: 'judge' },
+    secrets: ['agent-example-secret']
+  });
+
+  assert.equal(Object.hasOwn(participant, 'submission'), true);
+  assert.equal(Object.hasOwn(participant.submission.agentCard, 'value'), false);
+  assert.equal(Object.hasOwn(judge.submission.agentCard, 'value'), true);
+  assert.equal(judge.absoluteReview.modelPanel.primary[0].reviews[0].score, 78);
+  assert.equal(Object.hasOwn(participant, 'replicaArena'), false);
+  assert.equal(Object.hasOwn(judge, 'replicaArena'), false);
+  assertNoReplicaLeak(participant);
+  assertNoReplicaLeak(judge);
+  assertNoSecretShape(participant);
+  assertNoSecretShape(judge);
+});
+
+test('requires principals compatible with a non-public audience', () => {
+  const source = unsafeEvaluation();
+
+  assert.throws(
+    () => projectEvaluation(source, { audience: 'judge' }),
+    /principal|role/i
+  );
+  assert.throws(
+    () => projectEvaluation(source, {
+      audience: 'participant',
+      principal: { principalId: 'judge-1', role: 'judge' }
+    }),
+    /principal|role/i
+  );
 });
 
 test('judge preview exposes redacted submission and locked model reviews without replica material', () => {
@@ -347,7 +414,10 @@ test('all pre-lock projections expose sealed Replica counts without runtime or e
   source.resultV2.replica = { status: 'sealed', runtimeId: 'runtime-private', output: 'must-not-project' };
 
   for (const audience of ['public', 'admin', 'judge-preview']) {
-    const projection = projectEvaluation(source, { audience });
+    const projection = projectEvaluation(source, {
+      audience,
+      principal: audience === 'admin' ? { principalId: 'admin-1', role: 'admin' } : null
+    });
     assert.deepEqual(projection.resultV2.replica, {
       status: 'sealed', validReplicaCount: 1, pendingAttributionCount: 1
     });
@@ -525,6 +595,7 @@ test('type-checks and redacts every projected leaf, including allowed summaries 
   for (const audience of ['public', 'admin']) {
     const projection = projectEvaluation(source, {
       audience,
+      principal: audience === 'admin' ? { principalId: 'admin-1', role: 'admin' } : null,
       secrets: ['run-explicit-secret', 'objective-secret', 'finding-secret']
     });
     const serialized = JSON.stringify(projection);
@@ -544,7 +615,10 @@ test('type-checks and redacts every projected leaf, including allowed summaries 
     assert.match(projection.id, /\[SECRET_REDACTED\]/);
   }
 
-  const admin = projectEvaluation(source, { audience: 'admin' });
+  const admin = projectEvaluation(source, {
+    audience: 'admin',
+    principal: { principalId: 'admin-1', role: 'admin' }
+  });
   const hidden = admin.evidenceManifest.items.find((item) => item.evidenceId === 'ev_hidden');
   assert.ok(hidden);
   assert.equal(Object.hasOwn(hidden, 'summary'), false);
@@ -564,7 +638,10 @@ test('fails closed instead of projecting malformed or commitment-mismatched mani
   ];
 
   for (const audience of ['public', 'admin']) {
-    const projection = projectEvaluation(source, { audience });
+    const projection = projectEvaluation(source, {
+      audience,
+      principal: audience === 'admin' ? { principalId: 'admin-1', role: 'admin' } : null
+    });
     assert.deepEqual(projection.evidenceManifest.items, [PUBLIC_MANIFEST]);
   }
 });

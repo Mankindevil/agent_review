@@ -23,6 +23,10 @@ import { getPandaDataStatus, pandaDataConfig, queryPandaData } from './src/panda
 import { resolveServerAddress } from './src/server-address.js';
 import { projectEvaluation } from './src/evaluation-projection.js';
 import {
+  authenticatePrincipal,
+  requireRole
+} from './src/review-access.js';
+import {
   copyEvidenceEncryptionKey,
   copyResumeMacKey,
   readBlackBoxRuntimeConfig
@@ -125,7 +129,9 @@ export const server = createServer(async (request, response) => {
     }
     if (request.method === 'GET' && url.pathname === '/api/evaluations') {
       return json(response, 200, store.list().map((item) =>
-        item.schemaVersion === 2 ? projectEvaluation(item, { audience: 'public' }) : summary(item)
+        item.schemaVersion === 2
+          ? projectForRequest(item, request)
+          : summary(item)
       ));
     }
     if (request.method === 'POST' && url.pathname === '/api/evaluations') {
@@ -185,23 +191,33 @@ export const server = createServer(async (request, response) => {
       url.pathname.match(/^\/api\/evaluations\/([^/]+)\/judge-preview$/);
     if (request.method === 'GET' && judgePreviewMatch) {
       response.setHeader('cache-control', 'no-store');
-      const accessKey = process.env.JUDGE_PREVIEW_ACCESS_KEY;
-      if (!accessKey) {
-        return json(response, 503, {
-          error: 'Judge preview access is not configured'
-        });
-      }
-      if (!authorizedBearer(request, accessKey)) {
-        return json(response, 401, {
-          error: 'Judge preview authorization failed'
-        });
-      }
       const item = store.get(judgePreviewMatch[1]);
       if (!item || item.schemaVersion !== 2) {
         return json(response, 404, { error: 'Evaluation does not exist' });
       }
+      const principal = requireRole(
+        authenticatePrincipal(request, item, process.env),
+        ['judge', 'admin']
+      );
       return json(response, 200, projectEvaluation(item, {
-        audience: 'judge-preview'
+        audience: principal.role === 'admin' ? 'admin' : 'judge',
+        principal
+      }));
+    }
+    const adminEvaluationMatch = url.pathname.match(/^\/api\/admin\/evaluations\/([^/]+)$/);
+    if (request.method === 'GET' && adminEvaluationMatch) {
+      response.setHeader('cache-control', 'no-store');
+      const item = store.get(adminEvaluationMatch[1]);
+      if (!item || item.schemaVersion !== 2) {
+        return json(response, 404, { error: 'Evaluation does not exist' });
+      }
+      const principal = requireRole(
+        authenticatePrincipal(request, item, process.env),
+        'admin'
+      );
+      return json(response, 200, projectEvaluation(item, {
+        audience: 'admin',
+        principal
       }));
     }
     const skillMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/builds\/([^/]+)\/skill$/);
@@ -247,7 +263,7 @@ export const server = createServer(async (request, response) => {
     if (request.method === 'GET' && match) {
       const item = store.get(match[1]);
       if (item?.schemaVersion === 2) {
-        return json(response, 200, projectEvaluation(item, { audience: 'public' }));
+        return json(response, 200, projectForRequest(item, request));
       }
       return item ? json(response, 200, item) : json(response, 404, { error: '评测不存在' });
     }
@@ -270,10 +286,13 @@ export const server = createServer(async (request, response) => {
 function streamEvents(request, response, evaluationId) {
   const item = store.get(evaluationId);
   if (!item) return json(response, 404, { error: '评测不存在' });
+  const projectionOptions = item.schemaVersion === 2
+    ? projectionOptionsForRequest(item, request)
+    : null;
   response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
   const send = (value) => {
     const body = item.schemaVersion === 2 || value?.schemaVersion === 2
-      ? projectEvaluation(value, { audience: 'public' })
+      ? projectEvaluation(value, projectionOptions)
       : value;
     response.write(`data: ${JSON.stringify(body)}\n\n`);
   };
@@ -337,6 +356,17 @@ export function serializeEvaluationForResponse(item) {
   return item?.schemaVersion === 2
     ? projectEvaluation(item, { audience: 'public' })
     : item;
+}
+
+function projectForRequest(evaluation, request) {
+  return projectEvaluation(evaluation, projectionOptionsForRequest(evaluation, request));
+}
+
+function projectionOptionsForRequest(evaluation, request) {
+  if (!request.headers.authorization) return { audience: 'public' };
+  const principal = authenticatePrincipal(request, evaluation, process.env);
+  if (!principal) throw Object.assign(new Error('authentication required'), { statusCode: 401 });
+  return { audience: principal.role, principal };
 }
 
 function bearerToken(value) {

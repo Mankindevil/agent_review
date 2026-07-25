@@ -12,13 +12,14 @@ const COMMON_RESULT_FIELDS = [
 ];
 const DIMENSION_FIELDS = new Set(['scenarioValue', 'professionalism', 'agentCapability']);
 
-export function projectEvaluation(evaluation, { audience = 'public', secrets = [] } = {}) {
-  if (!['public', 'admin', 'judge-preview'].includes(audience)) {
+export function projectEvaluation(evaluation, { audience = 'public', principal = null, secrets = [] } = {}) {
+  if (!['public', 'participant', 'judge', 'admin', 'judge-preview'].includes(audience)) {
     throw new TypeError('unsupported evaluation projection audience');
   }
   if (!evaluation || typeof evaluation !== 'object' || Array.isArray(evaluation)) {
     throw new TypeError('evaluation must be an object');
   }
+  assertAudiencePrincipal(audience, principal);
 
   const projection = {
     schemaVersion: projectPrimitive(evaluation.schemaVersion, secrets),
@@ -40,14 +41,14 @@ export function projectEvaluation(evaluation, { audience = 'public', secrets = [
     qualification: projectQualification(evaluation.qualification, secrets),
     evidenceManifest: projectManifest(
       evaluation.evidenceManifest,
-      audience === 'judge-preview' ? 'admin' : audience,
+      audience,
       secrets
     ),
     objectiveCapability: pickResult(evaluation.objectiveCapability, COMMON_RESULT_FIELDS, secrets),
     absoluteReview: projectAbsoluteReview(
       evaluation.absoluteReview,
       secrets,
-      audience === 'judge-preview'
+      audience === 'judge' || audience === 'judge-preview'
     ),
     resultV2: evaluation.resultV2 === null
       ? null
@@ -67,10 +68,20 @@ export function projectEvaluation(evaluation, { audience = 'public', secrets = [
     projection.submission = projectSubmissionMetadata(evaluation.submission, secrets);
     projection.auditEvents = (Array.isArray(evaluation.auditEvents) ? evaluation.auditEvents : [])
       .map((event) => projectAuditEvent(event, secrets));
-  } else if (audience === 'judge-preview') {
+  } else if (audience === 'judge' || audience === 'judge-preview') {
     projection.submission = projectJudgeSubmission(evaluation.submission, secrets);
+  } else if (audience === 'participant') {
+    projection.submission = projectSubmissionMetadata(evaluation.submission, secrets);
   }
   return projection;
+}
+
+function assertAudiencePrincipal(audience, principal) {
+  if (audience === 'public' || audience === 'judge-preview') return;
+  const expected = audience === 'participant' ? 'participant' : audience;
+  if (!principal || principal.role !== expected) {
+    throw new TypeError(`unsupported audience principal role for ${audience} projection`);
+  }
 }
 
 function projectQualification(value, secrets) {
@@ -337,13 +348,29 @@ function projectManifest(manifest, audience, secrets) {
       .flatMap((item) => {
         try {
           const canonical = validateEvidenceManifestItem(item);
-          if (audience !== 'admin' && canonical.visibility !== 'public') return [];
+          if (!canReadManifestItem(canonical, audience)) return [];
           return [projectManifestItem(canonical, secrets)];
         } catch {
           return [];
         }
       })
   };
+}
+
+function canReadManifestItem(item, audience) {
+  if (audience === 'admin') return true;
+  if (audience === 'public') return item.visibility === 'public';
+  if (isReplicaManifestItem(item)) return false;
+  return audience === 'participant' || audience === 'judge' || audience === 'judge-preview';
+}
+
+function isReplicaManifestItem(item) {
+  return /(?:replica|runtime|arena)/iu.test([
+    item.evidenceId,
+    item.runId,
+    item.kind,
+    item.testId
+  ].join(':'));
 }
 
 function projectManifestItem(item, secrets) {
@@ -430,4 +457,25 @@ function pick(source, fields, transforms = {}, secrets = []) {
     if (value !== undefined) result[field] = value;
   }
   return result;
+}
+
+export function assertNoReplicaLeak(value) {
+  assertNoForbiddenShape(value, /^(?:replicaArena|anonymousMapping|encryptedRevealMap|revealMap|scoreCube|replicaLogs|runtimeIdentity|runtimeName)$/iu, 'Replica');
+}
+
+export function assertNoSecretShape(value) {
+  assertNoForbiddenShape(value, /(?:authorization|credential|password|secret|token|cookie|private|rawEvidence|signedUrl)/iu, 'secret');
+}
+
+function assertNoForbiddenShape(value, forbiddenKey, label) {
+  const visit = (current) => {
+    if (Array.isArray(current)) return current.forEach(visit);
+    if (!current || typeof current !== 'object') return;
+    for (const [key, child] of Object.entries(current)) {
+      if (forbiddenKey.test(key)) throw new Error(`${label} shape leaked: ${key}`);
+      visit(child);
+    }
+  };
+  visit(value);
+  return value;
 }
