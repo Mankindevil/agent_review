@@ -161,7 +161,12 @@ function completeEvaluation() {
       checkEvidence: [{
         checkId: `${subcriterionId}:check`,
         evidenceIds: ['ev_a']
-      }]
+      }],
+      findings: [{
+        findingId: `finding_model_${index}_${subcriterionId.replace('.', '_')}_0`,
+        text: 'Captured evidence supports only a partial, reusable workflow.'
+      }],
+      repairSuggestion: 'Make the workflow and its evidence links explicit.'
     }))
   }));
   return {

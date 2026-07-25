@@ -256,3 +256,23 @@ Return every requested subcriterion and every applicable check with evidence IDs
 EVIDENCE_PACKET:
 ${JSON.stringify(packet)}`;
 }
+
+export function humorRewritePrompt(lockedFindings) {
+  const findings = Array.isArray(lockedFindings) ? lockedFindings.map((item) => ({
+    subcriterionId: item?.subcriterionId,
+    sourceFindings: Array.isArray(item?.sourceFindings) ? item.sourceFindings.map((finding) => ({
+      findingId: finding?.findingId,
+      text: finding?.text
+    })) : [],
+    repairSuggestion: item?.repairSuggestion
+  })) : [];
+  return `Rewrite only the supplied locked findings as concise, non-abusive Chinese humor.
+Each line must cite its finding IDs and must be a rewrite, not extend, of those findings.
+Do not add facts, numbers, company or instrument names, tools, models, capabilities, scores,
+or proposed score changes. Do not mention evidence that is not in the packet.
+Return one JSON object only, with no Markdown or prose outside it:
+{"items":[{"subcriterionId":"","findingIds":[""],"line":""}]}
+
+LOCKED_FINDINGS:
+${JSON.stringify(findings)}`;
+}

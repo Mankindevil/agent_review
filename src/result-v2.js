@@ -5,6 +5,7 @@ import {
   computeTotalConfidence
 } from './confidence.js';
 import { releaseReplicaArena } from './arena-release.js';
+import { generateLockedHumor } from './humor.js';
 import { RUBRIC_V1 } from './rubric.js';
 
 const DIMENSION_IDS = ['scenarioValue', 'professionalism', 'agentCapability'];
@@ -181,10 +182,12 @@ export function lockAbsoluteResult(evaluation, result, actor) {
 
 export async function lockAndReleaseAbsoluteResult(evaluation, services, actor) {
   const absolute = lockAbsoluteResult(evaluation, undefined, actor);
+  const humor = await generateLockedHumor(evaluation, services);
   const released = await releaseReplicaArena(evaluation, services);
   Object.assign(evaluation, released);
   return {
     absolute,
+    humor,
     replica: evaluation.resultV2.replica,
     rating: evaluation.resultV2.rating
   };

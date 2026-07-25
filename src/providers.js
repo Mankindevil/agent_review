@@ -9,6 +9,10 @@ export const DEFAULT_REVIEWERS = [
   { id: 'deepseek', name: 'DeepSeek 评审', model: 'DeepSeek', kind: 'mock' }
 ];
 
+export const LOCKED_HUMOR_SYSTEM_PROMPT = `You rewrite supplied locked findings into concise,
+non-abusive humor. You may not add facts, scores, score changes, numbers, named entities,
+tools, models, or capability claims. Return JSON only.`;
+
 export function configuredReviewPanel(env = process.env) {
   if (!env.MODEL_REVIEW_PANEL_JSON) {
     const primary = DEFAULT_REVIEWERS.map((reviewer) =>
@@ -118,6 +122,16 @@ export async function requestJson(
     ? await callAnthropic(reviewer, system, prompt, signal, sampling)
     : await callOpenAICompatible(reviewer, system, prompt, signal, sampling);
   return safeJson(text);
+}
+
+export async function requestLockedHumor(reviewer, prompt, signal, sampling = {}) {
+  return requestJson(
+    reviewer,
+    LOCKED_HUMOR_SYSTEM_PROMPT,
+    prompt,
+    signal,
+    { temperature: 0, maxTokens: 1200, ...sampling }
+  );
 }
 
 export async function requestReviewerWithFallback({

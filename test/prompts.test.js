@@ -6,6 +6,7 @@ import {
   arenaComparisonPrompt,
   hiddenScopeReviewPrompt,
   hiddenVariantGenerationPrompt,
+  humorRewritePrompt,
   replicaBuildPrompt,
   replicaRunPrompt
 } from '../src/prompts.js';
@@ -74,6 +75,23 @@ test('absolute panel prompt includes only evidence-safe fields and forbids outsi
   assert.match(prompt, /outside fact|external fact/iu);
   assert.match(prompt, /"evidenceId":"ev_a"/u);
   assert.doesNotMatch(prompt, /replicaArena|runtimeBuild/u);
+});
+
+test('humor rewrite prompt contains only locked findings and forbids score changes', () => {
+  const prompt = humorRewritePrompt([{
+    subcriterionId: 'scenarioValue.agentNecessity',
+    sourceFindings: [{
+      findingId: 'finding_1',
+      text: 'Captured evidence lacks a reusable workflow.'
+    }],
+    repairSuggestion: 'Document the workflow.'
+  }]);
+
+  assert.match(prompt, /finding_1/u);
+  assert.match(prompt, /rewrite.*not extend|不得.*扩展/iu);
+  assert.match(prompt, /score|分数/iu);
+  assert.match(prompt, /"items"/u);
+  assert.doesNotMatch(prompt, /raw evidence|Replica output|model score|human score|total/iu);
 });
 
 test('arena prompt compares anonymous results only and requires one strict JSON result', () => {
