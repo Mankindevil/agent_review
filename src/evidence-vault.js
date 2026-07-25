@@ -56,11 +56,17 @@ export class EvidenceVault {
         mode: 0o600
       });
     } catch (error) {
-      // Identical content-addressed writes are idempotent: a prior partial
-      // Arena/finalize attempt may have left the envelope on disk without
-      // persisting the scoring cube. Re-putting the same recordHash is a no-op.
+      // Content-addressed retries are idempotent. A prior partial Arena run may
+      // have written the same evidenceId with a different capturedAt (hence a
+      // different recordHash); reuse the envelope already on disk.
       if (error?.code !== 'EEXIST') throw error;
-      return this.get(canonicalRecord.evidenceId, canonicalRecord.recordHash);
+      try {
+        return await this.get(canonicalRecord.evidenceId, canonicalRecord.recordHash);
+      } catch {
+        const existing = JSON.parse(await readFile(file, 'utf8'));
+        validateEnvelope(existing);
+        return this.get(canonicalRecord.evidenceId, existing.recordHash);
+      }
     }
     if (process.platform !== 'win32') await chmod(file, 0o600);
     return canonicalRecord;

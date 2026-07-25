@@ -366,7 +366,9 @@ function revealMapFor(cell, reviewerId, seed) {
   return map;
 }
 
-async function persistRevealMap({ evidenceVault, cell, reviewerId, revealMap, now }) {
+async function persistRevealMap({ evidenceVault, cell, reviewerId, revealMap }) {
+  // Keep capturedAt fixed so content-addressed retries share recordHash with
+  // any envelope left by a previous partial Arena run.
   const record = createEvidenceRecord({
     evidenceId: `ev_${hash({ testId: cell.testId, repeatIndex: cell.repeatIndex, reviewerId, revealMap })}`,
     runId: `run_${hash({ testId: cell.testId, repeatIndex: cell.repeatIndex, reviewerId }).slice(0, 32)}`,
@@ -374,7 +376,7 @@ async function persistRevealMap({ evidenceVault, cell, reviewerId, revealMap, no
     kind: 'agent-output',
     testId: 'arena_reveal',
     repeatIndex: cell.repeatIndex,
-    capturedAt: typeof now === 'function' ? now() : new Date().toISOString(),
+    capturedAt: '1970-01-01T00:00:00.000Z',
     payload: {
       phase: 'anonymous-arena-reveal-map',
       testId: cell.testId,
