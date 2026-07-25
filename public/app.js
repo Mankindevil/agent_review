@@ -736,7 +736,12 @@ function showEvaluation(item) {
   $('#progress-number').textContent = progress;
   $('#pulse-progress').style.height = `${progress}%`;
   $('#pulse-dot').style.top = `calc(${Math.min(progress, 96)}% - 2px)`;
-  $('#live-deck').classList.toggle('running', ['running','retrying'].includes(status));
+  $('#live-deck').classList.toggle(
+    'running',
+    isV2
+      ? ['queued', 'running', 'retrying', 'credentials-required'].includes(status)
+      : ['running', 'retrying'].includes(status)
+  );
   const stopButton = $('#stop-evaluation');
   stopButton.classList.toggle('hidden', !canStopEvaluation(item));
   stopButton.disabled = state.stopping;
@@ -756,15 +761,19 @@ function showEvaluation(item) {
 }
 
 function renderResult(item) {
-  if (!item.resultV2) return renderLegacyResult(item);
-  const root = $('#result-content');
-  state.verdictRevealToken += 1;
-  state.completedRendered = null;
-  root.classList.remove('reveal');
-  root.classList.remove('verdict-pending');
-  root.classList.remove('streaming');
-  root.innerHTML = renderV2ResultView(item, { escapeHtml });
-  return false;
+  // V2 records start with resultV2=null until model lock; never fall back to
+  // the legacy "0 / 4 组已出" artifact console for schemaVersion 2.
+  if (item.schemaVersion === 2) {
+    const root = $('#result-content');
+    state.verdictRevealToken += 1;
+    state.completedRendered = null;
+    root.classList.remove('reveal');
+    root.classList.remove('verdict-pending');
+    root.classList.toggle('streaming', !item.resultV2?.absolute?.total && statusOf(item) !== 'completed');
+    root.innerHTML = renderV2ResultView(item, { escapeHtml });
+    return false;
+  }
+  return renderLegacyResult(item);
 }
 
 function renderLegacyResult(item) {

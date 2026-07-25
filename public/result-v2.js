@@ -29,8 +29,27 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
   const ratingSub = trackStatus.overall === 'final'
     ? (item.evaluationTrack || item.qualification?.selectedInterface?.binding || 'same-track only')
     : (trackStatus.subStatusLabel || 'same-track only');
+  const absoluteReady = Number.isFinite(absolute.total);
+  const progressPanel = absoluteReady ? '' : renderV2ProgressPanel(item, escapeHtml);
+
+  if (!absoluteReady) {
+    return `
+    ${progressPanel}
+    <article class="v2-result-report" data-result-section="absolute-total">
+      <header class="v2-result-report__head">
+        <div><small>LOCKED / ABSOLUTE RESULT</small><h3>三维绝对分：Agent 本身做得怎么样</h3></div>
+        <strong>—<small>/100</small></strong>
+      </header>
+      <p>绝对分将在模型评审锁定后写入；当前仍在黑盒证据采集阶段，不会显示旧版四组产物进度。</p>
+    </article>
+    <article class="v2-rating-strip" data-result-section="rating-status">
+      <span>FINAL RATING</span><b>进行中</b>
+      <small>${escapeHtml(trackStatus.subStatusLabel || stageLabel(item))}</small>
+    </article>`;
+  }
 
   return `
+    ${progressPanel}
     ${skipPanel}
     ${finalizePanel}
     <article class="v2-result-report" data-result-section="absolute-total">
@@ -75,6 +94,32 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
       <p>${absolute.evidenceGaps?.length ? escapeHtml(absolute.evidenceGaps.join(' · ')) : '当前没有已记录的证据缺口。'}</p>
       <a href="/evidence.html#${encodeURIComponent(item.id)}">打开脱敏证据回放</a>
     </article>`;
+}
+
+function renderV2ProgressPanel(item, escapeHtml) {
+  const stage = stageLabel(item);
+  const progress = Number.isFinite(item.execution?.progress)
+    ? Math.max(0, Math.min(100, item.execution.progress))
+    : 0;
+  const work = item.activeWork;
+  const workLine = work?.label
+    ? escapeHtml(work.detail ? `${work.label} · ${work.detail}` : work.label)
+    : escapeHtml(stage);
+  const evidenceCount = item.evidenceManifest?.items?.length || 0;
+  return `
+    <section class="v2-live-console" data-result-section="v2-live-progress">
+      <header>
+        <div><small>LIVE / BLACK-BOX PIPELINE</small><h3>证据链采集进行中</h3></div>
+        <span>${progress}%</span>
+      </header>
+      <div class="v2-live-meter"><i style="--progress:${progress}%"></i></div>
+      <p>${workLine}</p>
+      <small>阶段 ${escapeHtml(stage)} · 已记录证据 ${evidenceCount} 条。完整明细在服务端 data/runlogs/</small>
+    </section>`;
+}
+
+function stageLabel(item) {
+  return item.execution?.stage || item.governance?.phase || item.execution?.status || 'queued';
 }
 
 function renderSkipHumanReviewPanel(item, escapeHtml) {
