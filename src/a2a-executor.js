@@ -4,6 +4,7 @@ import {
   buildA2ARequest,
   buildGetTaskRequest,
   extractAgentText,
+  negotiateAcceptedOutputModes,
   parseA2AResponse,
   selectInterface,
   validateStreamResult
@@ -56,7 +57,8 @@ export async function executeA2ATurn(options) {
     sleep = wait,
     requestId: suppliedRequestId,
     messageId: suppliedMessageId,
-    runId: suppliedRunId
+    runId: suppliedRunId,
+    acceptedOutputModes: suppliedAcceptedOutputModes
   } = options || {};
   const startedAt = clock();
   const deadline = startedAt + timeoutMs;
@@ -84,12 +86,16 @@ export async function executeA2ATurn(options) {
     }
     target = selectInterface(card);
     if (!target) throw executorError('No supported A2A interface', 'configuration', 'platform-error');
+    const acceptedOutputModes = suppliedAcceptedOutputModes === undefined
+      ? negotiateAcceptedOutputModes(card)
+      : suppliedAcceptedOutputModes;
     initialRequest = buildA2ARequest(target, input, {
       requestId,
       messageId,
       contextId,
       taskId,
-      streaming
+      streaming,
+      acceptedOutputModes
     });
 
     if (streaming) {
@@ -261,6 +267,9 @@ export async function executeA2AProtocolRecoveryProbe(options = {}) {
       taskId: undefined
     });
   }
+  const acceptedOutputModes = options.acceptedOutputModes === undefined
+    ? negotiateAcceptedOutputModes(card)
+    : options.acceptedOutputModes;
   const malformedRequestId = options.requestId
     ? `${options.requestId}_malformed`
     : crypto.randomUUID();
@@ -269,7 +278,8 @@ export async function executeA2AProtocolRecoveryProbe(options = {}) {
     messageId: options.messageId
       ? `${options.messageId}_malformed`
       : crypto.randomUUID(),
-    streaming: false
+    streaming: false,
+    acceptedOutputModes
   });
   const malformedBody = target.binding === 'JSONRPC'
     ? {

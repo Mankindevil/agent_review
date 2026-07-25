@@ -38,6 +38,42 @@ const streamingHttpCard = {
   }]
 };
 
+test('negotiates acceptedOutputModes from Agent Card defaultOutputModes', async () => {
+  let acceptedOutputModes = null;
+  const card = {
+    ...streamingHttpCard,
+    defaultOutputModes: ['text/markdown', 'application/json']
+  };
+  const run = await executeA2ATurn({
+    card,
+    input: { parts: [{ type: 'text', text: 'run' }] },
+    timeoutMs: 5_000,
+    authorization: 'token-abc',
+    request: async (_url, options) => {
+      const body = JSON.parse(options.body);
+      acceptedOutputModes = body.configuration?.acceptedOutputModes || null;
+      return {
+        status: 200,
+        headers: { 'content-type': 'application/a2a+json' },
+        body: Buffer.from(JSON.stringify({
+          task: {
+            id: 'task-1',
+            contextId: 'ctx-1',
+            status: { state: 'TASK_STATE_COMPLETED' },
+            artifacts: [{
+              artifactId: 'a1',
+              name: 'result.md',
+              parts: [{ text: 'ok', mediaType: 'text/markdown' }]
+            }]
+          }
+        }))
+      };
+    }
+  });
+  assert.equal(run.outcome.status, 'succeeded');
+  assert.deepEqual(acceptedOutputModes, ['text/markdown', 'application/json']);
+});
+
 test('sends one bounded malformed request before a valid request with fresh context', async () => {
   const bodies = [];
   const run = await executeA2AProtocolRecoveryProbe({

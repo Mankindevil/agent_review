@@ -6,6 +6,7 @@ import {
   buildGetTaskRequest,
   extractAgentText,
   getInterfaces,
+  negotiateAcceptedOutputModes,
   parseA2AResponse,
   parseA2AStreamEvent,
   parseSseEvents,
@@ -404,6 +405,19 @@ test('serializes explicitly negotiated output modes for both A2A bindings', () =
 
   assert.deepEqual(rpc.body.params.configuration, { acceptedOutputModes });
   assert.deepEqual(rest.body.configuration, { acceptedOutputModes });
+});
+
+test('negotiates accepted output modes from Agent Card defaults', () => {
+  assert.deepEqual(
+    negotiateAcceptedOutputModes({
+      defaultOutputModes: ['application/pdf', 'text/markdown', 'application/json', 'text/markdown']
+    }),
+    ['text/markdown', 'application/json']
+  );
+  assert.deepEqual(
+    negotiateAcceptedOutputModes({}),
+    ['text/plain', 'application/json']
+  );
 });
 
 test('serializes normalized multipart input for A2A 1.x and keeps turn context', () => {

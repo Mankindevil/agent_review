@@ -5,6 +5,30 @@ const HYBRID_1X_WARNING =
   '检测到 A2A 0.3/1.x 混合格式；平台已根据顶层 url、protocolVersion 和 preferredTransport 生成兼容接口。建议提交前修正原始 Agent Card。';
 const LEGACY_02_WARNING =
   '检测到 A2A 0.2.x；平台已按 0.3 兼容接口执行。建议将 protocolVersion 升级为 0.3 或改为 supportedInterfaces 1.x。';
+const PLATFORM_OUTPUT_MODES = new Set([
+  'text/plain',
+  'text/markdown',
+  'application/json'
+]);
+const DEFAULT_ACCEPTED_OUTPUT_MODES = Object.freeze(['text/plain', 'application/json']);
+
+export function negotiateAcceptedOutputModes(card) {
+  if (!Object.hasOwn(card || {}, 'defaultOutputModes')) {
+    return [...DEFAULT_ACCEPTED_OUTPUT_MODES];
+  }
+  const modes = [];
+  for (const mode of card.defaultOutputModes || []) {
+    if (PLATFORM_OUTPUT_MODES.has(mode) && !modes.includes(mode)) {
+      modes.push(mode);
+    }
+  }
+  if (modes.length === 0) {
+    throw new TypeError(
+      'Agent Card defaultOutputModes are incompatible with platform-supported output modes'
+    );
+  }
+  return modes;
+}
 
 export function validateAgentCard(card, options = {}) {
   const errors = [];

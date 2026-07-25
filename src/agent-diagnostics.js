@@ -1,6 +1,7 @@
 import {
   buildA2ARequest,
   extractAgentText,
+  negotiateAcceptedOutputModes,
   parseA2AResponse,
   parseSseEvents,
   resolveAgentCard,
@@ -15,12 +16,6 @@ const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 1_200_000;
 const MAX_CARD_BYTES = 1024 * 1024;
 const CARD_RESOLVE_TIMEOUT_MS = 12_000;
-const SUPPORTED_OUTPUT_MODES = new Set([
-  'text/plain',
-  'text/markdown',
-  'application/json'
-]);
-const DEFAULT_OUTPUT_MODES = ['text/plain', 'application/json'];
 
 export function validateDiagnosticsInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -272,22 +267,14 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
 }
 
 export function negotiateDiagnosticOutputModes(card) {
-  if (!Object.hasOwn(card || {}, 'defaultOutputModes')) {
-    return [...DEFAULT_OUTPUT_MODES];
-  }
-  const modes = [];
-  for (const mode of card.defaultOutputModes || []) {
-    if (SUPPORTED_OUTPUT_MODES.has(mode) && !modes.includes(mode)) {
-      modes.push(mode);
-    }
-  }
-  if (modes.length === 0) {
+  try {
+    return negotiateAcceptedOutputModes(card);
+  } catch (error) {
     throw stageError(
       'Agent Card 声明的输出模式与诊断平台支持的 output mode 不兼容',
       'protocol'
     );
   }
-  return modes;
 }
 
 function emptyCheck(id) {
