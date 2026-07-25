@@ -32,6 +32,11 @@ process.env.REVIEW_PRINCIPALS_JSON = JSON.stringify([{
   role: 'judge',
   tokenSha256: createHash('sha256').update('judge-secret', 'utf8').digest('hex')
 }, {
+  principalId: 'judge-2',
+  displayName: '评委二',
+  role: 'judge',
+  tokenSha256: createHash('sha256').update('judge-2-secret', 'utf8').digest('hex')
+}, {
   principalId: 'admin-1',
   displayName: '管理员',
   role: 'admin',
@@ -364,6 +369,44 @@ test('manages authenticated review assignments with assignment-scoped ETags', as
     assert.equal(assigned.status, 201);
     assert.equal(assignment.role, 'primary');
 
+    const changedReplay = await fetch(
+      `${origin}/api/admin/evaluations/${evaluation.id}/review-assignments`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer admin-secret',
+          'content-type': 'application/json',
+          'idempotency-key': 'assign-governance-api-key'
+        },
+        body: JSON.stringify({
+          judgeId: 'judge-2',
+          role: 'primary',
+          criterionScope: [leaf]
+        })
+      }
+    );
+    assert.equal(changedReplay.status, 409);
+
+    for (const judgeId of ['admin-1', 'unknown-judge']) {
+      const invalidJudge = await fetch(
+        `${origin}/api/admin/evaluations/${evaluation.id}/review-assignments`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer admin-secret',
+            'content-type': 'application/json',
+            'idempotency-key': `invalid-judge-${judgeId}`
+          },
+          body: JSON.stringify({
+            judgeId,
+            role: 'primary',
+            criterionScope: [leaf]
+          })
+        }
+      );
+      assert.equal(invalidJudge.status, 422);
+    }
+
     const replay = await fetch(
       `${origin}/api/admin/evaluations/${evaluation.id}/review-assignments`,
       {
@@ -460,6 +503,28 @@ test('manages authenticated review assignments with assignment-scoped ETags', as
       }
     );
     assert.deepEqual(await submitReplay.json(), submittedBody);
+
+    const changedSubmitReplay = await fetch(
+      `${origin}/api/review-assignments/${evaluation.id}/submit`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer judge-secret',
+          'content-type': 'application/json',
+          'idempotency-key': 'submit-governance-api-key'
+        },
+        body: JSON.stringify({
+          ...reviewPayload,
+          scores: {
+            [leaf]: {
+              ...reviewPayload.scores[leaf],
+              score: 76
+            }
+          }
+        })
+      }
+    );
+    assert.equal(changedSubmitReplay.status, 409);
   } finally {
     await evaluationStore.delete(evaluation.id);
   }

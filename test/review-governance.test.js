@@ -18,7 +18,7 @@ function evaluation() {
     id: 'eval_governance',
     governance: { phase: 'waiting_model' },
     evidenceManifest: {
-      items: [{ evidenceId: 'ev_1', visibility: 'judge' }]
+      items: [{ evidenceId: 'ev_1', visibility: 'public' }]
     },
     absoluteReview: {
       modelPanel: {
@@ -117,12 +117,17 @@ test('submits immutable primary reviews and triggers per-leaf arbitration above 
     () => assignHumanReviewer(item, { principalId: 'judge_1' }, 'arbitrator', leaves),
     /primary|arbitrator|judge/i
   );
+  assert.throws(
+    () => assignHumanReviewer(item, { principalId: 'judge_4' }, 'arbitrator', leaves),
+    /one|arbitrator/i
+  );
   submitHumanReview(item, arbitrator, payload(60));
 
   const aggregate = aggregateHumanReviews(item);
   assert.equal(aggregate.leaves[leaves[0]].score, 60);
   assert.equal(aggregate.leaves[leaves[1]].score, 60);
-  assert.equal(item.governance.phase, 'human_open');
+  assert.equal(item.governance.phase, 'human_arbitration');
+  assert.deepEqual(item.governance.arbitrationRequired, []);
 });
 
 test('uses the two-value median without averaging review totals', () => {
@@ -148,4 +153,26 @@ test('rejects scores, foreign evidence, missing checks, and unsupported overturn
   ]) {
     assert.throws(() => submitHumanReview(item, assignment, invalid), /score|evidence|check|overturn/i);
   }
+});
+
+test('rejects admin-only evidence citations and ambiguous arbitrator aggregates', () => {
+  const item = advanceGovernance(evaluation());
+  item.evidenceManifest.items[0].visibility = 'admin';
+  const assignment = assignHumanReviewer(item, { principalId: 'judge_1' }, 'primary', leaves);
+  assert.throws(() => submitHumanReview(item, assignment, payload()), /evidence|visible/i);
+
+  const disputed = advanceGovernance(evaluation());
+  const first = assignHumanReviewer(disputed, { principalId: 'judge_1' }, 'primary', leaves);
+  const second = assignHumanReviewer(disputed, { principalId: 'judge_2' }, 'primary', leaves);
+  submitHumanReview(disputed, first, payload(50));
+  submitHumanReview(disputed, second, payload(70));
+  const arbitrator = assignHumanReviewer(disputed, { principalId: 'judge_3' }, 'arbitrator', leaves);
+  submitHumanReview(disputed, arbitrator, payload(60));
+  disputed.humanReviews.push({
+    ...structuredClone(disputed.humanReviews.at(-1)),
+    reviewId: 'review_extra_arbitrator',
+    assignmentId: 'assignment_extra_arbitrator',
+    judgeId: 'judge_4'
+  });
+  assert.throws(() => aggregateHumanReviews(disputed), /one|arbitrator/i);
 });

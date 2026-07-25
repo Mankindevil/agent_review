@@ -52,6 +52,11 @@ export function assignHumanReviewer(evaluation, principal, role, scope) {
   )) {
     throw conflict('a primary judge cannot arbitrate the same evaluation');
   }
+  if (role === 'arbitrator' && assignments.some((assignment) =>
+    assignment.role === 'arbitrator' && assignment.status !== 'recused'
+  )) {
+    throw conflict('only one arbitrator may be assigned for a disputed evaluation');
+  }
   const assignment = {
     assignmentId: `assignment_${randomUUID().replaceAll('-', '')}`,
     evaluationId: evaluation.id,
@@ -171,10 +176,11 @@ export function aggregateHumanReviews(evaluation) {
       transition(evaluation, 'human_arbitration', 'system');
     }
     const arbitrators = submitted.filter((review) => review.role === 'arbitrator');
+    if (arbitrators.length > 1) {
+      throw conflict('exactly one arbitrator may submit for a disputed evaluation');
+    }
     for (const criterionId of disputes) {
-      const value = arbitrators
-        .map((review) => review.scores[criterionId]?.score)
-        .find(Number.isFinite);
+      const value = arbitrators[0]?.scores[criterionId]?.score;
       if (Number.isFinite(value)) {
         const primaryValues = primary.map((review) => review.scores[criterionId].score);
         aggregate.leaves[criterionId] = {
@@ -187,7 +193,6 @@ export function aggregateHumanReviews(evaluation) {
     }
     if (disputes.every((criterionId) => aggregate.leaves[criterionId].status === 'resolved')) {
       evaluation.governance.arbitrationRequired = [];
-      transition(evaluation, 'human_open', 'system');
       aggregate.status = 'complete';
     } else {
       aggregate.status = 'arbitration-required';
@@ -254,9 +259,7 @@ function normalizeScores(evaluation, assignment, payload) {
     throw validation('scores must contain every and only assigned leaf');
   }
   const validEvidence = new Set((evaluation.evidenceManifest?.items || [])
-    .filter((item) => !/(?:replica|runtime|arena)/iu.test([
-      item.evidenceId, item.runId, item.kind, item.testId
-    ].join(':')))
+    .filter((item) => item.visibility === 'public')
     .map((item) => item.evidenceId));
   const expectedChecks = checksByLeaf(evaluation);
   return Object.fromEntries(assignment.criterionScope.map((criterionId) => {

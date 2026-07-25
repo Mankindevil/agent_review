@@ -1,7 +1,7 @@
 import './src/env.js';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -25,6 +25,7 @@ import { projectEvaluation } from './src/evaluation-projection.js';
 import {
   authenticatePrincipal,
   isReviewGovernanceEnabled,
+  isConfiguredJudge,
   requireRole
 } from './src/review-access.js';
 import {
@@ -293,15 +294,23 @@ export const server = createServer(async (request, response) => {
       const principal = requireRole(authenticatePrincipal(request, item, process.env), 'judge');
       const idempotencyKey = requiredIdempotencyKey(request);
       const payload = await readJsonBody(request, 250_000);
+      const fingerprint = governanceIdempotencyFingerprint(
+        item.id, 'submit', principal.principalId, payload
+      );
       const committed = await store.mutate(item.id, undefined, (current) => {
         const replies = governanceIdempotency(current, 'submits');
-        if (replies[idempotencyKey]) return current;
+        if (idempotencyResponse(replies, idempotencyKey, fingerprint)) return current;
         const assignment = assignmentForPrincipal(current, principal, payload.assignmentId);
         const review = submitHumanReview(current, assignment, payload);
-        replies[idempotencyKey] = projectSubmittedReview(review);
+        replies[idempotencyKey] = {
+          fingerprint,
+          response: projectSubmittedReview(review)
+        };
         return current;
       });
-      const reply = governanceIdempotency(committed, 'submits')[idempotencyKey];
+      const reply = idempotencyResponse(
+        governanceIdempotency(committed, 'submits'), idempotencyKey, fingerprint
+      );
       return json(response, 200, reply);
     }
     const recuseMatch =
@@ -331,19 +340,32 @@ export const server = createServer(async (request, response) => {
       const principal = requireRole(authenticatePrincipal(request, item, process.env), 'admin');
       const idempotencyKey = requiredIdempotencyKey(request);
       const payload = await readJsonBody(request, 16_000);
+      if (!isConfiguredJudge(payload.judgeId, process.env)) {
+        throw Object.assign(new TypeError('judgeId must identify a configured judge principal'), {
+          statusCode: 422
+        });
+      }
+      const fingerprint = governanceIdempotencyFingerprint(
+        item.id, 'assign', principal.principalId, payload
+      );
       const committed = await store.mutate(item.id, undefined, (current) => {
         const replies = governanceIdempotency(current, 'assignments');
-        if (replies[idempotencyKey]) return current;
+        if (idempotencyResponse(replies, idempotencyKey, fingerprint)) return current;
         const assignment = assignHumanReviewer(
           current,
           { principalId: payload.judgeId },
           payload.role,
           payload.criterionScope
         );
-        replies[idempotencyKey] = projectAssignment(assignment);
+        replies[idempotencyKey] = {
+          fingerprint,
+          response: projectAssignment(assignment)
+        };
         return current;
       });
-      const reply = governanceIdempotency(committed, 'assignments')[idempotencyKey];
+      const reply = idempotencyResponse(
+        governanceIdempotency(committed, 'assignments'), idempotencyKey, fingerprint
+      );
       return json(response, 201, reply);
     }
     const evidenceMatch =
@@ -558,6 +580,36 @@ function governanceIdempotency(evaluation, type) {
   if (!evaluation.governance.idempotency) evaluation.governance.idempotency = {};
   if (!evaluation.governance.idempotency[type]) evaluation.governance.idempotency[type] = {};
   return evaluation.governance.idempotency[type];
+}
+
+function governanceIdempotencyFingerprint(evaluationId, action, actorId, payload) {
+  return createHash('sha256').update(canonicalJson({
+    evaluationId,
+    action,
+    actorId,
+    payload
+  })).digest('hex');
+}
+
+function idempotencyResponse(replies, key, fingerprint) {
+  const entry = replies[key];
+  if (!entry) return null;
+  if (entry.fingerprint !== fingerprint || !entry.response) {
+    throw Object.assign(new Error('Idempotency-Key is already bound to a different request'), {
+      statusCode: 409
+    });
+  }
+  return entry.response;
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonicalJson(value[key])}`
+    ).join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function projectAssignment(assignment) {

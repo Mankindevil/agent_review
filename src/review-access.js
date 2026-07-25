@@ -36,6 +36,12 @@ export function requireRole(principal, roles) {
   return principal;
 }
 
+export function isConfiguredJudge(principalId, env = process.env) {
+  return readPrincipals(env?.REVIEW_PRINCIPALS_JSON).some((principal) =>
+    principal.principalId === principalId && principal.role === 'judge'
+  );
+}
+
 function readPrincipals(raw) {
   if (typeof raw !== 'string' || raw.length === 0) return [];
   let parsed;
