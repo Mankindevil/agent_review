@@ -72,3 +72,15 @@ release path.
   server recalculates the authoritative weighted total.
 - Added regression coverage for malicious task fields, malformed URL snapshots,
   and negative or over-range reported totals.
+
+## Repair round 2
+
+- Judge packets now omit artifact names/descriptions and Part filenames. URL
+  Parts retain only an exact locked snapshot metadata shape; raw endpoint URLs
+  are never passed to judges.
+- The arena uses the configured frozen four-reviewer primary panel by default.
+  Test-only overrides require an explicit opt-in and must exactly match the
+  frozen panel identities and configuration.
+- Added regressions that verify identity-bearing artifact metadata, runtime
+  filenames, and endpoint hosts never reach packets or prompts, and that
+  undersized or unapproved reviewer panels are rejected.

@@ -82,10 +82,7 @@ export async function runAnonymousArena(options = {}) {
   const cells = options.cells
     ? requiredArray(options.cells, 'cells').map(normalizeCell)
     : buildArenaCells(options);
-  const reviewers = options.reviewers
-    ? requiredArray(options.reviewers, 'reviewers')
-    : configuredArenaReviewers(options.env);
-  if (!reviewers.length) throw new TypeError('at least one arena reviewer is required');
+  const reviewers = resolveArenaReviewers(options);
   const evidenceVault = options.evidenceVault;
   if (!evidenceVault || typeof evidenceVault.put !== 'function') {
     throw new TypeError('arena reveal maps require an encrypted evidenceVault');
@@ -255,8 +252,6 @@ function projectOutput(value) {
 function projectArtifact(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const artifact = {};
-  if (typeof value.name === 'string') artifact.name = value.name;
-  if (typeof value.description === 'string') artifact.description = value.description;
   if (Array.isArray(value.parts)) artifact.parts = projectParts(value.parts);
   return Object.keys(artifact).length ? artifact : null;
 }
@@ -264,22 +259,22 @@ function projectArtifact(value) {
 function projectParts(parts) {
   return parts.map((part) => {
     if (!part || typeof part !== 'object' || Array.isArray(part)) return null;
-    const allowed = part.type === 'text' ? ['type', 'text', 'mediaType', 'filename']
-      : part.type === 'data' ? ['type', 'data', 'mediaType', 'filename']
-        : part.type === 'raw' ? ['type', 'raw', 'mediaType', 'filename']
-          : part.type === 'url' ? ['type', 'url', 'mediaType', 'filename'] : [];
+    const allowed = part.type === 'text' ? ['type', 'text', 'mediaType']
+      : part.type === 'data' ? ['type', 'data', 'mediaType']
+        : part.type === 'raw' ? ['type', 'raw', 'mediaType'] : [];
+    if (part.type === 'url') {
+      return exactSnapshot(part.snapshot)
+        ? { type: 'url', snapshot: structuredClone(part.snapshot) }
+        : null;
+    }
     if (!allowed.length) return null;
     const required = part.type === 'text' ? 'text'
       : part.type === 'data' ? 'data'
-        : part.type === 'raw' ? 'raw' : 'url';
+        : 'raw';
     if (part[required] === undefined) return null;
-    const projected = Object.fromEntries(allowed
+    return Object.fromEntries(allowed
       .filter((key) => part[key] !== undefined)
       .map((key) => [key, structuredClone(part[key])]));
-    if (part.type === 'url' && exactSnapshot(part.snapshot)) {
-      projected.snapshot = structuredClone(part.snapshot);
-    }
-    return projected;
   }).filter(Boolean);
 }
 
@@ -291,6 +286,33 @@ function exactSnapshot(snapshot) {
     && typeof snapshot.mediaType === 'string' && /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*(?:;\s*[A-Za-z0-9!#$&^_.+-]+=[^;\s]+)*$/u.test(snapshot.mediaType)
     && Number.isSafeInteger(snapshot.byteLength) && snapshot.byteLength >= 0 && snapshot.byteLength <= 2 * 1024 * 1024
     && typeof snapshot.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(snapshot.sha256);
+}
+
+function resolveArenaReviewers(options) {
+  const frozenReviewers = configuredArenaReviewers(options.env);
+  if (options.reviewers === undefined) return frozenReviewers;
+  if (options.allowTestReviewers !== true) {
+    throw new TypeError('arena reviewer overrides require allowTestReviewers');
+  }
+  const reviewers = requiredArray(options.reviewers, 'reviewers');
+  if (reviewers.length !== frozenReviewers.length) {
+    throw new TypeError(`arena reviewers must match the frozen ${frozenReviewers.length}-reviewer panel`);
+  }
+  const frozenByIdentity = new Map(frozenReviewers.map((reviewer) => [reviewer.identityKey, reviewer]));
+  const identities = reviewers.map((reviewer) => requiredText(reviewer?.identityKey, 'reviewer.identityKey'));
+  assertDistinct(identities, 'arena reviewer identities');
+  for (const reviewer of reviewers) {
+    const configured = frozenByIdentity.get(reviewer.identityKey);
+    if (!configured || !sameArenaReviewerConfiguration(reviewer, configured)) {
+      throw new TypeError('arena reviewers must match the frozen panel identities');
+    }
+  }
+  return reviewers;
+}
+
+function sameArenaReviewerConfiguration(reviewer, configured) {
+  return ['id', 'kind', 'baseUrl', 'model', 'apiKeyEnv', 'identityKey']
+    .every((key) => reviewer?.[key] === configured[key]);
 }
 
 function indexOutputs(outputs, field) {
