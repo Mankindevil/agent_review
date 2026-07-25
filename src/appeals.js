@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { attributeFailure } from './failure-attribution.js';
 
 const GROUNDS = new Set(['platform-error', 'evidence-missing', 'rubric-misapplied']);
 const TARGET_KINDS = new Set(['test', 'evidence', 'score']);
@@ -40,9 +41,12 @@ export function triageAppeal(evaluation, appealId, input, admin, options = {}) {
   requireAdmin(admin);
   const appeal = appealById(evaluation, appealId);
   if (appeal.status !== 'submitted') throw conflict('appeal is not awaiting triage');
-  const attribution = input?.attribution;
-  if (!attribution || !['platform', 'agent', 'replica', 'pending'].includes(attribution.attribution)) {
-    throw validation('triage requires a valid failure attribution');
+  const probes = input?.probes;
+  let attribution;
+  try {
+    attribution = attributeFailure(probes);
+  } catch (error) {
+    throw validation(error.message);
   }
   appeal.triage = structuredClone(attribution);
   appeal.status = 'triaged';
@@ -50,12 +54,19 @@ export function triageAppeal(evaluation, appealId, input, admin, options = {}) {
   return appeal;
 }
 
-export function authorizeReplacementRun(evaluation, appealId, runId, admin, options = {}) {
+export function authorizeReplacementRun(evaluation, appealId, input, admin, options = {}) {
   requireAdmin(admin);
   const appeal = appealById(evaluation, appealId);
-  if (appeal.triage?.attribution !== 'platform') {
+  let attribution;
+  try {
+    attribution = attributeFailure(input?.probes);
+  } catch (error) {
+    throw validation(error.message);
+  }
+  if (appeal.triage?.attribution !== 'platform' || attribution.attribution !== 'platform') {
     throw conflict('only a confirmed platform failure may authorize replacement');
   }
+  const runId = input?.runId;
   if (appeal.replacementRunIds.length > 0) throw conflict('appeal already has an authorized replacement');
   const original = findRun(evaluation, runId);
   const previous = (evaluation.replacementRuns || []).find((run) => run.replacementForRunId === runId);
@@ -120,7 +131,10 @@ function normalizeCreateInput(evaluation, input) {
 
 function targetExists(evaluation, target) {
   if (target.kind === 'evidence') return (evaluation.evidenceManifest?.items || []).some((item) => item.evidenceId === target.id);
-  if (target.kind === 'test') return (evaluation.runtimeState?.runIndex || []).some((cell) => cell.identity?.testId === target.id);
+  if (target.kind === 'test') {
+    return (evaluation.runtimeState?.runIndex || []).some((cell) => cell.identity?.testId === target.id) ||
+      (evaluation.evidenceManifest?.items || []).some((item) => item.testId === target.id);
+  }
   return target.id === evaluation.resultV2?.absolute?.resultHash || target.id === 'absolute';
 }
 

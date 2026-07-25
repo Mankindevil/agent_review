@@ -75,6 +75,14 @@ export function projectEvaluation(evaluation, { audience = 'public', principal =
     projection.archivedAt = projectPrimitive(evaluation.archivedAt, secrets);
   }
 
+  if (audience === 'participant') {
+    projection.appealTargets = projectAppealTargets(
+      evaluation,
+      projection.evidenceManifest,
+      absoluteLocked,
+      secrets
+    );
+  }
   if (audience === 'admin') {
     projection.submission = projectSubmissionMetadata(evaluation.submission, secrets);
     projection.auditEvents = (Array.isArray(evaluation.auditEvents) ? evaluation.auditEvents : [])
@@ -85,6 +93,29 @@ export function projectEvaluation(evaluation, { audience = 'public', principal =
     projection.submission = projectSubmissionMetadata(evaluation.submission, secrets);
   }
   return projection;
+}
+
+function projectAppealTargets(evaluation, manifest, absoluteLocked, secrets) {
+  const testIds = new Set();
+  const tests = [];
+  for (const [index, item] of (manifest?.items || []).entries()) {
+    if (!item.testId || testIds.has(item.testId)) continue;
+    testIds.add(item.testId);
+    tests.push({
+      id: projectPrimitive(item.testId, secrets),
+      path: `evidenceManifest.items[${index}]`
+    });
+  }
+  return {
+    tests,
+    evidence: (manifest?.items || []).map((item, index) => ({
+      id: projectPrimitive(item.evidenceId, secrets),
+      path: `evidenceManifest.items[${index}]`
+    })),
+    score: absoluteLocked
+      ? { id: 'absolute', path: 'resultV2.absolute' }
+      : undefined
+  };
 }
 
 function assertAudiencePrincipal(audience, principal) {
@@ -176,8 +207,8 @@ function projectResultV2(
     typeof governance?.replicaReleasedAt === 'string';
   const staleRelease = replicaStatus === 'released' && !releaseAllowed;
   return pick(value, omitReplica
-    ? ['absolute', 'rating', 'humor']
-    : ['absolute', 'replica', 'rating', 'humor'], {
+    ? ['absolute', 'rating', 'humor', 'resultVersions']
+    : ['absolute', 'replica', 'rating', 'humor', 'resultVersions'], {
     absolute: (item, nestedSecrets) => pick(
       item,
       [
@@ -203,8 +234,26 @@ function projectResultV2(
       : pick(item, ['status', 'code', 'label', 'differenceStable'], {}, nestedSecrets),
     humor: (item, nestedSecrets) => absoluteLocked
       ? projectLockedHumor(item, nestedSecrets)
-      : undefined
+      : undefined,
+    resultVersions: projectResultVersions
   }, secrets);
+}
+
+function projectResultVersions(value, secrets) {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((item) => pick(item, [
+    'version', 'supersedesResultHash', 'reason', 'createdAt', 'resultHash',
+    'absolute', 'replica', 'rating'
+  ], {
+    absolute: (absolute, nestedSecrets) => pick(
+      absolute,
+      ['status', 'total', 'resultHash'],
+      {},
+      nestedSecrets
+    ),
+    replica: (replica, nestedSecrets) => pick(replica, ['status', 'delta'], {}, nestedSecrets),
+    rating: (rating, nestedSecrets) => pick(rating, ['status', 'code', 'label'], {}, nestedSecrets)
+  }, secrets));
 }
 
 function projectLockedHumor(value, secrets) {

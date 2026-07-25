@@ -7,6 +7,14 @@ import {
   triageAppeal
 } from '../src/appeals.js';
 
+const platformProbes = {
+  scheduler: { ok: false, evidenceId: 'ev_scheduler' },
+  evidenceStore: { ok: true, evidenceId: 'ev_store' },
+  organizerEndpoint: { ok: true, evidenceId: 'ev_organizer' },
+  independentWorker: { ok: true, evidenceId: 'ev_worker' },
+  unrelatedAgentHealth: { ok: true, evidenceId: 'ev_other' }
+};
+
 function lockedEvaluation() {
   return {
     id: 'eval_appeal',
@@ -53,7 +61,7 @@ test('appeal lifecycle appends records without changing the locked result', () =
   const before = structuredClone(evaluation.resultV2.absolute);
   const appeal = createAppeal(evaluation, participant, appealInput);
   triageAppeal(evaluation, appeal.appealId, {
-    attribution: { attribution: 'platform', reasons: ['scheduler control failed'], evidenceIds: ['ev_control'] }
+    probes: platformProbes
   }, admin);
   decideAppeal(evaluation, appeal.appealId, { outcome: 'upheld', rationale: 'confirmed' }, admin);
 
@@ -63,6 +71,32 @@ test('appeal lifecycle appends records without changing the locked result', () =
   assert.equal(evaluation.appeals[0].status, 'upheld');
   assert.equal(evaluation.appeals[0].originalSnapshot.resultHash, before.resultHash);
   assert.equal(evaluation.appeals[0].version, 1);
+});
+
+test('triage and replacement derive platform attribution from probes', () => {
+  const evaluation = lockedEvaluation();
+  const appeal = createAppeal(evaluation, participant, appealInput);
+  assert.throws(
+    () => triageAppeal(evaluation, appeal.appealId, {
+      attribution: { attribution: 'platform', reasons: ['admin assertion'] }
+    }, admin),
+    /probes/i
+  );
+
+  triageAppeal(evaluation, appeal.appealId, { probes: platformProbes }, admin);
+  assert.equal(appeal.triage.attribution, 'platform');
+  assert.throws(
+    () => authorizeReplacementRun(evaluation, appeal.appealId, {
+      runId: 'run_1',
+      probes: {
+        ...platformProbes,
+        scheduler: { ok: true },
+        independentWorker: { ok: false, targetFailed: true, attempts: 2 },
+        targetFailures: 2
+      }
+    }, admin),
+    /platform|attribution/i
+  );
 });
 
 test('participant ownership, target, statement, and appeal window are enforced', () => {
@@ -102,10 +136,17 @@ test('only confirmed platform faults authorize one same-config replacement', () 
   const evaluation = lockedEvaluation();
   const appeal = createAppeal(evaluation, participant, appealInput);
   triageAppeal(evaluation, appeal.appealId, {
-    attribution: { attribution: 'agent', reasons: ['target only failure'], evidenceIds: [] }
+    probes: {
+      scheduler: { ok: true },
+      evidenceStore: { ok: true },
+      organizerEndpoint: { ok: true },
+      independentWorker: { ok: false, targetFailed: true, attempts: 2 },
+      unrelatedAgentHealth: { ok: true },
+      targetFailures: 2
+    }
   }, admin);
   assert.throws(
-    () => authorizeReplacementRun(evaluation, appeal.appealId, 'run_1', admin),
+    () => authorizeReplacementRun(evaluation, appeal.appealId, { runId: 'run_1', probes: platformProbes }, admin),
     /platform/i
   );
 
@@ -113,17 +154,17 @@ test('only confirmed platform faults authorize one same-config replacement', () 
     ...appealInput, idempotencyKey: 'appeal-create-2'
   });
   triageAppeal(evaluation, platformAppeal.appealId, {
-    attribution: { attribution: 'platform', reasons: ['control unavailable'], evidenceIds: ['ev_control'] }
+    probes: platformProbes
   }, admin);
   const replacement = authorizeReplacementRun(
-    evaluation, platformAppeal.appealId, 'run_1', admin
+    evaluation, platformAppeal.appealId, { runId: 'run_1', probes: platformProbes }, admin
   );
   assert.equal(replacement.replacementForRunId, 'run_1');
   assert.equal(replacement.config.inputHash, 'input-hash');
   assert.equal(replacement.config.seed, 7);
   assert.equal(replacement.config.protocolConfigHash, 'protocol-hash');
   assert.throws(
-    () => authorizeReplacementRun(evaluation, platformAppeal.appealId, 'run_1', admin),
+    () => authorizeReplacementRun(evaluation, platformAppeal.appealId, { runId: 'run_1', probes: platformProbes }, admin),
     /already|replacement/i
   );
   assert.equal(evaluation.runtimeState.runIndex[0].attempts[0].turns[0].runId, 'run_1');

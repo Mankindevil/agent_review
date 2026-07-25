@@ -142,7 +142,12 @@ const v2Fixture = {
 };
 await writeFile(process.env.DATA_FILE, JSON.stringify({ schemaVersion: '1.0', items: [v2Fixture] }));
 const serverModule = await import('../server.js');
-const { server, evaluationStore, serializeEvaluationForResponse } = serverModule;
+const {
+  server,
+  evaluationStore,
+  serializeEvaluationForResponse,
+  setAppealRecalculationServicesForTest
+} = serverModule;
 
 let origin;
 test.before(async () => {
@@ -239,6 +244,110 @@ test('participant appeal APIs require idempotency and preserve append-only timel
   assert.equal(listed.status, 200);
   assert.equal((await listed.json()).appeals.length, 1);
   assert.equal(evaluationStore.get(evaluation.id).resultV2.absolute.resultHash, 'd'.repeat(64));
+});
+
+test('appeal admin routes require probe attribution and append recalculated result versions', async () => {
+  const evaluation = {
+    ...structuredClone(v2Fixture),
+    id: 'eval_appeal_recalculation_api',
+    governance: { phase: 'final', resultHash: 'f'.repeat(64), evidenceManifestHash: 'e'.repeat(64) },
+    finalizedAt: '2026-07-25T00:00:00.000Z',
+    resultV2: { absolute: { status: 'locked', resultHash: 'f'.repeat(64) }, resultVersions: [] },
+    runtimeState: {
+      runIndex: [{
+        cellId: 'cell_api',
+        identity: { testId: 'test_api', inputHash: 'input-api', seed: 5, protocolConfigHash: 'protocol-api' },
+        policy: { timeoutMs: 1000, targetMs: 100, version: 'runtime-v1' },
+        attempts: [{ turns: [{ runId: 'run_api' }] }]
+      }]
+    }
+  };
+  await evaluationStore.set(evaluation);
+  const headers = (idempotencyKey) => ({
+    authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}`,
+    'content-type': 'application/json',
+    'idempotency-key': idempotencyKey
+  });
+  const created = await fetch(`${origin}/api/evaluations/${evaluation.id}/appeals`, {
+    method: 'POST',
+    headers: headers('appeal-recalculate-create'),
+    body: JSON.stringify({
+      target: { kind: 'test', id: 'test_api', path: 'evidenceManifest.items[0]' },
+      grounds: 'platform-error',
+      statement: 'The scheduler stopped the test run.',
+      evidenceIds: ['ev_api']
+    })
+  });
+  const appeal = await created.json();
+  assert.equal(created.status, 201);
+
+  const adminHeaders = (idempotencyKey) => ({
+    authorization: 'Bearer admin-secret',
+    'content-type': 'application/json',
+    'idempotency-key': idempotencyKey
+  });
+  const rawAttribution = await fetch(`${origin}/api/admin/appeals/${appeal.appealId}/triage`, {
+    method: 'POST',
+    headers: adminHeaders('appeal-raw-triage'),
+    body: JSON.stringify({ attribution: { attribution: 'platform' } })
+  });
+  assert.equal(rawAttribution.status, 422);
+
+  const probes = {
+    scheduler: { ok: false, evidenceId: 'ev_api' },
+    evidenceStore: { ok: true },
+    organizerEndpoint: { ok: true },
+    independentWorker: { ok: true },
+    unrelatedAgentHealth: { ok: true }
+  };
+  const triaged = await fetch(`${origin}/api/admin/appeals/${appeal.appealId}/triage`, {
+    method: 'POST',
+    headers: adminHeaders('appeal-probe-triage'),
+    body: JSON.stringify({ probes })
+  });
+  assert.equal(triaged.status, 200);
+  assert.equal((await triaged.json()).triage.attribution, 'platform');
+
+  setAppealRecalculationServicesForTest(appealRecalculationDoubles());
+  try {
+    const replacement = await fetch(`${origin}/api/admin/appeals/${appeal.appealId}/replacement-run`, {
+      method: 'POST',
+      headers: adminHeaders('appeal-replacement'),
+      body: JSON.stringify({ runId: 'run_api', probes })
+    });
+    const replacementBody = await replacement.json();
+    assert.equal(replacement.status, 200);
+    assert.equal(replacementBody.resultVersion.afterResultHash, 'c'.repeat(64));
+    const decision = await fetch(`${origin}/api/admin/appeals/${appeal.appealId}/decision`, {
+      method: 'POST',
+      headers: adminHeaders('appeal-upheld-recalculate'),
+      body: JSON.stringify({
+        outcome: 'upheld',
+        rationale: 'The platform interruption changed the result.',
+        recalculate: true
+      })
+    });
+    const decisionBody = await decision.json();
+    assert.equal(decision.status, 200);
+    assert.equal(decisionBody.resultVersion.afterResultHash, 'c'.repeat(64));
+    const persisted = evaluationStore.get(evaluation.id);
+    assert.equal(persisted.resultV2.resultVersions.length, 2);
+    assert.equal(persisted.resultV2.absolute.resultHash, 'f'.repeat(64));
+    const detail = await fetch(`${origin}/api/evaluations/${evaluation.id}`, {
+      headers: { authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}` }
+    });
+    const projected = await detail.json();
+    assert.equal(detail.status, 200);
+    assert.deepEqual(projected.appealTargets.tests, [{
+      id: 'test_api',
+      path: 'evidenceManifest.items[0]'
+    }]);
+    assert.equal(projected.resultV2.resultVersions.length, 2);
+    assert.equal(projected.resultV2.resultVersions[1].resultHash, 'c'.repeat(64));
+  } finally {
+    setAppealRecalculationServicesForTest(null);
+    await evaluationStore.delete(evaluation.id);
+  }
 });
 
 test('keeps disabled V2 resume behind the feature flag', async () => {
@@ -1535,6 +1644,23 @@ test('validates remote model-api adapters against the execution contract', async
 function restoreEnv(name, value) {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
+}
+
+function appealRecalculationDoubles() {
+  return Object.fromEntries([
+    'replaceOrCorrectEvidence',
+    'reevaluateAcceptance',
+    'recomputeObjective',
+    'runModelReviews',
+    'assignHumanReviews',
+    'arbitrateHumanReviews',
+    'rejudgeArena',
+    'bootstrapReplica',
+    'calculateRating',
+    'generateHumor'
+  ].map((name) => [name, () => ({ stage: name })]).concat([
+    ['lockAbsolute', () => ({ resultHash: 'c'.repeat(64), total: 81 })]
+  ]));
 }
 
 async function withRuntimeStatusEnv(run) {

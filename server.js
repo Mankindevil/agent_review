@@ -45,6 +45,7 @@ import {
   decideAppeal,
   triageAppeal
 } from './src/appeals.js';
+import { runAppealResultVersion } from './src/appeal-recalculation.js';
 import { getAccessAuditStore } from './src/access-audit-store.js';
 import {
   copyEvidenceEncryptionKey,
@@ -70,6 +71,7 @@ export const evaluationStore = new EvaluationStore(
 const store = evaluationStore;
 const events = new EventEmitter();
 events.setMaxListeners(100);
+let injectedAppealRecalculationServices = null;
 const credentialVault = blackBoxRuntimeConfig.enabled
   ? new EphemeralCredentialVault()
   : null;
@@ -255,18 +257,34 @@ export const server = createServer(async (request, response) => {
       const payload = await readJsonBody(request, 64_000);
       const action = appealTriageMatch ? 'triage' : appealReplacementMatch ? 'replacement' : 'decision';
       const fingerprint = governanceIdempotencyFingerprint(item.id, `appeal-${action}`, principal.principalId, payload);
-      const committed = await store.mutate(item.id, undefined, (current) => {
+      const committed = await store.mutate(item.id, undefined, async (current) => {
         const replies = governanceIdempotency(current, `appeal-${action}`);
         if (idempotencyResponse(replies, idempotencyKey, fingerprint)) return current;
         const result = action === 'triage'
           ? triageAppeal(current, appealId, payload, principal)
           : action === 'replacement'
-            ? authorizeReplacementRun(current, appealId, payload.runId, principal)
+            ? authorizeReplacementRun(current, appealId, payload, principal)
             : decideAppeal(current, appealId, payload, principal);
+        const appeal = action === 'replacement'
+          ? current.appeals.find((candidate) => candidate.appealId === appealId)
+          : result;
+        if (
+          action === 'replacement' ||
+          (action === 'decision' && payload.outcome === 'upheld' && payload.recalculate === true)
+        ) {
+          const version = await runAppealResultVersion(
+            current,
+            appeal,
+            appealRecalculationServices()
+          );
+          appeal.resultVersion = {
+            version: version.version,
+            beforeResultHash: version.supersedesResultHash,
+            afterResultHash: version.resultHash
+          };
+        }
         replies[idempotencyKey] = { fingerprint, response: projectAppeal(
-          action === 'replacement'
-            ? current.appeals.find((appeal) => appeal.appealId === appealId)
-            : result
+          appeal
         ) };
         return current;
       });
@@ -632,6 +650,10 @@ export function serializeEvaluationForResponse(item) {
     : item;
 }
 
+export function setAppealRecalculationServicesForTest(services) {
+  injectedAppealRecalculationServices = services;
+}
+
 function projectForRequest(evaluation, request) {
   return projectEvaluation(evaluation, projectionOptionsForRequest(evaluation, request));
 }
@@ -683,6 +705,14 @@ function replicaReleaseServices() {
       }
     }
   };
+}
+
+function appealRecalculationServices() {
+  if (injectedAppealRecalculationServices) return injectedAppealRecalculationServices;
+  throw Object.assign(
+    new Error('appeal recalculation services are not configured'),
+    { statusCode: 503 }
+  );
 }
 
 function assignmentForPrincipal(evaluation, principal, requestedId = null) {
@@ -803,7 +833,9 @@ function projectAppeal(appeal) {
     evidenceIds: appeal.evidenceIds,
     originalSnapshot: appeal.originalSnapshot,
     replacementRunIds: appeal.replacementRunIds,
+    triage: appeal.triage,
     decision: appeal.decision,
+    resultVersion: appeal.resultVersion,
     events: appeal.events
   };
 }
