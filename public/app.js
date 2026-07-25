@@ -5,10 +5,9 @@ import {
   recordActionFailure
 } from './a2a-ui-helpers.js?v=20260725-a2a1';
 import {
-  canArchiveEvaluation,
+  canDeleteEvaluation,
   canStopEvaluation,
-  participantActionOptions,
-  resolveParticipantToken,
+  evaluationActionOptions,
   restoreV2StartButton
 } from './evaluation-actions.js?v=20260725-hardening1';
 import {
@@ -17,7 +16,7 @@ import {
 } from './example-import.js?v=20260725-examples1';
 import { renderV2Result as renderV2ResultView } from './result-v2.js';
 
-const state = { mode: 'demo', sourceType: 'direct', blackBoxEnabled: false, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), participantTokens: new Map(), pendingEvaluationId: null, skillRequestToken: 0, activeWorkTimer: null, activeWorkKey: null };
+const state = { mode: 'demo', sourceType: 'direct', blackBoxEnabled: false, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), skillRequestToken: 0, activeWorkTimer: null, activeWorkKey: null };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const DEFAULT_REVIEW_PLAN = [
@@ -92,8 +91,6 @@ function bindEvents() {
   $('#add-v2-example').addEventListener('click', () => addV2Example());
   $('#fill-examples-from-card').addEventListener('click', fillExamplesFromAgentCard);
   $('#apply-example-paste').addEventListener('click', applyExamplePaste);
-  $('#copy-participant-token').addEventListener('click', copyParticipantToken);
-  $('#dismiss-participant-token').addEventListener('click', dismissParticipantTokenReceipt);
   $('#resume-evaluation').addEventListener('click', resumeEvaluation);
   $$('[data-example]').forEach((button) => button.addEventListener('click', () => loadSample(button.dataset.example)));
   $('#resolve-agent').addEventListener('click', resolveRemoteCard);
@@ -570,14 +567,9 @@ async function submitV2Evaluation(agentCard) {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || '创建 V2 评测失败');
-    if (!payload.participantAccessToken) throw new Error('创建响应缺少 participant access token');
     created = true;
-    state.participantTokens.set(payload.id, payload.participantAccessToken);
-    state.pendingEvaluationId = payload.id;
-    $('#participant-token-output').textContent = payload.participantAccessToken;
-    $('#participant-token-receipt').classList.remove('hidden');
-    $('span', button).textContent = '评测已创建 · 先保存 token';
     await loadHistory();
+    await openEvaluation(payload.id);
   } catch (error) {
     showError(error.message);
   } finally {
@@ -586,46 +578,6 @@ async function submitV2Evaluation(agentCard) {
       $('span', button).textContent = '启动 A2A 证据评测';
     }
   }
-}
-
-async function copyParticipantToken() {
-  const id = state.pendingEvaluationId;
-  const token = id ? state.participantTokens.get(id) : undefined;
-  const button = $('#copy-participant-token');
-  if (!token) return;
-  try {
-    await navigator.clipboard.writeText(token);
-    button.textContent = '已复制';
-  } catch {
-    button.textContent = '复制失败，请手动选择';
-  }
-}
-
-function dismissParticipantTokenReceipt() {
-  const id = state.pendingEvaluationId;
-  $('#participant-token-output').textContent = '';
-  $('#participant-token-receipt').classList.add('hidden');
-  $('#copy-participant-token').textContent = '复制 token';
-  state.pendingEvaluationId = null;
-  restoreV2StartButton($('#start-evaluation'));
-  if (id) openEvaluation(id);
-}
-
-function participantTokenForAction(evaluationId) {
-  const input = $('#resume-participant-token');
-  const remembered = state.participantTokens.get(evaluationId);
-  const manualValue = remembered
-    ? ''
-    : input.value.trim() || globalThis.prompt?.(
-        '请输入创建评测时保存的 Participant access token'
-      ) || '';
-  const token = resolveParticipantToken(
-    evaluationId,
-    state.participantTokens,
-    manualValue
-  );
-  input.value = '';
-  return token;
 }
 
 async function openEvaluation(id) {
@@ -664,23 +616,7 @@ async function stopEvaluation() {
   const item = state.current;
   if (!canStopEvaluation(item) || state.stopping) return;
   const button = $('#stop-evaluation');
-  let requestOptions = { method: 'POST' };
-  try {
-    if (item.schemaVersion === 2) {
-      requestOptions = participantActionOptions(
-        'POST',
-        participantTokenForAction(item.id)
-      );
-    }
-  } catch (error) {
-    $('span', button).textContent = error.message;
-    setTimeout(() => {
-      if (canStopEvaluation(state.current)) {
-        $('span', button).textContent = '停止本次评测';
-      }
-    }, 2200);
-    return;
-  }
+  const requestOptions = evaluationActionOptions('POST');
   state.stopping = true;
   button.disabled = true;
   $('span', button).textContent = '正在停止';
@@ -747,7 +683,7 @@ function showEvaluation(item) {
   $('#run-id').textContent = `RUN / ${item.id.toUpperCase()}`;
   $('#agent-name').textContent = isV2 ? 'A2A 证据链评测' : item.agentCard.name;
   $('#agent-description').textContent = isV2
-    ? `公开黑盒能力基础 · ${item.archivedAt ? '已归档，证据仍可查阅' : '仅展示可公开投影'}`
+    ? 'A2A 证据链评测 · 持有评测 ID 即可查看与控制'
     : item.agentCard.description;
   const modeLabel = isV2 ? 'V2 / BLACK-BOX' : item.overallMode === 'live' ? 'LIVE / 全链路真实' : item.mode === 'live' ? 'MIXED / Agent 实调' : 'DEMO / 演示模拟';
   $('#run-mode').textContent = isV2 ? modeLabel : `${modeLabel} · SEED ${item.seed ?? 'LEGACY'}`;
@@ -837,9 +773,8 @@ function renderLegacyResult(item) {
 
 function v2StatusCopy(item) {
   const status = statusOf(item);
-  if (item.archivedAt) return '卷宗已软归档；已提交的证据清单仍可查阅。';
   if (status === 'credentials-required') return '进程恢复需要新的 Agent connection authorization。';
-  if (status === 'interrupted') return '公开端点采集已中断，可由 participant 恢复。';
+  if (status === 'interrupted') return '公开端点采集已中断，可使用评测 ID 恢复。';
   if (status === 'cancelled') return '证据采集已取消。';
   if (item.qualification?.status === 'ineligible') return `资格检查未通过：${item.qualification.reason || 'endpoint-not-callable'}`;
   if (item.governance?.phase === 'human_open') return '四席模型初评已锁定，等待非盲人工复核。';
@@ -897,10 +832,9 @@ function syncActiveWorkTimer(item) {
 
 function renderResumePanel(item) {
   const panel = $('#v2-resume-panel');
-  const resumable = item.schemaVersion === 2 && ['credentials-required','interrupted'].includes(statusOf(item)) && !item.archivedAt;
+  const resumable = item.schemaVersion === 2 && ['credentials-required','interrupted'].includes(statusOf(item));
   panel.classList.toggle('hidden', !resumable);
   if (!resumable) {
-    $('#resume-participant-token').value = '';
     $('#resume-agent-authorization').value = '';
     $('#resume-error').textContent = '';
   }
@@ -909,16 +843,9 @@ function renderResumePanel(item) {
 async function resumeEvaluation() {
   const item = state.current;
   if (!item || item.schemaVersion !== 2 || !['credentials-required','interrupted'].includes(statusOf(item))) return;
-  const participantInput = $('#resume-participant-token');
   const authorizationInput = $('#resume-agent-authorization');
-  const participantToken = state.participantTokens.get(item.id) || participantInput.value.trim();
   const agentAuthorization = authorizationInput.value.trim();
-  if (!participantToken) {
-    $('#resume-error').textContent = '请输入保存的 participant access token。';
-    return;
-  }
   const body = agentAuthorization ? { agentAuthorization } : {};
-  participantInput.value = '';
   authorizationInput.value = '';
   const button = $('#resume-evaluation');
   button.disabled = true;
@@ -928,14 +855,12 @@ async function resumeEvaluation() {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${participantToken}`,
         'idempotency-key': crypto.randomUUID()
       },
       body: JSON.stringify(body)
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || '恢复评测失败');
-    state.participantTokens.set(item.id, participantToken);
     await openEvaluation(item.id);
   } catch (error) {
     $('#resume-error').textContent = error.message;
@@ -1424,15 +1349,10 @@ function renderLegacyHistoryItem(item) {
 }
 
 function renderV2HistoryItem(item) {
-  const archived = Boolean(item.archivedAt);
-  const canArchive = canArchiveEvaluation(item);
-  const label = archived ? '已归档' : statusOf(item);
-  const archiveTitle = archived
-    ? '卷宗已归档'
-    : canArchive
-      ? '软归档；证据仍可查阅'
-      : '运行中的卷宗暂不可归档';
-  return `<article class="history-item history-item-v2"><button class="history-open" type="button" data-evaluation-id="${item.id}"><header><span>${formatTime(item.createdAt)}</span><span>${progressOf(item)}%</span></header><h3>A2A 证据卷宗</h3><p>${escapeHtml(label)} · ${escapeHtml(stageOf(item) || 'qualification')} · ${item.evidenceManifest?.items?.length || 0} evidence</p></button><button class="history-delete" type="button" data-delete-evaluation="${item.id}" data-record-kind="v2" aria-label="归档 ${escapeHtml(item.id)} 的评测记录" title="${archiveTitle}"${canArchive ? '' : ' disabled'}><i aria-hidden="true">×</i><span>归档</span></button></article>`;
+  const canDelete = canDeleteEvaluation(item);
+  const label = statusOf(item);
+  const deleteTitle = canDelete ? '删除这条卷宗' : '请先停止本次评测';
+  return `<article class="history-item history-item-v2"><button class="history-open" type="button" data-evaluation-id="${item.id}"><header><span>${formatTime(item.createdAt)}</span><span>${progressOf(item)}%</span></header><h3>A2A 证据卷宗</h3><p>${escapeHtml(label)} · ${escapeHtml(stageOf(item) || 'qualification')} · ${item.evidenceManifest?.items?.length || 0} evidence</p></button><button class="history-delete" type="button" data-delete-evaluation="${item.id}" data-record-kind="v2" aria-label="${canDelete ? '删除' : '运行中，暂不可删除'} ${escapeHtml(item.id)} 的评测记录" title="${deleteTitle}"${canDelete ? '' : ' disabled'}><i aria-hidden="true">×</i><span>删除</span></button></article>`;
 }
 
 async function deleteEvaluation(button) {
@@ -1456,19 +1376,12 @@ async function deleteEvaluation(button) {
   button.classList.add('deleting');
   $('span', button).textContent = copy.pending;
   try {
-    const requestOptions = isV2
-      ? participantActionOptions(
-          'DELETE',
-          participantTokenForAction(id)
-        )
-      : { method: 'DELETE' };
-    const response = await fetch(`/api/evaluations/${id}`, requestOptions);
+    const response = await fetch(`/api/evaluations/${id}`, evaluationActionOptions('DELETE'));
     const payload = await response.json();
     if (!response.ok) throw new Error(recordActionFailure(isV2, payload.error));
     if (state.current?.id === id) {
       closeHistory();
-      if (state.current.schemaVersion === 2) await openEvaluation(id);
-      else showLanding();
+      showLanding();
     }
     await loadHistory();
   } catch (error) {

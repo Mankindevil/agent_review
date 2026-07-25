@@ -7,7 +7,6 @@ import {
   requireRole
 } from '../src/review-access.js';
 
-const participantToken = 'P'.repeat(43);
 const judgeToken = 'judge-secret';
 const env = {
   REVIEW_PRINCIPALS_JSON: JSON.stringify([
@@ -26,7 +25,7 @@ const env = {
   ])
 };
 const evaluation = {
-  participantAccess: { tokenHash: sha256(participantToken) }
+  participantAccess: { tokenHash: sha256('P'.repeat(43)) }
 };
 
 function request(token) {
@@ -48,10 +47,10 @@ test('authenticates configured judge tokens without trusting a client judgeId', 
   assert.doesNotMatch(JSON.stringify(principal), /judge-secret/u);
 });
 
-test('authenticates the existing per-evaluation participant token', () => {
-  assert.deepEqual(
-    authenticatePrincipal(request(participantToken), evaluation, env),
-    { principalId: 'participant', role: 'participant' }
+test('ignores legacy participant token hashes on disk', () => {
+  assert.equal(
+    authenticatePrincipal(request('P'.repeat(43)), evaluation, env),
+    null
   );
 });
 

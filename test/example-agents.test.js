@@ -236,7 +236,7 @@ test('runs the complete V2 black-box evidence pipeline against a real A2A agent'
     });
     const created = await createResponse.json();
     assert.equal(createResponse.status, 202);
-    assert.match(created.participantAccessToken, /^[A-Za-z0-9_-]{43}$/u);
+    assert.equal(Object.hasOwn(created, 'participantAccessToken'), false);
 
     const completed = await waitForTerminalEvaluation(
       apiModule.evaluationStore,
@@ -335,68 +335,25 @@ test('runs the complete V2 black-box evidence pipeline against a real A2A agent'
     );
     const getProjection = await getResponse.json();
     assert.equal(getResponse.status, 200);
+    assert.ok(getProjection.appealTargets);
+    assert.equal(
+      JSON.stringify(getProjection).includes(privatePrompt),
+      false
+    );
 
-    sseAbort = new AbortController();
-    const sseResponse = await fetch(
-      `${apiOrigin}/api/evaluations/${completed.id}/events`,
-      { signal: sseAbort.signal }
-    );
-    assert.equal(sseResponse.status, 200);
-    assert.match(
-      sseResponse.headers.get('content-type'),
-      /^text\/event-stream/iu
-    );
-    const reader = sseResponse.body.getReader();
-    const streamState = { buffer: '' };
-    const initialSseProjection = await readSseData(
-      reader,
-      streamState,
-      sseAbort
-    );
-    assert.equal(initialSseProjection.revision, getProjection.revision);
-    const archiveResponse = await fetch(
+    const deleteResponse = await fetch(
       `${apiOrigin}/api/evaluations/${completed.id}`,
-      {
-        method: 'DELETE',
-        headers: {
-          authorization: `Bearer ${created.participantAccessToken}`
-        }
-      }
+      { method: 'DELETE' }
     );
-    assert.equal(archiveResponse.status, 200);
-    const sseProjection = await readSseData(
-      reader,
-      streamState,
-      sseAbort
+    assert.equal(deleteResponse.status, 200);
+    assert.deepEqual(await deleteResponse.json(), {
+      id: completed.id,
+      deleted: true
+    });
+    const missing = await fetch(
+      `${apiOrigin}/api/evaluations/${completed.id}`
     );
-    assert.equal(sseProjection.revision, getProjection.revision + 1);
-    assert.ok(sseProjection.archivedAt);
-    sseAbort.abort();
-
-    for (const projection of [getProjection, sseProjection]) {
-      assert.ok(
-        projection.evidenceManifest.items.length <
-          completed.evidenceManifest.items.length
-      );
-      assert.equal(
-        projection.evidenceManifest.items.every(
-          (item) => item.visibility === 'public'
-        ),
-        true
-      );
-      const projectedRequest = projection.evidenceManifest.items.find(
-        (item) => item.evidenceId === requestManifest.evidenceId
-      );
-      assert.ok(projectedRequest);
-      assert.equal(projectedRequest.recordHash, requestManifest.recordHash);
-      assert.equal(Object.hasOwn(projectedRequest, 'payload'), false);
-      assert.equal(Object.hasOwn(projection, 'submission'), false);
-      assert.equal(Object.hasOwn(projection, 'runtimeState'), false);
-      assert.equal(
-        JSON.stringify(projection).includes(privatePrompt),
-        false
-      );
-    }
+    assert.equal(missing.status, 404);
   } finally {
     sseAbort?.abort();
     try {

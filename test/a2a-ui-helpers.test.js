@@ -49,14 +49,9 @@ test('allocates collision-free example and criterion IDs after arbitrary deletio
   );
 });
 
-test('keeps V2 archive copy separate from exact legacy delete copy', () => {
+test('uses the same delete copy for legacy and V2 history actions', () => {
+  assert.deepEqual(recordActionCopy(true), recordActionCopy(false));
   assert.deepEqual(recordActionCopy(true), {
-    idle: '归档',
-    confirm: '再点一次确认归档',
-    pending: '归档中',
-    failed: '归档失败'
-  });
-  assert.deepEqual(recordActionCopy(false), {
     idle: '删除',
     confirm: '再点一次确认',
     pending: '删除中',
@@ -64,12 +59,12 @@ test('keeps V2 archive copy separate from exact legacy delete copy', () => {
   });
 });
 
-test('formats empty and upstream archive failures without delete wording or duplicate prefixes', () => {
-  assert.equal(recordActionFailure(true), '归档失败');
-  assert.equal(recordActionFailure(true, ''), '归档失败');
-  assert.equal(recordActionFailure(true, '权限不足'), '归档失败：权限不足');
-  assert.equal(recordActionFailure(true, '归档失败'), '归档失败');
-  assert.equal(recordActionFailure(true, '归档失败：权限不足'), '归档失败：权限不足');
+test('formats empty and upstream delete failures without duplicate prefixes', () => {
+  assert.equal(recordActionFailure(true), '删除失败');
+  assert.equal(recordActionFailure(true, ''), '删除失败');
+  assert.equal(recordActionFailure(true, '权限不足'), '删除失败：权限不足');
+  assert.equal(recordActionFailure(true, '删除失败'), '删除失败');
+  assert.equal(recordActionFailure(true, '删除失败：权限不足'), '删除失败：权限不足');
   assert.equal(recordActionFailure(false), '删除失败');
-  assert.equal(recordActionFailure(false, '权限不足'), '权限不足');
+  assert.equal(recordActionFailure(false, '权限不足'), '删除失败：权限不足');
 });

@@ -166,7 +166,7 @@ export const server = createServer(async (request, response) => {
     }
     if (request.method === 'POST' && url.pathname === '/api/evaluations') {
       const item = await pipeline.create(await readEvaluationCreateBody(request));
-      if (item?.evaluation?.schemaVersion === 2) {
+      if (item?.schemaVersion === 2) {
         response.setHeader('cache-control', 'no-store');
       }
       return json(response, 202, serializeEvaluationForResponse(item));
@@ -177,19 +177,13 @@ export const server = createServer(async (request, response) => {
         return json(response, 409, { error: 'A2A black-box V2 is disabled' });
       }
       response.setHeader('cache-control', 'no-store');
-      const participantAccessToken =
-        bearerToken(request.headers.authorization);
-      const authorized = pipeline.authenticateResume(
-        resumeMatch[1],
-        participantAccessToken
-      );
+      const authorized = pipeline.authenticateResume(resumeMatch[1]);
       if (!authorized) {
         return json(response, 404, {
           error: 'Evaluation does not exist'
         });
       }
       const resumed = await pipeline.resume(resumeMatch[1], {
-        participantAccessToken,
         idempotencyKey: request.headers['idempotency-key'],
         body: await readJsonBody(request, 16 * 1024)
       });
@@ -199,10 +193,7 @@ export const server = createServer(async (request, response) => {
     }
     const cancelMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/cancel$/);
     if (request.method === 'POST' && cancelMatch) {
-      const item = await pipeline.cancel(
-        cancelMatch[1],
-        bearerToken(request.headers.authorization)
-      );
+      const item = await pipeline.cancel(cancelMatch[1]);
       return item
         ? json(response, 200, serializeEvaluationForResponse(item))
         : json(response, 404, { error: '评测不存在' });
@@ -222,13 +213,11 @@ export const server = createServer(async (request, response) => {
       response.setHeader('cache-control', 'no-store');
       requireGovernanceEnabled();
       const item = requireV2Evaluation(appealsMatch[1]);
-      const principal = requireRole(
-        authenticatePrincipal(request, item, process.env), 'participant'
-      );
+      const principal = participantPrincipalForRequest(request, item);
       const idempotencyKey = requiredIdempotencyKey(request);
       const payload = await readJsonBody(request, 64_000);
       const committed = await store.mutate(item.id, undefined, (current) => {
-        const appeal = createAppeal(current, principal, { ...payload, idempotencyKey }, {
+        createAppeal(current, principal, { ...payload, idempotencyKey }, {
           windowHours: appealWindowHours()
         });
         return current;
@@ -243,9 +232,7 @@ export const server = createServer(async (request, response) => {
       response.setHeader('cache-control', 'no-store');
       requireGovernanceEnabled();
       const item = requireV2Evaluation(appealsMatch[1]);
-      const principal = requireRole(
-        authenticatePrincipal(request, item, process.env), ['participant', 'admin']
-      );
+      const principal = participantPrincipalForRequest(request, item);
       const appeals = (item.appeals || []).filter((appeal) =>
         principal.role === 'admin' || appeal.participantId === principal.principalId
       ).map(projectAppeal);
@@ -539,16 +526,12 @@ export const server = createServer(async (request, response) => {
       const item = store.get(match[1]);
       if (!item) return json(response, 404, { error: '评测不存在' });
       if (item.schemaVersion === 2) {
-        const archived = await pipeline.archive(
-          match[1],
-          bearerToken(request.headers.authorization)
-        );
-        return json(response, 200, {
-          id: match[1],
-          archived: true,
-          deleted: false,
-          revision: archived.revision
-        });
+        const status = item.execution?.status;
+        if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(status)) {
+          return json(response, 409, { error: '运行中的评测不能删除，请先停止本次评测' });
+        }
+        await store.delete(match[1]);
+        return json(response, 200, { id: match[1], deleted: true });
       }
       const status = item.status;
       if (!['completed', 'failed', 'cancelled', 'interrupted'].includes(status)) {
@@ -646,12 +629,6 @@ function json(response, status, payload) { response.writeHead(status, { 'content
 function summary(item) { return { id: item.id, name: item.agentCard.name, createdAt: item.createdAt, status: item.status, progress: item.progress, tier: item.roast?.tier, score: item.averages?.submitted }; }
 
 export function serializeEvaluationForResponse(item) {
-  if (item?.evaluation?.schemaVersion === 2) {
-    return {
-      ...projectEvaluation(item.evaluation, { audience: 'public' }),
-      participantAccessToken: item.participantAccessToken
-    };
-  }
   return item?.schemaVersion === 2
     ? projectEvaluation(item, { audience: 'public' })
     : item;
@@ -666,16 +643,23 @@ function projectForRequest(evaluation, request) {
 }
 
 function projectionOptionsForRequest(evaluation, request) {
-  if (!request.headers.authorization) return { audience: 'public' };
   const principal = authenticatePrincipal(request, evaluation, process.env);
-  if (!principal) throw Object.assign(new Error('authentication required'), { statusCode: 401 });
-  if (
-    (principal.role === 'judge' || principal.role === 'admin') &&
-    !isReviewGovernanceEnabled(process.env)
-  ) {
-    throw Object.assign(new Error('review governance is disabled'), { statusCode: 403 });
+  if (principal?.role === 'judge' || principal?.role === 'admin') {
+    if (!isReviewGovernanceEnabled(process.env)) {
+      throw Object.assign(new Error('review governance is disabled'), { statusCode: 403 });
+    }
+    return { audience: principal.role, principal };
   }
-  return { audience: principal.role, principal };
+  return {
+    audience: 'participant',
+    principal: { principalId: 'participant', role: 'participant' }
+  };
+}
+
+function participantPrincipalForRequest(request, evaluation) {
+  const principal = authenticatePrincipal(request, evaluation, process.env);
+  if (principal?.role === 'admin') return principal;
+  return { principalId: 'participant', role: 'participant' };
 }
 
 function requireGovernanceEnabled() {
@@ -858,18 +842,8 @@ async function serveEvidenceItem(request, response, evaluationId, evidenceId) {
   if (!item || item.schemaVersion !== 2) {
     return json(response, 404, { error: 'Evaluation does not exist' });
   }
-  const principal = authenticatePrincipal(request, item, process.env);
-  const audience = principal?.role || 'public';
-  if (
-    (audience === 'judge' || audience === 'admin') &&
-    !isReviewGovernanceEnabled(process.env)
-  ) {
-    return json(response, 403, { error: 'Review governance is disabled' });
-  }
-  const projected = projectEvaluation(item, {
-    audience,
-    principal: principal || null
-  });
+  const options = projectionOptionsForRequest(item, request);
+  const projected = projectEvaluation(item, options);
   const manifestItem = projected.evidenceManifest?.items?.find(
     (entry) => entry.evidenceId === evidenceId
   );
@@ -880,10 +854,10 @@ async function serveEvidenceItem(request, response, evaluationId, evidenceId) {
   const record = await evidenceVault.get(manifestItem.evidenceId, manifestItem.recordHash);
   const projectedRecord = projectEvidenceRecord(record, manifestItem);
   await accessAuditStore.append({
-    principalId: principal?.principalId || 'public',
+    principalId: options.principal?.principalId || 'participant',
     evaluationId: item.id,
     evidenceId: manifestItem.evidenceId,
-    role: audience
+    role: options.audience
   });
   return json(response, 200, { item: projectedRecord });
 }

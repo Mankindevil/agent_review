@@ -2692,7 +2692,7 @@ async function interruptEvaluation(context) {
         level: 'warn',
         source: 'SYSTEM',
         phase: 'interrupted',
-        text: '执行已中断，可凭 participant token 恢复'
+        text: '执行已中断，可使用评测 ID 恢复'
       },
       activeWork: null
     }));

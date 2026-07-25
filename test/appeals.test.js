@@ -99,12 +99,17 @@ test('triage and replacement derive platform attribution from probes', () => {
   );
 });
 
-test('participant ownership, target, statement, and appeal window are enforced', () => {
+test('participant role, target, statement, and appeal window are enforced', () => {
   const evaluation = lockedEvaluation();
   assert.throws(
-    () => createAppeal(evaluation, { principalId: 'other', role: 'participant' }, appealInput),
-    /owner|participant/i
+    () => createAppeal(evaluation, { principalId: 'judge-1', role: 'judge' }, appealInput),
+    /participant/i
   );
+  assert.doesNotThrow(() => createAppeal(
+    structuredClone(evaluation),
+    { principalId: 'other', role: 'participant' },
+    { ...appealInput, idempotencyKey: 'appeal-other-participant' }
+  ));
   assert.throws(
     () => createAppeal(evaluation, participant, { ...appealInput, statement: ' ' }),
     /statement/i

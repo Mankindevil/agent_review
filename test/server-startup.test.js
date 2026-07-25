@@ -90,19 +90,16 @@ test('enabled server wires the V2 runtime and applies separate create body limit
         }]
       }]
     });
-    if (!/^[A-Za-z0-9_-]{43}$/.test(direct.participantAccessToken)) {
+    if (direct.schemaVersion !== 2 || !direct.id) {
       throw new Error('V2 pipeline was not wired');
     }
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const origin = 'http://127.0.0.1:' + server.address().port;
-    await pipeline.cancel(
-      direct.evaluation.id,
-      direct.participantAccessToken
-    );
-    while (pipeline.activeRuns.has(direct.evaluation.id)) {
+    await pipeline.cancel(direct.id);
+    while (pipeline.activeRuns.has(direct.id)) {
       await new Promise((resolve) => setTimeout(resolve, 1));
     }
-    const cancelled = evaluationStore.get(direct.evaluation.id);
+    const cancelled = evaluationStore.get(direct.id);
     await evaluationStore.mutate(
       cancelled.id,
       cancelled.revision,
@@ -117,34 +114,21 @@ test('enabled server wires the V2 runtime and applies separate create body limit
       })
     );
     const resumeHeaders = {
-      authorization: 'Bearer ' + direct.participantAccessToken,
       'content-type': 'application/json',
       'idempotency-key': 'startup-resume-key-00001'
     };
     const firstResume = await fetch(
-      origin + '/api/evaluations/' + direct.evaluation.id + '/resume',
+      origin + '/api/evaluations/' + direct.id + '/resume',
       { method: 'POST', headers: resumeHeaders, body: '{}' }
     );
     const firstResumeBody = await firstResume.text();
     const replayResume = await fetch(
-      origin + '/api/evaluations/' + direct.evaluation.id + '/resume',
+      origin + '/api/evaluations/' + direct.id + '/resume',
       { method: 'POST', headers: resumeHeaders, body: '{}' }
     );
     const replayResumeBody = await replayResume.text();
-    const rejectedToken = await fetch(
-      origin + '/api/evaluations/' + direct.evaluation.id + '/resume',
-      {
-        method: 'POST',
-        headers: {
-          ...resumeHeaders,
-          authorization: 'Bearer ' + 'B'.repeat(43),
-          'idempotency-key': 'startup-resume-key-00002'
-        },
-        body: '{}'
-      }
-    );
     const oversizedResume = await fetch(
-      origin + '/api/evaluations/' + direct.evaluation.id + '/resume',
+      origin + '/api/evaluations/' + direct.id + '/resume',
       {
         method: 'POST',
         headers: {
@@ -158,11 +142,9 @@ test('enabled server wires the V2 runtime and applies separate create body limit
       firstResume.status !== 202 ||
       replayResume.status !== 202 ||
       replayResumeBody !== firstResumeBody ||
-      firstResumeBody.includes(direct.participantAccessToken) ||
-      rejectedToken.status !== 401 ||
       oversizedResume.status !== 413
     ) {
-      throw new Error('participant-authenticated resume replay failed');
+      throw new Error('id-only resume replay failed');
     }
     const makeBody = (size) => JSON.stringify({
       schemaVersion: 2,

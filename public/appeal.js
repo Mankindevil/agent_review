@@ -1,10 +1,10 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { evaluationId: location.hash.slice(1), token: '', resultVersions: [] };
+const state = { evaluationId: location.hash.slice(1), resultVersions: [] };
 
 $('#appeal-form').addEventListener('submit', submitAppeal);
 $('#load-appeals').addEventListener('click', loadAppeals);
-$('#participant-token').addEventListener('change', async (event) => {
-  state.token = event.target.value.trim();
+$('#evaluation-id').addEventListener('change', async (event) => {
+  state.evaluationId = event.target.value.trim();
   await loadConcreteTargets();
 });
 if (state.evaluationId) $('#evaluation-id').value = state.evaluationId;
@@ -44,9 +44,7 @@ async function loadAppeals() {
   const evaluationId = $('#evaluation-id').value.trim();
   if (!evaluationId) return;
   try {
-    const response = await fetch(`/api/evaluations/${encodeURIComponent(evaluationId)}/appeals`, {
-      headers: { authorization: state.token ? `Bearer ${state.token}` : '' }
-    });
+    const response = await fetch(`/api/evaluations/${encodeURIComponent(evaluationId)}/appeals`);
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || '无法读取申诉');
     $('#timeline').innerHTML = result.appeals.length
@@ -59,10 +57,8 @@ async function loadAppeals() {
 
 async function loadConcreteTargets() {
   const evaluationId = $('#evaluation-id').value.trim();
-  if (!evaluationId || !state.token) return;
-  const response = await fetch(`/api/evaluations/${encodeURIComponent(evaluationId)}`, {
-    headers: { authorization: `Bearer ${state.token}` }
-  });
+  if (!evaluationId) return;
+  const response = await fetch(`/api/evaluations/${encodeURIComponent(evaluationId)}`);
   const item = await response.json();
   if (!response.ok) throw new Error(item.error || '无法读取评测目标');
   const targets = item.appealTargets || {};
@@ -98,9 +94,7 @@ function renderAppeal(appeal) {
 }
 
 function headers() {
-  if (!state.token) throw new Error('请输入 participant access token');
   return {
-    authorization: `Bearer ${state.token}`,
     'content-type': 'application/json',
     'idempotency-key': crypto.randomUUID()
   };
@@ -111,3 +105,5 @@ function escapeHtml(value) {
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   })[char]);
 }
+
+if (state.evaluationId) loadConcreteTargets().catch(() => {});

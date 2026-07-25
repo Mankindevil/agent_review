@@ -127,25 +127,13 @@
           <label class="agent-auth-panel" for="agent-authorization">
             <span>CONNECTION ONLY / 可选</span>
             <b>Agent connection authorization</b>
-            <small>只发往 Agent 端点，不是 participant access token；请求进入内存后立即清空，不会写入浏览器存储。</small>
+            <small>只发往 Agent 端点；请求进入内存后立即清空，不会写入浏览器存储。</small>
             <input id="agent-authorization" type="password" autocomplete="off" spellcheck="false" placeholder="例如 Bearer …">
           </label>
         </section>
 
         <div class="form-actions single"><button class="primary-button" id="start-evaluation" type="button" disabled><span>正在确认评测模式</span><i>↗</i></button></div>
         <p class="form-error" id="form-error" role="alert"></p>
-        <section id="participant-token-receipt" class="participant-token-receipt hidden" role="status" aria-live="polite">
-          <div>
-            <span>ONE-TIME RECEIPT / PARTICIPANT ACCESS</span>
-            <b>立即复制并安全保存</b>
-            <small>此 token 只用于恢复本次评测，不会发送给 Agent，也不会再次显示。</small>
-          </div>
-          <output id="participant-token-output" aria-label="Participant access token"></output>
-          <div class="receipt-actions">
-            <button id="copy-participant-token" type="button">复制 token</button>
-            <button id="dismiss-participant-token" type="button">我已保存</button>
-          </div>
-        </section>
       </div>
     </section>
 
@@ -173,11 +161,10 @@
 
     <section id="v2-resume-panel" class="v2-resume-panel hidden" aria-labelledby="v2-resume-title">
       <div>
-        <span>RECOVERY / PARTICIPANT ACCESS</span>
+        <span>RECOVERY</span>
         <b id="v2-resume-title">恢复已暂停的证据采集</b>
-        <small>Participant access token 用于授权恢复；Agent connection authorization 只连接 Agent。两者不会保存到浏览器存储。</small>
+        <small>持有评测 ID 即可恢复。Agent connection authorization 只连接 Agent，不会保存到浏览器存储。</small>
       </div>
-      <label>Participant access token<input id="resume-participant-token" type="password" autocomplete="off" spellcheck="false"></label>
       <label>Agent connection authorization（如原运行需要）<input id="resume-agent-authorization" type="password" autocomplete="off" spellcheck="false"></label>
       <button id="resume-evaluation" type="button">恢复评测</button>
       <p id="resume-error" role="alert"></p>

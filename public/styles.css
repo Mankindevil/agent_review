@@ -154,10 +154,6 @@ h1 em::after { content: ""; position: absolute; left: 0; bottom: -5px; width: 10
 .agent-auth-panel { display:grid; gap:5px; margin-top:18px; padding:14px; border-left:4px solid var(--lime); background:var(--ink); color:white; }
 .agent-auth-panel > span { color:var(--lime); font:800 8px var(--mono); letter-spacing:.1em; }.agent-auth-panel > b { font-size:12px; }.agent-auth-panel > small { color:#aeb9b6; font-size:9px; line-height:1.55; }
 .agent-auth-panel input { width:100%; border:1px solid #526461; background:#071d1d; color:var(--lime); padding:10px; font:10px var(--mono); }
-.participant-token-receipt { display:grid; gap:10px; margin-top:16px; padding:14px; border:2px solid var(--lime); background:var(--ink); color:white; box-shadow:5px 5px 0 var(--lime); }
-.participant-token-receipt > div:first-child { display:grid; gap:3px; }.participant-token-receipt span { color:var(--lime); font:800 8px var(--mono); letter-spacing:.1em; }.participant-token-receipt b { font-size:13px; }.participant-token-receipt small { color:#afbfba; font-size:9px; line-height:1.5; }
-.participant-token-receipt output { display:block; overflow-wrap:anywhere; padding:9px; border:1px dashed var(--lime); background:#071d1d; color:var(--lime); font:10px/1.5 var(--mono); user-select:all; }
-.receipt-actions { display:flex; gap:7px; }.receipt-actions button { border:1px solid var(--lime); background:transparent; color:var(--lime); padding:7px 9px; cursor:pointer; font:800 8px var(--mono); }.receipt-actions button:last-child { background:var(--lime); color:var(--ink); }
 .form-actions { display: grid; grid-template-columns: .8fr 1.25fr; gap: 10px; margin-top: 18px; }
 .form-actions.single { grid-template-columns: 1fr; }
 .sample-button, .primary-button { min-height: 50px; border: 1px solid var(--ink); cursor: pointer; font-weight: 800; }

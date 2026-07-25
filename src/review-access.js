@@ -1,5 +1,4 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { verifyParticipantAccess } from './participant-access.js';
 
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const ROLES = new Set(['judge', 'admin']);
@@ -21,10 +20,6 @@ export function authenticatePrincipal(request, evaluation, env = process.env) {
       displayName: configured.displayName,
       role: configured.role
     };
-  }
-  const participantHash = evaluation?.participantAccess?.tokenHash;
-  if (verifyParticipantAccess(token, participantHash)) {
-    return { principalId: 'participant', role: 'participant' };
   }
   return null;
 }

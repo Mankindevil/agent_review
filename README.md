@@ -285,21 +285,17 @@ and its request limits remain unchanged.
 
 Create a V2 evaluation with `POST /api/evaluations` using
 `schemaVersion: 2`, an `agentCard`, and `agentExamples`. The `202` response is
-the public evaluation projection plus `participantAccessToken`. That token is
-returned only once: the server persists only its SHA-256 hash, and the token
-does not appear in later GET, list, SSE, cancel, or resume responses. Store the
-one-time token securely on the participant side.
+the public evaluation projection. The evaluation ID is the participant handle for
+later reads, cancel, resume, delete, and appeals.
 
 V2 create is non-idempotent. If its HTTP response is lost, create a new
-evaluation; the replacement has a new evaluation ID and a new one-time
-participant token. There is no endpoint that can recover a lost token.
+evaluation; the replacement has a new evaluation ID.
 
 After a restart marks an evaluation `interrupted` or `credentials-required`,
 resume only the missing planned work with:
 
 ```http
 POST /api/evaluations/:id/resume
-Authorization: Bearer <participantAccessToken>
 Idempotency-Key: <unique 16-128 byte printable value>
 Content-Type: application/json
 

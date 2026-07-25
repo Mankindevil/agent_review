@@ -15,27 +15,20 @@ export function nextAvailableEditorId(values, prefix) {
   return `${prefix}-${ordinal}`;
 }
 
-export function recordActionCopy(isV2) {
-  return isV2
-    ? {
-        idle: '归档',
-        confirm: '再点一次确认归档',
-        pending: '归档中',
-        failed: '归档失败'
-      }
-    : {
-        idle: '删除',
-        confirm: '再点一次确认',
-        pending: '删除中',
-        failed: '删除失败'
-      };
+export function recordActionCopy(_isV2) {
+  return {
+    idle: '删除',
+    confirm: '再点一次确认',
+    pending: '删除中',
+    failed: '删除失败'
+  };
 }
 
-export function recordActionFailure(isV2, upstreamMessage = '') {
-  const copy = recordActionCopy(isV2);
+export function recordActionFailure(_isV2, upstreamMessage = '') {
+  const copy = recordActionCopy();
   const upstream = String(upstreamMessage || '').trim();
   if (!upstream) return copy.failed;
-  if (!isV2 || upstream === copy.failed || upstream.startsWith(`${copy.failed}：`)) {
+  if (upstream === copy.failed || upstream.startsWith(`${copy.failed}：`)) {
     return upstream;
   }
   return `${copy.failed}：${upstream}`;

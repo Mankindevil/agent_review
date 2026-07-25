@@ -215,7 +215,7 @@ test('routes numeric V2 only when enabled and keeps V2 retry disabled in both mo
   const created = await enabled.create(v2Input());
   await new Promise(setImmediate);
   await assert.rejects(
-    enabled.retry(created.evaluation.id, {}),
+    enabled.retry(created.id, {}),
     (error) => error.statusCode === 409 && /V2/i.test(error.message)
   );
 });
@@ -297,7 +297,7 @@ test('rejects closed V2 intake and invalid Cards before store, token, credential
   assert.deepEqual(store.list(), []);
 });
 
-test('requires participant ownership for V2 cancel with zero unauthorized side effects and idempotent replay', async () => {
+test('cancels active V2 evaluations without bearer and replays idempotently', async () => {
   const store = new EvaluationStore(path.join(
     tmpdir(),
     `agent-roast-v2-cancel-owner-${process.pid}.json`
@@ -325,7 +325,7 @@ test('requires participant ownership for V2 cancel with zero unauthorized side e
     agentAuthorization: 'owned-agent-secret'
   }));
   await new Promise(setImmediate);
-  const id = created.evaluation.id;
+  const id = created.id;
   const before = store.get(id);
   const sideEffectsBefore = {
     revision: before.revision,
@@ -334,25 +334,7 @@ test('requires participant ownership for V2 cancel with zero unauthorized side e
     deletes: calls.deletes.length
   };
 
-  for (const participantAccessToken of [
-    undefined,
-    'W'.repeat(43)
-  ]) {
-    await assert.rejects(
-      () => pipeline.cancel(id, participantAccessToken),
-      (error) => error.statusCode === 401
-    );
-    assert.equal(store.get(id).revision, sideEffectsBefore.revision);
-    assert.equal(store.get(id).auditEvents.length, sideEffectsBefore.audit);
-    assert.equal(emitted.length, sideEffectsBefore.emitted);
-    assert.equal(calls.deletes.length, sideEffectsBefore.deletes);
-    assert.equal(observedSignal.aborted, false);
-  }
-
-  const cancelled = await pipeline.cancel(
-    id,
-    created.participantAccessToken
-  );
+  const cancelled = await pipeline.cancel(id);
   assert.equal(cancelled.execution.status, 'cancelled');
   assert.equal(observedSignal.aborted, true);
   await new Promise(setImmediate);
@@ -362,89 +344,32 @@ test('requires participant ownership for V2 cancel with zero unauthorized side e
     emitted: emitted.length,
     deletes: calls.deletes.length
   };
-  const replayed = await pipeline.cancel(
-    id,
-    created.participantAccessToken
-  );
+  const replayed = await pipeline.cancel(id);
   assert.equal(replayed.revision, afterCancel.revision);
   assert.equal(store.get(id).auditEvents.length, afterCancel.audit);
   assert.equal(emitted.length, afterCancel.emitted);
   assert.equal(calls.deletes.length, afterCancel.deletes);
-  await assert.rejects(
-    () => pipeline.cancel(id, 'W'.repeat(43)),
-    (error) => error.statusCode === 401
-  );
+  assert.equal(afterCancel.revision, sideEffectsBefore.revision + 1);
 });
 
-test('requires participant ownership for V2 archive and coalesces concurrent or replayed requests', async () => {
+test('hard-deletes terminal V2 records through the store', async () => {
   const store = new EvaluationStore(path.join(
     tmpdir(),
-    `agent-roast-v2-archive-owner-${process.pid}.json`
+    `agent-roast-v2-delete-${process.pid}.json`
   ));
-  const emitted = [];
-  const events = new EventEmitter();
-  const originalEmit = events.emit.bind(events);
-  events.emit = (name, value) => {
-    if (name.startsWith('eval_')) emitted.push(structuredClone(value));
-    return originalEmit(name, value);
-  };
-  const { calls, options } = v2Options();
-  const pipeline = new EvaluationPipeline(store, events, options);
+  const { options } = v2Options();
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
   const created = await pipeline.create(v2Input());
   await new Promise(setImmediate);
-  const id = created.evaluation.id;
-  let current = store.get(id);
-  current = await store.mutate(id, current.revision, (record) => ({
-    ...record,
-    execution: {
-      status: 'completed',
-      stage: 'waiting-model',
-      progress: 100,
-      completedAt: '2026-07-24T10:30:00.000Z'
-    }
-  }));
-  const before = {
-    revision: current.revision,
-    audit: current.auditEvents.length,
-    emitted: emitted.length,
-    deletes: calls.deletes.length
-  };
-
-  for (const participantAccessToken of [
-    undefined,
-    'W'.repeat(43)
-  ]) {
-    await assert.rejects(
-      () => pipeline.archive(id, participantAccessToken),
-      (error) => error.statusCode === 401
-    );
-    assert.equal(store.get(id).revision, before.revision);
-    assert.equal(store.get(id).auditEvents.length, before.audit);
-    assert.equal(emitted.length, before.emitted);
-    assert.equal(calls.deletes.length, before.deletes);
+  await pipeline.cancel(created.id);
+  while (pipeline.activeRuns.has(created.id)) {
+    await new Promise((resolve) => setImmediate(resolve));
   }
-
-  const [first, second] = await Promise.all([
-    pipeline.archive(id, created.participantAccessToken),
-    pipeline.archive(id, created.participantAccessToken)
-  ]);
-  assert.equal(first.revision, before.revision + 1);
-  assert.equal(second.revision, before.revision + 1);
-  assert.equal(store.get(id).revision, before.revision + 1);
-  assert.equal(emitted.length, before.emitted + 1);
-  const replayed = await pipeline.archive(
-    id,
-    created.participantAccessToken
-  );
-  assert.equal(replayed.revision, before.revision + 1);
-  assert.equal(emitted.length, before.emitted + 1);
-  await assert.rejects(
-    () => pipeline.archive(id, 'W'.repeat(43)),
-    (error) => error.statusCode === 401
-  );
+  await store.delete(created.id);
+  assert.equal(store.get(created.id), undefined);
 });
 
-test('creates non-idempotent V2 records with one store set and returns each participant token out of band', async () => {
+test('creates non-idempotent V2 records with one store set and no participant access metadata', async () => {
   const store = new EvaluationStore(path.join(
     tmpdir(),
     `agent-roast-v2-create-${process.pid}.json`
@@ -470,30 +395,26 @@ test('creates non-idempotent V2 records with one store set and returns each part
   const second = await pipeline.create(input);
   await new Promise(setImmediate);
 
-  assert.notEqual(first.evaluation.id, second.evaluation.id);
-  assert.notEqual(first.participantAccessToken, second.participantAccessToken);
-  assert.match(first.participantAccessToken, /^[A-Za-z0-9_-]{43}$/u);
+  assert.notEqual(first.id, second.id);
+  assert.equal(first.participantAccess, undefined);
+  assert.equal(second.participantAccess, undefined);
   assert.equal(setCalls, 2);
   assert.equal(calls.runs.length, 2);
   assert.equal(calls.puts.length, 2);
   for (const created of [first, second]) {
-    assert.equal(created.evaluation.schemaVersion, 2);
-    assert.equal(created.evaluation.execution.status, 'queued');
-    assert.equal(created.evaluation.runtimeState.runIndex.length, 3);
-    assert.deepEqual(created.evaluation.submission.config, {
+    assert.equal(created.schemaVersion, 2);
+    assert.equal(created.execution.status, 'queued');
+    assert.equal(created.runtimeState.runIndex.length, 3);
+    assert.deepEqual(created.submission.config, {
       rubricVersion: 'a2a-black-box-v1',
       hiddenTestPackageVersion: 'black-box-test-plan/v1',
       modelConfigVersion: 'panel-v1',
       runtimeConfigVersion: 'phase2-black-box-runtime/v1'
     });
-    const stored = JSON.stringify(store.get(created.evaluation.id));
-    assert.equal(stored.includes(created.participantAccessToken), false);
+    const stored = JSON.stringify(store.get(created.id));
+    assert.equal(stored.includes('participantAccess'), false);
     assert.equal(stored.includes('agent-create-secret'), false);
   }
-  assert.equal(
-    JSON.stringify(emitted).includes(first.participantAccessToken),
-    false
-  );
 });
 
 test('authenticates and reserves resume once, replays exactly, and rejects changed bodies without side effects', async () => {
@@ -507,7 +428,7 @@ test('authenticates and reserves resume once, replays exactly, and rejects chang
     agentAuthorization: 'agent-initial-secret'
   }));
   await new Promise(setImmediate);
-  const before = store.get(created.evaluation.id);
+  const before = store.get(created.id);
   await store.mutate(before.id, before.revision, (record) => ({
     ...record,
     execution: {
@@ -520,19 +441,18 @@ test('authenticates and reserves resume once, replays exactly, and rejects chang
   const putsBefore = calls.puts.length;
   const runsBefore = calls.runs.length;
   const request = {
-    participantAccessToken: created.participantAccessToken,
     idempotencyKey: 'resume-key-00001',
     body: { agentAuthorization: 'agent-resume-secret' }
   };
-  const accepted = await pipeline.resume(created.evaluation.id, request);
+  const accepted = await pipeline.resume(created.id, request);
   await new Promise(setImmediate);
-  const replayed = await pipeline.resume(created.evaluation.id, request);
+  const replayed = await pipeline.resume(created.id, request);
 
   assert.equal(accepted.statusCode, 202);
   assert.deepEqual(replayed, accepted);
   assert.equal(calls.puts.length, putsBefore + 1);
   assert.equal(calls.runs.length, runsBefore + 1);
-  const stored = store.get(created.evaluation.id);
+  const stored = store.get(created.id);
   assert.equal(stored.resumeReceipts.length, 1);
   assert.equal(stored.execution.status, 'queued');
   assert.equal(
@@ -545,19 +465,11 @@ test('authenticates and reserves resume once, replays exactly, and rejects chang
   );
 
   await assert.rejects(
-    pipeline.resume(created.evaluation.id, {
+    pipeline.resume(created.id, {
       ...request,
       body: { agentAuthorization: 'different-agent-secret' }
     }),
     (error) => error.statusCode === 409
-  );
-  await assert.rejects(
-    pipeline.resume(created.evaluation.id, {
-      ...request,
-      participantAccessToken: 'B'.repeat(43),
-      idempotencyKey: 'another-key-00001'
-    }),
-    (error) => error.statusCode === 401
   );
   assert.equal(calls.puts.length, putsBefore + 1);
   assert.equal(calls.runs.length, runsBefore + 1);
@@ -572,7 +484,7 @@ test('replays an accepted resume receipt after archive but rejects a new key wit
   const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
   const created = await pipeline.create(v2Input());
   await new Promise(setImmediate);
-  let current = store.get(created.evaluation.id);
+  let current = store.get(created.id);
   current = await store.mutate(current.id, current.revision, (record) => ({
     ...record,
     execution: {
@@ -583,7 +495,6 @@ test('replays an accepted resume receipt after archive but rejects a new key wit
     }
   }));
   const request = {
-    participantAccessToken: created.participantAccessToken,
     idempotencyKey: 'archived-replay-key-00001',
     body: {}
   };
@@ -626,7 +537,7 @@ test('rejects explicit non-object resume bodies without reserving or dispatching
   const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
   const created = await pipeline.create(v2Input());
   await new Promise(setImmediate);
-  let current = store.get(created.evaluation.id);
+  let current = store.get(created.id);
   current = await store.mutate(current.id, current.revision, (record) => ({
     ...record,
     execution: {
@@ -646,7 +557,6 @@ test('rejects explicit non-object resume bodies without reserving or dispatching
   for (const [index, body] of [null, [], 0, 'invalid'].entries()) {
     await assert.rejects(
       () => pipeline.resume(current.id, {
-        participantAccessToken: created.participantAccessToken,
         idempotencyKey: `resume-body-key-0000${index}`,
         body
       }),
@@ -670,7 +580,7 @@ test('rejects resume of an archived interrupted V2 record without side effects',
   const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
   const created = await pipeline.create(v2Input());
   await new Promise(setImmediate);
-  let current = store.get(created.evaluation.id);
+  let current = store.get(created.id);
   current = await store.mutate(current.id, current.revision, (record) => ({
     ...record,
     archivedAt: '2026-07-24T11:00:00.000Z',
@@ -691,7 +601,6 @@ test('rejects resume of an archived interrupted V2 record without side effects',
 
   await assert.rejects(
     () => pipeline.resume(current.id, {
-      participantAccessToken: created.participantAccessToken,
       idempotencyKey: 'archived-resume-key-00001',
       body: {}
     }),
@@ -705,10 +614,7 @@ test('rejects resume of an archived interrupted V2 record without side effects',
   assert.equal(calls.deletes.length, before.deletes);
   assert.equal(calls.runs.length, before.runs);
 
-  const archivedCancel = await pipeline.cancel(
-    current.id,
-    created.participantAccessToken
-  );
+  const archivedCancel = await pipeline.cancel(current.id);
   assert.equal(archivedCancel.execution.status, 'interrupted');
   assert.equal(archivedCancel.revision, before.revision);
   assert.equal(store.get(current.id).revision, before.revision);
@@ -723,13 +629,12 @@ test('records a distinct audit event for each accepted resume request', async ()
   const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
   const created = await pipeline.create(v2Input());
   await new Promise(setImmediate);
-  let current = store.get(created.evaluation.id);
+  let current = store.get(created.id);
   current = await store.mutate(current.id, current.revision, (record) => ({
     ...record,
     execution: { status: 'interrupted', stage: 'recovery', progress: 0 }
   }));
   await pipeline.resume(current.id, {
-    participantAccessToken: created.participantAccessToken,
     idempotencyKey: 'resume-audit-key-00001',
     body: {}
   });
@@ -740,7 +645,6 @@ test('records a distinct audit event for each accepted resume request', async ()
     execution: { status: 'interrupted', stage: 'recovery', progress: 0 }
   }));
   await pipeline.resume(current.id, {
-    participantAccessToken: created.participantAccessToken,
     idempotencyKey: 'resume-audit-key-00002',
     body: {}
   });
@@ -763,7 +667,7 @@ test('concurrent identical resumes reserve one durable receipt and dispatch only
     agentAuthorization: 'agent-initial-secret'
   }));
   await new Promise(setImmediate);
-  const before = store.get(created.evaluation.id);
+  const before = store.get(created.id);
   await store.mutate(before.id, before.revision, (record) => ({
     ...record,
     execution: {
@@ -776,19 +680,18 @@ test('concurrent identical resumes reserve one durable receipt and dispatch only
   const putsBefore = calls.puts.length;
   const runsBefore = calls.runs.length;
   const request = {
-    participantAccessToken: created.participantAccessToken,
     idempotencyKey: 'resume-race-key-00001',
     body: { agentAuthorization: 'agent-resume-secret' }
   };
 
   const results = await Promise.all([
-    pipeline.resume(created.evaluation.id, request),
-    pipeline.resume(created.evaluation.id, request)
+    pipeline.resume(created.id, request),
+    pipeline.resume(created.id, request)
   ]);
   await new Promise(setImmediate);
 
   assert.deepEqual(results[1], results[0]);
-  assert.equal(store.get(created.evaluation.id).resumeReceipts.length, 1);
+  assert.equal(store.get(created.id).resumeReceipts.length, 1);
   assert.equal(calls.puts.length, putsBefore + 1);
   assert.equal(calls.runs.length, runsBefore + 1);
 });
@@ -804,7 +707,7 @@ test('recovers enabled nested V2 state once while disabled recovery leaves it un
     agentAuthorization: 'agent-recovery-secret'
   }));
   await new Promise(setImmediate);
-  let current = store.get(created.evaluation.id);
+  let current = store.get(created.id);
   current = await store.mutate(current.id, current.revision, (record) => ({
     ...record,
     execution: {
@@ -847,7 +750,7 @@ test('recovery maps public V2 interruption to one execution-interrupted audit', 
   const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
   const created = await pipeline.create(v2Input());
   await new Promise(setImmediate);
-  let current = store.get(created.evaluation.id);
+  let current = store.get(created.id);
   current = await store.mutate(current.id, current.revision, (record) => ({
     ...record,
     execution: {
@@ -899,7 +802,7 @@ test('dispatched crash recovery closes pending checks and completes objective sc
   const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
   const created = await pipeline.create(v2Input({ agentExamples: examples }));
   await new Promise(setImmediate);
-  let current = store.get(created.evaluation.id);
+  let current = store.get(created.id);
   const crashedCell = current.runtimeState.runIndex[0];
   current = await store.mutate(current.id, current.revision, (record) => ({
     ...record,
@@ -1033,21 +936,20 @@ test('same-process resume closes a dispatched unknown turn instead of selecting 
   const created = await pipeline.create(v2Input());
   const interrupted = await waitFor(
     store,
-    created.evaluation.id,
+    created.id,
     (item) => item.execution.status === 'interrupted'
   );
   const unknownCell = interrupted.runtimeState.runIndex[0];
   const unknownRunId = unknownCell.attempts[0].turns[0].runId;
   assert.equal(unknownCell.attempts[0].turns[0].status, 'dispatched');
 
-  await pipeline.resume(created.evaluation.id, {
-    participantAccessToken: created.participantAccessToken,
+  await pipeline.resume(created.id, {
     idempotencyKey: 'resume-dispatched-unknown-0001',
     body: {}
   });
   const completed = await waitFor(
     store,
-    created.evaluation.id,
+    created.id,
     (item) => item.execution.status === 'completed'
   );
 
@@ -1107,10 +1009,7 @@ test('enabled V2 cancel commits before abort/delete/emit and is revision-idempot
   await new Promise(setImmediate);
   operations.length = 0;
 
-  const cancelled = await pipeline.cancel(
-    created.evaluation.id,
-    created.participantAccessToken
-  );
+  const cancelled = await pipeline.cancel(created.id);
   const revision = cancelled.revision;
   assert.equal(cancelled.execution.status, 'cancelled');
   assert.equal(cancelled.auditEvents.at(-1).type, 'cancelled');
@@ -1119,10 +1018,7 @@ test('enabled V2 cancel commits before abort/delete/emit and is revision-idempot
     operations.indexOf('credential-delete') <
       operations.indexOf('emit-cancelled')
   );
-  const again = await pipeline.cancel(
-    created.evaluation.id,
-    created.participantAccessToken
-  );
+  const again = await pipeline.cancel(created.id);
   assert.equal(again.revision, revision);
   assert.equal(calls.puts.length, 1);
   releaseRun();
@@ -1170,10 +1066,7 @@ test('V2 cancel retries a stale worker revision and still aborts and clears cred
     return mutate(id, expectedRevision, updater);
   };
 
-  const cancelled = await pipeline.cancel(
-    created.evaluation.id,
-    created.participantAccessToken
-  );
+  const cancelled = await pipeline.cancel(created.id);
 
   assert.equal(injectedWorkerCommits, 17);
   assert.equal(cancelled.execution.status, 'cancelled');
@@ -1183,7 +1076,7 @@ test('V2 cancel retries a stale worker revision and still aborts and clears cred
   );
   assert.deepEqual(operations, ['abort']);
   assert.equal(
-    calls.deletes.filter((id) => id === created.evaluation.id).length >= 1,
+    calls.deletes.filter((id) => id === created.id).length >= 1,
     true
   );
 });
@@ -1218,18 +1111,18 @@ test('concurrent V2 cancels commit one transition and both return the current re
   const pipeline = new EvaluationPipeline(store, events, options);
   const created = await pipeline.create(v2Input());
   await new Promise(setImmediate);
-  const revisionBefore = store.get(created.evaluation.id).revision;
+  const revisionBefore = store.get(created.id).revision;
 
   const results = await Promise.all([
-    pipeline.cancel(created.evaluation.id, created.participantAccessToken),
-    pipeline.cancel(created.evaluation.id, created.participantAccessToken)
+    pipeline.cancel(created.id),
+    pipeline.cancel(created.id)
   ]);
 
   assert.equal(results[0].execution.status, 'cancelled');
   assert.equal(results[1].execution.status, 'cancelled');
   assert.equal(results[0].revision, revisionBefore + 1);
   assert.equal(results[1].revision, revisionBefore + 1);
-  assert.equal(store.get(created.evaluation.id).revision, revisionBefore + 1);
+  assert.equal(store.get(created.id).revision, revisionBefore + 1);
   assert.deepEqual(emitted, [revisionBefore + 1]);
   releaseRun();
 });
@@ -1243,7 +1136,7 @@ test('V2 cancel closes a dispatched turn, attempt, and cell without pending attr
   const pipeline = new EvaluationPipeline(store, new EventEmitter(), options);
   const created = await pipeline.create(v2Input());
   await new Promise(setImmediate);
-  let current = store.get(created.evaluation.id);
+  let current = store.get(created.id);
   current = await store.mutate(current.id, current.revision, (record) => ({
     ...record,
     execution: { status: 'running', stage: 'public-examples', progress: 20 },
@@ -1276,10 +1169,7 @@ test('V2 cancel closes a dispatched turn, attempt, and cell without pending attr
     }
   }));
 
-  const cancelled = await pipeline.cancel(
-    current.id,
-    created.participantAccessToken
-  );
+  const cancelled = await pipeline.cancel(current.id);
   const cell = cancelled.runtimeState.runIndex[0];
   const attempt = cell.attempts[0];
   assert.equal(cell.status, 'cancelled');

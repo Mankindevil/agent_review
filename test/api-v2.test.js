@@ -56,7 +56,7 @@ test.after(async () => {
   await rm(testRoot, { recursive: true, force: true });
 });
 
-test('returns a flat one-time V2 create token with no-store caching', async () => {
+test('returns a flat V2 create projection with no-store caching', async () => {
   const response = await createEvaluation();
   const body = await response.json();
 
@@ -64,19 +64,15 @@ test('returns a flat one-time V2 create token with no-store caching', async () =
   assert.equal(response.headers.get('cache-control'), 'no-store');
   assert.equal(body.schemaVersion, 2);
   assert.match(body.id, /^eval_/u);
-  assert.match(body.participantAccessToken, /^[A-Za-z0-9_-]{43}$/u);
+  assert.equal(Object.hasOwn(body, 'participantAccessToken'), false);
   assert.equal(Object.hasOwn(body, 'evaluation'), false);
-  assert.equal(
-    JSON.stringify(evaluationStore.get(body.id))
-      .includes(body.participantAccessToken),
-    false
-  );
-  await pipeline.cancel(body.id, body.participantAccessToken);
+  assert.equal(evaluationStore.get(body.id)?.participantAccess, undefined);
+  await pipeline.cancel(body.id);
 });
 
 test('protects the non-blind judge preview and returns no replica material', async () => {
   const created = await (await createEvaluation()).json();
-  await pipeline.cancel(created.id, created.participantAccessToken);
+  await pipeline.cancel(created.id);
 
   const unauthorized = await fetch(
     `${origin}/api/evaluations/${created.id}/judge-preview`
@@ -109,10 +105,10 @@ test('preserves the legacy 413 limit for oversized malformed create bodies when 
   assert.equal(response.status, 413);
 });
 
-test('returns no-store on participant-authenticated resume and exact replay', async () => {
+test('returns no-store on resume and exact replay without bearer auth', async () => {
   const createdResponse = await createEvaluation();
   const created = await createdResponse.json();
-  await pipeline.cancel(created.id, created.participantAccessToken);
+  await pipeline.cancel(created.id);
   while (pipeline.activeRuns.has(created.id)) {
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
@@ -129,7 +125,6 @@ test('returns no-store on participant-authenticated resume and exact replay', as
   const options = {
     method: 'POST',
     headers: {
-      authorization: `Bearer ${created.participantAccessToken}`,
       'content-type': 'application/json',
       'idempotency-key': 'api-v2-resume-key-00001'
     },
@@ -152,15 +147,13 @@ test('returns no-store on participant-authenticated resume and exact replay', as
   assert.equal(first.headers.get('cache-control'), 'no-store');
   assert.equal(replay.headers.get('cache-control'), 'no-store');
   assert.equal(replayText, firstText);
-  assert.equal(firstText.includes(created.participantAccessToken), false);
 });
 
-test('authenticates resume before parsing malformed, oversized, or unknown request bodies', async () => {
+test('resolves resume by evaluation id before parsing malformed or unknown bodies', async () => {
   const createdResponse = await createEvaluation();
   const created = await createdResponse.json();
   const resumeUrl = `${origin}/api/evaluations/${created.id}/resume`;
   const commonHeaders = {
-    authorization: `Bearer ${'x'.repeat(43)}`,
     'content-type': 'application/json',
     'idempotency-key': 'api-v2-auth-order-key-0001'
   };
@@ -171,11 +164,6 @@ test('authenticates resume before parsing malformed, oversized, or unknown reque
       headers: commonHeaders,
       body: '{'
     });
-    const oversized = await fetch(resumeUrl, {
-      method: 'POST',
-      headers: commonHeaders,
-      body: JSON.stringify({ padding: 'x'.repeat(20 * 1024) })
-    });
     const unknown = await fetch(
       `${origin}/api/evaluations/eval_unknown_auth_order/resume`,
       {
@@ -185,21 +173,20 @@ test('authenticates resume before parsing malformed, oversized, or unknown reque
       }
     );
 
-    assert.equal(malformed.status, 401);
-    assert.equal(oversized.status, 401);
+    assert.equal(malformed.status, 400);
     assert.equal(unknown.status, 404);
   } finally {
-    await pipeline.cancel(created.id, created.participantAccessToken);
+    await pipeline.cancel(created.id);
     while (pipeline.activeRuns.has(created.id)) {
       await new Promise((resolve) => setTimeout(resolve, 1));
     }
   }
 });
 
-test('requires participant Bearer ownership for HTTP V2 cancel and archive', async () => {
+test('allows id-only HTTP V2 cancel and hard delete', async () => {
   const createdResponse = await createEvaluation();
   const created = await createdResponse.json();
-  await pipeline.cancel(created.id, created.participantAccessToken);
+  await pipeline.cancel(created.id);
   while (pipeline.activeRuns.has(created.id)) {
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
@@ -218,30 +205,13 @@ test('requires participant Bearer ownership for HTTP V2 cancel and archive', asy
     })
   );
   const cancelUrl = `${origin}/api/evaluations/${created.id}/cancel`;
-  const archiveUrl = `${origin}/api/evaluations/${created.id}`;
-  const authorized = {
-    authorization: `Bearer ${created.participantAccessToken}`
-  };
-  const wrong = {
-    authorization: `Bearer ${'x'.repeat(43)}`
-  };
+  const deleteUrl = `${origin}/api/evaluations/${created.id}`;
   let baseline = {
     revision: current.revision,
     auditEvents: current.auditEvents.length
   };
 
-  for (const headers of [{}, wrong]) {
-    const response = await fetch(cancelUrl, { method: 'POST', headers });
-    assert.equal(response.status, 401);
-    const unchanged = evaluationStore.get(created.id);
-    assert.equal(unchanged.revision, baseline.revision);
-    assert.equal(unchanged.auditEvents.length, baseline.auditEvents);
-  }
-
-  const cancelled = await fetch(cancelUrl, {
-    method: 'POST',
-    headers: authorized
-  });
+  const cancelled = await fetch(cancelUrl, { method: 'POST' });
   assert.equal(cancelled.status, 200);
   current = evaluationStore.get(created.id);
   assert.equal(current.execution.status, 'cancelled');
@@ -250,55 +220,26 @@ test('requires participant Bearer ownership for HTTP V2 cancel and archive', asy
     revision: current.revision,
     auditEvents: current.auditEvents.length
   };
-  const cancelReplay = await fetch(cancelUrl, {
-    method: 'POST',
-    headers: authorized
-  });
+  const cancelReplay = await fetch(cancelUrl, { method: 'POST' });
   assert.equal(cancelReplay.status, 200);
   assert.equal(evaluationStore.get(created.id).revision, baseline.revision);
 
-  for (const headers of [{}, wrong]) {
-    const response = await fetch(archiveUrl, { method: 'DELETE', headers });
-    assert.equal(response.status, 401);
-    const unchanged = evaluationStore.get(created.id);
-    assert.equal(unchanged.revision, baseline.revision);
-    assert.equal(unchanged.auditEvents.length, baseline.auditEvents);
-  }
-
-  const [firstArchive, secondArchive] = await Promise.all([
-    fetch(archiveUrl, { method: 'DELETE', headers: authorized }),
-    fetch(archiveUrl, { method: 'DELETE', headers: authorized })
-  ]);
-  assert.equal(firstArchive.status, 200);
-  assert.equal(secondArchive.status, 200);
-  const firstBody = await firstArchive.json();
-  const secondBody = await secondArchive.json();
-  assert.equal(firstBody.revision, baseline.revision + 1);
-  assert.equal(secondBody.revision, baseline.revision + 1);
-  assert.equal(evaluationStore.get(created.id).revision, baseline.revision + 1);
-
-  const archiveReplay = await fetch(archiveUrl, {
-    method: 'DELETE',
-    headers: authorized
+  const deleted = await fetch(deleteUrl, { method: 'DELETE' });
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(await deleted.json(), {
+    id: created.id,
+    deleted: true
   });
-  assert.equal(archiveReplay.status, 200);
-  assert.equal(
-    (await archiveReplay.json()).revision,
-    baseline.revision + 1
-  );
-  assert.equal(evaluationStore.get(created.id).revision, baseline.revision + 1);
-  const wrongAfterArchive = await fetch(archiveUrl, {
-    method: 'DELETE',
-    headers: wrong
-  });
-  assert.equal(wrongAfterArchive.status, 401);
-  assert.equal(evaluationStore.get(created.id).revision, baseline.revision + 1);
+  assert.equal(evaluationStore.get(created.id), undefined);
+
+  const deleteReplay = await fetch(deleteUrl, { method: 'DELETE' });
+  assert.equal(deleteReplay.status, 404);
 });
 
-test('rejects HTTP resume after an interrupted V2 evaluation is archived', async () => {
+test('rejects HTTP resume after a hard-deleted V2 evaluation', async () => {
   const createdResponse = await createEvaluation();
   const created = await createdResponse.json();
-  await pipeline.cancel(created.id, created.participantAccessToken);
+  await pipeline.cancel(created.id);
   while (pipeline.activeRuns.has(created.id)) {
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
@@ -316,30 +257,25 @@ test('rejects HTTP resume after an interrupted V2 evaluation is archived', async
       }
     })
   );
-  const archived = await fetch(`${origin}/api/evaluations/${created.id}`, {
-    method: 'DELETE',
-    headers: {
-      authorization: `Bearer ${created.participantAccessToken}`
-    }
+  const deleted = await fetch(`${origin}/api/evaluations/${created.id}`, {
+    method: 'DELETE'
   });
-  assert.equal(archived.status, 200);
-  const revision = evaluationStore.get(created.id).revision;
+  assert.equal(deleted.status, 200);
+  assert.equal(evaluationStore.get(created.id), undefined);
 
   const resumed = await fetch(
     `${origin}/api/evaluations/${created.id}/resume`,
     {
       method: 'POST',
       headers: {
-        authorization: `Bearer ${created.participantAccessToken}`,
         'content-type': 'application/json',
-        'idempotency-key': 'api-v2-archived-resume-0001'
+        'idempotency-key': 'api-v2-deleted-resume-0001'
       },
       body: '{}'
     }
   );
 
-  assert.equal(resumed.status, 409);
-  assert.equal(evaluationStore.get(created.id).revision, revision);
+  assert.equal(resumed.status, 404);
 });
 
 test('returns secret-free transient 422 states for invalid and unsupported Cards', async () => {

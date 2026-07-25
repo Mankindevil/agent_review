@@ -377,7 +377,7 @@ test('preserves the legacy evaluation request body limit while V2 is disabled', 
   assert.equal(response.status, 413);
 });
 
-test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes', async () => {
+test('projects every V2 list, detail, and SSE read and hard-deletes terminal V2 records', async () => {
   const forbidden = [
     'api-auth-secret', 'api-mapping-secret', 'api-hidden-secret',
     'api-seal-secret', 'api-card-secret', 'api-skill-secret', 'api-audit-secret',
@@ -401,6 +401,18 @@ test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes'
   const detailResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
   const detailText = await detailResponse.text();
   assert.equal(detailResponse.status, 200);
+  const detailView = JSON.parse(detailText);
+  assert.ok(detailView.appealTargets);
+  assert.deepEqual(detailView.submission, {
+    submissionVersion: '1.0',
+    frozenAt: '2026-07-24T09:00:00.000Z',
+    agentCard: { sha256: 'a'.repeat(64) },
+    agentExamples: { sha256: 'b'.repeat(64) },
+    config: {
+      rubricVersion: 'rubric-v1',
+      modelConfigVersion: 'model-v1'
+    }
+  });
   for (const secret of forbidden) assert.equal(detailText.includes(secret), false, `detail: ${secret}`);
 
   const createProjection = serializeEvaluationForResponse(v2Fixture);
@@ -408,13 +420,9 @@ test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes'
   assert.equal(createProjection.schemaVersion, 2);
   for (const secret of forbidden) assert.equal(createProjectionText.includes(secret), false, `create: ${secret}`);
 
-  const participantAccessToken = V2_FIXTURE_PARTICIPANT_TOKEN;
-  const createResponse = serializeEvaluationForResponse({
-    evaluation: v2Fixture,
-    participantAccessToken
-  });
+  const createResponse = serializeEvaluationForResponse(v2Fixture);
   const createResponseText = JSON.stringify(createResponse);
-  assert.equal(createResponse.participantAccessToken, participantAccessToken);
+  assert.equal(Object.hasOwn(createResponse, 'participantAccessToken'), false);
   assert.equal(createResponse.schemaVersion, 2);
   assert.equal(Object.hasOwn(createResponse, 'evaluation'), false);
   for (const secret of forbidden) assert.equal(createResponseText.includes(secret), false, `create wrapper: ${secret}`);
@@ -436,6 +444,7 @@ test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes'
   const firstEvent = new TextDecoder().decode((await reader.read()).value);
   assert.match(firstEvent, /^data: /);
   for (const secret of forbidden) assert.equal(firstEvent.includes(secret), false, `SSE: ${secret}`);
+  await reader.cancel();
 
   const skillResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}/builds/legacy-runtime/skill`);
   const skillText = await skillResponse.text();
@@ -443,35 +452,26 @@ test('projects every V2 list, detail, and SSE read and soft-archives V2 deletes'
   assert.equal(skillText.includes('api-skill-secret'), false);
   assert.equal(skillText.includes('api-card-secret'), false);
 
+  const deleteTarget = {
+    ...structuredClone(v2Fixture),
+    id: 'eval_v2_delete_only'
+  };
+  await evaluationStore.set(deleteTarget);
+
   const deleteResponse = await fetch(
-    `${origin}/api/evaluations/${v2Fixture.id}`,
-    {
-      method: 'DELETE',
-      headers: {
-        authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}`
-      }
-    }
+    `${origin}/api/evaluations/${deleteTarget.id}`,
+    { method: 'DELETE' }
   );
   const deleted = await deleteResponse.json();
   assert.equal(deleteResponse.status, 200);
-  assert.equal(deleted.id, v2Fixture.id);
-  assert.equal(deleted.archived, true);
-  assert.equal(deleted.deleted, false);
+  assert.deepEqual(deleted, {
+    id: deleteTarget.id,
+    deleted: true
+  });
+  assert.equal(evaluationStore.get(deleteTarget.id), undefined);
 
-  const nextEvent = await Promise.race([
-    reader.read(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('missing subsequent SSE event')), 500))
-  ]);
-  const nextEventText = new TextDecoder().decode(nextEvent.value);
-  await reader.cancel();
-  assert.match(nextEventText, /^data: /);
-  for (const secret of forbidden) assert.equal(nextEventText.includes(secret), false, `subsequent SSE: ${secret}`);
-
-  const archivedResponse = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
-  const archived = await archivedResponse.json();
-  assert.equal(archivedResponse.status, 200);
-  assert.equal(typeof archived.archivedAt, 'string');
-  assert.equal(archived.revision, 1);
+  const missingAfterDelete = await fetch(`${origin}/api/evaluations/${deleteTarget.id}`);
+  assert.equal(missingAfterDelete.status, 404);
 });
 
 test('enforces server-authenticated judge and admin projections for V2 routes', async () => {
@@ -714,18 +714,11 @@ test('manages authenticated review assignments with assignment-scoped ETags', as
   }
 });
 
-test('returns participant projection for authenticated evaluation detail reads', async () => {
-  const publicDetail = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
-  const publicView = await publicDetail.json();
-  assert.equal(publicDetail.status, 200);
-  assert.equal(Object.hasOwn(publicView, 'submission'), false);
-
-  const participantDetail = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`, {
-    headers: { authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}` }
-  });
-  const participantView = await participantDetail.json();
-  assert.equal(participantDetail.status, 200);
-  assert.deepEqual(participantView.submission, {
+test('returns participant projection for unauthenticated evaluation detail reads', async () => {
+  const detail = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
+  const view = await detail.json();
+  assert.equal(detail.status, 200);
+  assert.deepEqual(view.submission, {
     submissionVersion: '1.0',
     frozenAt: '2026-07-24T09:00:00.000Z',
     agentCard: { sha256: 'a'.repeat(64) },
@@ -735,8 +728,9 @@ test('returns participant projection for authenticated evaluation detail reads',
       modelConfigVersion: 'model-v1'
     }
   });
-  assert.equal(Object.hasOwn(participantView.submission.agentCard, 'value'), false);
-  assert.equal(Object.hasOwn(participantView.absoluteReview, 'modelPanel'), false);
+  assert.equal(Object.hasOwn(view.submission.agentCard, 'value'), false);
+  assert.equal(Object.hasOwn(view.absoluteReview, 'modelPanel'), false);
+  assert.ok(view.appealTargets);
 });
 
 test('fails closed for judge and admin elevation when review governance is disabled', async () => {
@@ -760,13 +754,7 @@ test('fails closed for judge and admin elevation when review governance is disab
 
     const publicDetail = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`);
     assert.equal(publicDetail.status, 200);
-
-    const participantDetail = await fetch(`${origin}/api/evaluations/${v2Fixture.id}`, {
-      headers: { authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}` }
-    });
-    const participantView = await participantDetail.json();
-    assert.equal(participantDetail.status, 200);
-    assert.equal(participantView.submission.submissionVersion, '1.0');
+    assert.ok((await publicDetail.json()).appealTargets);
   } finally {
     if (previous === undefined) delete process.env.REVIEW_GOVERNANCE_ENABLED;
     else process.env.REVIEW_GOVERNANCE_ENABLED = previous;
@@ -792,8 +780,7 @@ test('allows public evidence replay for public-projected manifest items', async 
 test('records evidence-view audit events without returning vault content', async () => {
   const { readdir, readFile } = await import('node:fs/promises');
   const response = await fetch(
-    `${origin}/api/evaluations/${v2Fixture.id}/evidence/${apiEvidenceRecord.evidenceId}`,
-    { headers: { authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}` } }
+    `${origin}/api/evaluations/${v2Fixture.id}/evidence/${apiEvidenceRecord.evidenceId}`
   );
   const body = await response.json();
   assert.equal(response.status, 200);
@@ -1002,8 +989,7 @@ test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
   assert.match(html, /id="v2-example-list"/);
   assert.match(html, /id="add-v2-example"/);
   assert.match(html, /id="agent-authorization"[^>]*type="password"/);
-  assert.match(html, /id="participant-token-receipt"[^>]*class="[^"]*hidden/);
-  assert.match(html, /id="participant-token-output"/);
+  assert.doesNotMatch(html, /participant-token-receipt/);
   assert.doesNotMatch(html, /Skill 使用示例|skillId/);
 
   for (const level of ['example', 'turn', 'part', 'criterion']) {
@@ -1029,7 +1015,6 @@ test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
 
   assert.match(css, /\.a2a-custody-rail/);
   assert.match(css, /\.agent-auth-panel/);
-  assert.match(css, /\.participant-token-receipt/);
   for (const selector of [
     'a2a-example-list',
     'a2a-custody-rail',
@@ -1061,7 +1046,7 @@ test('keeps V2 browser secrets memory-only and renders nested projections safely
   assert.equal(response.status, 200);
   assert.equal(actionsResponse.status, 200);
 
-  assert.match(script, /participantTokens:\s*new Map\(\)/);
+  assert.doesNotMatch(script, /participantTokens:\s*new Map\(\)/);
   assert.match(script, /from '.\/evaluation-actions\.js/);
   assert.match(script, /function statusOf\(item\)/);
   assert.match(script, /function stageOf\(item\)/);
@@ -1071,11 +1056,10 @@ test('keeps V2 browser secrets memory-only and renders nested projections safely
   assert.match(script, /renderV2ResultView\(item, \{ escapeHtml \}\)/);
   assert.match(script, /function renderV2HistoryItem\(item\)/);
   assert.match(script, /schemaVersion:\s*2,\s*agentCard,\s*agentExamples/);
-  assert.match(script, /participantAccessToken/);
-  assert.match(script, /participant-token-output'\)\.textContent/);
   assert.match(script, /agent-authorization'\)\.value = ''/);
-  assert.match(script, /authorization:\s*`Bearer \$\{participantToken\}`/);
   assert.match(script, /'idempotency-key':\s*crypto\.randomUUID\(\)/);
+  assert.doesNotMatch(script, /participantAccessToken/);
+  assert.doesNotMatch(script, /participant-token-output/);
   assert.doesNotMatch(
     `${script}\n${actions}`,
     /localStorage|sessionStorage|indexedDB|document\.cookie|console\./
@@ -1278,14 +1262,13 @@ test('documents diagnostics configuration, credential scopes, side effects, and 
   assert.match(readme, /20 分钟/);
 });
 
-test('documents the opt-in V2 create, one-time participant token, and resume contract', async () => {
+test('documents the opt-in V2 create, evaluation-id control, and resume contract', async () => {
   const readme = await readFile(path.join(process.cwd(), 'README.md'), 'utf8');
   assert.match(readme, /A2A_BLACK_BOX_V1_ENABLED=true/u);
   assert.match(readme, /POST \/api\/evaluations\b/u);
-  assert.match(readme, /participantAccessToken/u);
+  assert.match(readme, /evaluation ID is the participant handle/u);
   assert.match(readme, /POST \/api\/evaluations\/:id\/resume/u);
   assert.match(readme, /Idempotency-Key/u);
-  assert.match(readme, /only once|one-time/iu);
   assert.match(readme, /non-idempotent/iu);
   assert.match(readme, /lost response|response is lost/iu);
   assert.match(readme, /public Agent[\s\S]*\{\}/iu);

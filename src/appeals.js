@@ -198,9 +198,8 @@ function appealById(evaluation, appealId) {
   return appeal;
 }
 
-function requireParticipant(evaluation, participant) {
-  if (participant?.role !== 'participant' ||
-      participant.principalId !== (evaluation.participantAccess?.ownerId || 'participant')) {
+function requireParticipant(_evaluation, participant) {
+  if (participant?.role !== 'participant') {
     throw Object.assign(new Error('participant owner access is required'), { statusCode: 403 });
   }
 }

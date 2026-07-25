@@ -9,10 +9,6 @@ import {
 import { canonicalJson } from './evidence.js';
 import { createEvaluationRecord } from './evaluation-model.js';
 import {
-  createParticipantAccess,
-  verifyParticipantAccess
-} from './participant-access.js';
-import {
   assertFrozenSubmissionIntegrity,
   freezeSubmission
 } from './submission.js';
@@ -51,8 +47,6 @@ export class EvaluationPipeline {
         ? Buffer.from(options.resumeMacKey)
         : null,
       runBlackBox: options.runBlackBox || runBlackBoxFoundation,
-      createParticipantAccess:
-        options.createParticipantAccess || createParticipantAccess,
       now: options.now || now,
       createId: options.createId || id,
       policy: options.policy || PHASE1_EXECUTION_POLICY
@@ -132,7 +126,6 @@ export class EvaluationPipeline {
       throw httpError(400, error.message);
     }
 
-    const participant = state.createParticipantAccess();
     const evaluationId = state.createId('eval');
     const runIndex = compileBlackBoxRunPlan(submission, {
       policy: state.policy,
@@ -141,10 +134,6 @@ export class EvaluationPipeline {
     const evaluation = createEvaluationRecord(submission, {
       id: evaluationId,
       createdAt,
-      participantAccess: {
-        tokenHash: participant.hash,
-        createdAt
-      },
       authorizationRequired: input.agentAuthorization !== undefined,
       endpointHash: sha256(submission.selectedInterface.url),
       agentVersion: submission.agentCard.value.version ?? null,
@@ -163,13 +152,10 @@ export class EvaluationPipeline {
       state.credentialVault.put(evaluationId, input.agentAuthorization);
     }
     this.queueV2(committed);
-    return {
-      evaluation: committed,
-      participantAccessToken: participant.token
-    };
+    return committed;
   }
 
-  authenticateResume(evaluationId, participantAccessToken) {
+  authenticateResume(evaluationId) {
     const state = privateState(this);
     if (!state.blackBoxEnabled) throw v2DisabledError();
     const current = this.store.get(evaluationId);
@@ -177,16 +163,12 @@ export class EvaluationPipeline {
     if (current.schemaVersion !== 2) {
       throw httpError(409, 'Resume is available only for V2 evaluations');
     }
-    assertV2ParticipantOwner(current, participantAccessToken);
     return current;
   }
 
   async resume(evaluationId, input = {}) {
     const state = privateState(this);
-    let current = this.authenticateResume(
-      evaluationId,
-      input.participantAccessToken
-    );
+    let current = this.authenticateResume(evaluationId);
     if (!current) return null;
     const body = input.body === undefined ? {} : input.body;
     assertClosedObject(body, V2_RESUME_FIELDS, 'V2 resume body');
@@ -345,49 +327,7 @@ export class EvaluationPipeline {
     }));
   }
 
-  async archive(evaluationId, participantAccessToken) {
-    const state = privateState(this);
-    let current = this.store.get(evaluationId);
-    if (!current) return null;
-    if (current.schemaVersion !== 2) {
-      throw httpError(409, 'Archive is available only for V2 evaluations');
-    }
-    assertV2ParticipantOwner(current, participantAccessToken);
-    const archivedAt = state.now();
-    while (true) {
-      assertV2ParticipantOwner(current, participantAccessToken);
-      if (current.archivedAt !== undefined) return current;
-      if (!isArchivableV2Status(current.execution?.status)) {
-        throw httpError(409, 'Running V2 evaluations cannot be archived');
-      }
-      try {
-        const committed = await this.store.mutate(
-          evaluationId,
-          current.revision,
-          (record) => {
-            assertV2ParticipantOwner(record, participantAccessToken);
-            if (!isArchivableV2Status(record.execution?.status)) {
-              throw httpError(409, 'Running V2 evaluations cannot be archived');
-            }
-            return {
-              ...record,
-              archivedAt
-            };
-          }
-        );
-        this.events.emit(evaluationId, committed);
-        return committed;
-      } catch (error) {
-        if (error.statusCode !== 409 || error.message !== 'revision conflict') {
-          throw error;
-        }
-        current = this.store.get(evaluationId);
-        if (!current) return null;
-      }
-    }
-  }
-
-  async cancel(evaluationId, participantAccessToken) {
+  async cancel(evaluationId) {
     const item = this.store.get(evaluationId);
     if (!item) return null;
     if (item.schemaVersion === 2) {
@@ -395,14 +335,12 @@ export class EvaluationPipeline {
       if (!state.blackBoxEnabled) {
         throw httpError(409, 'V2 cancellation service is not enabled');
       }
-      assertV2ParticipantOwner(item, participantAccessToken);
       if (item.archivedAt !== undefined) return item;
       const cancelledAt = state.now();
       const auditId = state.createId('audit');
       let current = item;
       let committed;
       while (!committed) {
-        assertV2ParticipantOwner(current, participantAccessToken);
         if (current.archivedAt !== undefined) return current;
         if (['completed', 'cancelled'].includes(current.execution.status)) {
           return current;
@@ -412,7 +350,6 @@ export class EvaluationPipeline {
             evaluationId,
             current.revision,
             (record) => {
-              assertV2ParticipantOwner(record, participantAccessToken);
               return {
                 ...record,
                 execution: {
@@ -920,19 +857,6 @@ function assertNotArchived(record) {
   if (record.archivedAt !== undefined) {
     throw httpError(409, 'Archived V2 evaluations cannot be resumed');
   }
-}
-
-function assertV2ParticipantOwner(record, participantAccessToken) {
-  if (!verifyParticipantAccess(
-    participantAccessToken,
-    record.participantAccess?.tokenHash
-  )) {
-    throw httpError(401, 'Participant authorization failed');
-  }
-}
-
-function isArchivableV2Status(status) {
-  return ['completed', 'failed', 'cancelled', 'interrupted'].includes(status);
 }
 
 function appendAuditEvent(events, event) {

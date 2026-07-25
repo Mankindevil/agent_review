@@ -1,45 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  canArchiveEvaluation,
+  canDeleteEvaluation,
   canStopEvaluation,
-  participantActionOptions,
-  resolveParticipantToken,
+  evaluationActionOptions,
   restoreV2StartButton
 } from '../public/evaluation-actions.js';
 
-test('resolves participant ownership from memory before a manual token', () => {
-  const tokens = new Map([['eval_memory', 'memory-token']]);
-
-  assert.equal(
-    resolveParticipantToken('eval_memory', tokens, ' manual-token '),
-    'memory-token'
-  );
-  assert.equal(tokens.get('eval_memory'), 'memory-token');
-});
-
-test('keeps a manually supplied participant token only in the provided memory map', () => {
-  const tokens = new Map();
-
-  assert.equal(
-    resolveParticipantToken('eval_manual', tokens, ' manual-token '),
-    'manual-token'
-  );
-  assert.equal(tokens.get('eval_manual'), 'manual-token');
-  assert.throws(
-    () => resolveParticipantToken('eval_missing', tokens, '   '),
-    /participant access token/i
-  );
-});
-
-test('builds an authenticated participant action without persisting the token', () => {
-  assert.deepEqual(
-    participantActionOptions('DELETE', 'participant-token'),
-    {
-      method: 'DELETE',
-      headers: { authorization: 'Bearer participant-token' }
-    }
-  );
+test('builds a method-only action request', () => {
+  assert.deepEqual(evaluationActionOptions('DELETE'), { method: 'DELETE' });
+  assert.deepEqual(evaluationActionOptions('POST'), { method: 'POST' });
 });
 
 test('allows stopping only active unarchived evaluations', () => {
@@ -58,27 +28,22 @@ test('allows stopping only active unarchived evaluations', () => {
   }), false);
 });
 
-test('allows V2 archive only for unarchived archiveable terminal states', () => {
+test('allows delete only for terminal states', () => {
   for (const status of ['completed', 'failed', 'cancelled', 'interrupted']) {
-    assert.equal(canArchiveEvaluation({
+    assert.equal(canDeleteEvaluation({
       schemaVersion: 2,
       execution: { status }
     }), true);
   }
-  assert.equal(canArchiveEvaluation({
+  assert.equal(canDeleteEvaluation({
     schemaVersion: 2,
     execution: { status: 'running' }
   }), false);
-  assert.equal(canArchiveEvaluation({
-    schemaVersion: 2,
-    archivedAt: '2026-07-25T00:00:00.000Z',
-    execution: { status: 'completed' }
-  }), false);
-  assert.equal(canArchiveEvaluation({ status: 'completed' }), false);
+  assert.equal(canDeleteEvaluation({ status: 'completed' }), true);
 });
 
-test('restores the V2 create control after the one-time token receipt', () => {
-  const label = { textContent: '评测已创建 · 先保存 token' };
+test('restores the V2 create control after creation', () => {
+  const label = { textContent: '正在建立证据链' };
   const button = {
     disabled: true,
     querySelector(selector) {

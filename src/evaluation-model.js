@@ -15,7 +15,9 @@ export function createEvaluationRecord(snapshot, options) {
     execution: { status: 'queued', stage: 'qualification', progress: 0 },
     governance: { phase: 'waiting_model' },
     submission: snapshot,
-    participantAccess: options.participantAccess,
+    ...(options.participantAccess !== undefined
+      ? { participantAccess: options.participantAccess }
+      : {}),
     connection: { authorizationRequired: options.authorizationRequired },
     resumeReceipts: [],
     runtimeState: {
