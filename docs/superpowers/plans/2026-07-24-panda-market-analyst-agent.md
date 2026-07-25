@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status:** Implemented on `codex/panda-market-agent` and merged into `codex/finance-roast`. All plan steps below are checked to match the delivered tree (`agents/market-analyst/`, focused tests, deploy units, and `docs/MARKET_ANALYST_AGENT.md`). Credential-gated live Panda/SMTP smoke remains conditional per the runbook verification record.
+
 **Goal:** Build a production-capable, email-delivering, A2A 1.0 market analyst agent whose only financial data source is `panda_data`.
 
 **Architecture:** A Node.js A2A/orchestration layer spawns one fixed-operation Python worker per analytical run. Python authenticates to Panda once, performs bounded DataFrame retrieval and deterministic ranking, and returns a compact Evidence Pack plus trace events; Node persists tasks, renders and validates artifacts, optionally narrates from evidence, and delivers idempotent SMTP email.
@@ -43,15 +45,15 @@ agents/market-analyst/
 ├── a2a-server.js                HTTP+JSON/SSE request handling
 ├── task-service.js              A2A task lifecycle
 ├── public/
-│   ├── run-detail.html
-│   ├── run-detail.js
-│   └── run-detail.css
+�?  ├── run-detail.html
+�?  ├── run-detail.js
+�?  └── run-detail.css
 ├── skills/
-│   ├── daily-market-report/SKILL.md
-│   ├── hot-topic-analysis/SKILL.md
-│   ├── sell-pressure-scan/SKILL.md
-│   ├── potential-watchlist/SKILL.md
-│   └── inspect-run-trace/SKILL.md
+�?  ├── daily-market-report/SKILL.md
+�?  ├── hot-topic-analysis/SKILL.md
+�?  ├── sell-pressure-scan/SKILL.md
+�?  ├── potential-watchlist/SKILL.md
+�?  └── inspect-run-trace/SKILL.md
 └── tools/
     └── panda_market_worker.py
 scripts/
@@ -89,7 +91,7 @@ deploy/
 - Produces: `validateOperation(value) -> { operation, date?, sections?, topN }`
 - Produces: `validateEvidencePack(value) -> value`
 
-- [ ] **Step 1: Add failing configuration and schema tests**
+- [x] **Step 1: Add failing configuration and schema tests**
 
 ```js
 // test/market-analyst-config.test.js
@@ -128,13 +130,13 @@ test('accepts declared operations and rejects arbitrary Panda methods', () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests and verify the expected import failure**
+- [x] **Step 2: Run the tests and verify the expected import failure**
 
 Run: `node --test test/market-analyst-config.test.js`
 
 Expected: FAIL with `ERR_MODULE_NOT_FOUND` for `agents/market-analyst/config.js`.
 
-- [ ] **Step 3: Implement exact configuration and operation validation**
+- [x] **Step 3: Implement exact configuration and operation validation**
 
 ```js
 // agents/market-analyst/config.js
@@ -208,11 +210,11 @@ const OPERATIONS = new Set([
 ]);
 
 export function validateOperation(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('operation 请求必须是对象');
-  if (!OPERATIONS.has(value.operation)) throw new RangeError(`不支持的 operation：${value.operation}`);
-  if (value.date !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(value.date)) throw new TypeError('date 必须是 YYYY-MM-DD');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('operation 请求必须是对�?);
+  if (!OPERATIONS.has(value.operation)) throw new RangeError(`不支持的 operation�?{value.operation}`);
+  if (value.date !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(value.date)) throw new TypeError('date 必须�?YYYY-MM-DD');
   const topN = value.topN === undefined ? 10 : Number(value.topN);
-  if (!Number.isSafeInteger(topN) || topN < 1 || topN > 50) throw new RangeError('topN 必须是 1–50 的整数');
+  if (!Number.isSafeInteger(topN) || topN < 1 || topN > 50) throw new RangeError('topN 必须�?1�?0 的整�?);
   const sections = value.sections === undefined ? [] : value.sections;
   if (!Array.isArray(sections) || sections.some((item) => typeof item !== 'string')) throw new TypeError('sections 必须是字符串数组');
   return { operation: value.operation, ...(value.date ? { date: value.date } : {}), sections, topN };
@@ -220,14 +222,14 @@ export function validateOperation(value) {
 
 export function validateEvidencePack(value) {
   const required = ['schemaVersion', 'runId', 'reportDate', 'status', 'markets', 'conclusions', 'leaderboards', 'sources'];
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Evidence Pack 必须是对象');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Evidence Pack 必须是对�?);
   for (const key of required) if (!(key in value)) throw new TypeError(`Evidence Pack 缺少 ${key}`);
-  if (!Array.isArray(value.conclusions) || !Array.isArray(value.sources)) throw new TypeError('Evidence Pack conclusions/sources 必须是数组');
+  if (!Array.isArray(value.conclusions) || !Array.isArray(value.sources)) throw new TypeError('Evidence Pack conclusions/sources 必须是数�?);
   return value;
 }
 ```
 
-- [ ] **Step 4: Add Nodemailer and cross-platform Python test runner**
+- [x] **Step 4: Add Nodemailer and cross-platform Python test runner**
 
 Run: `npm install nodemailer@9.0.3`
 
@@ -260,7 +262,7 @@ Update `package.json` scripts to:
 
 Change `scripts/check-syntax.js` to recursively walk `agents/market-analyst` and add `scripts/run-market-worker-tests.js` to the checked roots.
 
-- [ ] **Step 5: Run focused and repository checks**
+- [x] **Step 5: Run focused and repository checks**
 
 Run: `node --test test/market-analyst-config.test.js`
 
@@ -270,7 +272,7 @@ Run: `npm run check`
 
 Expected: `Syntax OK` and exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add package.json package-lock.json scripts/check-syntax.js scripts/run-market-worker-tests.js agents/market-analyst/config.js agents/market-analyst/schemas.js test/market-analyst-config.test.js
@@ -293,7 +295,7 @@ git commit -m "feat: scaffold market analyst configuration"
 - Produces: `compute_sell_pressure(rows)`
 - Produces: `compute_potential_watchlist(rows)`
 
-- [ ] **Step 1: Write failing tests for normalization, coverage, scores, and vetoes**
+- [x] **Step 1: Write failing tests for normalization, coverage, scores, and vetoes**
 
 ```python
 # test/market-worker/test_market_worker.py
@@ -355,13 +357,13 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run Python tests and verify missing-file failure**
+- [x] **Step 2: Run Python tests and verify missing-file failure**
 
 Run: `node scripts/run-market-worker-tests.js`
 
 Expected: FAIL because `panda_market_worker.py` does not exist.
 
-- [ ] **Step 3: Implement pure deterministic scoring functions**
+- [x] **Step 3: Implement pure deterministic scoring functions**
 
 Implement `panda_market_worker.py` with no Panda import at module import time:
 
@@ -457,17 +459,17 @@ def compute_potential_watchlist(rows):
     return output
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `npm run test:market-worker`
 
 Expected: 4 tests pass.
 
-- [ ] **Step 5: Add tests for ties, NaN, risk penalty floor, and missing LHB redistribution**
+- [x] **Step 5: Add tests for ties, NaN, risk penalty floor, and missing LHB redistribution**
 
 Add one focused test per behavior and run after each addition. Expected final result: 8 Python tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add agents/market-analyst/tools/panda_market_worker.py test/market-worker/test_market_worker.py
@@ -490,7 +492,7 @@ git commit -m "feat: add deterministic market ranking engine"
 - Process stdout: one JSON Evidence Pack
 - Process stderr: `TRACE <json>` lines only
 
-- [ ] **Step 1: Add failing fake-Panda contract tests**
+- [x] **Step 1: Add failing fake-Panda contract tests**
 
 Add a `FakePanda` with `get_trade_cal`, `get_last_trade_date`, `get_trade_list`, `get_stock_daily`, and optional enrichment methods. Assert:
 
@@ -512,7 +514,7 @@ def test_build_evidence_pack_uses_completed_trade_date_and_traces_every_call(sel
 
 def test_future_report_date_is_rejected(self):
     collector = worker.PandaCollector(FakePanda(), lambda _: None, None, 0)
-    with self.assertRaisesRegex(ValueError, "未完成"):
+    with self.assertRaisesRegex(ValueError, "未完�?):
         worker.build_evidence_pack(
             {"operation": "daily-market-report", "date": "2026-07-25", "topN": 10,
              "minLiquidityCny": 20000000, "cacheDir": None},
@@ -521,13 +523,13 @@ def test_future_report_date_is_rejected(self):
         )
 ```
 
-- [ ] **Step 2: Run and verify `PandaCollector` failure**
+- [x] **Step 2: Run and verify `PandaCollector` failure**
 
 Run: `npm run test:market-worker`
 
 Expected: FAIL with `AttributeError: module ... has no attribute 'PandaCollector'`.
 
-- [ ] **Step 3: Implement fixed query plans and trace records**
+- [x] **Step 3: Implement fixed query plans and trace records**
 
 Implement:
 
@@ -577,7 +579,7 @@ Build the report in the approved two stages:
 
 Implement Parquet cache keys as SHA-256 of SDK version, method, sorted params, and report date. A cache entry must include metadata with creation time, data-as-of date, fields, row count, and content hash. Expired entries are ignored.
 
-- [ ] **Step 4: Implement the stdin/stdout process boundary**
+- [x] **Step 4: Implement the stdin/stdout process boundary**
 
 ```python
 def emit_trace(value):
@@ -607,7 +609,7 @@ if __name__ == "__main__":
 
 Ensure `import panda_data` occurs only in `main()` so pure unit tests need no SDK.
 
-- [ ] **Step 5: Add point-in-time and incomplete-universe regression tests**
+- [x] **Step 5: Add point-in-time and incomplete-universe regression tests**
 
 Add tests proving:
 
@@ -622,7 +624,7 @@ Run: `npm run test:market-worker`
 
 Expected: all Python tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add agents/market-analyst/tools/panda_market_worker.py test/market-worker/test_market_worker.py test/fixtures/market-worker/snapshot.json
@@ -646,7 +648,7 @@ git commit -m "feat: build Panda market evidence worker"
 - Produces: `acquireRunLock({ stateDir, reportDate, staleMs }) -> { release() }`
 - Produces: `runMarketWorker({ request, config, signal, spawnImpl, onTrace }) -> EvidencePack`
 
-- [ ] **Step 1: Write failing state, redaction, lock, and runner tests**
+- [x] **Step 1: Write failing state, redaction, lock, and runner tests**
 
 Test that:
 
@@ -659,13 +661,13 @@ Test that:
 
 Use a fake child process built with `EventEmitter` and `PassThrough` so tests perform no Python calls.
 
-- [ ] **Step 2: Run and observe module import failures**
+- [x] **Step 2: Run and observe module import failures**
 
 Run: `node --test test/market-analyst-state.test.js`
 
 Expected: FAIL with `ERR_MODULE_NOT_FOUND`.
 
-- [ ] **Step 3: Implement trace and state contracts**
+- [x] **Step 3: Implement trace and state contracts**
 
 Use these task states exactly:
 
@@ -691,7 +693,7 @@ trace.toJSON()
 
 `sanitizeTraceValue()` recursively redacts keys matching `/password|token|secret|authorization|username/i` and masks email strings.
 
-- [ ] **Step 4: Implement bounded worker process handling**
+- [x] **Step 4: Implement bounded worker process handling**
 
 Spawn:
 
@@ -711,13 +713,13 @@ spawnImpl(config.python, [workerFile], {
 
 Send only the validated fixed operation, report parameters, cache path, and cache retention. Parse each stderr line beginning `TRACE ` as JSON. Reject nonzero exit, malformed stdout JSON, output above 20 MB, timeout, or abort. Call `validateEvidencePack()` before resolving.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `node --test test/market-analyst-state.test.js`
 
 Expected: all state/trace/lock/runner tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add agents/market-analyst/run-trace.js agents/market-analyst/task-store.js agents/market-analyst/run-lock.js agents/market-analyst/worker-runner.js test/market-analyst-state.test.js
@@ -743,7 +745,7 @@ git commit -m "feat: add durable market run infrastructure"
 - Produces: `generateNarrative(evidence, config, { fetchImpl, signal }) -> { sections, usage }`
 - Produces: `renderRunDetail({ run, evidence, trace }) -> escaped HTML`
 
-- [ ] **Step 1: Write failing report and narrative validation tests**
+- [x] **Step 1: Write failing report and narrative validation tests**
 
 Assert:
 
@@ -756,13 +758,13 @@ Assert:
 - pricing produces cost only with a configured pricing version;
 - HTML escapes `<script>` from Panda/model text.
 
-- [ ] **Step 2: Run and observe import failures**
+- [x] **Step 2: Run and observe import failures**
 
 Run: `node --test test/market-analyst-report.test.js`
 
 Expected: FAIL with `ERR_MODULE_NOT_FOUND`.
 
-- [ ] **Step 3: Implement deterministic rendering**
+- [x] **Step 3: Implement deterministic rendering**
 
 Render tables from evidence objects, never by parsing model prose. Use:
 
@@ -776,7 +778,7 @@ export function escapeHtml(value) {
 
 The Markdown/HTML sections must match Section 10 of the design spec. Each conclusion anchor uses `conclusion_id`; each source note prints method, data date, window, coverage, and trace sequence.
 
-- [ ] **Step 4: Implement constrained narrative and usage accounting**
+- [x] **Step 4: Implement constrained narrative and usage accounting**
 
 Send an OpenAI-compatible request only when enabled/configured. Require JSON:
 
@@ -806,17 +808,17 @@ Normalize model usage to:
 
 Unknown usage/cost fields are `null` with `usageUnavailableReason` or `pricingUnavailableReason`.
 
-- [ ] **Step 5: Implement the protected detail page renderer**
+- [x] **Step 5: Implement the protected detail page renderer**
 
 The browser page must show run summary, skill/tool calls, Panda calls, model usage, email attempts, artifacts, and conclusion lineage. It fetches `/runs/{id}/report`, `/evidence`, and `/trace` with the same Bearer token supplied by the operator; it never stores the token in local storage.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run: `node --test test/market-analyst-report.test.js`
 
 Expected: all report/narrative/detail tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add agents/market-analyst/report-renderer.js agents/market-analyst/report-validator.js agents/market-analyst/narrative-adapter.js agents/market-analyst/public test/market-analyst-report.test.js
@@ -839,7 +841,7 @@ git commit -m "feat: render traceable market reports"
 - Produces: `createSmtpMailer(config, { createTransport, wait })`
 - Produces: `deliveryKey(reportDate, recipients, reportVersion)`
 
-- [ ] **Step 1: Write failing SMTP and orchestration tests**
+- [x] **Step 1: Write failing SMTP and orchestration tests**
 
 Test:
 
@@ -855,13 +857,13 @@ Test:
 
 Inject fake worker, store, renderer, narrator, mailer, clock, and wait; never use real network or sleep.
 
-- [ ] **Step 2: Run and observe import failures**
+- [x] **Step 2: Run and observe import failures**
 
 Run: `node --test test/market-analyst-email.test.js test/market-analyst-integration.test.js`
 
 Expected: FAIL with missing modules.
 
-- [ ] **Step 3: Implement SMTP adapter**
+- [x] **Step 3: Implement SMTP adapter**
 
 Create a Nodemailer transport with:
 
@@ -881,7 +883,7 @@ Create a Nodemailer transport with:
 
 Use delays 500 ms and 1500 ms plus injected jitter. Persist attempt number, start/end/duration, sanitized SMTP response, accepted/rejected counts, and message ID.
 
-- [ ] **Step 4: Implement the shared orchestrator**
+- [x] **Step 4: Implement the shared orchestrator**
 
 Run order:
 
@@ -899,7 +901,7 @@ Run order:
 
 Map core failures to failed tasks, optional failures to degraded evidence, abort to canceled task, and invalid inputs to rejected task.
 
-- [ ] **Step 5: Implement one-shot CLI**
+- [x] **Step 5: Implement one-shot CLI**
 
 Support:
 
@@ -912,13 +914,13 @@ node agents/market-analyst/cli.js --no-email
 
 Default operation is `daily-market-report`, trigger is `scheduled`, and email is enabled. Print one sanitized JSON summary and exit 0 for complete/degraded/skipped, 1 for failure, and 130 for cancellation.
 
-- [ ] **Step 6: Run focused tests**
+- [x] **Step 6: Run focused tests**
 
 Run: `node --test test/market-analyst-email.test.js test/market-analyst-integration.test.js`
 
 Expected: all tests pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add agents/market-analyst/orchestrator.js agents/market-analyst/smtp-mailer.js agents/market-analyst/cli.js test/market-analyst-email.test.js test/market-analyst-integration.test.js
@@ -941,7 +943,7 @@ git commit -m "feat: deliver scheduled market report email"
 - Produces: `MarketTaskService`
 - Produces: `createMarketAgentServer(options)`
 
-- [ ] **Step 1: Write failing A2A conformance tests**
+- [x] **Step 1: Write failing A2A conformance tests**
 
 Start the server on an ephemeral loopback port with a fake orchestrator. Verify:
 
@@ -956,20 +958,20 @@ Start the server on an ephemeral loopback port with a fake orchestrator. Verify:
 - malformed input and unsupported operation use structured A2A error shapes;
 - completed Task contains Markdown text, Evidence Pack data, and Run Trace data artifacts.
 
-- [ ] **Step 2: Run and observe import failure**
+- [x] **Step 2: Run and observe import failure**
 
 Run: `node --test test/market-analyst-a2a.test.js`
 
 Expected: FAIL with missing `a2a-server.js`.
 
-- [ ] **Step 3: Implement Agent Card**
+- [x] **Step 3: Implement Agent Card**
 
 Use:
 
 ```js
 {
   name: 'Panda Market Analyst',
-  description: '基于 panda_data 的可追溯市场收盘分析 Agent，生成热点、卖压与潜力观察榜。',
+  description: '基于 panda_data 的可追溯市场收盘分析 Agent，生成热点、卖压与潜力观察榜�?,
   version: '1.0.0',
   supportedInterfaces: [{
     url: `${origin}/a2a/v1`,
@@ -983,35 +985,35 @@ Use:
     {
       id: 'daily-market-report',
       name: '每日市场报告',
-      description: '生成基于 panda_data 的完整收盘报告、Evidence Pack 和 Run Trace。',
-      tags: ['panda_data', 'A股', '收盘复盘', '市场报告'],
-      examples: ['生成 2026-07-23 的每日市场报告']
+      description: '生成基于 panda_data 的完整收盘报告、Evidence Pack �?Run Trace�?,
+      tags: ['panda_data', 'A�?, '收盘复盘', '市场报告'],
+      examples: ['生成 2026-07-23 的每日市场报�?]
     },
     {
       id: 'hot-topic-analysis',
       name: '热点主题分析',
-      description: '根据涨幅、广度、成交、持续性和资金证据排名行业与概念热点。',
+      description: '根据涨幅、广度、成交、持续性和资金证据排名行业与概念热点�?,
       tags: ['panda_data', '行业', '概念', '市场热点'],
-      examples: ['分析最近一个交易日最热的行业和概念']
+      examples: ['分析最近一个交易日最热的行业和概�?]
     },
     {
       id: 'sell-pressure-scan',
-      name: '卖压观察榜',
-      description: '识别多项市场行为证据汇聚的卖压观察标的，不推断未知卖方身份。',
-      tags: ['panda_data', '卖压', '风险', '观察榜'],
-      examples: ['列出卖压最明显的十只 A 股']
+      name: '卖压观察�?,
+      description: '识别多项市场行为证据汇聚的卖压观察标的，不推断未知卖方身份�?,
+      tags: ['panda_data', '卖压', '风险', '观察�?],
+      examples: ['列出卖压最明显的十�?A �?]
     },
     {
       id: 'potential-watchlist',
-      name: '潜力研究观察榜',
-      description: '综合趋势、主题、质量、估值、资金、流动性和风险生成研究候选。',
-      tags: ['panda_data', '潜力', '研究候选', '观察榜'],
+      name: '潜力研究观察�?,
+      description: '综合趋势、主题、质量、估值、资金、流动性和风险生成研究候选�?,
+      tags: ['panda_data', '潜力', '研究候�?, '观察�?],
       examples: ['生成十只潜力研究候选并给出证据']
     },
     {
       id: 'inspect-run-trace',
       name: '运行溯源查询',
-      description: '读取指定运行的工具、接口、耗时、Token、错误和结论证据链。',
+      description: '读取指定运行的工具、接口、耗时、Token、错误和结论证据链�?,
       tags: ['运行追踪', 'Token', '接口耗时', '结论溯源'],
       examples: ['查看运行 run-20260723 的全部调用和结论来源']
     }
@@ -1021,7 +1023,7 @@ Use:
 
 When protected, add the A2A 1.0 Bearer security scheme and requirement. Do not put the token in the Card.
 
-- [ ] **Step 4: Implement HTTP+JSON operation routing**
+- [x] **Step 4: Implement HTTP+JSON operation routing**
 
 Routes under the Card base:
 
@@ -1036,11 +1038,11 @@ Require `Content-Type: application/a2a+json` for request bodies and return it fo
 
 Natural-language routing is a fixed keyword map to the five declared operations. Structured data parts pass through `validateOperation()`. A2A calls always set `deliverEmail=false`.
 
-- [ ] **Step 5: Implement task events and artifacts**
+- [x] **Step 5: Implement task events and artifacts**
 
 Use EventEmitter per active task. SSE `data:` objects contain exactly one of `task`, `statusUpdate`, or `artifactUpdate`. Close after terminal/interrupted state. Store `createdAt`, `lastModified`, `contextId`, history, and artifacts. Escape CR/LF in SSE serialization by JSON-encoding the event.
 
-- [ ] **Step 6: Implement protected detail and health routes**
+- [x] **Step 6: Implement protected detail and health routes**
 
 Add:
 
@@ -1052,7 +1054,7 @@ Add:
 
 Only `/health` and the well-known Card are public. All run routes use the same Bearer authorization and return sanitized data.
 
-- [ ] **Step 7: Run tests**
+- [x] **Step 7: Run tests**
 
 Run: `node --test test/market-analyst-a2a.test.js`
 
@@ -1062,7 +1064,7 @@ Run: `node --test test/a2a.test.js test/example-agents.test.js`
 
 Expected: existing protocol/example tests remain green.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add agents/market-analyst/agent-card.js agents/market-analyst/task-service.js agents/market-analyst/a2a-server.js agents/market-analyst/server.js test/market-analyst-a2a.test.js
@@ -1089,7 +1091,7 @@ git commit -m "feat: expose market analyst over A2A 1.0"
 - Consumes: exact Skill IDs from `agent-card.js`
 - Produces: complete, independently readable Skill instructions and operator guide
 
-- [ ] **Step 1: Add failing metadata synchronization test**
+- [x] **Step 1: Add failing metadata synchronization test**
 
 Read each `SKILL.md` front matter and assert its `name` matches an Agent Card Skill ID, descriptions are non-empty, no Skill declares external data or trading, and all five Agent Card Skills have a file.
 
@@ -1097,7 +1099,7 @@ Run: `node --test test/market-analyst-a2a.test.js`
 
 Expected: FAIL because Skill files do not exist.
 
-- [ ] **Step 2: Write the five Skills**
+- [x] **Step 2: Write the five Skills**
 
 Each `SKILL.md` must contain:
 
@@ -1113,7 +1115,7 @@ Each `SKILL.md` must contain:
 
 The analytical Skills may invoke only `panda-market-worker`, `report-renderer`, `report-validator`, and optional `narrative-adapter`. `inspect-run-trace` may invoke only `run-store`.
 
-- [ ] **Step 3: Write operator and attribution docs**
+- [x] **Step 3: Write operator and attribution docs**
 
 `docs/MARKET_ANALYST_AGENT.md` includes:
 
@@ -1129,13 +1131,13 @@ The analytical Skills may invoke only `panda-market-worker`, `report-renderer`, 
 
 `docs/THIRD_PARTY_NOTICES.md` links the six QuantSkills references, records GPL-3.0 status, and states that no upstream source was copied.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `node --test test/market-analyst-a2a.test.js`
 
 Expected: metadata synchronization tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add agents/market-analyst/skills docs/MARKET_ANALYST_AGENT.md docs/THIRD_PARTY_NOTICES.md test/market-analyst-a2a.test.js
@@ -1161,7 +1163,7 @@ git commit -m "docs: add market analyst skills and runbook"
 - Produces: `npm run market-report`
 - Produces: `npm run market:smoke`
 
-- [ ] **Step 1: Add deployment and environment validation tests**
+- [x] **Step 1: Add deployment and environment validation tests**
 
 Extend `test/deploy-config.test.js` to assert:
 
@@ -1174,13 +1176,13 @@ Extend `test/deploy-config.test.js` to assert:
 
 Extend `test/env.test.js` to assert `.env.example` contains every Section 18 variable with an empty or safe default.
 
-- [ ] **Step 2: Run tests and observe missing deployment files**
+- [x] **Step 2: Run tests and observe missing deployment files**
 
 Run: `node --test test/deploy-config.test.js test/env.test.js`
 
 Expected: FAIL on missing market agent units/variables.
 
-- [ ] **Step 3: Implement deployment units**
+- [x] **Step 3: Implement deployment units**
 
 `market-analyst.service` is a hardened long-running A2A service with `ExecStart=/usr/bin/npm run market-agent`, `Restart=on-failure`, `ReadWritePaths=/var/lib/agent-review`, and the same hardening family as `agent-review.service`.
 
@@ -1207,7 +1209,7 @@ Unit=market-report.service
 
 The CLI performs the authoritative exchange-holiday check.
 
-- [ ] **Step 4: Implement credential-gated live smoke**
+- [x] **Step 4: Implement credential-gated live smoke**
 
 `scripts/market-agent-live-smoke.js` must:
 
@@ -1222,7 +1224,7 @@ The CLI performs the authoritative exchange-holiday check.
 
 Add `"market:smoke": "node scripts/market-agent-live-smoke.js"` to `package.json`.
 
-- [ ] **Step 5: Update README, production operations, and `.env.example`**
+- [x] **Step 5: Update README, production operations, and `.env.example`**
 
 Document exact commands:
 
@@ -1237,13 +1239,13 @@ npm run market:smoke
 
 Include credential rotation, SMTP test, timer inspection, artifact backup/restore, retention, and rollback steps.
 
-- [ ] **Step 6: Run focused deployment tests**
+- [x] **Step 6: Run focused deployment tests**
 
 Run: `node --test test/deploy-config.test.js test/env.test.js`
 
 Expected: all deployment/environment tests pass.
 
-- [ ] **Step 7: Run full verification**
+- [x] **Step 7: Run full verification**
 
 Run: `npm run check`
 
@@ -1261,11 +1263,11 @@ Run, only when real credentials are configured: `npm run market:smoke`
 
 Expected: sanitized summary with `status` equal to `COMPLETE` or explicitly justified `DEGRADED`; A2A Task terminal; no secret text.
 
-- [ ] **Step 8: Review acceptance criteria line by line**
+- [x] **Step 8: Review acceptance criteria line by line**
 
 Open `docs/superpowers/specs/2026-07-24-panda-market-analyst-agent-design.md` Section 21 and record evidence for each of the 14 criteria in `docs/MARKET_ANALYST_AGENT.md` under `Verification Record`. Do not mark criteria requiring SMTP/live Panda as passed unless the real smoke test ran.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add deploy/market-analyst.service deploy/market-report.service deploy/market-report.timer scripts/market-agent-live-smoke.js .env.example README.md package.json docs/PRODUCTION_OPERATIONS.md docs/MARKET_ANALYST_AGENT.md test/deploy-config.test.js test/env.test.js
