@@ -1,0 +1,14 @@
+---
+description: Always commit and push after making code changes
+alwaysApply: true
+---
+
+# Always Commit And Push
+
+When you make any code or docs change that the user asked for:
+
+1. After the change is verified (relevant tests pass when applicable), create a git commit.
+2. Immediately `git push -u origin HEAD` (or push the current tracking branch).
+3. Do not wait for a separate "please commit/push" message.
+
+Follow the existing commit-message and Git Safety Protocol rules. Exclude secrets, build artifacts, and unrelated local WIP. If unrelated dirty files are mixed into a touched file, isolate the requested change before committing.

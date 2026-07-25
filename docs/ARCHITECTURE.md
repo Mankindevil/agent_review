@@ -69,6 +69,8 @@ A2A Agent endpoint   Model / Runtime endpoints
 
 A2A 1.0 JSON-RPC 使用 `SendMessage`，0.3 兼容调用使用 `message/send`。HTTP+JSON 则在 Agent Card 声明的接口基址后调用 `message:send`。示例服务覆盖即时 `Message` 与包含 `Artifact` 的 `Task` 两类响应。
 
+正式黑盒评测的资格检查与公开用例单元格超时上限为 20 分钟（`1_200_000` ms），与 `/agent-check` 预检台的最大响应窗口一致，以支持慢速多 Agent 投研端点；时长分仍按较短的 target 计算，超时只决定是否记为不可调用或任务超时。
+
 ### 3.1.1 提交与发现策略
 
 平台区分“Agent Card 如何进入平台”和“A2A 如何发现 Agent”：

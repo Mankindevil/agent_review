@@ -10,8 +10,9 @@ const SCOPE_CHECKS = Object.freeze([
 ]);
 
 export const TEST_TIMING_POLICY_V1 = deepFreeze({
-  singleTurn: { targetMs: 45_000, timeoutMs: 180_000 },
-  multiTurnPerTurn: { targetMs: 45_000, timeoutMs: 180_000 }
+  // Match agent-check / Phase 1 formal max window (20 minutes).
+  singleTurn: { targetMs: 45_000, timeoutMs: 1_200_000 },
+  multiTurnPerTurn: { targetMs: 45_000, timeoutMs: 1_200_000 }
 });
 
 export function finalizeTestPlan(compilation, candidates, decisions, policy = {}) {

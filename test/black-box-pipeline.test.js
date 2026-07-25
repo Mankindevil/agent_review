@@ -56,7 +56,7 @@ test('deep-freezes the exact Phase 1 public-example policy', () => {
     version: 'phase1-public-examples/v1',
     repeatCount: 3,
     targetMs: 15_000,
-    timeoutMs: 45_000,
+    timeoutMs: 1_200_000,
     streaming: false,
     platformReplacementLimit: 1,
     qualificationRetryDelaysMs: [250, 1000]
@@ -140,7 +140,7 @@ test('compiles deterministic safe three-repeat cells with frozen executable coun
     version: 'phase1-public-examples/v1',
     repeatCount: 3,
     targetMs: 15_000,
-    timeoutMs: 45_000,
+    timeoutMs: 1_200_000,
     streaming: false,
     platformReplacementLimit: 1
   });

@@ -54,7 +54,9 @@ export const PHASE1_EXECUTION_POLICY = deepFreeze({
   version: 'phase1-public-examples/v1',
   repeatCount: 3,
   targetMs: 15_000,
-  timeoutMs: 45_000,
+  // Align with agent-check max response window so slow multi-agent
+  // research endpoints can pass qualification and formal cells.
+  timeoutMs: 1_200_000,
   streaming: false,
   platformReplacementLimit: 1,
   qualificationRetryDelaysMs: [250, 1000]
