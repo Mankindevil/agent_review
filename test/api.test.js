@@ -679,6 +679,16 @@ test('keeps the history count inline in the top navigation', async () => {
   assert.match(css, /\.nav-button\s*\{[^}]*display:flex;[^}]*white-space:nowrap;/);
 });
 
+test('serves the judge workbench without exposing a Replica preview', async () => {
+  const response = await fetch(`${origin}/judge`);
+  const html = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /text\/html/);
+  assert.match(html, /judge-access-form/);
+  assert.match(html, /复刻结果.*绝对分锁定.*密封/u);
+  assert.doesNotMatch(html, /replicaArena|revealMap|runtimeId/u);
+});
+
 test('serves localized loading effects with reduced-motion support', async () => {
   const [cssResponse, appResponse] = await Promise.all([
     fetch(`${origin}/styles.css`),

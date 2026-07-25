@@ -496,6 +496,8 @@ async function staticFile(pathname, response) {
     ? '/index.html'
     : pathname === '/agent-check'
       ? '/agent-check.html'
+      : pathname === '/judge'
+        ? '/judge.html'
       : pathname;
   const target = path.resolve(publicRoot, `.${requested}`);
   if (target !== publicRoot && !target.startsWith(`${publicRoot}${path.sep}`)) return json(response, 403, { error: '禁止访问' });
