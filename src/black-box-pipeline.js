@@ -29,6 +29,12 @@ import {
   buildObjectiveInputFromExecution,
   executeTestPlan
 } from './test-executor.js';
+import {
+  buildReplicas,
+  executeReplicas,
+  sealReplicaArena,
+  sealedReplicaProjection
+} from './replica-runner.js';
 
 const MODULE_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -633,6 +639,58 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
     testPlan,
     phase2Execution
   );
+  let replicaArena = null;
+  if (services.phase3?.enabled === true) {
+    const phase3 = services.phase3;
+    const existingCheckpoint = context.store.get(context.evaluationId).replicaCheckpoint;
+    if (existingCheckpoint?.status === 'sealed' && existingCheckpoint.arena) {
+      replicaArena = structuredClone(existingCheckpoint.arena);
+    } else {
+      const checkpoint = async (step) => {
+        await mutateCurrent(context, (record) => ({
+          ...record,
+          replicaCheckpoint: {
+            status: 'running',
+            steps: [...(record.replicaCheckpoint?.steps || []), structuredClone(step)]
+          }
+        }));
+      };
+      const built = await buildReplicas({
+        ...phase3,
+        agentCard: evaluation.submission.agentCard.value,
+        agentExamples: evaluation.submission.agentExamples.value,
+        rubricVersion: evaluation.submission.config.rubricVersion,
+        evidenceVault,
+        now: context.now,
+        createId: context.createId,
+        signal: context.signal,
+        checkpoint
+      });
+      const executed = await executeReplicas({
+        ...phase3,
+        testPlan,
+        replicas: built,
+        evidenceVault,
+        now: context.now,
+        createId: context.createId,
+        signal: context.signal,
+        checkpoint
+      });
+      replicaArena = await sealReplicaArena({
+        packageHash: built.packageHash,
+        built,
+        executed
+      });
+      await mutateCurrent(context, (record) => ({
+        ...record,
+        replicaCheckpoint: {
+          status: 'sealed',
+          arena: structuredClone(replicaArena),
+          sealedEvidenceIds: [...replicaArena.encryptedArenaEvidenceIds]
+        }
+      }));
+    }
+  }
   const objectiveMetrics = (services.buildObjectiveMetrics ||
     buildObjectiveMetricsDefault)(objectiveInput);
   const objectiveCapability = (services.aggregateObjectiveCapability ||
@@ -708,7 +766,7 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
         value: modelConfidence
       }
     },
-    replicaArena: { status: 'disabled' },
+    replicaArena: replicaArena || { status: 'disabled' },
     resultV2: {
       absolute: {
         status: 'model-provisional',
@@ -723,7 +781,9 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
             : 'not-required'
         }
       },
-      replica: { status: 'disabled' },
+      replica: replicaArena
+        ? sealedReplicaProjection(replicaArena)
+        : { status: 'disabled' },
       rating: {
         status: 'pending-human',
         code: null,

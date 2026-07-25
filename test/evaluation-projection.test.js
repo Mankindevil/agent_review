@@ -279,7 +279,7 @@ test('judge preview exposes redacted submission and locked model reviews without
     78
   );
   assert.equal(Object.hasOwn(projection, 'replicaArena'), false);
-  assert.equal(Object.hasOwn(projection.resultV2, 'replica'), false);
+  assert.deepEqual(projection.resultV2.replica, { status: 'disabled' });
   assert.equal(serialized.includes('private-agent.example'), false);
   assert.equal(serialized.includes('replica-seal-secret'), false);
   assert.equal(serialized.includes('judge-secret'), false);
@@ -332,6 +332,30 @@ test('public projection exposes only the safe Phase 2 completion summary', () =>
       arbitrationStatus: 'not-required'
     }
   });
+});
+
+test('all pre-lock projections expose sealed Replica counts without runtime or evidence details', () => {
+  const source = unsafeEvaluation();
+  source.replicaArena = {
+    status: 'sealed', sealVersion: 'replica-arena-seal/v1', packageHash: 'a'.repeat(64),
+    runtimeSummaries: [
+      { runtimeId: 'runtime-private', validity: 'valid', artifactEvidenceIds: ['ev_private'], runCount: 6, failureCategory: null },
+      { runtimeId: 'runtime-pending', validity: 'attribution-pending', artifactEvidenceIds: ['ev_pending'], runCount: 0, failureCategory: 'UNKNOWN' }
+    ],
+    encryptedArenaEvidenceIds: ['ev_private', 'ev_pending'], releasedAt: null
+  };
+  source.resultV2.replica = { status: 'sealed', runtimeId: 'runtime-private', output: 'must-not-project' };
+
+  for (const audience of ['public', 'admin', 'judge-preview']) {
+    const projection = projectEvaluation(source, { audience });
+    assert.deepEqual(projection.resultV2.replica, {
+      status: 'sealed', validReplicaCount: 1, pendingAttributionCount: 1
+    });
+    const serialized = JSON.stringify(projection);
+    for (const secret of ['runtime-private', 'runtime-pending', 'ev_private', 'must-not-project']) {
+      assert.equal(serialized.includes(secret), false, `${audience}: ${secret}`);
+    }
+  }
 });
 
 test('type-checks and redacts every projected leaf, including allowed summaries and findings', () => {

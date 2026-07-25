@@ -396,6 +396,71 @@ test('orchestrates a formal Phase 2 evaluation through model lock and opens huma
   );
 });
 
+test('seals Phase 3 replica work after the immutable test plan without exposing its runtime material', async () => {
+  const snapshot = freezeSubmission({
+    agentCard: CARD,
+    agentExamples: EXAMPLES,
+    config: {
+      rubricVersion: 'a2a-black-box-v1', hiddenTestPackageVersion: 'black-box-test-plan/v1',
+      modelConfigVersion: 'panel-v1', runtimeConfigVersion: 'phase2-black-box-runtime/v1'
+    },
+    frozenAt: '2026-07-25T10:00:00.000Z'
+  });
+  const evaluation = createEvaluationRecord(snapshot, {
+    id: 'eval_phase3_sealed', createdAt: '2026-07-25T10:00:00.000Z',
+    participantAccess: { tokenHash: 'a'.repeat(64), createdAt: '2026-07-25T10:00:00.000Z' },
+    authorizationRequired: false, endpointHash: 'b'.repeat(64), agentVersion: '1.2.3', serviceBuildId: null, runIndex: []
+  });
+  const store = memoryStore(evaluation);
+  const candidate = (variantType) => ({
+    candidateId: `phase3-${variantType}`, sourceExampleId: 'unsafe example id', variantType,
+    changeSummary: 'in-scope', timingClass: variantType === 'multi-turn' ? 'multiTurn' : 'singleTurn',
+    turns: variantType === 'multi-turn'
+      ? [{ input: { parts: [{ type: 'text', text: 'first' }] } }, { input: { parts: [{ type: 'text', text: 'second' }] } }]
+      : [{ input: { parts: [{ type: 'text', text: variantType }] } }],
+    inheritedCriteriaIds: ['contains output'], proposedCriteria: []
+  });
+  let builds = 0;
+  const phase2 = {
+    enabled: true, generatorIdentity: 'generator', scopeReviewerIdentity: 'scope',
+    generateHidden: async () => ({ candidates: ['equivalent', 'boundary', 'multi-turn'].map(candidate) }),
+    reviewScopes: async (_compilation, candidates) => ({ decisions: candidates.map((item) => ({
+      candidateId: item.candidateId,
+      checks: { sameDomain: true, declaredOrDemonstratedCapabilityOnly: true, noExternalTruthDependency: true, difficultyFromAllowedTransformation: true, sameInputForAgentAndReplica: true },
+      approved: true, reasons: []
+    })) }),
+    runPanel: async ({ contract }) => ({ status: 'model-locked', dimensions: {}, subcriteria: Object.fromEntries(contract.subcriterionIds.map((id) => [id, { score: 70, confidence: 0.8 }])), checkEvidenceIndex: {} })
+  };
+  const phase3 = {
+    enabled: true,
+    runtimes: [{ id: 'sealed-runtime' }],
+    adapters: {
+      'sealed-runtime': {
+        health: async () => ({ ready: true, budgetEnforcement: { wallClock: 'hard', tokens: 'hard', outputBytes: 'hard', network: 'hard' } }),
+        build: async (packet) => { builds += 1; assert.equal(JSON.stringify(packet).includes('agent.example'), false); return replicaArtifact('sealed-runtime', packet.manifest.contentHash); },
+        run: async (_artifact, input) => ({ status: 'completed', messageParts: [{ type: 'text', text: input.parts[0].text }], artifacts: [], durationMs: 1, error: null, budgetUsage: { tokens: 1 }, evidence: {} }),
+        disposeContext: async () => {}
+      }
+    }
+  };
+
+  await runBlackBoxFoundation(evaluation, workerServices(store, {
+    phase2, phase3,
+    executeTurn: async (options) => successfulRun(options, options.contextId || `ctx-${options.testId}-${options.repeatIndex}`)
+  }));
+
+  const result = store.get(evaluation.id);
+  assert.equal(builds, 1);
+  assert.equal(result.replicaArena.status, 'sealed');
+  assert.deepEqual(result.resultV2.replica, { status: 'sealed', validReplicaCount: 1, pendingAttributionCount: 0 });
+  assert.equal(JSON.stringify(result.resultV2.replica).includes('sealed-runtime'), false);
+  assert.equal(
+    result.evidenceManifest.items.some((item) => item.runId.includes('replica')),
+    false
+  );
+  assert.equal(Object.hasOwn(result, 'replicaCheckpoint'), true);
+});
+
 test('deletes ephemeral credentials when worker evidence or credential setup throws', async () => {
   for (const failure of ['evidence-factory', 'credential-get']) {
     const { evaluation, store } = workerFixture();
@@ -2160,6 +2225,24 @@ function monotonicIso() {
 function monotonicClock() {
   let value = 0;
   return () => value += 5;
+}
+
+function replicaArtifact(runtimeId, packageHash) {
+  const content = '# Replica Skill\n\nUse only the supplied input.\n';
+  return {
+    artifactId: `artifact-${runtimeId}`,
+    runtimeId,
+    skill: { name: 'Replica Skill', description: 'Uses supplied input.', instructions: ['Use supplied input.'] },
+    files: [{
+      path: 'SKILL.md', mediaType: 'text/markdown', content,
+      byteLength: Buffer.byteLength(content), sha256: createHash('sha256').update(content).digest('hex')
+    }],
+    manifest: {
+      packageHash, budgetVersion: 'replica-budget/v1',
+      budgetEnforcement: { wallClock: 'hard', tokens: 'hard', outputBytes: 'hard', network: 'hard' }
+    },
+    buildEvidence: { budgetUsage: { tokens: 1 } }
+  };
 }
 
 function incrementingClock(step) {

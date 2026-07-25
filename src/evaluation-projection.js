@@ -54,7 +54,8 @@ export function projectEvaluation(evaluation, { audience = 'public', secrets = [
       : projectResultV2(
           evaluation.resultV2,
           secrets,
-          audience === 'judge-preview'
+          false,
+          evaluation.replicaArena
         )
   };
   if (evaluation.archivedAt !== undefined) {
@@ -100,7 +101,7 @@ function projectAbsoluteReview(value, secrets, includeModelPanel = false) {
   }, secrets);
 }
 
-function projectResultV2(value, secrets, omitReplica = false) {
+function projectResultV2(value, secrets, omitReplica = false, replicaArena = null) {
   return pick(value, omitReplica
     ? ['absolute', 'rating']
     : ['absolute', 'replica', 'rating'], {
@@ -113,7 +114,7 @@ function projectResultV2(value, secrets, omitReplica = false) {
       },
       nestedSecrets
     ),
-    replica: (item, nestedSecrets) => pick(item, ['status'], {}, nestedSecrets),
+    replica: (item, nestedSecrets) => projectReplica(item, replicaArena, nestedSecrets),
     rating: (item, nestedSecrets) => pick(
       item,
       ['status', 'code', 'label'],
@@ -121,6 +122,21 @@ function projectResultV2(value, secrets, omitReplica = false) {
       nestedSecrets
     )
   }, secrets);
+}
+
+function projectReplica(value, replicaArena, secrets) {
+  const status = projectPrimitive(value?.status || replicaArena?.status, secrets);
+  if (status !== 'sealed') return status === undefined ? undefined : { status };
+  const summaries = Array.isArray(replicaArena?.runtimeSummaries)
+    ? replicaArena.runtimeSummaries
+    : [];
+  return {
+    status: 'sealed',
+    validReplicaCount: summaries.filter((item) => item?.validity === 'valid').length,
+    pendingAttributionCount: summaries.filter(
+      (item) => item?.validity === 'attribution-pending'
+    ).length
+  };
 }
 
 function projectTestSummary(value, secrets) {
