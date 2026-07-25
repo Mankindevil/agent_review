@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 data/evaluations.json
+data/runlogs/
 coverage/
 node_modules/
 .venv/

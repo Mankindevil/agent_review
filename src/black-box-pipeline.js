@@ -35,6 +35,14 @@ import {
   sealReplicaArena,
   sealedReplicaProjection
 } from './replica-runner.js';
+import {
+  appendRunLogFile,
+  applyActiveWork,
+  applyRunLog,
+  createRunLogEntry,
+  runLogFilePath,
+  sanitizeLogText
+} from './run-log.js';
 
 export { releaseReplicaArena } from './arena-release.js';
 
@@ -226,6 +234,7 @@ export async function runBlackBoxFoundation(evaluation, services = {}) {
       signal: services.signal,
       createId,
       authorization,
+      runLogRoot: services.runLogRoot || path.join(MODULE_ROOT, 'data', 'runlogs'),
       worker: true
     };
     let current = store.get(evaluation.id);
@@ -235,15 +244,22 @@ export async function runBlackBoxFoundation(evaluation, services = {}) {
     const firstTurn = current.submission.agentExamples.value[0].turns[0];
     let qualified = current.qualification.status === 'eligible';
     if (!qualified) {
-      await mutateCurrent(context, (record) => ({
-        ...record,
+      await mutateCurrent(context, (record) => withRunProgress(record, context, {
         execution: {
           ...record.execution,
           status: 'running',
           stage: 'qualification',
           progress: 5,
           startedAt: record.execution.startedAt || now()
-        }
+        },
+        entry: {
+          level: 'info',
+          source: 'PIPELINE',
+          phase: 'qualification',
+          text: '开始资格验证',
+          detail: '正在建立可调用的 A2A 证据'
+        },
+        activeWork: null
       }));
     }
     const qualificationStart =
@@ -254,6 +270,29 @@ export async function runBlackBoxFoundation(evaluation, services = {}) {
       attemptIndex += 1
     ) {
       const runId = createId('run_qualification');
+      const attemptNumber = attemptIndex + 1;
+      const attemptStartedAt = now();
+      const attemptStartedMs = clock();
+      await mutateCurrent(context, (record) => withRunProgress(record, context, {
+        entry: {
+          level: 'info',
+          source: 'A2A',
+          phase: 'qualification',
+          text: `资格验证 attempt ${attemptNumber}/3`,
+          detail: `timeout ${policy.timeoutMs}ms`,
+          refs: { attempt: attemptNumber, runId, testId: 'test_qualification' }
+        },
+        activeWork: {
+          key: `qualification:${attemptNumber}`,
+          phase: 'qualification',
+          label: `等待 Agent 资格验证 · ${attemptNumber}/3`,
+          detail: '正在调用 A2A 端点',
+          startedAt: attemptStartedAt,
+          index: attemptNumber,
+          total: 3,
+          kind: 'call'
+        }
+      }));
       const snapshotPersistence = createSnapshotPersistence(context, {
         runId,
         testId: 'test_qualification'
@@ -280,12 +319,13 @@ export async function runBlackBoxFoundation(evaluation, services = {}) {
       });
       mergeEvidenceBundle(evidence, snapshotPersistence);
       qualified = isVersionValidObservation(run);
+      const attemptDurationMs = Math.max(0, clock() - attemptStartedMs);
       await mutateCurrent(context, (record) => {
         const attemptRunIds = [
           ...record.qualification.attemptRunIds,
           runId
         ];
-        return {
+        return withRunProgress({
           ...record,
           qualification: qualified
             ? {
@@ -316,7 +356,20 @@ export async function runBlackBoxFoundation(evaluation, services = {}) {
                 summary: 'A version-valid A2A response established callability'
               })
             : record.auditEvents
-        };
+        }, context, {
+          entry: {
+            level: qualified ? 'success' : 'warn',
+            source: 'A2A',
+            phase: 'qualification',
+            text: qualified ? '资格验证通过' : '资格验证未通过，准备重试',
+            detail: run.outcome?.status
+              ? `outcome=${run.outcome.status}`
+              : 'version-valid observation failed',
+            durationMs: attemptDurationMs,
+            refs: { attempt: attemptNumber, runId }
+          },
+          activeWork: null
+        });
       });
       if (qualified) {
         break;
@@ -327,7 +380,7 @@ export async function runBlackBoxFoundation(evaluation, services = {}) {
     }
 
     if (!qualified) {
-      await mutateCurrent(context, (record) => ({
+      await mutateCurrent(context, (record) => withRunProgress({
         ...record,
         qualification: {
           status: 'ineligible',
@@ -358,17 +411,39 @@ export async function runBlackBoxFoundation(evaluation, services = {}) {
           occurredAt: now(),
           summary: 'The endpoint did not produce a version-valid A2A response'
         })
+      }, context, {
+        entry: {
+          level: 'error',
+          source: 'PIPELINE',
+          phase: 'qualification',
+          text: '不具备正式评测资格',
+          detail: 'endpoint-not-callable'
+        },
+        activeWork: null
       }));
       return store.get(evaluation.id);
     }
 
-    await mutateCurrent(context, (record) => ({
-      ...record,
+    await mutateCurrent(context, (record) => withRunProgress(record, context, {
       execution: {
         ...record.execution,
         status: 'running',
         stage: 'public-examples',
         progress: 20
+      },
+      entry: {
+        level: 'info',
+        source: 'PIPELINE',
+        phase: 'public-examples',
+        text: '进入公开用例执行'
+      },
+      activeWork: {
+        key: 'public-examples',
+        phase: 'public-examples',
+        label: '正在执行公开用例',
+        detail: '按计划采集正式样本',
+        startedAt: now(),
+        kind: 'call'
       }
     }));
     current = store.get(evaluation.id);
@@ -385,7 +460,7 @@ export async function runBlackBoxFoundation(evaluation, services = {}) {
     const objectiveMetrics = buildObjectiveMetrics(objectiveInput);
     const objectiveCapability =
       aggregateObjectiveCapability(objectiveMetrics, rubric);
-    await mutateCurrent(context, (record) => ({
+    await mutateCurrent(context, (record) => withRunProgress({
       ...record,
       execution: {
         status: 'completed',
@@ -418,10 +493,35 @@ export async function runBlackBoxFoundation(evaluation, services = {}) {
         occurredAt: now(),
         summary: 'Phase 1 objective capability calculation completed'
       })
+    }, context, {
+      entry: {
+        level: 'success',
+        source: 'PIPELINE',
+        phase: 'waiting-model',
+        text: 'Phase 1 完成，等待模型评审'
+      },
+      activeWork: null
     }));
     return store.get(evaluation.id);
   } catch (error) {
-    if (context) await interruptEvaluation(context);
+    if (context) {
+      try {
+        await mutateCurrent(context, (record) => withRunProgress(record, context, {
+          entry: {
+            level: 'error',
+            source: 'SYSTEM',
+            phase: record.execution?.stage || 'failed',
+            text: error?.name === 'AbortError' ? '评测已取消或中止' : '评测执行失败',
+            detail: safeErrorDetail(error),
+            internalDetail: error?.stack || String(error)
+          },
+          activeWork: null
+        }));
+      } catch {
+        // Keep original failure path even if logging cannot commit.
+      }
+      await interruptEvaluation(context);
+    }
     throw error;
   } finally {
     credentialVault.delete(evaluation.id);
@@ -432,13 +532,25 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
   const phase2 = services.phase2;
   const resumed = context.store.get(context.evaluationId);
   if (resumed.absoluteReview?.status === 'model-locked') return resumed;
-  await mutateCurrent(context, (record) => ({
-    ...record,
+  await mutateCurrent(context, (record) => withRunProgress(record, context, {
     execution: {
       ...record.execution,
       status: 'running',
       stage: 'example_compilation',
       progress: 25
+    },
+    entry: {
+      level: 'info',
+      source: 'PIPELINE',
+      phase: 'example_compilation',
+      text: '编译 Agent 示例为动态评分表'
+    },
+    activeWork: {
+      key: 'example_compilation',
+      phase: 'example_compilation',
+      label: '正在编译评分表',
+      startedAt: context.now(),
+      kind: 'compile'
     }
   }));
   const currentBeforePlan = context.store.get(context.evaluationId);
@@ -453,12 +565,28 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
     const candidates = [];
     const decisions = [];
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      await mutateCurrent(context, (record) => ({
-        ...record,
+      await mutateCurrent(context, (record) => withRunProgress(record, context, {
         execution: {
           ...record.execution,
           stage: attempt === 0 ? 'hidden_generation' : 'hidden_generation_retry',
           progress: 30 + attempt * 3
+        },
+        entry: {
+          level: 'info',
+          source: 'MODEL',
+          phase: 'hidden_generation',
+          text: attempt === 0 ? '生成隐藏测试题' : `隐藏题生成重试 ${attempt + 1}/3`,
+          refs: { attempt: attempt + 1 }
+        },
+        activeWork: {
+          key: `hidden_generation:${attempt + 1}`,
+          phase: 'hidden_generation',
+          label: '模型正在出隐藏题',
+          detail: `第 ${attempt + 1}/3 轮`,
+          startedAt: context.now(),
+          index: attempt + 1,
+          total: 3,
+          kind: 'compile'
         }
       }));
       const generated = await phase2.generateHidden(compilation, { attempt });
@@ -466,12 +594,27 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
         generated.candidates || generated,
         attempt
       );
-      await mutateCurrent(context, (record) => ({
-        ...record,
+      await mutateCurrent(context, (record) => withRunProgress(record, context, {
         execution: {
           ...record.execution,
           stage: 'scope_review',
           progress: 34 + attempt * 3
+        },
+        entry: {
+          level: 'info',
+          source: 'MODEL',
+          phase: 'scope_review',
+          text: '审查隐藏题是否越界',
+          refs: { attempt: attempt + 1 }
+        },
+        activeWork: {
+          key: `scope_review:${attempt + 1}`,
+          phase: 'scope_review',
+          label: '模型正在审 scope',
+          startedAt: context.now(),
+          index: attempt + 1,
+          total: 3,
+          kind: 'review'
         }
       }));
       const reviewed = await phase2.reviewScopes(compilation, roundCandidates, {
@@ -489,7 +632,7 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
       scopeReviewerIdentity: phase2.scopeReviewerIdentity,
       timingPolicy: phase2.timingPolicy
     });
-    await mutateCurrent(context, (record) => ({
+    await mutateCurrent(context, (record) => withRunProgress({
       ...record,
       exampleCompilation: compilation,
       testPlan,
@@ -518,15 +661,45 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
           ? 'Closed-scope dynamic test plan locked'
           : 'A required hidden-test slot remained unapproved'
       })
+    }, context, {
+      entry: {
+        level: testPlan.status === 'ready' ? 'success' : 'error',
+        source: 'PIPELINE',
+        phase: testPlan.status === 'ready' ? 'test_execution' : 'scope-incomplete',
+        text: testPlan.status === 'ready' ? '测试计划已锁定，开始正式执行' : '隐藏题 scope 未完成'
+      },
+      activeWork: testPlan.status === 'ready'
+        ? {
+            key: 'test_execution',
+            phase: 'test_execution',
+            label: '正在执行正式测试',
+            startedAt: context.now(),
+            kind: 'call'
+          }
+        : null
     }));
   } else {
-    await mutateCurrent(context, (record) => ({
-      ...record,
+    await mutateCurrent(context, (record) => withRunProgress(record, context, {
       execution: {
         ...record.execution,
         stage: testPlan.status === 'ready' ? 'test_execution' : 'scope-incomplete',
         progress: testPlan.status === 'ready' ? 45 : 100
-      }
+      },
+      entry: {
+        level: 'info',
+        source: 'PIPELINE',
+        phase: testPlan.status === 'ready' ? 'test_execution' : 'scope-incomplete',
+        text: testPlan.status === 'ready' ? '恢复正式测试执行' : '测试计划仍未就绪'
+      },
+      activeWork: testPlan.status === 'ready'
+        ? {
+            key: 'test_execution',
+            phase: 'test_execution',
+            label: '正在执行正式测试',
+            startedAt: context.now(),
+            kind: 'call'
+          }
+        : null
     }));
   }
   if (testPlan.status !== 'ready') return context.store.get(context.evaluationId);
@@ -606,7 +779,7 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
         const snapshots = snapshotBundles.get(run.runId);
         if (snapshots) mergeEvidenceBundle(evidence, snapshots);
         run.evidenceIds = evidence.evidenceIds;
-        await mutateCurrent(context, (record) => ({
+        await mutateCurrent(context, (record) => withRunProgress({
           ...record,
           evidenceManifest: appendManifest(
             record.evidenceManifest,
@@ -626,15 +799,51 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
             ...record.evaluationWindow,
             lastRunAt: context.now()
           }
+        }, context, {
+          entry: {
+            level: run.outcome?.status === 'succeeded' ? 'info' : 'warn',
+            source: 'A2A',
+            phase: 'test_execution',
+            text: `完成 ${test.testId} · R${repeatIndex + 1} · T${run.turnIndex + 1}`,
+            detail: run.outcome?.status
+              ? `outcome=${run.outcome.status}`
+              : 'turn persisted',
+            refs: {
+              testId: test.testId,
+              repeatIndex,
+              turnIndex: run.turnIndex,
+              runId: run.runId
+            }
+          },
+          activeWork: {
+            key: `test_execution:${test.testId}:${repeatIndex}:${run.turnIndex}`,
+            phase: 'test_execution',
+            label: `正式测试 ${test.testId}`,
+            detail: `repeat ${repeatIndex + 1} · turn ${run.turnIndex + 1}`,
+            startedAt: context.now(),
+            kind: 'call'
+          }
         }));
       },
       persistCell: async ({ testRun }) => {
-        await mutateCurrent(context, (record) => ({
+        await mutateCurrent(context, (record) => withRunProgress({
           ...record,
           phase2Execution: appendPhase2TestRun(
             record.phase2Execution,
             testRun
           )
+        }, context, {
+          entry: {
+            level: 'success',
+            source: 'PIPELINE',
+            phase: 'test_execution',
+            text: `单元格完成 ${testRun.cellIdentity?.testId || 'test'}`,
+            detail: `status=${testRun.status || 'completed'}`,
+            refs: {
+              testId: testRun.cellIdentity?.testId,
+              repeatIndex: testRun.cellIdentity?.repeatIndex
+            }
+          }
         }));
       }
     }
@@ -655,11 +864,58 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
     }
     if (existingCheckpoint?.status === 'sealed' && existingCheckpoint.arena) {
       replicaArena = structuredClone(existingCheckpoint.arena);
+      await mutateCurrent(context, (record) => withRunProgress(record, context, {
+        entry: {
+          level: 'info',
+          source: 'REPLICA',
+          phase: 'replica',
+          text: '复用已密封的 Replica 检查点'
+        }
+      }));
     } else {
+      await mutateCurrent(context, (record) => withRunProgress(record, context, {
+        entry: {
+          level: 'info',
+          source: 'REPLICA',
+          phase: 'replica',
+          text: '开始构建 Replica 基线'
+        },
+        activeWork: {
+          key: 'replica:build',
+          phase: 'replica',
+          label: '正在构建 Replica',
+          detail: '结果在绝对分锁定前保持密封',
+          startedAt: context.now(),
+          kind: 'replica'
+        }
+      }));
       const checkpoint = async (step) => {
-        await mutateCurrent(context, (record) => ({
+        await mutateCurrent(context, (record) => withRunProgress({
           ...record,
           replicaCheckpoint: mergeReplicaCheckpoint(record.replicaCheckpoint, step, testPlan)
+        }, context, {
+          entry: step?.type
+            ? {
+                level: 'info',
+                source: 'REPLICA',
+                phase: 'replica',
+                text: `Replica 检查点 · ${step.type}`,
+                refs: {
+                  runtimeId: step.runtimeId,
+                  testId: step.testId,
+                  turnIndex: step.turnIndex,
+                  repeatIndex: step.repeatIndex
+                }
+              }
+            : undefined,
+          activeWork: {
+            key: `replica:${step?.type || 'checkpoint'}`,
+            phase: 'replica',
+            label: step?.type ? `Replica · ${step.type}` : 'Replica 执行中',
+            detail: step?.runtimeId ? `runtime=${step.runtimeId}` : undefined,
+            startedAt: context.now(),
+            kind: 'replica'
+          }
         }));
       };
       const built = await buildReplicas({
@@ -674,6 +930,21 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
         checkpoint,
         resume: existingCheckpoint
       });
+      await mutateCurrent(context, (record) => withRunProgress(record, context, {
+        entry: {
+          level: 'info',
+          source: 'REPLICA',
+          phase: 'replica',
+          text: 'Replica 构建完成，开始同题执行'
+        },
+        activeWork: {
+          key: 'replica:execute',
+          phase: 'replica',
+          label: '正在执行 Replica 同题测试',
+          startedAt: context.now(),
+          kind: 'replica'
+        }
+      }));
       const executed = await executeReplicas({
         ...phase3,
         testPlan,
@@ -692,7 +963,7 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
         built,
         executed
       });
-      await mutateCurrent(context, (record) => ({
+      await mutateCurrent(context, (record) => withRunProgress({
         ...record,
         replicaCheckpoint: {
           ...structuredClone(record.replicaCheckpoint),
@@ -709,6 +980,14 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
             ...replicaArena.encryptedArenaEvidenceIds
           ]
         }
+      }, context, {
+        entry: {
+          level: 'success',
+          source: 'REPLICA',
+          phase: 'replica',
+          text: 'Replica 证据已密封'
+        },
+        activeWork: null
       }));
     }
   }
@@ -719,7 +998,7 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
     objectiveMetrics,
     services.rubric || RUBRIC_V1
   );
-  await mutateCurrent(context, (record) => ({
+  await mutateCurrent(context, (record) => withRunProgress({
     ...record,
     phase2Execution,
     objectiveCapability,
@@ -727,6 +1006,21 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
       ...record.execution,
       stage: 'model_review',
       progress: 78
+    }
+  }, context, {
+    entry: {
+      level: 'info',
+      source: 'MODEL',
+      phase: 'model_review',
+      text: '开始四席模型评审'
+    },
+    activeWork: {
+      key: 'model_review',
+      phase: 'model_review',
+      label: '四席模型正在评审',
+      detail: '独立会话，等待锁定',
+      startedAt: context.now(),
+      kind: 'review'
     }
   }));
 
@@ -766,7 +1060,7 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
   const testSummary = summarizePhase2Execution(testPlan, phase2Execution);
   const arbitrationRequired =
     (modelPanel.disputedSubcriterionIds || []).length > 0;
-  await mutateCurrent(context, (record) => ({
+  await mutateCurrent(context, (record) => withRunProgress({
     ...record,
     execution: {
       status: 'completed',
@@ -817,6 +1111,14 @@ async function runFormalPhase2(evaluation, context, services, evidenceVault) {
       occurredAt: lockedAt,
       summary: 'Four independent model reviews locked; human review opened'
     })
+  }, context, {
+    entry: {
+      level: 'success',
+      source: 'MODEL',
+      phase: 'human-open',
+      text: '模型初评已锁定，打开人类评审'
+    },
+    activeWork: null
   }));
   return context.store.get(context.evaluationId);
 }
@@ -1181,12 +1483,36 @@ async function executeFormalCells(context) {
         }
         const sentContextId = returnedContextId || null;
         const sentTaskId = continuationTaskId || null;
-        await mutateCurrent(context, (record) =>
+        await mutateCurrent(context, (record) => withRunProgress(
           updateAttemptTurn(record, cell.cellId, attemptIndex, plannedTurn.turnIndex, {
             status: 'dispatched',
             sentContextId,
             sentTaskId
-          }));
+          }),
+          context,
+          {
+            entry: {
+              level: 'info',
+              source: 'A2A',
+              phase: 'public-examples',
+              text: `调度 ${cell.identity.testId} · R${cell.identity.repeatIndex + 1} · T${plannedTurn.turnIndex + 1}`,
+              refs: {
+                testId: cell.identity.testId,
+                repeatIndex: cell.identity.repeatIndex,
+                turnIndex: plannedTurn.turnIndex,
+                runId: plannedTurn.runId
+              }
+            },
+            activeWork: {
+              key: `public:${cell.identity.testId}:${cell.identity.repeatIndex}:${plannedTurn.turnIndex}`,
+              phase: 'public-examples',
+              label: `公开用例 ${cell.identity.testId}`,
+              detail: `repeat ${cell.identity.repeatIndex + 1} · turn ${plannedTurn.turnIndex + 1}`,
+              startedAt: context.now(),
+              kind: 'call'
+            }
+          }
+        ));
         const snapshotPersistence = createSnapshotPersistence(context, {
           runId: plannedTurn.runId,
           testId: cell.identity.testId,
@@ -2260,6 +2586,72 @@ async function mutateCurrent(context, updater) {
   return committed;
 }
 
+function withRunProgress(record, context, options = {}) {
+  let next = record;
+  if (options.execution) {
+    next = { ...next, execution: options.execution };
+  }
+  const at = context.now();
+  const secrets = [context.authorization].filter(Boolean);
+  if (options.entry) {
+    const entry = createRunLogEntry({
+      id: context.createId('log'),
+      at,
+      level: options.entry.level,
+      source: options.entry.source,
+      phase: options.entry.phase,
+      text: sanitizeLogText(options.entry.text, secrets),
+      detail: options.entry.detail != null
+        ? sanitizeLogText(options.entry.detail, secrets)
+        : undefined,
+      durationMs: options.entry.durationMs,
+      refs: options.entry.refs
+    });
+    void writeRunLogFile(context, {
+      ...entry,
+      evaluationId: context.evaluationId,
+      ...(options.entry.internalDetail
+        ? { internalDetail: sanitizeLogText(options.entry.internalDetail, secrets) }
+        : {})
+    });
+    next = applyRunLog(next, entry);
+  }
+  if (Object.hasOwn(options, 'activeWork')) {
+    const work = options.activeWork;
+    next = applyActiveWork(
+      next,
+      work == null
+        ? null
+        : {
+            ...work,
+            startedAt: work.startedAt || at,
+            label: sanitizeLogText(work.label, secrets),
+            ...(work.detail != null
+              ? { detail: sanitizeLogText(work.detail, secrets) }
+              : {})
+          }
+    );
+  }
+  return next;
+}
+
+async function writeRunLogFile(context, payload) {
+  try {
+    const root = context.runLogRoot || path.join(MODULE_ROOT, 'data', 'runlogs');
+    await appendRunLogFile(runLogFilePath(root, context.evaluationId), payload);
+  } catch {
+    // Local diagnostics must not block evaluation progress.
+  }
+}
+
+function safeErrorDetail(error) {
+  if (!error) return 'unknown error';
+  if (typeof error.code === 'string' && error.code) {
+    return `${error.code}: ${error.message || 'failed'}`;
+  }
+  return String(error.message || error);
+}
+
 async function interruptEvaluation(context) {
   try {
     const current = context.store.get(context.evaluationId);
@@ -2267,7 +2659,7 @@ async function interruptEvaluation(context) {
       current.execution.status === 'completed' ||
       current.execution.status === 'cancelled'
     ) return;
-    await mutateCurrent(context, (record) => ({
+    await mutateCurrent(context, (record) => withRunProgress({
       ...record,
       execution: {
         status: 'interrupted',
@@ -2282,6 +2674,14 @@ async function interruptEvaluation(context) {
         occurredAt: context.now(),
         summary: 'Execution paused before a trustworthy evidence commit'
       })
+    }, context, {
+      entry: {
+        level: 'warn',
+        source: 'SYSTEM',
+        phase: 'interrupted',
+        text: '执行已中断，可凭 participant token 恢复'
+      },
+      activeWork: null
     }));
   } catch {
     // Preserve the original infrastructure failure when interruption cannot commit.

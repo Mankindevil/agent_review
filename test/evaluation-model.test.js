@@ -70,7 +70,9 @@ test('creates the exact queued V2 evaluation record', () => {
     replicaArena: { status: 'disabled' },
     resultV2: null,
     revision: 0,
-    auditEvents: []
+    auditEvents: [],
+    runLog: [],
+    activeWork: null
   });
 });
 

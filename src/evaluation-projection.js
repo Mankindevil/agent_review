@@ -2,6 +2,7 @@ import {
   redactEvidence,
   validateEvidenceManifestItem
 } from './evidence.js';
+import { RUN_LOG_PUBLIC_LIMIT } from './run-log.js';
 
 const COMMON_RESULT_FIELDS = [
   'id', 'status', 'stage', 'progress', 'score', 'confidence', 'coverage',
@@ -11,6 +12,12 @@ const COMMON_RESULT_FIELDS = [
   'findings', 'uncertainties', 'repairSuggestion'
 ];
 const DIMENSION_FIELDS = new Set(['scenarioValue', 'professionalism', 'agentCapability']);
+const RUN_LOG_FIELDS = [
+  'id', 'at', 'level', 'source', 'phase', 'text', 'detail', 'durationMs', 'refs'
+];
+const ACTIVE_WORK_FIELDS = [
+  'key', 'phase', 'label', 'detail', 'startedAt', 'kind', 'index', 'total'
+];
 
 export function projectEvaluation(evaluation, { audience = 'public', principal = null, secrets = [] } = {}) {
   if (!['public', 'participant', 'judge', 'admin', 'judge-preview'].includes(audience)) {
@@ -62,7 +69,9 @@ export function projectEvaluation(evaluation, { audience = 'public', principal =
           false,
           evaluation.replicaArena,
           evaluation.governance
-        )
+        ),
+    runLog: projectRunLog(evaluation.runLog, secrets),
+    activeWork: projectActiveWork(evaluation.activeWork, secrets)
   };
   if (absoluteLocked) {
     projection.humanReviewAggregate = projectHumanReviewAggregate(
@@ -124,6 +133,24 @@ function assertAudiencePrincipal(audience, principal) {
   if (!principal || principal.role !== expected) {
     throw new TypeError(`unsupported audience principal role for ${audience} projection`);
   }
+}
+
+function projectRunLog(value, secrets) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(-RUN_LOG_PUBLIC_LIMIT).map((entry) => pick(entry, RUN_LOG_FIELDS, {
+    refs: (refs, nestedSecrets) => pick(
+      refs,
+      ['attempt', 'runId', 'testId', 'turnIndex', 'repeatIndex', 'runtimeId', 'judgeId'],
+      {},
+      nestedSecrets
+    )
+  }, secrets));
+}
+
+function projectActiveWork(value, secrets) {
+  if (value == null) return null;
+  const projected = pick(value, ACTIVE_WORK_FIELDS, {}, secrets);
+  return Object.keys(projected).length ? projected : null;
 }
 
 function projectQualification(value, secrets) {

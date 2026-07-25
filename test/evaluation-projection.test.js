@@ -137,8 +137,11 @@ test('constructs a public V2 projection from explicit allow-listed fields', () =
   assert.deepEqual(Object.keys(projection), [
     'schemaVersion', 'id', 'createdAt', 'updatedAt', 'revision',
     'evaluationWindow', 'execution', 'governance', 'qualification',
-    'evidenceManifest', 'objectiveCapability', 'absoluteReview', 'resultV2'
+    'evidenceManifest', 'objectiveCapability', 'absoluteReview', 'resultV2',
+    'runLog', 'activeWork'
   ]);
+  assert.deepEqual(projection.runLog, []);
+  assert.equal(projection.activeWork, null);
   assert.deepEqual(projection.evaluationWindow, {
     firstRunAt: '2026-07-24T10:00:15.000Z',
     lastRunAt: null

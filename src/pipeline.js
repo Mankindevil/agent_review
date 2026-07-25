@@ -295,7 +295,49 @@ export class EvaluationPipeline {
       credentialVault: state.credentialVault,
       signal: controller.signal,
       policy: state.policy
-    }).catch(() => undefined).finally(() => {
+    }).catch(async (error) => {
+      console.error(`[v2-pipeline] ${evaluation.id}`, error);
+      try {
+        const current = this.store.get(evaluation.id);
+        const status = current?.execution?.status;
+        if (
+          current?.schemaVersion === 2 &&
+          !['completed', 'cancelled', 'interrupted', 'failed'].includes(status)
+        ) {
+          const failedAt = state.now();
+          const committed = await this.store.mutate(
+            evaluation.id,
+            current.revision,
+            (record) => ({
+              ...record,
+              execution: {
+                ...record.execution,
+                status: 'interrupted',
+                stage: record.execution?.stage || 'failed',
+                progress: record.execution?.progress || 0,
+                interruptedAt: failedAt
+              },
+              activeWork: null,
+              runLog: [
+                ...(Array.isArray(record.runLog) ? record.runLog : []),
+                {
+                  id: state.createId('log'),
+                  at: failedAt,
+                  level: 'error',
+                  source: 'SYSTEM',
+                  phase: 'failed',
+                  text: '评测管道异常终止',
+                  detail: String(error?.message || error)
+                }
+              ].slice(-500)
+            })
+          );
+          this.events.emit(evaluation.id, committed);
+        }
+      } catch (commitError) {
+        console.error(`[v2-pipeline] failed to persist terminal state for ${evaluation.id}`, commitError);
+      }
+    }).finally(() => {
       state.credentialVault?.delete(evaluation.id);
       if (this.activeRuns.get(evaluation.id) === controller) {
         this.activeRuns.delete(evaluation.id);

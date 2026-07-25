@@ -921,7 +921,11 @@ test('documents the governed black-box methodology, operations, and rollout', as
     '待复刻',
     '申诉',
     '平台错误',
-    '原始运行不覆盖'
+    '原始运行不覆盖',
+    '0\\.40 × 任务约束',
+    '0\\.30 × 专业质量',
+    '0\\.20 × 证据风险',
+    '0\\.10 × 产物可用性'
   ]) {
     assert.match(documentation, new RegExp(term, 'u'), term);
   }
