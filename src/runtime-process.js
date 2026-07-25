@@ -26,10 +26,14 @@ export function runLocalCliProcess(command, args, {
     let stdoutBytes = 0;
     let stderrBytes = 0;
     const detached = platform !== 'win32';
+    // Windows Agent/CLI shims are usually `.cmd`; spawn without a shell cannot
+    // resolve PATHEXT and fails with ENOENT / EINVAL on the bare command name.
+    const shell = platform === 'win32';
     const child = spawnImpl(command, args, {
       cwd,
       env,
       detached,
+      shell,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     });

@@ -246,15 +246,28 @@ function statusEntry({
 async function findExecutable(command, env, accessImpl) {
   for (const directory of String(env.PATH || '').split(path.delimiter)) {
     if (!directory) continue;
-    const candidate = path.join(directory, command);
-    try {
-      await accessImpl(candidate, fsConstants.X_OK);
-      return candidate;
-    } catch {
-      // Continue searching the configured PATH.
+    for (const name of executableNames(command, env)) {
+      const candidate = path.join(directory, name);
+      try {
+        await accessImpl(candidate, fsConstants.X_OK);
+        return candidate;
+      } catch {
+        // Continue searching PATHEXT candidates and PATH directories.
+      }
     }
   }
   return null;
+}
+
+/** Windows shims are often `cursor-agent.cmd`; bare `cursor-agent` is not a real file. */
+function executableNames(command, env) {
+  if (typeof command !== 'string' || !command.trim()) return [];
+  if (process.platform !== 'win32' || path.extname(command)) return [command];
+  const extensions = String(env.PATHEXT || '.EXE;.CMD;.BAT;.COM')
+    .split(';')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return [command, ...extensions.map((ext) => `${command}${ext}`)];
 }
 
 function readinessCacheKey(runtimeId, config, env) {
