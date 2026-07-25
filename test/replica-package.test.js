@@ -190,14 +190,30 @@ test('uses a locked snapshot for secret-looking query values and rejects endpoin
   assert.throws(() => createReplicaPackage(structuredClone(CARD), embeddedEndpoint, options()), /host|endpoint|prohibited/i);
 });
 
-test('classifies credential key variants and raw YAML or HTTP headers without rejecting public scores', () => {
-  for (const field of ['xApiKey', 'x_api_key', 'x-api-key', 'refreshToken', 'awsSecretAccessKey', 'accessToken', 'id_token', 'apiKey', 'secret_key', 'access-key', 'modelScore', 'review_score', 'judge-score', 'absoluteScore', 'replica_score', 'scoringEvidence']) {
+test('classifies credential key families and raw YAML or HTTP headers without rejecting public scores', () => {
+  for (const field of [
+    'xApiKey', 'x_api_key', 'x-api-key', 'refreshToken', 'awsSecretAccessKey',
+    'awsAccessKeyId', 'aws_access_key_id', 'sessionToken', 'security_token',
+    'personalAccessToken', 'githubToken', 'accessToken', 'id_token', 'apiKey',
+    'secret_key', 'access-key', 'modelScore', 'modelScores', 'modelScoreValue',
+    'review_score', 'humanReviewScore', 'judge-score', 'judge_scores',
+    'absoluteScore', 'absolute-scores', 'replica_score', 'replicaScores',
+    'scoringEvidence'
+  ]) {
     const credential = structuredClone(EXAMPLES);
     credential[0].turns[0].input.parts.push({ type: 'data', data: { [field]: 'opaque' } });
     assert.throws(() => createReplicaPackage(structuredClone(CARD), credential, options()), /forbidden/i, field);
   }
 
-  for (const rawText of ['api_key: opaque-credential', 'X-API-Key: opaque-credential', 'executionEvidence: captured']) {
+  for (const rawText of [
+    'api_key: opaque-credential',
+    'X-API-Key: opaque-credential',
+    'executionEvidence: captured',
+    '- api_key: opaque-credential',
+    '- X-API-Key: opaque-credential',
+    '  - refresh_token: opaque-credential',
+    '"api_key": opaque-credential'
+  ]) {
     const credential = structuredClone(EXAMPLES);
     credential[0].turns[0].input.parts.push({
       type: 'raw', raw: Buffer.from(rawText).toString('base64'), mediaType: 'text/plain'

@@ -11,7 +11,9 @@ const EXCLUSIONS = Object.freeze([
   'reviews',
   'other-replicas'
 ]);
-const FORBIDDEN_KEY = /^(?:auth(?:entication|orization)?|credentials?|passwords?|secrets?|tokens?|cookies?|endpoints?|providers?|documentation(?:urls?)?|metadata|signatures?|security(?:schemes)?|xapikey|(?:api|secret|access)key|awssecretaccesskey|(?:access|refresh|id)token|clientsecret|hiddentests?|hiddenvariants?|reviews?|reviewscores?|modelscore|judgescore|absolutescore|replicascore|scoringevidence|replicas?|otherreplicas?|replicaartifacts?|submittedoutputs?|executionevidence|executionoutputs?|modeloutputs?|capturedoutputs?|outputs?|evidence|testplan(?:id)?|privatekey|sessionid)$/iu;
+const FORBIDDEN_KEY = /^(?:auth(?:entication|orization)?|credentials?|passwords?|secrets?|tokens?|cookies?|endpoints?|providers?|documentation(?:urls?)?|metadata|signatures?|security(?:schemes)?|hiddentests?|hiddenvariants?|reviews?|scoringevidence|replicas?|otherreplicas?|replicaartifacts?|submittedoutputs?|executionevidence|executionoutputs?|modeloutputs?|capturedoutputs?|outputs?|evidence|testplan(?:id)?|sessionid)$/iu;
+const CREDENTIAL_KEY_SUFFIX = /(?:token|apikey|accesskey(?:id)?|secretkey|privatekey|credentials?|passwords?|cookies?)$/u;
+const PLATFORM_SCORE_KEY = /(?:model|judge|absolute|replica|humanreview|review)score/u;
 const SECRET_VALUE = /(?:\bbearer\s+\S+|\b(?:authorization|cookie)\s*[:=]|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b)/iu;
 const SIGNED_QUERY_KEY = /(?:^|[-_])(?:sig(?:nature)?|jwt|cookie|access[-_]?token|api[-_]?key|client[-_]?secret|authorization|token|secret|password|policy|key)(?:$|[-_])|^x-amz-(?:algorithm|credential|date|expires|security-token|signature)$/iu;
 const SNAPSHOT_REFERENCE = /^snapshot_[A-Za-z0-9_-]{1,128}$/u;
@@ -313,7 +315,7 @@ function scanAssociatedRawFields(text, prohibitedStrings, path) {
     scanSensitiveText(safeDecode(match[2]), prohibitedStrings, `${path} field value`);
   }
   for (const line of text.split(/\r?\n/u)) {
-    const match = line.match(/^\s*([A-Za-z][A-Za-z0-9_-]{0,127})\s*:\s*(\S.*)$/u);
+    const match = line.match(/^\s*(?:-\s*)?["']?([A-Za-z][A-Za-z0-9_-]{0,127})["']?\s*:\s*(\S.*)$/u);
     if (!match || !isForbiddenKey(match[1])) continue;
     throw new TypeError(`${path} contains a forbidden field`);
   }
@@ -338,7 +340,10 @@ function isRawPartPath(path) {
 }
 
 function isForbiddenKey(key) {
-  return FORBIDDEN_KEY.test(String(key).replaceAll(/[-_]/gu, '').toLowerCase());
+  const normalized = String(key).replaceAll(/[^A-Za-z0-9]/gu, '').toLowerCase();
+  if (FORBIDDEN_KEY.test(normalized)) return true;
+  if (CREDENTIAL_KEY_SUFFIX.test(normalized) && normalized !== 'tokencount') return true;
+  return PLATFORM_SCORE_KEY.test(normalized);
 }
 
 function isPublicExampleUrlPath(path) {
