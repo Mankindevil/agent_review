@@ -75,7 +75,11 @@ export function projectEvaluation(evaluation, { audience = 'public', principal =
         ),
     runLog: projectRunLog(evaluation.runLog, secrets),
     activeWork: projectActiveWork(evaluation.activeWork, secrets),
-    trackStatus: projectTrackStatus(evaluation.governance, absoluteLocked)
+    trackStatus: projectTrackStatus(
+      evaluation.governance,
+      absoluteLocked,
+      evaluation.replicaArena
+    )
   };
   const replicaHumanReview = projectReplicaHumanReview(evaluation.replicaArena, evaluation.governance);
   if (replicaHumanReview) projection.replicaHumanReview = replicaHumanReview;
@@ -369,12 +373,16 @@ const TRACK_SUB_STATUS_LABELS = Object.freeze({
  * `finalizeDualTrack` transitions governance to `final`. This never derives
  * a rating; it only summarizes which track(s) the desk is still waiting on.
  */
-function projectTrackStatus(governance, absoluteLocked) {
+function projectTrackStatus(governance, absoluteLocked, replicaArena) {
   const finalized = governance?.phase === 'final' &&
     typeof governance?.dualTrackFinalizedAt === 'string';
   if (finalized) return { overall: 'final' };
+  const replicaDisabled = !replicaArena ||
+    replicaArena.status === 'disabled' ||
+    replicaArena.status === 'unavailable';
   const replicaSettled = typeof governance?.replicaUnavailableAt === 'string' ||
-    typeof governance?.replicaHumanLockedAt === 'string';
+    typeof governance?.replicaHumanLockedAt === 'string' ||
+    replicaDisabled;
   const subStatus = !absoluteLocked && !replicaSettled
     ? 'waiting_both'
     : !absoluteLocked

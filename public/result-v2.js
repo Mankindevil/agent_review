@@ -7,7 +7,9 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
   const testSummary = absolute.testSummary || {};
   const coverage = dimensions.agentCapability?.objectiveCoverage;
   const released = replica.status === 'released';
-  const pendingReplica = replica.status === 'unavailable' || rating.code === 'PENDING_REPLICA';
+  const pendingReplica = replica.status === 'unavailable' ||
+    replica.status === 'disabled' ||
+    rating.code === 'PENDING_REPLICA';
   const stableCopy = replica.differenceStable === false ? '差异未稳定' : '差异稳定';
   const dimensionRows = [
     ['任务价值', dimensions.scenarioValue],
@@ -29,10 +31,16 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
   const ratingSub = trackStatus.overall === 'final'
     ? (item.evaluationTrack || item.qualification?.selectedInterface?.binding || 'same-track only')
     : (trackStatus.subStatusLabel || 'same-track only');
+  const modelLocked = item.absoluteReview?.modelPanel?.status === 'model-locked' ||
+    Boolean(item.governance?.modelLockedAt) ||
+    item.governance?.phase === 'human_open' ||
+    absolute.status === 'model-provisional' ||
+    absolute.status === 'locked';
   const absoluteReady = Number.isFinite(absolute.total);
-  const progressPanel = absoluteReady ? '' : renderV2ProgressPanel(item, escapeHtml);
+  const stillCollecting = !modelLocked && !absoluteReady;
+  const progressPanel = stillCollecting ? renderV2ProgressPanel(item, escapeHtml) : '';
 
-  if (!absoluteReady) {
+  if (stillCollecting) {
     return `
     ${progressPanel}
     <article class="v2-result-report" data-result-section="absolute-total">
@@ -57,7 +65,9 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
         <div><small>LOCKED / ABSOLUTE RESULT</small><h3>三维绝对分：Agent 本身做得怎么样</h3></div>
         <strong>${value(absolute.total)}<small>/100</small></strong>
       </header>
-      <p>总置信度 ${value(absolute.confidence)}。该分数由服务端锁定；Replica results never enter the absolute total.</p>
+      <p>${absoluteReady
+        ? `总置信度 ${value(absolute.confidence)}。该分数由服务端锁定；Replica results never enter the absolute total.`
+        : '模型四席已锁定；绝对分将在人工终审（或跳过人工）后写入。当前不会显示 Claude Code / Cursor 等复刻进度，除非 Phase 3 Replica 已接入。'}</p>
       <ul class="v2-result-dimensions">${dimensionRows}</ul>
     </article>
     <article class="v2-rating-strip" data-result-section="rating-status">
@@ -147,7 +157,13 @@ function renderFinalizePanel(item, trackStatus, escapeHtml) {
 }
 
 function replicaTrackCopy(item, pendingReplica) {
-  if (pendingReplica) return '绝对分单独成立；没有有效 Replica 时不把“待复刻”解释为胜出。';
+  if (pendingReplica) {
+    const status = item.resultV2?.replica?.status;
+    if (status === 'disabled') {
+      return '本机未接入 Phase 3 Replica 服务（Claude Code / Cursor / Doubao 不会在此跑），复刻轨按「待复刻」结算；绝对分仍可单独完成。';
+    }
+    return '绝对分单独成立；没有有效 Replica 时不把“待复刻”解释为胜出。';
+  }
   const trackPhase = item.replicaHumanReview?.trackPhase;
   if (trackPhase === 'open') {
     return '模型 Arena 已密封评分，复刻人工评审进行中；<a href="/judge.html">前往复刻人工评审台 ↗</a>。';

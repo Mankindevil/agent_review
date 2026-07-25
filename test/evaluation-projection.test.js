@@ -129,6 +129,19 @@ function unsafeEvaluation() {
   };
 }
 
+test('treats disabled Replica as settled so the desk waits on absolute only', () => {
+  const source = unsafeEvaluation();
+  source.replicaArena = { status: 'disabled' };
+  source.governance = { phase: 'human_open', modelLockedAt: '2026-07-24T10:05:00.000Z' };
+  const projection = projectEvaluation(source, { audience: 'public' });
+  assert.deepEqual(projection.trackStatus, {
+    overall: 'in_progress',
+    subStatus: 'waiting_absolute',
+    subStatusLabel: '等绝对分',
+    canFinalize: false
+  });
+});
+
 test('constructs a public V2 projection from explicit allow-listed fields', () => {
   const source = unsafeEvaluation();
   const projection = projectEvaluation(source, { audience: 'public' });

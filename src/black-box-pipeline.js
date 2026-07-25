@@ -1175,7 +1175,29 @@ async function openReplicaTrackAfterModelLock(record, context, services) {
 }
 
 async function openReplicaTrackAfterModelLockUnsafe(record, context, services) {
-  if (record.replicaArena?.status !== 'sealed') return record;
+  // Phase 3 not wired / disabled → settle replica track as unavailable so the
+  // dual-track UI does not keep saying 「等双轨」forever.
+  if (record.replicaArena?.status !== 'sealed') {
+    if (record.governance?.replicaUnavailableAt) return record;
+    return await mutateCurrent(context, (current) => withRunProgress({
+      ...current,
+      governance: {
+        ...current.governance,
+        replicaUnavailableAt: current.governance?.replicaUnavailableAt || context.now()
+      },
+      resultV2: {
+        ...(current.resultV2 || {}),
+        replica: { status: 'unavailable' }
+      }
+    }, context, {
+      entry: {
+        level: 'info',
+        source: 'REPLICA',
+        phase: 'replica-human',
+        text: 'Replica 轨未启用或未密封，标记为待复刻'
+      }
+    }));
+  }
   const validReplicaIds = validReplicaIdsFor(record.replicaArena);
 
   if (validReplicaIds.length === 0) {
