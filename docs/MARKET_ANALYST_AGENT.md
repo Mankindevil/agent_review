@@ -59,8 +59,8 @@ Copy-Item .env.example .env
 | A2A | `MARKET_AGENT_PRINCIPAL_ID` | 稳定、非密钥的所有者标识；轮换 Bearer token 时保持不变 |
 | A2A | `MARKET_AGENT_ALLOW_INSECURE_LOOPBACK` | 仅本机开发可设 `true` 以允许无 token |
 | 模型 | `MARKET_REPORT_MODEL_ENABLED` | 是否启用可选叙事改写 |
-| 模型 | `OPENAI_BASE_URL`, `OPENAI_API_KEY` | OpenAI-compatible 接口；不是金融数据源 |
-| 模型 | `MARKET_REPORT_MODEL` | 模型名 |
+| 模型 | `MARKET_REPORT_MODEL` | 底模名；默认 DeepSeek V4 Pro（继承 `REVIEW_MODEL_DEEPSEEK` / `CLAUDE_ARK_MODEL` / `DEEPSEEK_CLAUDE_MODEL`，否则 `deepseek-v4-pro[1m]`） |
+| 模型 | `MARKET_REPORT_BASE_URL`, `MARKET_REPORT_API_KEY` | 可选专用 OpenAI-compatible 接口；未设置且模型为 DeepSeek V4 Pro 时使用 `ARK_*`，否则回退 `OPENAI_*` |
 | 模型 | `MARKET_REPORT_MODEL_PRICING_JSON` | 带版本的输入/输出 token 单价 JSON |
 | SMTP | `MARKET_REPORT_EMAIL_TO`, `MARKET_REPORT_EMAIL_FROM` | 逗号分隔收件人和发件人 |
 | SMTP | `MARKET_REPORT_SMTP_HOST`, `MARKET_REPORT_SMTP_PORT` | SMTP 地址和端口 |

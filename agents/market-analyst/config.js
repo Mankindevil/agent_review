@@ -8,6 +8,43 @@ const positive = (value, fallback) => {
   return Number.isSafeInteger(number) && number > 0 ? number : fallback;
 };
 
+const DEFAULT_DEEPSEEK_V4_PRO = 'deepseek-v4-pro[1m]';
+
+function resolveMarketModel(env = {}) {
+  const name = String(
+    env.MARKET_REPORT_MODEL
+    || env.REVIEW_MODEL_DEEPSEEK
+    || env.CLAUDE_ARK_MODEL
+    || env.DEEPSEEK_CLAUDE_MODEL
+    || DEFAULT_DEEPSEEK_V4_PRO
+  ).trim() || DEFAULT_DEEPSEEK_V4_PRO;
+  const explicitBase = String(env.MARKET_REPORT_BASE_URL || '').trim().replace(/\/$/, '');
+  const explicitKey = String(env.MARKET_REPORT_API_KEY || '');
+  const arkBase = String(env.ARK_BASE_URL || '').trim().replace(/\/$/, '');
+  const arkKey = String(env.ARK_API_KEY || '');
+  const openaiBase = String(env.OPENAI_BASE_URL || '').trim().replace(/\/$/, '');
+  const openaiKey = String(env.OPENAI_API_KEY || '');
+  const deepseekNames = new Set(
+    [
+      env.REVIEW_MODEL_DEEPSEEK,
+      env.CLAUDE_ARK_MODEL,
+      env.DEEPSEEK_CLAUDE_MODEL,
+      DEFAULT_DEEPSEEK_V4_PRO,
+      'deepseek-v4-pro'
+    ]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+  );
+  const prefersArk = !explicitBase && deepseekNames.has(name) && Boolean(arkBase && arkKey);
+  return {
+    enabled: truthy(env.MARKET_REPORT_MODEL_ENABLED),
+    baseUrl: explicitBase || (prefersArk ? arkBase : openaiBase),
+    apiKey: explicitKey || (prefersArk ? arkKey : openaiKey),
+    name,
+    pricing: env.MARKET_REPORT_MODEL_PRICING_JSON || ''
+  };
+}
+
 export function marketAgentConfig(env = process.env, cwd = process.cwd()) {
   const to = String(env.MARKET_REPORT_EMAIL_TO || '')
     .split(',').map((item) => item.trim()).filter(Boolean);
@@ -29,13 +66,7 @@ export function marketAgentConfig(env = process.env, cwd = process.cwd()) {
     cacheDays: positive(env.MARKET_REPORT_CACHE_DAYS, 30),
     minLiquidityCny: positive(env.MARKET_REPORT_MIN_LIQUIDITY_CNY, 20_000_000),
     panda,
-    model: {
-      enabled: truthy(env.MARKET_REPORT_MODEL_ENABLED),
-      baseUrl: String(env.OPENAI_BASE_URL || ''),
-      apiKey: String(env.OPENAI_API_KEY || ''),
-      name: env.MARKET_REPORT_MODEL || env.REVIEW_MODEL_OPENAI || 'g5.4',
-      pricing: env.MARKET_REPORT_MODEL_PRICING_JSON || ''
-    },
+    model: resolveMarketModel(env),
     email: {
       to,
       from: String(env.MARKET_REPORT_EMAIL_FROM || ''),

@@ -21,10 +21,51 @@ test('builds non-secret market agent configuration with Shanghai defaults', () =
   assert.equal(config.public.accessProtected, true);
   assert.equal('accessToken' in config.public, false);
   assert.equal('password' in config.public.smtp, false);
+  assert.equal(config.model.name, 'deepseek-v4-pro[1m]');
   assert.throws(
     () => marketAgentConfig({ MARKET_AGENT_PRINCIPAL_ID: 'contains spaces' }),
     /principal/i
   );
+});
+
+test('market narrative model defaults to DeepSeek V4 Pro over Ark credentials', () => {
+  const config = marketAgentConfig({
+    MARKET_REPORT_MODEL_ENABLED: 'true',
+    REVIEW_MODEL_DEEPSEEK: 'ep-deepseek-v4-pro',
+    ARK_BASE_URL: 'https://ark.example.com/api/v3',
+    ARK_API_KEY: 'ark-secret',
+    OPENAI_BASE_URL: 'https://llmx.example.com/v1',
+    OPENAI_API_KEY: 'openai-secret',
+    REVIEW_MODEL_OPENAI: 'g5.4'
+  }, 'C:\\repo');
+  assert.equal(config.model.enabled, true);
+  assert.equal(config.model.name, 'ep-deepseek-v4-pro');
+  assert.equal(config.model.baseUrl, 'https://ark.example.com/api/v3');
+  assert.equal(config.model.apiKey, 'ark-secret');
+});
+
+test('market narrative model honors explicit market overrides and non-DeepSeek OpenAI routes', () => {
+  const overridden = marketAgentConfig({
+    MARKET_REPORT_MODEL: 'ep-deepseek-v4-pro',
+    MARKET_REPORT_BASE_URL: 'https://market-proxy.example.com/v1',
+    MARKET_REPORT_API_KEY: 'market-secret',
+    REVIEW_MODEL_DEEPSEEK: 'ep-deepseek-v4-pro',
+    ARK_BASE_URL: 'https://ark.example.com/api/v3',
+    ARK_API_KEY: 'ark-secret'
+  }, 'C:\\repo');
+  assert.equal(overridden.model.baseUrl, 'https://market-proxy.example.com/v1');
+  assert.equal(overridden.model.apiKey, 'market-secret');
+
+  const openaiRoute = marketAgentConfig({
+    MARKET_REPORT_MODEL: 'g5.4',
+    OPENAI_BASE_URL: 'https://llmx.example.com/v1',
+    OPENAI_API_KEY: 'openai-secret',
+    ARK_BASE_URL: 'https://ark.example.com/api/v3',
+    ARK_API_KEY: 'ark-secret'
+  }, 'C:\\repo');
+  assert.equal(openaiRoute.model.name, 'g5.4');
+  assert.equal(openaiRoute.model.baseUrl, 'https://llmx.example.com/v1');
+  assert.equal(openaiRoute.model.apiKey, 'openai-secret');
 });
 
 test('accepts declared operations and rejects arbitrary Panda methods', () => {

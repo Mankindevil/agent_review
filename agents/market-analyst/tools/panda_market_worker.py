@@ -44,6 +44,10 @@ POTENTIAL_WEIGHTS = {"trend": .25, "theme": .15, "quality": .20, "valuation": .1
 def _records(result):
     if result is None:
         return []
+    # panda-data get_last_trade_date returns Optional[str], not a frame.
+    if isinstance(result, (str, bytes)):
+        text = result.decode("utf-8") if isinstance(result, bytes) else result
+        return [{"date": text}]
     if hasattr(result, "to_dict"):
         output = result.to_dict(orient="records")
     elif isinstance(result, dict):

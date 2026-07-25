@@ -52,7 +52,8 @@ class FakePanda:
         return FakeFrame(rows)
 
     def get_last_trade_date(self, exchange="SH"):
-        return FakeFrame([{"date": "20260723" if exchange == "SH" else "20260722"}])
+        # Real panda-data==0.0.12 returns Optional[str], not a frame.
+        return "20260723" if exchange == "SH" else "20260722"
 
     def get_trade_list(self, date, exchange="SH"):
         return FakeFrame([{"symbol": symbol, "date": date} for symbol in self.symbols])
@@ -2016,6 +2017,16 @@ class MarketWorkerTests(unittest.TestCase):
             self.assertTrue(conclusion["windows"])
             self.assertIn("stale", conclusion)
             self.assertIn("missing", conclusion)
+
+
+class RecordsNormalizationTests(unittest.TestCase):
+    def test_records_wraps_scalar_last_trade_date_strings(self):
+        self.assertEqual(worker._records(None), [])
+        self.assertEqual(worker._records("20260724"), [{"date": "20260724"}])
+        self.assertEqual(
+            worker._records(FakeFrame([{"date": "20260723"}])),
+            [{"date": "20260723"}],
+        )
 
 
 if __name__ == "__main__":
