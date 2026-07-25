@@ -4,6 +4,7 @@ import {
   computeSubcriterionConfidence,
   computeTotalConfidence
 } from './confidence.js';
+import { releaseReplicaArena } from './arena-release.js';
 import { RUBRIC_V1 } from './rubric.js';
 
 const DIMENSION_IDS = ['scenarioValue', 'professionalism', 'agentCapability'];
@@ -36,14 +37,17 @@ export function calculateAbsoluteResult(evaluation, rubric = RUBRIC_V1, options 
       const objective = dimensionId === 'agentCapability'
         ? objectiveLeaf(evaluation, leafId)
         : null;
+      const applicable = objective ? objective.applicable : true;
       return {
         id,
         weight,
-        applicable: objective ? objective.applicable : true,
+        applicable,
         model,
         human,
         objective,
-        confidence: leafConfidence(evaluation, id, model, human, objective)
+        confidence: applicable
+          ? leafConfidence(evaluation, id, model, human, objective)
+          : { status: 'unavailable', value: null, missingCheckIds: [] }
       };
     });
     const applicable = leaves.filter((leaf) => leaf.applicable);
@@ -69,24 +73,30 @@ export function calculateAbsoluteResult(evaluation, rubric = RUBRIC_V1, options 
       id: leaf.id.replace('.', '_'),
       weight: leaf.weight,
       applicable: true,
-      confidence: leaf.confidence
+      confidence: {
+        status: leaf.confidence.status,
+        value: leaf.confidence.value
+      }
     })));
     dimensions[dimensionId] = {
       score: scoreValue,
       confidence: confidence.value,
       leaves: Object.fromEntries(leaves.map((leaf) => [leaf.id, {
-        score: HUMAN_SEAT_DIMENSIONS.has(dimensionId)
-          ? combineScenarioOrProfessional({
-            model: leaf.model.score,
-            human: leaf.human.score
-          })
-          : combineCapability({
-            objective: leaf.objective.score,
-            model: leaf.model.score,
-            human: leaf.human.score
-          }),
+        score: !leaf.applicable
+          ? null
+          : HUMAN_SEAT_DIMENSIONS.has(dimensionId)
+            ? combineScenarioOrProfessional({
+              model: leaf.model.score,
+              human: leaf.human.score
+            })
+            : combineCapability({
+              objective: leaf.objective.score,
+              model: leaf.model.score,
+              human: leaf.human.score
+            }),
         confidence: leaf.confidence.value,
-        applicable: leaf.applicable
+        applicable: leaf.applicable,
+        missingCheckIds: leaf.confidence.missingCheckIds
       }])),
       seats: {
         model: modelSeat,
@@ -116,8 +126,12 @@ export function calculateAbsoluteResult(evaluation, rubric = RUBRIC_V1, options 
     dimensions,
     total: DIMENSION_IDS.reduce((sum, id) => sum + dimensions[id].score, 0) / 3,
     confidence: totalConfidence.value,
-    evidenceGaps: allLeaves.filter((leaf) => leaf.confidence === 0).map((leaf) => leaf.id),
-    lowConfidenceLeaves: allLeaves.filter((leaf) => leaf.confidence < 0.6).map((leaf) => leaf.id),
+    evidenceGaps: allLeaves.filter((leaf) =>
+      leaf.applicable && leaf.missingCheckIds.length > 0
+    ).map((leaf) => leaf.id),
+    lowConfidenceLeaves: allLeaves.filter((leaf) =>
+      leaf.applicable && leaf.confidence < 0.6
+    ).map((leaf) => leaf.id),
     lockedAt,
     sourceHashes: {
       rubricHash: evaluation.governance?.rubricHash ?? null,
@@ -131,21 +145,20 @@ export function lockAbsoluteResult(evaluation, result, actor) {
   assertHumanReviewComplete(evaluation);
   const key = requiredText(actor?.idempotencyKey, 'idempotency key');
   const actorId = requiredText(actor?.principalId, 'actor identity');
-  const payload = canonical({ ...result, resultHash: undefined });
+  const requestPayloadHash = hash(canonical(result ?? null));
   const existing = evaluation.resultV2?.absolute;
   if (evaluation.governance?.absoluteLockedAt || existing?.status === 'locked') {
     const receipt = evaluation.governance.absoluteLockReceipt;
-    if (receipt?.key === key && receipt.payloadHash === hash(payload)) return existing;
+    if (receipt?.key === key && receipt.payloadHash === requestPayloadHash) return existing;
     throw conflict('absolute result is already locked with a different idempotency payload');
   }
-  if (!result || result.status !== 'locked') throw new TypeError('absolute result must be calculated first');
-  if (result.sourceHashes?.rubricHash !== (evaluation.governance?.rubricHash ?? null) ||
-      result.sourceHashes?.configHash !== (evaluation.governance?.configHash ?? null)) {
-    throw conflict('rubric or configuration changed before absolute lock');
-  }
+  // Absolute totals are derived only from the locked evaluation record. The
+  // caller-provided result remains a compatibility argument and is never used.
+  const calculated = calculateAbsoluteResult(evaluation);
+  const payload = canonical({ ...calculated, resultHash: undefined });
   const resultHash = hash(payload);
   const locked = deepFreeze({
-    ...structuredClone(result),
+    ...structuredClone(calculated),
     resultHash
   });
   evaluation.resultV2 = {
@@ -157,13 +170,24 @@ export function lockAbsoluteResult(evaluation, result, actor) {
     phase: 'absolute_locked',
     absoluteLockedAt: locked.lockedAt,
     resultHash,
-    absoluteLockReceipt: { key, payloadHash: resultHash }
+    absoluteLockReceipt: { key, payloadHash: requestPayloadHash, resultHash }
   };
   appendAudit(evaluation, 'absolute-result-locked', actorId, {
     resultHash,
     idempotencyKey: key
   });
   return locked;
+}
+
+export async function lockAndReleaseAbsoluteResult(evaluation, services, actor) {
+  const absolute = lockAbsoluteResult(evaluation, undefined, actor);
+  const released = await releaseReplicaArena(evaluation, services);
+  Object.assign(evaluation, released);
+  return {
+    absolute,
+    replica: evaluation.resultV2.replica,
+    rating: evaluation.resultV2.rating
+  };
 }
 
 function modelLeavesFor(evaluation) {
@@ -199,9 +223,11 @@ function humanLeavesFor(evaluation) {
 
 function objectiveLeaf(evaluation, leafId) {
   const metric = evaluation.objectiveCapability?.metrics?.find((item) => item.id === leafId);
-  if (!metric || metric.applicable !== true || !Number.isFinite(metric.score)) {
+  if (!metric || typeof metric.applicable !== 'boolean') {
     throw new TypeError(`objective metric is incomplete: ${leafId}`);
   }
+  if (!metric.applicable) return { applicable: false };
+  if (!Number.isFinite(metric.score)) throw new TypeError(`objective metric is incomplete: ${leafId}`);
   return {
     applicable: true,
     score: score(metric.score, 'objective metric score'),
@@ -225,16 +251,22 @@ function leafConfidence(evaluation, id, model, human, objective) {
   const grades = new Map((evaluation.evidenceManifest?.items || []).map((item) => [
     item.evidenceId, item.grade
   ]));
-  return computeSubcriterionConfidence({
+  const normalizedChecks = [...checks].map(([checkId, evidenceIds]) => ({
+    id: checkId.replace(/[^A-Za-z0-9_-]/gu, '_'),
+    evidenceGrades: evidenceIds.map((evidenceId) => grades.get(evidenceId)).filter(Boolean)
+  }));
+  return {
+    ...computeSubcriterionConfidence({
     stage: 'final',
-    checks: [...checks].map(([checkId, evidenceIds]) => ({
-      id: checkId.replace(/[^A-Za-z0-9_-]/gu, '_'),
-      evidenceGrades: evidenceIds.map((evidenceId) => grades.get(evidenceId)).filter(Boolean)
-    })),
+    checks: normalizedChecks,
     modelScores: model.scores,
     humanScores: human.scores,
     modelConfidences: model.confidences
-  });
+    }),
+    missingCheckIds: normalizedChecks
+      .filter((check) => check.evidenceGrades.length === 0)
+      .map((check) => check.id)
+  };
 }
 
 function assertModelLocked(evaluation) {
@@ -243,9 +275,21 @@ function assertModelLocked(evaluation) {
       panel.primary.length !== 4) {
     throw conflict('four model seats must be locked before absolute result calculation');
   }
-  if ((panel.disputedSubcriterionIds || []).length > 0 && !panel.arbitration) {
+  if (!hasCompletedArbitration(panel)) {
     throw conflict('required fifth-model decisions must be complete');
   }
+}
+
+function hasCompletedArbitration(panel) {
+  const disputed = panel.disputedSubcriterionIds || [];
+  if (!disputed.length) return true;
+  const reviews = panel.arbitration?.reviews;
+  return Array.isArray(reviews) &&
+    sameMembers(reviews.map((review) => review?.subcriterionId), disputed) &&
+    reviews.every((review) => Number.isFinite(review.score) &&
+      review.score >= 0 && review.score <= 100 &&
+      Number.isFinite(review.confidence) &&
+      review.confidence >= 0 && review.confidence <= 1);
 }
 
 function assertHumanReviewComplete(evaluation) {
@@ -330,6 +374,13 @@ function assertIso(value, name) {
 
 function conflict(message) {
   return Object.assign(new Error(message), { statusCode: 409 });
+}
+
+function sameMembers(actual, expected) {
+  return Array.isArray(actual) && Array.isArray(expected) &&
+    actual.length === expected.length &&
+    new Set(actual).size === actual.length &&
+    actual.every((item) => expected.includes(item));
 }
 
 function deepFreeze(value) {

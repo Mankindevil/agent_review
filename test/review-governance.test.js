@@ -71,6 +71,13 @@ test('opens human review only after four model reviews and required fifth decisi
   const fifthRequired = evaluation();
   fifthRequired.absoluteReview.modelPanel.disputedSubcriterionIds = [leaves[0]];
   assert.throws(() => advanceGovernance(fifthRequired), /fifth|arbitration|model/i);
+
+  const incompleteFifth = evaluation();
+  incompleteFifth.absoluteReview.modelPanel.disputedSubcriterionIds = [leaves[0]];
+  incompleteFifth.absoluteReview.modelPanel.arbitration = {
+    reviews: [{ subcriterionId: leaves[0] }]
+  };
+  assert.throws(() => advanceGovernance(incompleteFifth), /fifth|arbitration|model/i);
 });
 
 test('assigns distinct primary judges, preserves assignment scopes, and validates drafts', () => {

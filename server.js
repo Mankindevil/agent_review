@@ -33,7 +33,8 @@ import {
   assignHumanReviewer,
   recuseHumanReviewer,
   saveHumanDraft,
-  submitHumanReview
+  submitHumanReview,
+  lockAndReleaseAbsoluteResult
 } from './src/review-governance.js';
 import { getAccessAuditStore } from './src/access-audit-store.js';
 import {
@@ -236,6 +237,40 @@ export const server = createServer(async (request, response) => {
         audience: 'admin',
         principal
       }));
+    }
+    const absoluteLockMatch =
+      url.pathname.match(/^\/api\/admin\/evaluations\/([^/]+)\/lock-absolute$/);
+    if (request.method === 'POST' && absoluteLockMatch) {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const item = requireV2Evaluation(absoluteLockMatch[1]);
+      const principal = requireRole(authenticatePrincipal(request, item, process.env), 'admin');
+      const idempotencyKey = requiredIdempotencyKey(request);
+      const payload = await readJsonBody(request, 16_000);
+      const fingerprint = governanceIdempotencyFingerprint(
+        item.id, 'lock-absolute', principal.principalId, payload
+      );
+      const committed = await store.mutate(item.id, undefined, async (current) => {
+        const replies = governanceIdempotency(current, 'absoluteLocks');
+        if (idempotencyResponse(replies, idempotencyKey, fingerprint)) return current;
+        const result = await lockAndReleaseAbsoluteResult(current, replicaReleaseServices(), {
+          principalId: principal.principalId,
+          idempotencyKey
+        });
+        replies[idempotencyKey] = {
+          fingerprint,
+          response: {
+            absolute: result.absolute,
+            replica: result.replica,
+            rating: result.rating,
+            phase: current.governance.phase
+          }
+        };
+        return current;
+      });
+      return json(response, 200, idempotencyResponse(
+        governanceIdempotency(committed, 'absoluteLocks'), idempotencyKey, fingerprint
+      ));
     }
     if (request.method === 'GET' && url.pathname === '/api/review-assignments') {
       response.setHeader('cache-control', 'no-store');
@@ -545,6 +580,23 @@ function requireV2Evaluation(evaluationId) {
 function governancePrincipal(request) {
   const item = store.list().find((candidate) => candidate.schemaVersion === 2);
   return requireRole(authenticatePrincipal(request, item, process.env), ['judge', 'admin']);
+}
+
+function replicaReleaseServices() {
+  return {
+    evidenceVaultFactory: (evaluationId) => {
+      const key = copyEvidenceEncryptionKey(blackBoxRuntimeConfig);
+      try {
+        return new EvidenceVault({
+          root: blackBoxRuntimeConfig.evidenceRoot,
+          evaluationId,
+          key
+        });
+      } finally {
+        key.fill(0);
+      }
+    }
+  };
 }
 
 function assignmentForPrincipal(evaluation, principal, requestedId = null) {

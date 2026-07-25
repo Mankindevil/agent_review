@@ -143,7 +143,7 @@ test('releases a sealed arena using the locked absolute result without mutation'
 
   const publicView = projectEvaluation(released, { audience: 'public' });
   assert.deepEqual(publicView.governance, {
-    phase: 'absolute_locked',
+    phase: 'final',
     absoluteLockedAt: '2026-07-25T12:00:00.000Z',
     resultHash: 'a'.repeat(64),
     replicaReleasedAt: '2026-07-25T12:01:00.000Z'

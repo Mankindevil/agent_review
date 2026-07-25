@@ -4,7 +4,8 @@ import {
   calculateAbsoluteResult,
   combineCapability,
   combineScenarioOrProfessional,
-  lockAbsoluteResult
+  lockAbsoluteResult,
+  lockAndReleaseAbsoluteResult
 } from '../src/result-v2.js';
 import { RUBRIC_V1 } from '../src/rubric.js';
 
@@ -36,18 +37,19 @@ test('combines fixed score seats without trusting client totals', () => {
   assert.equal(result.dimensions.agentCapability.provisional, false);
 });
 
-test('locks a canonical absolute result once and rejects a different idempotent payload', () => {
+test('locks only a server-calculated absolute result despite a caller-supplied total', () => {
   const evaluation = completeEvaluation();
   const result = calculateAbsoluteResult(evaluation, RUBRIC_V1, {
     now: () => '2026-07-25T12:00:00.000Z'
   });
   const actor = { principalId: 'admin_1', idempotencyKey: 'absolute-lock-1' };
 
-  const locked = lockAbsoluteResult(evaluation, result, actor);
+  const locked = lockAbsoluteResult(evaluation, { ...result, total: 0 }, actor);
   assert.equal(locked.status, 'locked');
+  assert.equal(locked.total, 235 / 3);
   assert.equal(locked.resultHash.length, 64);
   assert.equal(evaluation.governance.phase, 'absolute_locked');
-  assert.equal(evaluation.governance.absoluteLockedAt, result.lockedAt);
+  assert.equal(evaluation.governance.absoluteLockedAt, locked.lockedAt);
   assert.equal(evaluation.governance.resultHash, locked.resultHash);
   assert.equal(evaluation.resultV2.absolute, locked);
   assert.equal(evaluation.auditEvents.at(-1).type, 'absolute-result-locked');
@@ -55,11 +57,81 @@ test('locks a canonical absolute result once and rejects a different idempotent 
     locked.dimensions.scenarioValue.score = 0;
   }, TypeError);
 
-  assert.strictEqual(lockAbsoluteResult(evaluation, result, actor), locked);
   assert.throws(
-    () => lockAbsoluteResult(evaluation, { ...result, total: 0 }, actor),
+    () => lockAbsoluteResult(evaluation, { ...result, total: 1 }, actor),
     /idempotency|payload|lock/i
   );
+  assert.throws(
+    () => lockAbsoluteResult(evaluation, result, {
+      ...actor,
+      idempotencyKey: 'absolute-lock-2'
+    }),
+    /idempotency|payload|lock/i
+  );
+});
+
+test('redistributes objective seat weights when an objective metric is not applicable', () => {
+  const evaluation = completeEvaluation();
+  const [notApplicable, changed] = evaluation.objectiveCapability.metrics;
+  notApplicable.applicable = false;
+  notApplicable.score = null;
+  changed.score = 60;
+
+  const result = calculateAbsoluteResult(evaluation, RUBRIC_V1);
+  const applicableWeight = Object.values(RUBRIC_V1.dimensions.agentCapability)
+    .reduce((sum, weight) => sum + weight, 0) - notApplicable.weight;
+  const expectedObjective = (
+    60 * changed.weight +
+    evaluation.objectiveCapability.metrics.slice(2)
+      .reduce((sum, metric) => sum + metric.score * metric.weight, 0)
+  ) / applicableWeight;
+
+  assert.equal(result.dimensions.agentCapability.seats.objective, expectedObjective);
+  assert.equal(
+    result.dimensions.agentCapability.leaves['agentCapability.testSuccess'].applicable,
+    false
+  );
+});
+
+test('includes compiled checks without evidence in final evidence gaps', () => {
+  const evaluation = completeEvaluation();
+  for (const run of evaluation.absoluteReview.modelPanel.primary) {
+    run.reviews[0].checkEvidence[0].evidenceIds = [];
+    run.reviews[0].checkEvidence.push({
+      checkId: 'compiled-but-uncited',
+      evidenceIds: []
+    });
+  }
+  for (const review of evaluation.humanReviews) {
+    review.scores = {
+      'scenarioValue.agentNecessity': {
+        checkEvidence: [{ checkId: 'compiled-but-uncited', evidenceIds: [] }]
+      }
+    };
+  }
+
+  const result = calculateAbsoluteResult(evaluation, RUBRIC_V1);
+  assert.equal(
+    result.dimensions.scenarioValue.leaves['scenarioValue.agentNecessity'].confidence,
+    0.46
+  );
+  assert.equal(result.evidenceGaps.includes('scenarioValue.agentNecessity'), true);
+  assert.equal(result.lowConfidenceLeaves.includes('scenarioValue.agentNecessity'), true);
+});
+
+test('locks and releases the Replica Arena to final pending status', async () => {
+  const evaluation = completeEvaluation();
+  evaluation.replicaArena = { status: 'sealed', runtimeSummaries: [] };
+
+  const result = await lockAndReleaseAbsoluteResult(evaluation, {}, {
+    principalId: 'admin_1',
+    idempotencyKey: 'absolute-lock-release-1'
+  });
+
+  assert.equal(result.absolute.status, 'locked');
+  assert.equal(result.replica.status, 'unavailable');
+  assert.equal(evaluation.governance.phase, 'final');
+  assert.equal(evaluation.resultV2.rating.label, '待复刻');
 });
 
 test('refuses an absolute lock until the model and human seats are complete', () => {

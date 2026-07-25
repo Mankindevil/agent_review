@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 
 export {
   calculateAbsoluteResult,
-  lockAbsoluteResult
+  lockAbsoluteResult,
+  lockAndReleaseAbsoluteResult
 } from './result-v2.js';
 
 const PHASES = new Set([
@@ -234,8 +235,17 @@ function modelReviewComplete(panel) {
   const disputed = Array.isArray(panel.disputedSubcriterionIds)
     ? panel.disputedSubcriterionIds
     : [];
-  return disputed.length === 0 || (panel.arbitration &&
-    sameMembers(panel.arbitration.reviews?.map((review) => review.subcriterionId), disputed));
+  return disputed.length === 0 || completedArbitration(panel.arbitration, disputed);
+}
+
+function completedArbitration(arbitration, disputed) {
+  const reviews = arbitration?.reviews;
+  return Array.isArray(reviews) &&
+    sameMembers(reviews.map((review) => review?.subcriterionId), disputed) &&
+    reviews.every((review) => Number.isFinite(review.score) &&
+      review.score >= 0 && review.score <= 100 &&
+      Number.isFinite(review.confidence) &&
+      review.confidence >= 0 && review.confidence <= 1);
 }
 
 function applicableLeaves(evaluation) {

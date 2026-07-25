@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto';
 import { runAnonymousArena as runAnonymousArenaDefault } from './arena.js';
 import {
   bootstrapReplicaAdvantage as bootstrapReplicaAdvantageDefault,
@@ -53,6 +54,7 @@ async function releaseSealedArena(evaluation, services) {
       code: 'PENDING_REPLICA',
       label: '待复刻'
     };
+    transitionToFinal(next, releasedAt, false);
     return next;
   }
 
@@ -101,7 +103,34 @@ async function releaseSealedArena(evaluation, services) {
     rating
   );
   next.resultV2.rating = rating;
+  transitionToFinal(next, releasedAt, true);
   return next;
+}
+
+function transitionToFinal(evaluation, at, replicaReleased) {
+  const from = evaluation.governance.phase;
+  if (replicaReleased) {
+    appendPhaseTransition(evaluation, from, 'replica_released', at);
+    appendPhaseTransition(evaluation, 'replica_released', 'final', at);
+  } else {
+    appendPhaseTransition(evaluation, from, 'final', at);
+  }
+  evaluation.governance.phase = 'final';
+}
+
+function appendPhaseTransition(evaluation, from, to, at) {
+  if (!Array.isArray(evaluation.auditEvents)) evaluation.auditEvents = [];
+  const previousEventHash = evaluation.auditEvents.at(-1)?.eventHash || null;
+  const event = {
+    eventId: `audit_${randomUUID().replaceAll('-', '')}`,
+    type: 'governance-phase-transition',
+    actorId: 'system',
+    at,
+    payloadHash: hash(canonical({ from, to })),
+    previousEventHash
+  };
+  event.eventHash = hash(canonical(event));
+  evaluation.auditEvents.push(event);
 }
 
 async function loadSealedArenaMaterials(evaluation, validReplicaIds, services) {
@@ -260,4 +289,18 @@ function assertIso(value, name) {
 
 function isIso(value) {
   return typeof value === 'string' && new Date(value).toISOString() === value;
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonical(value[key])}`
+    ).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hash(value) {
+  return createHash('sha256').update(value).digest('hex');
 }

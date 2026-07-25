@@ -204,7 +204,7 @@ function projectReplica(value, replicaArena, secrets, releaseAllowed, staleRelea
 }
 
 function hasAbsoluteLock(governance, absolute) {
-  return governance?.phase === 'absolute_locked' &&
+  return ['absolute_locked', 'replica_released', 'final'].includes(governance?.phase) &&
     typeof governance.absoluteLockedAt === 'string' &&
     /^[a-f0-9]{64}$/u.test(governance.resultHash || '') &&
     absolute?.status === 'locked' &&
