@@ -40,6 +40,8 @@ export function createEvaluationRecord(snapshot, options) {
     humanReviews: [],
     humanReviewAggregate: { status: 'pending', leaves: {} },
     replicaArena: { status: 'disabled' },
+    replicaHumanReviews: [],
+    replicaHumanReviewAggregate: null,
     resultV2: null,
     revision: 0,
     auditEvents: [],

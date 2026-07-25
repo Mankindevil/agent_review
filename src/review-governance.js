@@ -6,9 +6,26 @@ export {
   lockAndReleaseAbsoluteResult
 } from './result-v2.js';
 
+export {
+  DEFAULT_REPLICA_REVIEW_POLICY,
+  REPLICA_REVIEW_VISIBILITIES,
+  getReplicaReviewPolicy,
+  isReplicaReviewPolicyFrozen,
+  lockReplicaHumanReview,
+  setReplicaReviewPolicy,
+  submitReplicaHumanReview
+} from './replica-human-review.js';
+
+// The replica track runs in parallel with the absolute track above (see
+// docs/superpowers/specs/2026-07-26-parallel-replica-human-review-design.md):
+// absolute human review proceeds through human_open/human_arbitration while
+// the Replica track independently seals, scores, and locks. Neither track
+// requires the other's phase; `final` is only reached once both are ready.
 const PHASES = new Set([
   'waiting_model', 'human_open', 'human_arbitration', 'absolute_locked',
-  'replica_released', 'final'
+  'replica_released', 'final',
+  'replica_human_open', 'replica_human_arbitration', 'replica_human_locked',
+  'replica_unavailable'
 ]);
 const ROLES = new Set(['primary', 'arbitrator']);
 

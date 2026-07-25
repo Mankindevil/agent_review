@@ -68,6 +68,8 @@ test('creates the exact queued V2 evaluation record', () => {
     humanReviews: [],
     humanReviewAggregate: { status: 'pending', leaves: {} },
     replicaArena: { status: 'disabled' },
+    replicaHumanReviews: [],
+    replicaHumanReviewAggregate: null,
     resultV2: null,
     revision: 0,
     auditEvents: [],
