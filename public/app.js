@@ -15,6 +15,7 @@ import {
   parseExampleMarkdown,
   skillExamplesFromCard
 } from './example-import.js?v=20260725-examples1';
+import { renderV2Result as renderV2ResultView } from './result-v2.js';
 
 const state = { mode: 'demo', sourceType: 'direct', blackBoxEnabled: false, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), participantTokens: new Map(), pendingEvaluationId: null, skillRequestToken: 0, activeWorkTimer: null, activeWorkKey: null };
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -777,7 +778,12 @@ function showEvaluation(item) {
 }
 
 function renderResult(item) {
-  if (item.schemaVersion === 2) return renderV2Result(item);
+  return item.resultV2
+    ? renderV2ResultView(item, { escapeHtml })
+    : renderLegacyResult(item);
+}
+
+function renderLegacyResult(item) {
   const root = $('#result-content');
   if (item.status !== 'completed') {
     state.verdictRevealToken += 1;

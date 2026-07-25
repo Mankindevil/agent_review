@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>证据回放 · 锐评局</title>
+  <link rel="stylesheet" href="/evidence.css">
+</head>
+<body>
+  <main class="evidence-page">
+    <a class="evidence-back" href="/">← 返回评测</a>
+    <header><small>CHAIN OF CUSTODY / REDACTED REPLAY</small><h1>证据回放</h1><p>只展示当前身份获准读取、且已再次脱敏的证据内容。</p></header>
+    <form id="evidence-filters">
+      <label>测试类型<select id="evidence-filter-test-type"><option value="">全部</option></select></label>
+      <label>测试 ID<select id="evidence-filter-test-id"><option value="">全部</option></select></label>
+      <label>重复<select id="evidence-filter-repeat"><option value="">全部</option></select></label>
+      <label>轮次<select id="evidence-filter-turn"><option value="">全部</option></select></label>
+      <label>等级<select id="evidence-filter-grade"><option value="">全部</option></select></label>
+      <label>种类<select id="evidence-filter-kind"><option value="">全部</option></select></label>
+    </form>
+    <p id="evidence-status" role="status" aria-live="polite"></p>
+    <section id="evidence-list" aria-label="证据列表"></section>
+    <pre id="evidence-detail" tabindex="0">选择一条证据以查看脱敏内容。</pre>
+  </main>
+  <script type="module" src="/evidence.js"></script>
+</body>
+</html>

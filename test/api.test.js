@@ -11,6 +11,7 @@ import {
   createEvidenceManifestItem,
   createEvidenceRecord
 } from '../src/evidence.js';
+import { EvidenceVault } from '../src/evidence-vault.js';
 
 const {
   cachedRuntimeReadiness,
@@ -44,6 +45,8 @@ process.env.REVIEW_PRINCIPALS_JSON = JSON.stringify([{
 }]);
 process.env.REVIEW_GOVERNANCE_ENABLED = 'true';
 process.env.ACCESS_AUDIT_ROOT = path.join(tmpdir(), `agent-roast-audit-${process.pid}`);
+process.env.EVIDENCE_ROOT = path.join(tmpdir(), `agent-roast-evidence-${process.pid}`);
+process.env.EVIDENCE_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString('base64');
 const API_UNSECURED_JWT = 'eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ.';
 const V2_FIXTURE_PARTICIPANT_TOKEN = 'T'.repeat(43);
 const apiEvidenceRecord = createEvidenceRecord({
@@ -151,6 +154,7 @@ test.after(async () => {
   await rm(process.env.DATA_FILE, { force: true });
   await rm(`${process.env.DATA_FILE}.tmp`, { force: true });
   await rm(process.env.ACCESS_AUDIT_ROOT, { force: true, recursive: true });
+  await rm(process.env.EVIDENCE_ROOT, { force: true, recursive: true });
 });
 
 test('health endpoint responds', async () => {
@@ -591,6 +595,12 @@ test('fails closed for judge and admin elevation when review governance is disab
 
 test('records evidence-view audit events without returning vault content', async () => {
   const { readdir, readFile } = await import('node:fs/promises');
+  const vault = new EvidenceVault({
+    root: process.env.EVIDENCE_ROOT,
+    evaluationId: v2Fixture.id,
+    key: process.env.EVIDENCE_ENCRYPTION_KEY
+  });
+  await vault.put(apiEvidenceRecord);
   const response = await fetch(
     `${origin}/api/evaluations/${v2Fixture.id}/evidence/${apiEvidenceRecord.evidenceId}`,
     { headers: { authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}` } }
@@ -599,7 +609,7 @@ test('records evidence-view audit events without returning vault content', async
   assert.equal(response.status, 200);
   assert.equal(body.item.evidenceId, 'ev_api');
   assert.equal(body.item.recordHash, apiEvidenceRecord.recordHash);
-  assert.equal(Object.hasOwn(body.item, 'payload'), false);
+  assert.deepEqual(body.item.payload, { durationMs: 30 });
 
   const auditDir = process.env.ACCESS_AUDIT_ROOT;
   const auditFile = (await readdir(auditDir)).find((name) => name.endsWith('.ndjson'));
@@ -610,6 +620,25 @@ test('records evidence-view audit events without returning vault content', async
   assert.equal(lastEvent.evidenceId, 'ev_api');
   assert.equal(lastEvent.role, 'participant');
   assert.equal(JSON.stringify(lastEvent).includes('durationMs'), false);
+});
+
+test('publishes role-projected results and evidence manifests without score overrides', async () => {
+  const result = await fetch(
+    `${origin}/api/evaluations/${v2Fixture.id}/result?total=100&weight=1`
+  );
+  const resultBody = await result.json();
+  assert.equal(result.status, 200);
+  assert.equal(resultBody.resultV2.status, undefined);
+  assert.equal(JSON.stringify(resultBody).includes('api-seal-secret'), false);
+
+  const manifest = await fetch(
+    `${origin}/api/evaluations/${v2Fixture.id}/evidence-manifest`
+  );
+  const manifestBody = await manifest.json();
+  assert.equal(manifest.status, 200);
+  assert.equal(manifestBody.items.length, 1);
+  assert.equal(Object.hasOwn(manifestBody.items[0], 'payload'), false);
+  assert.equal(JSON.stringify(manifestBody).includes('durationMs'), false);
 });
 
 test('reports PandaAI data source status without credentials', async () => {
@@ -706,8 +735,8 @@ test('serves localized loading effects with reduced-motion support', async () =>
   assert.match(app, /review-card-queued/);
   const indexResponse = await fetch(`${origin}/`);
   const index = await indexResponse.text();
-  assert.match(index, /app\.js\?v=20260725-examples1/);
-  assert.match(index, /styles\.css\?v=20260725-examples1/);
+  assert.match(index, /app\.js\?v=20260725-results1/);
+  assert.match(index, /styles\.css\?v=20260725-results1/);
 });
 
 test('serves the feature-gated V2 chain-of-custody intake editor', async () => {

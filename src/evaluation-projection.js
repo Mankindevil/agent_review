@@ -467,6 +467,35 @@ export function assertNoSecretShape(value) {
   assertNoForbiddenShape(value, /(?:authorization|credential|password|secret|token|cookie|private|rawEvidence|signedUrl)/iu, 'secret');
 }
 
+export function projectEvidenceRecord(record, manifestItem, secrets = []) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    throw new TypeError('evidence record must be an object');
+  }
+  const manifest = validateEvidenceManifestItem(manifestItem);
+  if (
+    record.evidenceId !== manifest.evidenceId ||
+    record.recordHash !== manifest.recordHash ||
+    record.payloadHash !== manifest.payloadHash
+  ) {
+    throw new TypeError('evidence record does not match projected manifest commitment');
+  }
+  return {
+    evidenceId: manifest.evidenceId,
+    runId: manifest.runId,
+    grade: manifest.grade,
+    kind: manifest.kind,
+    testId: manifest.testId,
+    turnIndex: manifest.turnIndex,
+    repeatIndex: manifest.repeatIndex,
+    occurredAt: manifest.occurredAt,
+    summary: manifest.summary,
+    payloadHash: manifest.payloadHash,
+    recordHash: manifest.recordHash,
+    redaction: manifest.redaction,
+    payload: redactEvidence(structuredClone(record.payload), secrets)
+  };
+}
+
 function assertNoForbiddenShape(value, forbiddenKey, label) {
   const visit = (current) => {
     if (Array.isArray(current)) return current.forEach(visit);

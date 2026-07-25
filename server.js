@@ -21,7 +21,10 @@ import { getRuntimeStatus } from './src/runtime-status.js';
 import { createSkillBundle } from './src/runtimes.js';
 import { getPandaDataStatus, pandaDataConfig, queryPandaData } from './src/panda-data.js';
 import { resolveServerAddress } from './src/server-address.js';
-import { projectEvaluation } from './src/evaluation-projection.js';
+import {
+  projectEvaluation,
+  projectEvidenceRecord
+} from './src/evaluation-projection.js';
 import {
   authenticatePrincipal,
   isReviewGovernanceEnabled,
@@ -408,6 +411,15 @@ export const server = createServer(async (request, response) => {
     if (request.method === 'GET' && evidenceMatch) {
       return serveEvidenceItem(request, response, evidenceMatch[1], evidenceMatch[2]);
     }
+    const evidenceManifestMatch =
+      url.pathname.match(/^\/api\/evaluations\/([^/]+)\/evidence-manifest$/);
+    if (request.method === 'GET' && evidenceManifestMatch) {
+      return serveEvidenceManifest(request, response, evidenceManifestMatch[1]);
+    }
+    const resultMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/result$/);
+    if (request.method === 'GET' && resultMatch) {
+      return serveResult(request, response, resultMatch[1]);
+    }
     const skillMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/builds\/([^/]+)\/skill$/);
     if (request.method === 'GET' && skillMatch) {
       const item = store.get(skillMatch[1]);
@@ -725,13 +737,54 @@ async function serveEvidenceItem(request, response, evaluationId, evidenceId) {
   if (!manifestItem) {
     return json(response, 404, { error: 'Evidence does not exist' });
   }
+  const evidenceVault = evidenceVaultForRead(item.id);
+  const record = await evidenceVault.get(manifestItem.evidenceId, manifestItem.recordHash);
+  const projectedRecord = projectEvidenceRecord(record, manifestItem);
   await accessAuditStore.append({
     principalId: principal.principalId,
     evaluationId: item.id,
     evidenceId: manifestItem.evidenceId,
     role: principal.role
   });
-  return json(response, 200, { item: manifestItem });
+  return json(response, 200, { item: projectedRecord });
+}
+
+function serveEvidenceManifest(request, response, evaluationId) {
+  response.setHeader('cache-control', 'no-store');
+  const item = store.get(evaluationId);
+  if (!item || item.schemaVersion !== 2) {
+    return json(response, 404, { error: 'Evaluation does not exist' });
+  }
+  const options = projectionOptionsForRequest(item, request);
+  const projected = projectEvaluation(item, options);
+  return json(response, 200, {
+    evaluationId: item.id,
+    version: projected.evidenceManifest?.version,
+    items: projected.evidenceManifest?.items || []
+  });
+}
+
+function serveResult(request, response, evaluationId) {
+  response.setHeader('cache-control', 'no-store');
+  const item = store.get(evaluationId);
+  if (!item || item.schemaVersion !== 2) {
+    return json(response, 404, { error: 'Evaluation does not exist' });
+  }
+  return json(response, 200, projectForRequest(item, request));
+}
+
+function evidenceVaultForRead(evaluationId) {
+  const key = blackBoxRuntimeConfig.enabled
+    ? copyEvidenceEncryptionKey(blackBoxRuntimeConfig)
+    : process.env.EVIDENCE_ENCRYPTION_KEY;
+  const evidenceRoot = blackBoxRuntimeConfig.enabled
+    ? blackBoxRuntimeConfig.evidenceRoot
+    : path.resolve(root, process.env.EVIDENCE_ROOT || 'data/evidence');
+  try {
+    return new EvidenceVault({ root: evidenceRoot, evaluationId, key });
+  } finally {
+    if (Buffer.isBuffer(key)) key.fill(0);
+  }
 }
 
 function bearerToken(value) {

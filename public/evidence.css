@@ -1,0 +1,20 @@
+:root { --ink:#102a2a; --paper:#e8eeeb; --panel:#f7faf8; --line:#bdcbc6; --red:#f04d3f; --teal:#0e7c78; --lime:#b8ee68; --mono:Consolas,monospace; --body:Inter,"PingFang SC","Microsoft YaHei",sans-serif; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--paper); color:var(--ink); font-family:var(--body); }
+.evidence-page { width:min(1120px,92vw); margin:0 auto; padding:42px 0 72px; }
+.evidence-back { color:var(--teal); font:12px var(--mono); }
+header { border-bottom:2px solid var(--ink); padding:24px 0 16px; }
+header small { color:var(--red); font:800 10px var(--mono); letter-spacing:.1em; }
+h1 { margin:6px 0; font-size:clamp(40px,8vw,84px); line-height:.9; }
+header p { max-width:560px; color:#667875; font-size:14px; }
+#evidence-filters { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:18px 0; }
+label { display:grid; gap:5px; font:10px var(--mono); color:#667875; }
+select { min-width:0; border:1px solid var(--line); background:var(--panel); color:var(--ink); padding:10px; }
+select:focus-visible,.evidence-item:focus-visible { outline:3px solid rgba(14,124,120,.35); outline-offset:2px; }
+#evidence-status { min-height:1.5em; font:11px var(--mono); color:#667875; }
+#evidence-list { display:grid; gap:6px; }
+.evidence-item { width:100%; border:1px solid var(--line); border-left:4px solid var(--teal); background:var(--panel); padding:12px; text-align:left; cursor:pointer; font:11px/1.5 var(--mono); overflow-wrap:anywhere; }
+.evidence-item:hover { border-color:var(--ink); background:#fff; }
+#evidence-detail { min-height:190px; margin:18px 0 0; padding:16px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; border:1px solid var(--ink); background:#162021; color:var(--lime); font:11px/1.55 var(--mono); }
+@media (max-width:700px) { .evidence-page { width:min(94vw,1120px); padding-top:24px; } #evidence-filters { grid-template-columns:1fr; } }
+@media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto !important; transition-duration:.01ms !important; animation-duration:.01ms !important; } }
