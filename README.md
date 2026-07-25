@@ -353,6 +353,42 @@ REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 ]
 ```
 
+V2 正式黑盒评测使用独立的 `MODEL_REVIEW_PANEL_JSON`，不会把旧版
+`MODEL_REVIEWERS_JSON` 自动视为合格面板。它必须包含恰好 4 个
+`primary`、1 个身份不同的 `arbitrator`，以及可选的预登记
+`fallbacks`。每个 live reviewer 只能通过 `apiKeyEnv` 引用环境变量，
+不得在 JSON 中写入明文 `apiKey`。四个主审未全部得到有效结构化结果时，
+V2 不会锁定模型席；同一主审先以相同配置重试一次，随后才会使用尚未占席的
+预登记备用模型。
+
+```json
+{
+  "version": "panel-v1",
+  "primary": [
+    {
+      "id": "reviewer-a",
+      "name": "Reviewer A",
+      "kind": "openai-compatible",
+      "baseUrl": "https://models.example/v1",
+      "model": "model-a",
+      "apiKeyEnv": "REVIEWER_A_KEY"
+    }
+  ],
+  "arbitrator": {
+    "id": "reviewer-e",
+    "name": "Reviewer E",
+    "kind": "anthropic",
+    "baseUrl": "https://api.anthropic.com/v1/messages",
+    "model": "model-e",
+    "apiKeyEnv": "REVIEWER_E_KEY"
+  },
+  "fallbacks": []
+}
+```
+
+示例为节省篇幅只展示一个 `primary`；生产配置必须提供四个身份不同的
+主审。身份按 provider kind、Base URL host 与 model 的组合锁定。
+
 配置只引用 API key 的环境变量名；密钥本身不应写入 JSON。
 
 ## Prompt 文件

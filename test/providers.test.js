@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { configuredReviewers, DEFAULT_REVIEWERS, normalizeProfessionalReview, reviewAgent } from '../src/providers.js';
+import {
+  configuredReviewPanel,
+  configuredReviewers,
+  DEFAULT_REVIEWERS,
+  normalizeProfessionalReview,
+  requestJson,
+  requestReviewerWithFallback,
+  reviewAgent
+} from '../src/providers.js';
 
 const names = ['MODEL_REVIEWERS_JSON', 'OPENAI_BASE_URL', 'OPENAI_API_KEY', 'ARK_BASE_URL', 'ARK_API_KEY', 'REVIEW_MODEL_OPENAI', 'REVIEW_MODEL_ANTHROPIC', 'REVIEW_MODEL_DOUBAO', 'REVIEW_MODEL_DEEPSEEK', 'MODEL_REVIEW_TIMEOUT_MS', 'MODEL_REVIEW_MAX_TOKENS'];
 const original = Object.fromEntries(names.map((name) => [name, process.env[name]]));
@@ -75,4 +83,148 @@ test('rejects reviewer payloads that violate the scoring contract', () => {
   assert.throws(() => normalizeProfessionalReview({ ...valid, score: 130 }), /0–100/);
   assert.throws(() => normalizeProfessionalReview({ ...valid, dimensions: { ...valid.dimensions, reproducibility: '80' } }), /0–100/);
   assert.throws(() => normalizeProfessionalReview({ ...valid, comment: '' }), /comment/);
+});
+
+test('configures exactly four primary reviewers and one distinct arbitrator', () => {
+  const reviewer = (id, model) => ({
+    id,
+    name: id,
+    kind: 'openai-compatible',
+    baseUrl: `https://${id}.models.example/v1`,
+    model,
+    apiKeyEnv: `${id.toUpperCase()}_KEY`
+  });
+  const env = {
+    A_KEY: 'secret-a',
+    B_KEY: 'secret-b',
+    C_KEY: 'secret-c',
+    D_KEY: 'secret-d',
+    E_KEY: 'secret-e',
+    MODEL_REVIEW_PANEL_JSON: JSON.stringify({
+      version: 'panel-v1',
+      primary: [
+        reviewer('a', 'model-a'),
+        reviewer('b', 'model-b'),
+        reviewer('c', 'model-c'),
+        reviewer('d', 'model-d')
+      ],
+      arbitrator: reviewer('e', 'model-e'),
+      fallbacks: []
+    })
+  };
+
+  const panel = configuredReviewPanel(env);
+  assert.equal(panel.primary.length, 4);
+  assert.equal(panel.arbitrator.id, 'e');
+  assert.equal(new Set([
+    ...panel.primary.map((item) => item.identityKey),
+    panel.arbitrator.identityKey
+  ]).size, 5);
+  assert.equal(JSON.stringify(panel).includes('secret-a'), false);
+});
+
+test('fails closed for duplicate identities, literal secrets, or incomplete live panels', () => {
+  const base = {
+    id: 'same',
+    name: 'same',
+    kind: 'openai-compatible',
+    baseUrl: 'https://models.example/v1',
+    model: 'model-a',
+    apiKeyEnv: 'MODEL_KEY'
+  };
+  const makeEnv = (primary, arbitrator) => ({
+    MODEL_KEY: 'configured',
+    MODEL_REVIEW_PANEL_JSON: JSON.stringify({
+      version: 'panel-v1',
+      primary,
+      arbitrator,
+      fallbacks: []
+    })
+  });
+
+  assert.throws(
+    () => configuredReviewPanel(makeEnv(
+      [base, base, { ...base, id: 'c' }, { ...base, id: 'd' }],
+      { ...base, id: 'e' }
+    )),
+    /distinct|duplicate|identity/iu
+  );
+  assert.throws(
+    () => configuredReviewPanel(makeEnv(
+      [0, 1, 2, 3].map((index) => ({
+        ...base,
+        id: `p${index}`,
+        baseUrl: `https://p${index}.example/v1`,
+        apiKey: 'literal-secret'
+      })),
+      { ...base, id: 'e', baseUrl: 'https://e.example/v1' }
+    )),
+    /literal|apiKey/iu
+  );
+  assert.throws(
+    () => configuredReviewPanel(makeEnv([base], { ...base, id: 'e' })),
+    /four|4|primary/iu
+  );
+});
+
+test('provides five deterministic mock identities when no live panel is configured', () => {
+  const panel = configuredReviewPanel({});
+  assert.equal(panel.mode, 'demo');
+  assert.equal(panel.primary.length, 4);
+  assert.equal(panel.arbitrator.kind, 'mock');
+  assert.equal(new Set([
+    ...panel.primary.map((item) => item.identityKey),
+    panel.arbitrator.identityKey
+  ]).size, 5);
+});
+
+test('requestJson uses the shared live adapter and caller sampling limits', async () => {
+  const originalFetch = globalThis.fetch;
+  let body;
+  globalThis.fetch = async (_url, options) => {
+    body = JSON.parse(options.body);
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: '{"ok":true}' } }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  process.env.PANEL_TEST_KEY = 'test-secret';
+  try {
+    const result = await requestJson({
+      id: 'panel',
+      name: 'Panel',
+      kind: 'openai-compatible',
+      baseUrl: 'https://models.example/v1',
+      model: 'model-v1',
+      apiKeyEnv: 'PANEL_TEST_KEY'
+    }, 'system', 'prompt', undefined, {
+      seed: 77,
+      temperature: 0,
+      maxTokens: 4321
+    });
+    assert.deepEqual(result, { ok: true });
+    assert.equal(body.max_tokens, 4321);
+    assert.equal(body.seed, 77);
+  } finally {
+    delete process.env.PANEL_TEST_KEY;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('retries the same reviewer before using one pre-registered fallback', async () => {
+  const calls = [];
+  const result = await requestReviewerWithFallback({
+    reviewer: { id: 'primary' },
+    fallbacks: [{ id: 'fallback' }],
+    maxSameReviewerAttempts: 2,
+    invoke: async (reviewer) => {
+      calls.push(reviewer.id);
+      if (calls.length < 3) throw new Error('temporary failure');
+      return { ok: true };
+    }
+  });
+
+  assert.deepEqual(calls, ['primary', 'primary', 'fallback']);
+  assert.equal(result.reviewer.id, 'fallback');
+  assert.deepEqual(result.value, { ok: true });
+  assert.equal(result.failures.length, 2);
 });
