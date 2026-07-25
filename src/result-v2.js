@@ -32,13 +32,15 @@ export function calculateAbsoluteResult(evaluation, rubric = RUBRIC_V1, options 
     const weights = rubric.dimensions[dimensionId];
     const leaves = Object.entries(weights).map(([leafId, weight]) => {
       const id = `${dimensionId}.${leafId}`;
-      const model = modelLeaves.get(id);
-      const human = humanLeaves.get(id);
-      if (!model || !human) throw new TypeError(`missing resolved absolute leaf: ${id}`);
       const objective = dimensionId === 'agentCapability'
         ? objectiveLeaf(evaluation, leafId)
         : null;
       const applicable = objective ? objective.applicable : true;
+      // Multi-turn-only leaves (e.g. contextContinuity) are omitted from the
+      // model panel when not applicable; do not require model/human seats.
+      const model = modelLeaves.get(id) || (applicable ? null : unavailableSeat());
+      const human = humanLeaves.get(id) || (applicable ? null : unavailableSeat());
+      if (!model || !human) throw new TypeError(`missing resolved absolute leaf: ${id}`);
       return {
         id,
         weight,
@@ -204,6 +206,10 @@ export async function lockAndReleaseAbsoluteResult(evaluation, services, actor) 
     replica: evaluation.resultV2.replica,
     rating: evaluation.resultV2.rating
   };
+}
+
+function unavailableSeat() {
+  return { score: 0, scores: [], confidences: [], checkEvidence: [] };
 }
 
 function modelLeavesFor(evaluation) {

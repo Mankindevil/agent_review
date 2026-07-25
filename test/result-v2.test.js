@@ -93,6 +93,28 @@ test('redistributes objective seat weights when an objective metric is not appli
   );
 });
 
+test('allows absolute lock when contextContinuity is not applicable and absent from model panel', () => {
+  const evaluation = completeEvaluation();
+  const leafId = 'agentCapability.contextContinuity';
+  for (const run of evaluation.absoluteReview.modelPanel.primary) {
+    run.reviews = run.reviews.filter((review) => review.subcriterionId !== leafId);
+  }
+  delete evaluation.humanReviewAggregate.leaves[leafId];
+  const metric = evaluation.objectiveCapability.metrics.find((item) => item.id === 'contextContinuity');
+  metric.applicable = false;
+  metric.score = null;
+
+  const result = calculateAbsoluteResult(evaluation, RUBRIC_V1);
+  assert.equal(result.dimensions.agentCapability.leaves[leafId].applicable, false);
+  assert.equal(
+    lockAbsoluteResult(evaluation, result, {
+      principalId: 'admin_1',
+      idempotencyKey: 'absolute-lock-no-continuity'
+    }).status,
+    'locked'
+  );
+});
+
 test('includes compiled checks without evidence in final evidence gaps', () => {
   const evaluation = completeEvaluation();
   for (const run of evaluation.absoluteReview.modelPanel.primary) {
