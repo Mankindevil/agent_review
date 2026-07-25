@@ -170,6 +170,77 @@ test('health endpoint responds', async () => {
   assert.equal(typeof health.dataSource.autoVerify, 'boolean');
 });
 
+test('participant appeal APIs require idempotency and preserve append-only timeline', async () => {
+  const evaluation = {
+    ...structuredClone(v2Fixture),
+    id: 'eval_appeal_api',
+    governance: {
+      phase: 'final',
+      resultHash: 'd'.repeat(64),
+      evidenceManifestHash: 'e'.repeat(64)
+    },
+    finalizedAt: '2026-07-25T00:00:00.000Z',
+    resultV2: {
+      absolute: { status: 'locked', resultHash: 'd'.repeat(64) },
+      resultVersions: []
+    },
+    runtimeState: {
+      runIndex: [{
+        cellId: 'cell_api',
+        identity: { testId: 'test_api', inputHash: 'input-api', seed: 5, protocolConfigHash: 'protocol-api' },
+        policy: { timeoutMs: 1000, targetMs: 100, version: 'runtime-v1' },
+        attempts: [{ turns: [{ runId: 'run_api' }] }]
+      }]
+    }
+  };
+  await evaluationStore.set(evaluation);
+  const input = {
+    target: { kind: 'test', id: 'test_api', path: 'runtimeState.runIndex[0]' },
+    grounds: 'platform-error',
+    statement: 'A platform control failure interrupted the run.',
+    evidenceIds: ['ev_api']
+  };
+  const missingKey = await fetch(`${origin}/api/evaluations/${evaluation.id}/appeals`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}`,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify(input)
+  });
+  assert.equal(missingKey.status, 422);
+
+  const created = await fetch(`${origin}/api/evaluations/${evaluation.id}/appeals`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}`,
+      'content-type': 'application/json',
+      'idempotency-key': 'appeal-api-create-1'
+    },
+    body: JSON.stringify(input)
+  });
+  assert.equal(created.status, 201);
+  const appeal = await created.json();
+  assert.equal(appeal.status, 'submitted');
+  const replay = await fetch(`${origin}/api/evaluations/${evaluation.id}/appeals`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}`,
+      'content-type': 'application/json',
+      'idempotency-key': 'appeal-api-create-1'
+    },
+    body: JSON.stringify(input)
+  });
+  assert.deepEqual(await replay.json(), appeal);
+
+  const listed = await fetch(`${origin}/api/evaluations/${evaluation.id}/appeals`, {
+    headers: { authorization: `Bearer ${V2_FIXTURE_PARTICIPANT_TOKEN}` }
+  });
+  assert.equal(listed.status, 200);
+  assert.equal((await listed.json()).appeals.length, 1);
+  assert.equal(evaluationStore.get(evaluation.id).resultV2.absolute.resultHash, 'd'.repeat(64));
+});
+
 test('keeps disabled V2 resume behind the feature flag', async () => {
   const response = await fetch(
     `${origin}/api/evaluations/${v2Fixture.id}/resume`,

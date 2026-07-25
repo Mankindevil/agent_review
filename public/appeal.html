@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>提交评测申诉 · 锐评局</title>
+  <link rel="stylesheet" href="/appeal.css">
+</head>
+<body>
+  <main>
+    <a href="/">← 返回评测台</a>
+    <header>
+      <small>PARTICIPANT / APPEND-ONLY APPEAL</small>
+      <h1>只纠错，<br>不改历史。</h1>
+      <p class="deck">针对一条具体测试、证据或分数路径提交申诉。确认的平台故障最多获得一次同配置替代运行；Agent 或 Replica Skill 的失败不会触发替代。原始锁定结果始终保留。</p>
+    </header>
+    <form id="appeal-form" class="appeal-form">
+      <label><span>评测 ID</span><input id="evaluation-id" required></label>
+      <label><span>Participant access token</span><input id="participant-token" type="password" autocomplete="off" required></label>
+      <label><span>具体目标</span>
+        <select id="target" required>
+          <option value="">选择具体路径</option>
+          <option value="test:test-id:runtimeState.runIndex[0]">测试运行</option>
+          <option value="evidence:evidence-id:evidenceManifest.items[0]">证据条目</option>
+          <option value="score:absolute:resultV2.absolute">绝对分叶子</option>
+        </select>
+      </label>
+      <label><span>申诉理由</span><select id="grounds"><option value="platform-error">平台错误</option><option value="evidence-missing">证据缺失</option><option value="rubric-misapplied">量表误用</option></select></label>
+      <label><span>可见证据 ID（逗号分隔，可选）</span><input id="evidence-ids" placeholder="ev_…"></label>
+      <label><span>说明</span><textarea id="statement" required placeholder="说明这条具体路径为何需要复核。"></textarea></label>
+      <button type="submit">提交申诉</button>
+      <p id="status" role="status"></p>
+    </form>
+    <section aria-labelledby="timeline-heading">
+      <h2 id="timeline-heading">申诉时间线</h2>
+      <button id="load-appeals" type="button">查看我的申诉</button>
+      <div id="timeline"></div>
+    </section>
+  </main>
+  <script type="module" src="/appeal.js"></script>
+</body>
+</html>

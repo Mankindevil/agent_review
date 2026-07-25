@@ -39,6 +39,12 @@ import {
   submitHumanReview,
   lockAndReleaseAbsoluteResult
 } from './src/review-governance.js';
+import {
+  authorizeReplacementRun,
+  createAppeal,
+  decideAppeal,
+  triageAppeal
+} from './src/appeals.js';
 import { getAccessAuditStore } from './src/access-audit-store.js';
 import {
   copyEvidenceEncryptionKey,
@@ -201,6 +207,72 @@ export const server = createServer(async (request, response) => {
       return item
         ? json(response, 202, serializeEvaluationForResponse(item))
         : json(response, 404, { error: '评测不存在' });
+    }
+    const appealsMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/appeals$/);
+    if (appealsMatch && request.method === 'POST') {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const item = requireV2Evaluation(appealsMatch[1]);
+      const principal = requireRole(
+        authenticatePrincipal(request, item, process.env), 'participant'
+      );
+      const idempotencyKey = requiredIdempotencyKey(request);
+      const payload = await readJsonBody(request, 64_000);
+      const committed = await store.mutate(item.id, undefined, (current) => {
+        const appeal = createAppeal(current, principal, { ...payload, idempotencyKey }, {
+          windowHours: appealWindowHours()
+        });
+        return current;
+      });
+      const appeal = committed.appeals.at(-1);
+      const replayed = committed.appeals.find((candidate) =>
+        candidate.appealId === committed.governance.appealIdempotency[idempotencyKey]?.appealId
+      );
+      return json(response, 201, projectAppeal(replayed || appeal));
+    }
+    if (appealsMatch && request.method === 'GET') {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const item = requireV2Evaluation(appealsMatch[1]);
+      const principal = requireRole(
+        authenticatePrincipal(request, item, process.env), ['participant', 'admin']
+      );
+      const appeals = (item.appeals || []).filter((appeal) =>
+        principal.role === 'admin' || appeal.participantId === principal.principalId
+      ).map(projectAppeal);
+      return json(response, 200, { evaluationId: item.id, appeals });
+    }
+    const appealTriageMatch = url.pathname.match(/^\/api\/admin\/appeals\/([^/]+)\/triage$/);
+    const appealReplacementMatch = url.pathname.match(/^\/api\/admin\/appeals\/([^/]+)\/replacement-run$/);
+    const appealDecisionMatch = url.pathname.match(/^\/api\/admin\/appeals\/([^/]+)\/decision$/);
+    if (request.method === 'POST' && (appealTriageMatch || appealReplacementMatch || appealDecisionMatch)) {
+      response.setHeader('cache-control', 'no-store');
+      requireGovernanceEnabled();
+      const appealId = (appealTriageMatch || appealReplacementMatch || appealDecisionMatch)[1];
+      const item = evaluationForAppeal(appealId);
+      const principal = requireRole(authenticatePrincipal(request, item, process.env), 'admin');
+      const idempotencyKey = requiredIdempotencyKey(request);
+      const payload = await readJsonBody(request, 64_000);
+      const action = appealTriageMatch ? 'triage' : appealReplacementMatch ? 'replacement' : 'decision';
+      const fingerprint = governanceIdempotencyFingerprint(item.id, `appeal-${action}`, principal.principalId, payload);
+      const committed = await store.mutate(item.id, undefined, (current) => {
+        const replies = governanceIdempotency(current, `appeal-${action}`);
+        if (idempotencyResponse(replies, idempotencyKey, fingerprint)) return current;
+        const result = action === 'triage'
+          ? triageAppeal(current, appealId, payload, principal)
+          : action === 'replacement'
+            ? authorizeReplacementRun(current, appealId, payload.runId, principal)
+            : decideAppeal(current, appealId, payload, principal);
+        replies[idempotencyKey] = { fingerprint, response: projectAppeal(
+          action === 'replacement'
+            ? current.appeals.find((appeal) => appeal.appealId === appealId)
+            : result
+        ) };
+        return current;
+      });
+      return json(response, 200, idempotencyResponse(
+        governanceIdempotency(committed, `appeal-${action}`), idempotencyKey, fingerprint
+      ));
     }
     const judgePreviewMatch =
       url.pathname.match(/^\/api\/evaluations\/([^/]+)\/judge-preview$/);
@@ -709,6 +781,36 @@ function projectSubmittedReview(review) {
     submittedAt: review.submittedAt,
     payloadHash: review.payloadHash
   };
+}
+
+function evaluationForAppeal(appealId) {
+  const item = store.list().find((candidate) =>
+    candidate.schemaVersion === 2 &&
+    (candidate.appeals || []).some((appeal) => appeal.appealId === appealId)
+  );
+  if (!item) throw Object.assign(new Error('Appeal does not exist'), { statusCode: 404 });
+  return item;
+}
+
+function projectAppeal(appeal) {
+  return {
+    appealId: appeal.appealId,
+    version: appeal.version,
+    status: appeal.status,
+    target: appeal.target,
+    grounds: appeal.grounds,
+    statement: appeal.statement,
+    evidenceIds: appeal.evidenceIds,
+    originalSnapshot: appeal.originalSnapshot,
+    replacementRunIds: appeal.replacementRunIds,
+    decision: appeal.decision,
+    events: appeal.events
+  };
+}
+
+function appealWindowHours() {
+  const value = Number(process.env.APPEAL_WINDOW_HOURS || 72);
+  return Number.isFinite(value) && value > 0 ? value : 72;
 }
 
 async function serveEvidenceItem(request, response, evaluationId, evidenceId) {
