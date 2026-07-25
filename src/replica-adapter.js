@@ -49,18 +49,24 @@ export function createReplicaAdapter(runtime, mode, dependencies = {}) {
       await assertHardHealth(options);
       let payload;
       if (remote) {
-        payload = await executeWithLimits((signal) => postReplica(config, dependencies, {
-          action: 'build_replica', replicaPackage, buildBudget, seed: options.seed, temperature: options.temperature
-        }, signal), buildBudget, options);
+        payload = await executeWithLimits(async (signal) => {
+          const value = await postReplica(config, dependencies, {
+            action: 'build_replica', replicaPackage, buildBudget, seed: options.seed, temperature: options.temperature
+          }, signal);
+          await verifyPayloadLimits(dependencies, value, REPLICA_BUILD_BUDGET_V1, 'build', signal);
+          return value;
+        }, buildBudget, options);
       } else if (local && typeof dependencies.localBuild === 'function') {
-        payload = await withFreshWorkspace(runtime.id, dependencies, (workspace) => executeWithLimits((signal) => dependencies.localBuild({
-          replicaPackage, buildBudget, options: { ...options, signal }, workspace, policy: localPolicy(buildBudget, dependencies.sandbox)
-        }), buildBudget, options));
+        payload = await withFreshWorkspace(runtime.id, dependencies, (workspace) => executeWithLimits(async (signal) => {
+          const value = await dependencies.localBuild({
+            replicaPackage, buildBudget, options: { ...options, signal }, workspace, policy: localPolicy(buildBudget, dependencies.sandbox)
+          });
+          await verifyPayloadLimits(dependencies, value, REPLICA_BUILD_BUDGET_V1, 'build', signal);
+          return value;
+        }, buildBudget, options));
       } else {
         throw replicaError('BUILD_FAILED', 'Replica build adapter is not configured');
       }
-      assertPayloadCaps(payload, REPLICA_BUILD_BUDGET_V1);
-      await verifyTrustedUsage(dependencies, payload, REPLICA_BUILD_BUDGET_V1, 'build');
       return normalizeReplicaArtifact(payload, runtime, replicaPackage?.manifest?.contentHash, REPLICA_BUILD_BUDGET_V1);
     },
     async run(replicaArtifact, testInput, logicalHandle, runBudget, options = {}) {
@@ -70,22 +76,28 @@ export function createReplicaAdapter(runtime, mode, dependencies = {}) {
         validateReplicaArtifact(replicaArtifact, runBudget);
         let payload;
         if (remote) {
-          payload = await executeWithLimits((signal) => postReplica(config, dependencies, {
-            action: 'run_replica', replicaArtifact, testInput, contextHandle: remoteContext(context), runBudget, seed: options.seed, temperature: options.temperature
-          }, signal), runBudget, options);
+          payload = await executeWithLimits(async (signal) => {
+            const value = await postReplica(config, dependencies, {
+              action: 'run_replica', replicaArtifact, testInput, contextHandle: remoteContext(context), runBudget, seed: options.seed, temperature: options.temperature
+            }, signal);
+            await verifyPayloadLimits(dependencies, value, runBudget, 'run', signal);
+            return value;
+          }, runBudget, options);
         } else if (local && typeof dependencies.localRun === 'function') {
           if (!context.workspace) {
             context.workspace = await (dependencies.createWorkspace ?? mkdtemp)(path.join(tmpdir(), `replica-${runtime.id}-`));
             context.ownsWorkspace = true;
           }
-          payload = await executeWithLimits((signal) => dependencies.localRun({
-            replicaArtifact, testInput, contextHandle: context, runBudget, options: { ...options, signal }, policy: localPolicy(runBudget, dependencies.sandbox)
-          }), runBudget, options);
+          payload = await executeWithLimits(async (signal) => {
+            const value = await dependencies.localRun({
+              replicaArtifact, testInput, contextHandle: context, runBudget, options: { ...options, signal }, policy: localPolicy(runBudget, dependencies.sandbox)
+            });
+            await verifyPayloadLimits(dependencies, value, runBudget, 'run', signal);
+            return value;
+          }, runBudget, options);
         } else {
           throw replicaError('EXECUTION_BOUNDARY_NOT_STARTED', 'Replica run adapter is not configured');
         }
-        assertPayloadCaps(payload, runBudget);
-        await verifyTrustedUsage(dependencies, payload, runBudget, 'run');
         const result = normalizeReplicaResult(payload, options.metadata);
         if (result.status === 'invalid-output') throw replicaError('INVALID_REPLICA_OUTPUT', result.error?.message || 'Replica returned invalid output');
         assertResultCaps(result, runBudget);
@@ -200,26 +212,26 @@ async function dispose(context, dependencies) {
   finally { if (context?.workspace && context.ownsWorkspace) { await (dependencies.removeWorkspace ?? rm)(context.workspace, { recursive: true, force: true }); context.ownsWorkspace = false; context.workspace = null; } }
 }
 
-function assertPayloadCaps(payload, budget) {
+async function verifyPayloadLimits(dependencies, payload, budget, phase, signal) {
   const bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
   if (bytes > positiveBudget(budget?.maxOutputBytes)) throw replicaError('REPLICA_OUTPUT_BYTES_EXCEEDED', 'Replica response exceeds output byte cap');
-  assertUsageTokens(payload?.budgetUsage ?? payload?.buildEvidence?.budgetUsage, budget);
+  const usage = payload?.budgetUsage ?? payload?.buildEvidence?.budgetUsage;
+  assertUsageTokens(usage, undefined);
+  if (typeof dependencies.trustedUsageMeter !== 'function') {
+    assertUsageTokens(usage, budget);
+    return;
+  }
+  const measured = await dependencies.trustedUsageMeter({ phase, payload, signal });
+  const tokens = typeof measured === 'number' ? measured : measured?.tokens;
+  if (!Number.isSafeInteger(tokens) || tokens < 0) throw replicaError('REPLICA_TOKEN_USAGE_UNPROVEN', 'Trusted usage meter did not provide integer token telemetry');
+  assertUsageTokens({ tokens }, budget);
+  usage.tokens = tokens;
 }
 function assertResultCaps(result, budget) {
   const bytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
   if (bytes > positiveBudget(budget?.maxOutputBytes) || (result.budgetUsage.outputBytes ?? 0) > positiveBudget(budget?.maxOutputBytes)) throw replicaError('REPLICA_OUTPUT_BYTES_EXCEEDED', 'Replica result exceeds output byte cap');
   assertUsageTokens(result.budgetUsage, budget);
 }
-async function verifyTrustedUsage(dependencies, payload, budget, phase) {
-  if (typeof dependencies.trustedUsageMeter !== 'function') return;
-  const measured = await dependencies.trustedUsageMeter({ phase, payload });
-  const tokens = typeof measured === 'number' ? measured : measured?.tokens;
-  if (!Number.isSafeInteger(tokens) || tokens < 0) throw replicaError('REPLICA_TOKEN_USAGE_UNPROVEN', 'Trusted usage meter did not provide integer token telemetry');
-  assertUsageTokens({ tokens }, budget);
-  const reported = payload?.budgetUsage?.tokens ?? payload?.buildEvidence?.budgetUsage?.tokens;
-  if (reported !== tokens) throw replicaError('REPLICA_TOKEN_USAGE_CONFLICT', 'Trusted usage meter conflicts with audited token telemetry');
-}
-
 function assertSkill(skill) {
   assertExactObject(skill, SKILL_KEYS, 'Replica Skill', ['tools']);
   if (!nonEmpty(skill.name) || !nonEmpty(skill.description) || !Array.isArray(skill.instructions) || skill.instructions.length === 0 || skill.instructions.some((item) => !nonEmpty(item)) || (skill.tools !== undefined && (!Array.isArray(skill.tools) || skill.tools.some((item) => !nonEmpty(item)))) || containsForbidden(skill)) throw replicaError('UNSAFE_REPLICA_ARTIFACT', 'Replica Skill instructions or contents are invalid');
@@ -260,7 +272,7 @@ function plainObject(value) { return value !== null && typeof value === 'object'
 function nonEmpty(value) { return typeof value === 'string' && value.trim().length > 0; }
 function safeInt(value, fallback) { return Number.isSafeInteger(value) && value >= 0 ? value : fallback; }
 function positiveBudget(value) { return Number.isSafeInteger(value) && value > 0 ? value : 0; }
-function assertUsageTokens(usage, budget) { if (!plainObject(usage) || !Object.hasOwn(usage, 'tokens') || !Number.isSafeInteger(usage.tokens) || usage.tokens < 0) throw replicaError('REPLICA_TOKEN_USAGE_UNPROVEN', 'Replica contract did not provide required audited token telemetry'); if (usage.tokens > positiveBudget(budget?.maxTokens)) throw replicaError('REPLICA_TOKEN_CAP_EXCEEDED', 'Replica audited token telemetry exceeds cap'); }
+function assertUsageTokens(usage, budget) { if (!plainObject(usage) || !Object.hasOwn(usage, 'tokens') || !Number.isSafeInteger(usage.tokens) || usage.tokens < 0) throw replicaError('REPLICA_TOKEN_USAGE_UNPROVEN', 'Replica contract did not provide required audited token telemetry'); if (budget !== undefined && usage.tokens > positiveBudget(budget?.maxTokens)) throw replicaError('REPLICA_TOKEN_CAP_EXCEEDED', 'Replica audited token telemetry exceeds cap'); }
 function forbiddenKey(key, path) { return !(String(key) === 'tokens' && path.join('.') === 'buildEvidence.budgetUsage') && (SECRET_KEY.test(key) || /(?:token|secret|endpoint)(?:s|url|urls)?$/iu.test(String(key))); }
 function hash(value) { return createHash('sha256').update(value, 'utf8').digest('hex'); }
 function replicaError(code, message) { const error = new Error(message); error.code = code; return error; }

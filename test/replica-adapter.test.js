@@ -208,7 +208,7 @@ test('fails closed when standard build or run token usage is missing and inherit
   assert.deepEqual(await credentialed.health(), { ready: false, code: 'ADAPTER_TRANSPORT_FAILED', budgetEnforcement: { wallClock: 'unproven', tokens: 'unproven', outputBytes: 'unproven', network: 'unproven' }, evidence: {} });
 });
 
-test('validates build telemetry against the locked build budget, rejects nested telemetry tokens, and checks a trusted meter when supplied', async () => {
+test('validates build telemetry against the locked build budget, rejects nested telemetry tokens, and makes a trusted meter authoritative', async () => {
   const buildAtTwelveThousand = structuredClone(ARTIFACT);
   buildAtTwelveThousand.buildEvidence.budgetUsage.tokens = 12_000;
   assert.doesNotThrow(() => validateReplicaArtifact(buildAtTwelveThousand, REPLICA_RUN_BUDGET_V1));
@@ -216,13 +216,30 @@ test('validates build telemetry against the locked build budget, rejects nested 
   nestedToken.buildEvidence.telemetry = { tokens: 1 };
   assert.throws(() => validateReplicaArtifact(nestedToken, REPLICA_BUILD_BUDGET_V1), /forbidden|credential|endpoint/i);
 
+  let meterSignal;
   const metered = createReplicaAdapter({ id: 'cursor', name: 'Cursor Agent' }, 'live', {
     config: { kind: 'remote-http', url: 'https://runtime.example/adapter' },
     health: async () => ({ ready: true, budgetEnforcement: { wallClock: 'hard', tokens: 'hard', outputBytes: 'hard', network: 'hard' } }),
-    trustedUsageMeter: async () => 8,
+    trustedUsageMeter: async ({ signal }) => { meterSignal = signal; return 1; },
+    fetch: async () => {
+      const exaggerated = structuredClone(ARTIFACT);
+      exaggerated.buildEvidence.budgetUsage.tokens = 99_999;
+      return new Response(JSON.stringify(exaggerated));
+    }
+  });
+  await assert.doesNotReject(() => metered.build(PACKAGE, REPLICA_BUILD_BUDGET_V1));
+  assert.equal(meterSignal instanceof AbortSignal, true);
+
+  const hangingMeter = createReplicaAdapter({ id: 'cursor', name: 'Cursor Agent' }, 'live', {
+    config: { kind: 'remote-http', url: 'https://runtime.example/adapter' },
+    health: async () => ({ ready: true, budgetEnforcement: { wallClock: 'hard', tokens: 'hard', outputBytes: 'hard', network: 'hard' } }),
+    trustedUsageMeter: async () => new Promise(() => {}),
     fetch: async () => new Response(JSON.stringify(ARTIFACT))
   });
-  await assert.rejects(() => metered.build(PACKAGE, REPLICA_BUILD_BUDGET_V1), (error) => error.code === 'REPLICA_TOKEN_USAGE_CONFLICT');
+  await assert.rejects(
+    () => hangingMeter.build(PACKAGE, { ...REPLICA_BUILD_BUDGET_V1, wallClockMs: 5 }),
+    (error) => error.code === 'REPLICA_WALL_CLOCK_EXCEEDED'
+  );
 });
 
 test('build fails closed without fresh hard health proof and remote requests honor configured adapter credentials', async () => {
