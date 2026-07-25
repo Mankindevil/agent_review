@@ -98,6 +98,36 @@ test('runs three repeats with cloned identical current inputs and destroys every
   }
 });
 
+test('honors planned repeatCount from the locked test plan (smoke A2A_REPEAT_COUNT=1)', async () => {
+  const calls = [];
+  const disposed = [];
+  const vault = memoryVault();
+  const adapter = fakeAdapter('runtime-a', { calls, disposed });
+  const build = await buildReplicas({
+    agentCard: CARD, agentExamples: EXAMPLES, runtimes: [{ id: 'runtime-a' }],
+    adapters: { 'runtime-a': adapter }, evidenceVault: vault,
+    rubricVersion: 'a2a-black-box-v1', now: () => '2026-07-25T12:00:00.000Z', createId: ids()
+  });
+  const smokePlan = {
+    ...structuredClone(TEST_PLAN),
+    defaultRepeatCount: 1,
+    tests: [{ ...structuredClone(TEST_PLAN.tests[0]), repeatCount: 1 }]
+  };
+
+  const executed = await executeReplicas({
+    testPlan: smokePlan,
+    replicas: build,
+    adapters: { 'runtime-a': adapter }, evidenceVault: vault,
+    now: () => '2026-07-25T12:00:01.000Z', createId: ids(),
+    submittedInputForTurn: (test, turnIndex) => structuredClone(test.turns[turnIndex].input)
+  });
+
+  assert.equal(calls.length, 2);
+  assert.equal(disposed.length, 1);
+  assert.equal(executed.runtimes[0].runCount, 1);
+  assert.equal(executed.runtimes[0].turnCount, 2);
+});
+
 test('standard adapter receives same-example history lengths zero then one in every repeat', async () => {
   const historyLengths = [];
   const runtime = { id: 'runtime-a' };

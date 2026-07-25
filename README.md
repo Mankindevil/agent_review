@@ -506,7 +506,7 @@ V2 不会锁定模型席；同一主审先以相同配置重试一次，随后�
 | `EVIDENCE_ENCRYPTION_KEY` | 空 | V2 必需的 canonical base64 32-byte AES-256 key；只存于密钥管理或本机 `.env` |
 | `EVIDENCE_ROOT` | `data/evidence` | V2 加密证据 envelope 的根目录 |
 | `A2A_MULTI_TURN_ENABLED` | `true` | 精确设为 `false` 时跳过生成/执行隐藏 multi-turn 变体；提交示例自带多轮仍会执行 |
-| `A2A_REPEAT_COUNT` | `3` | Phase 1/2 每格重复次数；正整数，非法或未设置时回退为 `3` |
+| `A2A_REPEAT_COUNT` | `3` | Phase 1/2 与 Replica 同题执行每格重复次数；正整数，非法或未设置时回退为 `3` |
 | `JUDGE_PREVIEW_ACCESS_KEY` | 空 | 非盲人工评审预览 API 的 Bearer 密钥；未配置时入口保持关闭 |
 | `ALLOW_PRIVATE_AGENT_URLS` | `false` | 是否为测试入口、Card 发现和正式测评 A2A 请求统一允许平台服务器可达的 localhost/私网地址；仅私人或受控部署开启 |
 | `ALLOW_PRIVATE_DIAGNOSTICS_URLS` | `false` | 是否仅为 `/agent-check` 的 Card 获取和 A2A 调用允许内网/本机地址 |

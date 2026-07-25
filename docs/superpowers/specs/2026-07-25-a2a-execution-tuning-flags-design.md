@@ -14,9 +14,9 @@ Two independent environment flags (opt-out / override):
 | Flag | Default | Meaning |
 |---|---|---|
 | `A2A_MULTI_TURN_ENABLED` | enabled unless exact `false` | When `false`, do not generate, require, or execute hidden `multi-turn` variants. Original examples that already have multiple turns still run. |
-| `A2A_REPEAT_COUNT` | `3` | Positive integer applied to Phase 1 cells and Phase 2 `repeatCount` / `defaultRepeatCount`. Invalid or missing → `3`. |
+| `A2A_REPEAT_COUNT` | `3` | Positive integer applied to Phase 1 cells, Phase 2 `repeatCount` / `defaultRepeatCount`, and Replica same-question execution. Invalid or missing → `3`. |
 
-Recommended local smoke: `A2A_MULTI_TURN_ENABLED=false` and `A2A_REPEAT_COUNT=1`.
+Recommended local smoke: `A2A_MULTI_TURN_ENABLED=false` and `A2A_REPEAT_COUNT=1`. Replica follows the locked plan’s repeat count (no longer hard-requires 3).
 
 ## Behavior
 

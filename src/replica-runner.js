@@ -268,11 +268,10 @@ export async function executeReplicas(options = {}) {
       'Replica checkpoint test-plan hash mismatch'
     );
   }
-  if (testPlan.defaultRepeatCount !== 3) {
-    throw new TypeError(
-      'Replica execution requires exactly three planned repeats'
-    );
-  }
+  const defaultRepeatCount = requiredPositiveInteger(
+    testPlan.defaultRepeatCount,
+    'testPlan.defaultRepeatCount'
+  );
 
   const results = replicas.runtimes.map((replica) => ({
     runtimeId: replica.runtimeId,
@@ -295,14 +294,11 @@ export async function executeReplicas(options = {}) {
   for (const test of requiredArray(testPlan.tests, 'testPlan.tests')) {
     const testId = requiredString(test.testId, 'test.testId');
     const turns = requiredArray(test.turns, 'test.turns');
-    const repeatCount =
-      test.repeatCount ?? testPlan.defaultRepeatCount;
-    if (repeatCount !== 3) {
-      throw new TypeError(
-        'Each Replica test requires exactly three planned repeats'
-      );
-    }
-    for (let repeatIndex = 0; repeatIndex < 3; repeatIndex += 1) {
+    const repeatCount = requiredPositiveInteger(
+      test.repeatCount ?? defaultRepeatCount,
+      `test.${testId}.repeatCount`
+    );
+    for (let repeatIndex = 0; repeatIndex < repeatCount; repeatIndex += 1) {
       for (const replica of replicas.runtimes) {
         const result = byRuntime.get(replica.runtimeId);
         if (
@@ -1421,6 +1417,13 @@ function requiredObject(value, name) {
 function requiredString(value, name) {
   if (typeof value !== 'string' || !value) {
     throw new TypeError(`${name} is required`);
+  }
+  return value;
+}
+
+function requiredPositiveInteger(value, name) {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError(`${name} must be a positive integer`);
   }
   return value;
 }
