@@ -26,9 +26,9 @@
     <section class="method-hero" id="overview">
       <div class="method-hero__index"><span>SPEC</span><strong>01</strong><small>SCORING<br>CONTRACT</small></div>
       <div class="method-hero__copy">
-        <div class="method-kicker"><span>PUBLIC EVALUATION SPECIFICATION</span><span>V2 / PHASE 2 ACTIVE</span></div>
-        <h1>一条净值曲线，<br>到底有几分可信？</h1>
-        <p>这不是一句“模型觉得不错”。下面公开当前代码实际执行的 A2A 校验、金融研究硬指标、失败处理和最终分档顺序。看完后，你应该能分清研究设计审查与真实数据验算的边界。</p>
+        <div class="method-kicker"><span>PUBLIC EVALUATION SPECIFICATION</span><span>V2 / GOVERNED RELEASE</span></div>
+        <h1>一个 Agent，<br>到底有几分可信？</h1>
+        <p>这不是一句“模型觉得不错”。下面公开当前代码实际执行的 A2A 校验、黑盒执行、模型先评、人工不盲审、绝对分锁定与复刻对照；即使交付包含一条净值曲线，也应分清绝对质量、复刻优势与真实数据验算的边界。</p>
       </div>
       <aside class="method-warning">
         <span>先说结论</span>
@@ -83,20 +83,24 @@
         </section>
 
         <section class="rule-section" id="black-box-v2">
-          <header><span>V2 / BLACK-BOX FOUNDATION</span><h2>只凭 Agent Card 与使用示例，先测后审</h2><p>参赛者提交一个满足 A2A 的 Agent Card JSON 和该 Agent 的真实使用示例。平台不假定它是量化模型，也不读取内部工具、记忆、提示词或编排日志。</p></header>
+          <header><span>V2 / BLACK-BOX FOUNDATION</span><h2>只凭 Agent Card 与 Agent 使用示例，先测后审</h2><p>参赛者提交一个满足 A2A 的 Agent Card JSON 和该 Agent 的真实使用示例。平台不假定它是量化模型，也不读取内部工具、记忆、提示词或编排日志。</p></header>
           <div class="process-line">
             <div><b>01</b><span>示例合同化</span><small>把每轮输入、可执行验收条件和只能由模型判断的专业要求分开。</small></div>
             <div><b>02</b><span>闭域动态题</span><small>每个示例生成等价、边界、多轮三类隐藏变体，由独立模型做五项越界审查。</small></div>
             <div><b>03</b><span>黑盒重复执行</span><small>原始、等价、边界、多轮与协议恢复探针均重复 3 次；平台故障最多替换 1 次，Agent 失败不重抽。</small></div>
             <div><b>04</b><span>模型先评</span><small>四个独立模型逐子项给分、引用证据、写反证与修复建议；分差或结论冲突触发第五模型仲裁。</small></div>
-            <div><b>05</b><span>人工非盲复核</span><small>人类评委在模型结果锁定后进入，可见脱敏提交、证据索引和模型意见，再从三大维度独立打分并解释调整。</small></div>
+            <div><b>05</b><span>人工不盲审</span><small>人类评委在模型结果锁定后进入，可见脱敏提交、证据索引和模型意见，再从三大维度独立打分并解释调整。</small></div>
           </div>
           <div class="rule-grid three">
             <article class="rule-card"><h3>场景价值</h3><p>看任务是否值得使用 Agent、是否解决真实投研问题，以及协作或产品形态是否有新意。</p></article>
             <article class="rule-card"><h3>专业性</h3><p>看信息密度、数据与方法纪律、结论推导、风险披露和可复核程度。</p></article>
             <article class="rule-card"><h3>智能体能力</h3><p>只评价 A2A 黑盒可观察行为：任务完成、鲁棒性、多轮上下文、协议合规、效率与错误恢复。</p></article>
           </div>
-          <div class="mode-callout"><b>当前发布边界</b><span>Phase 2 已完成动态测试与四模型初评，状态进入 <code>human_open</code>。在人工分数锁定前，分数保持 provisional，Replica Arena 关闭，夯 / 人上人 / NPC / 拉评级不提前产生。</span></div>
+          <div class="mode-callout"><b>治理顺序</b><span>四模型先对每个适用子项给分；只有模型分歧或结论冲突的子项才进入第五模型。之后两位不同的人工评委不盲审地独立评分；同一子项两人相差大于 15 分时，第三位不同评委仲裁。人工与模型席位完成后才绝对分锁定；锁定前复刻结果密封。</span></div>
+          <div class="rule-grid two">
+            <article class="rule-card"><h3>证据与暂定状态</h3><p>每个检查项引用证据等级 A / B / C / D，分别对应 1 / 0.8 / 0.35 / 0.1。智能体能力的客观覆盖率低于 0.70 时，该维度标为“暂定”；这不会把复刻结果混入绝对分。</p></article>
+            <article class="rule-card"><h3>绝对分锁定后才开封</h3><p>锁定结果使用不可变哈希。随后才运行匿名复刻对照；复刻结果密封期间，评委看不到 Runtime 身份、输出、分数或优势。</p></article>
+          </div>
         </section>
 
         <section class="rule-section" id="replica-arena-v2">
@@ -111,7 +115,7 @@
             <div><b>03</b><span>保守优势</span><small>对完整评分立方体 bootstrap 10,000 次；每次重选最佳复刻。</small></div>
             <div><b>04</b><span>锁定后发布</span><small>绝对分与结果哈希锁定前，所有复刻证据保持密封。</small></div>
           </div>
-          <div class="equation"><span>复刻保守优势</span><strong>Δc = bootstrap 95% 区间下界</strong><small>点估计为提交 Agent 中位数减去最佳有效 Runtime 中位数；评级只使用 Δc，而不是乐观点估计。</small></div>
+          <div class="equation"><span>复刻保守优势</span><strong>Δc = bootstrap 95% 区间下界</strong><small>对所有匿名评分单元以固定 seed 重采样 10,000 次；每次都重选最佳有效复刻。点估计为提交 Agent 中位数减去最佳有效 Runtime 中位数；评级只使用 Δc，而不是乐观点估计。95% 区间跨过当前评级门槛时显示“差异未稳定”。</small></div>
           <div class="verdict-ladder">
             <article class="tier-hard"><i>夯</i><strong>夯</strong><code>总分 ≥ 80；场景 ≥ 60；覆盖率 ≥ 0.70；Δc ≥ 5</code><p>绝对质量与保守复刻优势都达标。</p></article>
             <article class="tier-elite"><i>人</i><strong>人上人</strong><code>总分 ≥ 70；场景 ≥ 50；Δc ≥ −2</code><p>未满足“夯”时按此门槛判断。</p></article>
@@ -276,6 +280,14 @@
           </div>
           <div class="equation"><span>重试完成后</span><strong>专业度 → 各选手均分 → 差值 → 最终分档，全部重算</strong><small>前后摘要、耗时与目标 key 写入 retryHistory；最多保留最近 100 条。</small></div>
           <div class="seed-box"><b>固定 Seed</b><p>根 seed 会为每个 reviewer、Runtime、用例和 Judge 派生稳定子 seed；单步重试沿用相同子 seed。OpenAI-compatible 与方舟链路会发送 seed，Cursor CLI 和外部 A2A Agent 只能尽力复现。</p></div>
+        </section>
+
+        <section class="rule-section" id="appeal">
+          <header><span>STAGE 07 / APPEAL</span><h2>申诉只追加版本，不覆盖历史</h2><p>参赛者在结果完成后的申诉窗口内，针对具体测试、证据或评分路径提交申诉，并引用自己可见的证据。</p></header>
+          <div class="rule-grid two">
+            <article class="rule-card"><h3>什么能重跑</h3><p>只有控制探针确认的<strong>平台错误</strong>可授权一次相同输入、seed、超时和配置的替代运行。Agent 超时、协议错误、任务失败，以及复刻 Skill 自身失败，都不能用来挑选更高分。</p></article>
+            <article class="rule-card"><h3>不可变记录</h3><p>原始运行不覆盖，原绝对分和证据哈希仍保留。申诉成立时，平台创建新的结果版本，重新走受影响证据、模型、人审、锁定、复刻、评级与锐评链路。</p></article>
+          </div>
         </section>
 
         <section class="rule-section" id="boundaries">

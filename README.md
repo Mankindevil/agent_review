@@ -320,6 +320,41 @@ must provide fresh Agent authorization on every accepted resume.
 - `examples/use-cases.json`：每个 Agent 的真实 prompt 和验收点；
 - `examples/agents/server.js`：三个实际提供 well-known discovery 与 A2A 调用接口的本地服务。
 
+### 受治理的黑盒评测：模型先评、人工不盲审、再开封复刻
+
+V2 参赛提交由 Agent Card 与 **Agent 使用示例**组成。平台执行黑盒测试后，四模型先
+对适用评分叶给出结构化意见；仅模型争议叶由第五模型处理。随后两位不同人类评委进行
+人工不盲审：可见脱敏提交、证据、客观指标和模型意见，但在绝对分锁定前完全看不到
+Replica Runtime、输出、分数和优势。两份人工叶分相差大于 15 分时，第三位不同评委
+仲裁，服务器使用中位数和 rubric 权重计算结果。
+
+绝对分含场景价值、专业性和 Agent 能力三维；Replica 不参与该总分。Agent 能力的
+客观覆盖率低于 0.70 会标记为“暂定”。结构化结论锁定为不可变哈希后，平台才生成
+受约束的幽默改写并释放此前密封的匿名复刻对照。
+
+复刻结果给出提交 Agent 相对最佳有效 Replica 的点估计 `Δ`、固定 seed bootstrap
+10,000 次的 95% 区间，以及区间下界 `Δc`（保守复刻优势）。区间跨过当前评级门槛
+时显示“差异未稳定”；没有有效复刻时保留绝对分并显示“待复刻”。详细公式、权重和
+评级阈值见 [评测与打分规则](./docs/SCORING.md)。
+
+参赛者可在 `APPEAL_WINDOW_HOURS`（默认 72）小时内针对具体测试、证据或评分路径
+提交申诉。只有固定控制探针确认的平台错误可授权一次相同配置的替代运行；Agent 或
+Replica Skill 自身失败不能用于重抽更高分。申诉产生新的可追溯结果版本，原始运行
+不覆盖。
+
+V2 使用实际存在的三个开关/参数：
+
+```env
+A2A_BLACK_BOX_V1_ENABLED=false
+REVIEW_GOVERNANCE_ENABLED=false
+APPEAL_WINDOW_HOURS=72
+```
+
+前两个设为精确 `true` 才分别开启 V2 提交与治理角色。Replica 发布和公开证据投影由
+已实现的状态机和角色投影控制，未提供独立的 Replica 或 public-evidence 开关。迁移
+时先 shadow V2、再 judge pilot、最后设为默认；`schemaVersion: 1` 历史记录保持 legacy，
+不会被静默重评分。
+
 ## 模型评审配置
 
 项目支持两组可独立启用的 OpenAI-compatible 网关：OpenAI 与 Anthropic 走 LLMX；豆包与 DeepSeek 走火山方舟在线推理。Base URL 和模型接入点已写入 `.env`：

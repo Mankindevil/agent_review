@@ -319,3 +319,52 @@ SSE 发送完整评测快照，因此断线重连后日志不会丢失。URL 日
 4. 使用独立 judge 模型做成对比较，并加入规则检查、人工复核与评审一致性指标。
 5. 给 Agent 输出和 runtime 输出做匿名化与随机排序，减轻模型品牌偏差。
 6. 引入可重复运行、置信区间、成本、耗时、成功率和污染检测，不用单次分数冒充稳定结论。
+
+## 8. 受治理的黑盒 V2
+
+`schemaVersion: 2` 是独立于遗留评测对象的证据化路径。创建时冻结 Agent Card 与
+Agent 使用示例，原始敏感证据写入加密 Evidence Vault，API/SSE 仅返回按角色构建的
+allow-list 投影。公开、参赛者、评委与管理员视图都不会通过“先序列化再删除字段”的
+方式处理；锁定前，前三者不会看到任何 Replica 工件、Runtime 身份、输出、评分立方
+体、优势或 reveal map。
+
+治理状态与执行状态分离：
+
+```text
+waiting_model → human_open → human_arbitration → absolute_locked
+             → replica_released → final
+
+execution: queued | running | completed | failed | cancelled | interrupted
+```
+
+四个主模型对全部适用叶完成结构化评审后才进入 `human_open`；需要时第五模型只处理
+模型争议叶。两名不同主审提交每个适用叶后，人工分差大于 15 分的叶进入
+`human_arbitration`，由第三名不同评委评分。服务端聚合中位数、权重、维度分、置信
+度与总分；浏览器只编辑叶分、证据和理由。
+
+### 锁定、幽默与复刻发布
+
+`src/result-v2.js` 从已锁定的模型和人工记录计算绝对分。锁定需验证模型席、完整
+人工主审、所需仲裁和 rubric/config 哈希，并以规范化 JSON 的 SHA-256 生成
+`resultHash`。结果一经锁定不可原位修改。结构化结论锁定后，`src/humor.js` 才能将
+同一批已锁定 finding 改写为幽默行；守卫拒绝新增数字、实体、工具、事实或分数。
+
+`src/arena-release.js` 只在该哈希已持久化时读取密封复刻材料并释放匿名 Arena。没有
+有效 Replica 时最终状态仍可完成，但评级是“待复刻”。有效复刻走固定 seed 的
+bootstrap，产出 `Δc` 和 95% 区间；复刻证据不参与绝对分计算。
+
+### 访问、证据与申诉
+
+`src/review-access.js` 只接受 Bearer token。评委/管理员 token 在
+`REVIEW_PRINCIPALS_JSON` 中只保存 SHA-256 哈希，比较使用
+`crypto.timingSafeEqual`；参与者沿用创建 V2 时仅回显一次的 token 哈希。请求体中的
+`judgeId`、`role` 或 `principalId` 不会影响服务器身份。
+
+证据读取先从角色投影的 manifest 取得 `recordHash`，再由 Vault 解密并再次脱敏。
+`AccessAuditStore` 将访问事件追加到按日 NDJSON hash chain；事件只含主体、评测、
+证据、角色、时间与链哈希，不含证据内容，也不增加评委草稿 revision。
+
+`src/appeals.js` 将申诉、分诊、替代运行授权和裁决追加到原记录。只有固定控制探针
+确认的平台错误可授权一次同配置替代运行。更正会建立新的结果版本，并重新运行受影
+响的验收、模型、人审、锁定、Arena、评级和幽默流程；原始运行、原证据与原分数都
+不会被覆盖。

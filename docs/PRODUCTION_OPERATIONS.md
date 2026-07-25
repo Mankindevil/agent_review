@@ -747,3 +747,77 @@ Preserve the approved SSH management path before modifying firewall rules.
 SSH key access uses a documented, human-accepted trust-on-first-use boundary. The pinned host-key fingerprint is in the deployment record; compare the presented fingerprint before accepting a new or changed host key. Never include or request an SSH password.
 
 For an incident: stabilize with service/Nginx/health checks; record UTC time, symlink target, statuses, and bounded logs with secrets redacted; roll back an implicated release; preserve then restore state only when needed; and escalate any credential exposure for rotation. For certificate issues inspect timer, expiry, renewal logs, and Nginx before changing application or firewall settings. Make one reversible, observable change at a time. Never use broad deletion, mass release cleanup, or unverified configuration rewrites.
+
+## Governed black-box V2 operations
+
+### Real rollout controls
+
+The committed `.env.example` defines exactly these V2 rollout controls:
+
+```text
+A2A_BLACK_BOX_V1_ENABLED=false
+REVIEW_GOVERNANCE_ENABLED=false
+APPEAL_WINDOW_HOURS=72
+```
+
+`A2A_BLACK_BOX_V1_ENABLED=true` enables V2 submission and its encrypted evidence
+pipeline. `REVIEW_GOVERNANCE_ENABLED=true` enables judge/admin roles and review
+routes. `APPEAL_WINDOW_HOURS` controls the post-finalization participant appeal
+window. Replica release and public evidence projection are implemented by the
+governance state and role projection; there is no
+`ENABLE_REPLICA_ARENA_V2` or `PUBLIC_EVIDENCE_ENABLED` environment flag. Do not
+document or deploy nonexistent flags.
+
+Roll out in three reversible stages: shadow V2 submissions while preserving the
+legacy path, a limited judge pilot with configured hashed principals, then V2 as
+the default submission experience. `schemaVersion: 1` records remain legacy and
+are never silently rescored. Before each promotion, run `node --test
+test/api.test.js`, `npm run check`, and a role-projection smoke covering public,
+participant, judge, and admin responses.
+
+### Keys, tokens, and evidence
+
+Set `EVIDENCE_ENCRYPTION_KEY` to one canonical base64-encoded 32-byte key in the
+root-only environment file. Rotate it by stopping writers, backing up the
+evaluation file and evidence root, decrypting/re-encrypting records through an
+approved migration, validating record hashes, then atomically promoting the new
+environment and state. The current implementation does not provide an automatic
+key-rotation command; do not change the key in place and strand existing
+evidence.
+
+`REVIEW_PRINCIPALS_JSON` contains only `principalId`, display metadata, role, and
+SHA-256 token hashes. Generate plaintext judge/admin tokens out of band, store
+them in an approved secret manager, and rotate the hash configuration atomically.
+Never put a plaintext token in `.env.example`, request bodies, SSE, shell
+history, tickets, or logs. Participant tokens are one-time create receipts:
+there is no recovery endpoint. A participant who loses one must create a new
+evaluation rather than request a token reset.
+
+Evidence manifests and item reads are role-projected and redacted. Treat all
+raw Vault payloads as sensitive: redact PII, credentials, signed URLs, and
+hidden test material before any operator export. Access reads append hash-chained
+events under `ACCESS_AUDIT_ROOT`; retain those events and encrypted evidence
+according to the organization-approved retention schedule. Automatic deletion
+for governed evidence is not implemented, so do not claim that a local cleanup
+job enforces retention.
+
+### Governance incidents and recovery
+
+For a judge draft `409`, reload the assignment and resubmit from the returned
+assignment revision; never overwrite a newer draft. Submitted reviews and an
+absolute locked result are immutable. To validate an audit chain, parse each
+daily NDJSON record in order, recompute the canonical event hash with its prior
+hash, and stop investigation on the first mismatch; preserve the original files.
+
+If Replica information appears before absolute lock, immediately disable
+`REVIEW_GOVERNANCE_ENABLED`, preserve bounded HTTP/SSE/audit evidence, revoke
+affected judge tokens, and assess the affected evaluation as compromised. Do not
+attempt to “re-hide” leaked data by editing projections or logs. Start a new
+evaluation/result version under an approved incident decision.
+
+Back up `DATA_FILE`, `EVIDENCE_ROOT`, and `ACCESS_AUDIT_ROOT` together while the
+service is stopped. On restoration, verify JSON validity, file ownership and
+mode, evidence ciphertext authentication, referenced record hashes, and audit
+chains before restart. Restore to a staged directory and atomically promote only
+the verified set; never mix an evaluation snapshot with a different evidence or
+audit snapshot.

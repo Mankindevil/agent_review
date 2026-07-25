@@ -891,6 +891,52 @@ test('serves the scoring methodology document in the web UI', async () => {
   assert.match(html, /待复刻/);
 });
 
+test('documents the governed black-box methodology, operations, and rollout', async () => {
+  const [methodology, architecture, scoring, operations, readme, envExample] = await Promise.all([
+    readFile(new URL('../public/methodology.html', import.meta.url), 'utf8'),
+    readFile(new URL('../docs/ARCHITECTURE.md', import.meta.url), 'utf8'),
+    readFile(new URL('../docs/SCORING.md', import.meta.url), 'utf8'),
+    readFile(new URL('../docs/PRODUCTION_OPERATIONS.md', import.meta.url), 'utf8'),
+    readFile(new URL('../README.md', import.meta.url), 'utf8'),
+    readFile(new URL('../.env.example', import.meta.url), 'utf8')
+  ]);
+  const participantCopy = `${methodology}\n${readme}`;
+  const documentation = `${participantCopy}\n${architecture}\n${scoring}\n${operations}`;
+
+  for (const term of [
+    'Agent 使用示例',
+    '模型先评',
+    '人工不盲审',
+    '四模型',
+    '第五模型',
+    '大于 15 分',
+    '证据等级',
+    '客观覆盖率',
+    '暂定',
+    '绝对分锁定',
+    '复刻结果密封',
+    '保守复刻优势',
+    'Δc',
+    '差异未稳定',
+    '待复刻',
+    '申诉',
+    '平台错误',
+    '原始运行不覆盖'
+  ]) {
+    assert.match(documentation, new RegExp(term, 'u'), term);
+  }
+  assert.doesNotMatch(participantCopy, /Skill 使用示例/u);
+
+  for (const flag of [
+    'A2A_BLACK_BOX_V1_ENABLED=false',
+    'REVIEW_GOVERNANCE_ENABLED=false',
+    'APPEAL_WINDOW_HOURS=72'
+  ]) {
+    assert.match(envExample, new RegExp(flag, 'u'), flag);
+  }
+  assert.doesNotMatch(envExample, /ENABLE_REPLICA_ARENA_V2|PUBLIC_EVIDENCE_ENABLED/u);
+});
+
 test('keeps the history count inline in the top navigation', async () => {
   const response = await fetch(`${origin}/styles.css`);
   const css = await response.text();
