@@ -573,7 +573,7 @@ async function submitV2Evaluation(agentCard) {
       body: requestBody
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || '创建 V2 评测失败');
+    if (!response.ok) throw new Error(formatV2CreateError(payload));
     created = true;
     if (replicaReviewPolicy) await applyReplicaReviewPolicy(payload.id, replicaReviewPolicy);
     await loadHistory();
@@ -586,6 +586,18 @@ async function submitV2Evaluation(agentCard) {
       $('span', button).textContent = '启动 A2A 证据评测';
     }
   }
+}
+
+function formatV2CreateError(payload) {
+  if (!payload || typeof payload !== 'object') return '创建 V2 评测失败';
+  if (payload.code === 'REPLICA_RUNTIME_NOT_READY' && Array.isArray(payload.runtimes)) {
+    const lines = payload.runtimes.map((runtime) => {
+      const state = runtime.runtimeReady ? '就绪' : (runtime.note || '未就绪');
+      return `${runtime.name || runtime.id}: ${state}`;
+    });
+    return `${payload.error || 'Replica Runtime 未就绪'}\n${lines.join('\n')}`;
+  }
+  return payload.error || '创建 V2 评测失败';
 }
 
 const DEFAULT_REPLICA_REVIEW_POLICY = { visibility: 'full_blind', requiredPrimaries: 1, forceSeparateJudges: false };

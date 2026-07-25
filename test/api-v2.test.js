@@ -22,7 +22,8 @@ process.env.EVIDENCE_ROOT = path.join(testRoot, 'evidence');
 const {
   evaluationStore,
   pipeline,
-  server
+  server,
+  setReplicaCreateGateForTests
 } = await import('../server.js');
 
 const CARD = {
@@ -46,6 +47,7 @@ const EXAMPLES = [{
 
 let origin;
 test.before(async () => {
+  setReplicaCreateGateForTests(async () => {});
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   origin = `http://127.0.0.1:${server.address().port}`;
 });
@@ -68,6 +70,33 @@ test('returns a flat V2 create projection with no-store caching', async () => {
   assert.equal(Object.hasOwn(body, 'evaluation'), false);
   assert.equal(evaluationStore.get(body.id)?.participantAccess, undefined);
   await pipeline.cancel(body.id);
+});
+
+test('rejects V2 create when no Replica runtime is ready', async () => {
+  const { assertReplicaRuntimesReady } = await import('../src/phase3-services.js');
+  setReplicaCreateGateForTests(async () => {
+    await assertReplicaRuntimesReady({
+      getRuntimeStatusFn: async () => [{
+        id: 'claude-code',
+        name: 'Claude Code',
+        enabled: false,
+        installed: false,
+        authenticated: false,
+        runtimeReady: false,
+        note: '未安装'
+      }]
+    });
+  });
+  try {
+    const response = await createEvaluation();
+    const body = await response.json();
+    assert.equal(response.status, 503);
+    assert.equal(body.code, 'REPLICA_RUNTIME_NOT_READY');
+    assert.equal(body.runtimes[0].runtimeReady, false);
+    assert.equal(evaluationStore.list().some((item) => item.id === body.id), false);
+  } finally {
+    setReplicaCreateGateForTests(async () => {});
+  }
 });
 
 test('serves a non-blind judge view without a token while never leaking raw replica material', async () => {

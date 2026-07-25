@@ -162,6 +162,7 @@ test('runs the complete V2 black-box evidence pipeline against a real A2A agent'
       EVIDENCE_ROOT: evidenceRoot
     });
     apiModule = await import('../server.js');
+    apiModule.setReplicaCreateGateForTests(async () => {});
     await new Promise((resolve) =>
       apiModule.server.listen(0, '127.0.0.1', resolve)
     );

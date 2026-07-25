@@ -97,6 +97,8 @@ test('surfaces dual-track progress, replica-human hand-off, and finalize control
   assert.match(app, /replica-review-policy/);
   assert.match(app, /skip-human-review/);
   assert.match(app, /skipHumanReview/);
+  assert.match(app, /formatV2CreateError/);
+  assert.match(app, /REPLICA_RUNTIME_NOT_READY/);
 
   assert.match(indexHtml, /id="skip-human-review"/);
   assert.match(indexHtml, /id="replica-policy-visibility"/);

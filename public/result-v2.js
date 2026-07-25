@@ -160,7 +160,7 @@ function replicaTrackCopy(item, pendingReplica) {
   if (pendingReplica) {
     const status = item.resultV2?.replica?.status;
     if (status === 'disabled') {
-      return '本机未接入 Phase 3 Replica 服务（Claude Code / Cursor / Doubao 不会在此跑），复刻轨按「待复刻」结算；绝对分仍可单独完成。';
+      return '本场未启用 Replica（资格淘汰或非黑盒路径）。正式 V2 创建时至少需要 1 个就绪 Runtime；启用后详情页会显示复刻构建/执行进度。';
     }
     return '绝对分单独成立；没有有效 Replica 时不把“待复刻”解释为胜出。';
   }

@@ -57,8 +57,26 @@ import { EphemeralCredentialVault } from './src/credential-vault.js';
 import { EvidenceVault } from './src/evidence-vault.js';
 import { readA2AExecutionTuning } from './src/execution-tuning.js';
 import { createPhase2Services } from './src/phase2-services.js';
+import {
+  assertReplicaRuntimesReady,
+  createPhase3Services
+} from './src/phase3-services.js';
 
 export { releaseReplicaArena } from './src/arena-release.js';
+
+let replicaCreateGate = defaultReplicaCreateGate;
+
+async function defaultReplicaCreateGate() {
+  await assertReplicaRuntimesReady({ env: process.env });
+}
+
+/** Test-only: skip or replace the V2 create-time Replica readiness gate. */
+export function setReplicaCreateGateForTests(fn) {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('setReplicaCreateGateForTests is only available when NODE_ENV=test');
+  }
+  replicaCreateGate = typeof fn === 'function' ? fn : defaultReplicaCreateGate;
+}
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicRoot = path.join(root, 'public');
@@ -92,6 +110,7 @@ export const pipeline = new EvaluationPipeline(evaluationStore, events, {
   blackBoxServices: blackBoxRuntimeConfig.enabled
     ? {
         phase2: createPhase2Services({ env: process.env }),
+        phase3: createPhase3Services({ env: process.env }),
         evidenceVaultFactory: (evaluationId) => {
           const key = copyEvidenceEncryptionKey(blackBoxRuntimeConfig);
           try {
@@ -166,7 +185,11 @@ export const server = createServer(async (request, response) => {
       ));
     }
     if (request.method === 'POST' && url.pathname === '/api/evaluations') {
-      const item = await pipeline.create(await readEvaluationCreateBody(request));
+      const body = await readEvaluationCreateBody(request);
+      if (body?.schemaVersion === 2 && blackBoxRuntimeConfig.enabled) {
+        await replicaCreateGate(body);
+      }
+      const item = await pipeline.create(body);
       if (item?.schemaVersion === 2) {
         response.setHeader('cache-control', 'no-store');
       }
