@@ -1,3 +1,5 @@
+import { labelLeaf } from '/rubric-labels.js';
+
 const queueStatus = document.querySelector('#queue-status');
 const queueList = document.querySelector('#queue-list');
 const cardTemplate = document.querySelector('#queue-card-template');
@@ -41,6 +43,8 @@ function renderCard(item) {
   fragment.querySelector('.queue-card-id').textContent = `EVAL / ${item.id}`;
   fragment.querySelector('.queue-card-view').href = `/#/evaluation/${encodeURIComponent(item.id)}`;
   fragment.querySelector('.queue-card-dimensions').replaceChildren(renderDimensions(item));
+  const dossierMount = fragment.querySelector('[data-role="absolute-dossier"]');
+  dossierMount.replaceChildren(renderAbsoluteDossier(item.reviewDossier?.absolute));
   const toggle = fragment.querySelector('[data-action="toggle-score"]');
   const skip = fragment.querySelector('[data-action="skip"]');
   const form = fragment.querySelector('[data-role="score-form"]');
@@ -83,7 +87,7 @@ function renderLeaf(leafId) {
   const fragment = leafTemplate.content.cloneNode(true);
   const root = fragment.querySelector('.leaf-form');
   root.dataset.leaf = leafId;
-  fragment.querySelector('.leaf-name').textContent = leafId;
+  fragment.querySelector('.leaf-name').textContent = labelLeaf(leafId);
   const disposition = fragment.querySelector('.leaf-disposition');
   const overrideLabel = fragment.querySelector('.leaf-override-label');
   disposition.addEventListener('change', () => {
@@ -120,11 +124,99 @@ function renderReplicaCard(item) {
   const root = fragment.querySelector('.queue-card-replica');
   fragment.querySelector('.queue-card-id').textContent = `EVAL / ${item.id}`;
   fragment.querySelector('.queue-card-view').href = `/#/evaluation/${encodeURIComponent(item.id)}`;
+  const dossierMount = fragment.querySelector('[data-role="replica-dossier"]');
+  dossierMount.replaceChildren(renderReplicaDossier(item.reviewDossier?.replica));
   const form = fragment.querySelector('[data-role="replica-score-form"]');
   const sources = item.replicaHumanReview?.requiredSources || [];
   form.querySelector('.replica-source-list').replaceChildren(...sources.map((sourceId) => renderReplicaSource(sourceId)));
   form.addEventListener('submit', (event) => submitReplicaReview(event, item, form, root));
   return fragment;
+}
+
+function renderAbsoluteDossier(absolute) {
+  const section = document.createElement('section');
+  section.className = 'review-dossier-block';
+  const heading = document.createElement('h3');
+  heading.textContent = '模型对照';
+  section.append(heading);
+  if (!absolute?.leaves?.length) {
+    const empty = document.createElement('p');
+    empty.className = 'review-dossier-empty';
+    empty.textContent = '暂无已锁定的模型叶子意见。';
+    section.append(empty);
+    return section;
+  }
+  for (const leaf of absolute.leaves) {
+    const details = document.createElement('details');
+    details.className = 'review-dossier-leaf';
+    details.open = true;
+    const summary = document.createElement('summary');
+    summary.textContent = labelLeaf(leaf.subcriterionId);
+    details.append(summary);
+    const seats = document.createElement('div');
+    seats.className = 'review-dossier-seats';
+    for (const seat of leaf.seats || []) {
+      const card = document.createElement('article');
+      card.className = 'review-dossier-seat';
+      const title = document.createElement('b');
+      title.textContent = seat.name || seat.seatId || '席位';
+      const score = document.createElement('span');
+      score.textContent = Number.isFinite(seat.score) ? String(Math.round(seat.score)) : '—';
+      const finding = document.createElement('p');
+      finding.textContent = seat.finding || '（无评语）';
+      card.append(title, score, finding);
+      seats.append(card);
+    }
+    details.append(seats);
+    section.append(details);
+  }
+  return section;
+}
+
+function renderReplicaDossier(replica) {
+  const section = document.createElement('section');
+  section.className = 'review-dossier-block';
+  const heading = document.createElement('h3');
+  heading.textContent = '同题对照';
+  section.append(heading);
+  if (replica?.error) {
+    const error = document.createElement('p');
+    error.className = 'review-dossier-error';
+    error.textContent = `材料不可用：${replica.error}`;
+    section.append(error);
+    return section;
+  }
+  if (!replica?.cases?.length) {
+    const empty = document.createElement('p');
+    empty.className = 'review-dossier-empty';
+    empty.textContent = '暂无同题输出材料。';
+    section.append(empty);
+    return section;
+  }
+  for (const item of replica.cases) {
+    const caseBlock = document.createElement('article');
+    caseBlock.className = 'review-dossier-case';
+    const title = document.createElement('h4');
+    title.textContent = item.title || item.testId || '题目';
+    const prompt = document.createElement('p');
+    prompt.className = 'review-dossier-prompt';
+    prompt.textContent = item.prompt || '（无题干）';
+    caseBlock.append(title, prompt);
+    for (const source of item.sources || []) {
+      const details = document.createElement('details');
+      details.className = 'review-dossier-source';
+      const summary = document.createElement('summary');
+      const label = source.label
+        || (source.sourceId === 'submitted' ? '提交 Agent' : source.sourceId);
+      summary.textContent = source.truncated ? `${label}（已截断）` : label;
+      const pre = document.createElement('pre');
+      pre.textContent = source.text || '（空输出）';
+      details.append(summary, pre);
+      caseBlock.append(details);
+    }
+    section.append(caseBlock);
+  }
+  return section;
 }
 
 function renderReplicaSource(sourceId) {

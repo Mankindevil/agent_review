@@ -68,3 +68,20 @@ test('open review desk lists both absolute and replica tracks from the review qu
     assert.match(html, new RegExp(`data-dim="${dim}"`), dim);
   }
 });
+
+test('open review desk renders absolute and replica review dossiers from the queue payload', async () => {
+  const [html, script, css] = await Promise.all([
+    readFile(new URL('../public/judge.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/judge.js', import.meta.url), 'utf8'),
+    readFile(new URL('../public/judge.css', import.meta.url), 'utf8')
+  ]);
+
+  assert.match(html, /data-role="absolute-dossier"/);
+  assert.match(html, /data-role="replica-dossier"/);
+  assert.match(script, /function renderAbsoluteDossier/);
+  assert.match(script, /function renderReplicaDossier/);
+  assert.match(script, /reviewDossier/);
+  assert.match(script, /模型对照/);
+  assert.match(script, /同题对照/);
+  assert.match(css, /\.review-dossier/);
+});
