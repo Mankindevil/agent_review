@@ -77,7 +77,9 @@ function signed(item) {
 }
 
 function renderRuntimeRows(replica, escapeHtml) {
-  const runtimes = Array.isArray(replica.runtimes) ? runtimes.filter((runtime) => runtime?.valid) : [];
+  const runtimes = Array.isArray(replica.runtimes)
+    ? replica.runtimes.filter((runtime) => runtime?.valid)
+    : [];
   if (!runtimes.length) return '<p>没有有效 Replica runtime 中位数可公开。</p>';
   return `<ul class="v2-result-runtimes">${runtimes.map((runtime) =>
     `<li><span>${escapeHtml(runtime.runtimeId || 'unknown')}</span><b>提交 ${value(replica.submittedMedian)} vs Replica ${value(runtime.median)}</b><small>Δc ${signed(replica.conservativeDelta)} · 95% CI ${value(replica.ci95?.low)} → ${value(replica.ci95?.high)}</small></li>`
