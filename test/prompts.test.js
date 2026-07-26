@@ -60,7 +60,9 @@ test('scope prompt exposes candidate changes but not generator rationale', () =>
   assert.doesNotMatch(prompt, /Secret chain of thought/u);
   assert.match(prompt, /sameDomain/u);
   assert.match(prompt, /noExternalTruthDependency/u);
-  assert.match(prompt, /single JSON object/iu);
+  assert.match(prompt, /ONE JSON object|single JSON object/iu);
+  assert.match(prompt, /ALLOWED_CANDIDATE_IDS/u);
+  assert.match(prompt, /"candidate-1"/u);
 });
 
 test('absolute panel prompt includes only evidence-safe fields and forbids outside fact checking', () => {
@@ -78,9 +80,12 @@ test('absolute panel prompt includes only evidence-safe fields and forbids outsi
     { disputedSubcriterionIds: [] }
   );
 
-  assert.match(prompt, /no browsing|must not browse/iu);
-  assert.match(prompt, /outside fact|external fact/iu);
+  assert.match(prompt, /No browsing|must not browse|no browsing/iu);
+  assert.match(prompt, /outside fact|external fact|outside facts/iu);
   assert.match(prompt, /"evidenceId":"ev_a"/u);
+  assert.match(prompt, /REQUIRED_SUBCRITERION_IDS/u);
+  assert.match(prompt, /ALLOWED_EVIDENCE_IDS/u);
+  assert.match(prompt, /professionalism\.evidenceReasoning/u);
   assert.doesNotMatch(prompt, /replicaArena|runtimeBuild/u);
 });
 
@@ -95,9 +100,10 @@ test('humor rewrite prompt contains only locked findings and forbids score chang
   }]);
 
   assert.match(prompt, /finding_1/u);
-  assert.match(prompt, /rewrite.*not extend|不得.*扩展/iu);
+  assert.match(prompt, /rewrite \(not extend\)|rewrite.*not extend|不得.*扩展/iu);
   assert.match(prompt, /score|分数/iu);
   assert.match(prompt, /"items"/u);
+  assert.match(prompt, /ALLOWED_FINDING_IDS/u);
   assert.doesNotMatch(prompt, /raw evidence|Replica output|model score|human score|total/iu);
 });
 
@@ -111,11 +117,12 @@ test('arena prompt compares anonymous results only and requires one strict JSON 
     candidates: [{ candidateId: 'candidate-abc12345', output: { messageParts: [{ type: 'text', text: 'Result.' }] } }]
   });
 
-  assert.match(ANONYMOUS_ARENA_SYSTEM_PROMPT, /compare.*task result quality/iu);
+  assert.match(ANONYMOUS_ARENA_SYSTEM_PROMPT, /Compare only shared task result quality|compare.*task result quality/iu);
   assert.match(ANONYMOUS_ARENA_SYSTEM_PROMPT, /protocol.*latency.*identity/iu);
-  assert.match(ANONYMOUS_ARENA_SYSTEM_PROMPT, /do not browse|must not browse/iu);
-  assert.match(ANONYMOUS_ARENA_SYSTEM_PROMPT, /JSON object only|one JSON object/iu);
+  assert.match(ANONYMOUS_ARENA_SYSTEM_PROMPT, /do not browse|Do not browse/iu);
+  assert.match(ANONYMOUS_ARENA_SYSTEM_PROMPT, /ONE JSON object|JSON object only|one JSON object/iu);
   assert.match(prompt, /candidate-abc12345/u);
+  assert.match(prompt, /ALLOWED_CANDIDATE_IDS/u);
   assert.match(prompt, /taskConstraint/u);
   assert.match(prompt, /artifactUsability/u);
 });
@@ -123,7 +130,8 @@ test('arena prompt compares anonymous results only and requires one strict JSON 
 test('replica prompts contain only supplied public build material and current-turn context history', () => {
   const build = replicaBuildPrompt({ agent: { name: 'Public Agent' }, manifest: { contentHash: 'a'.repeat(64) } }, { maxTokens: 16_000, network: 'none' });
   assert.match(build, /Public Agent/u);
-  assert.match(build, /only.*supplied.*public|supplied public material/iu);
+  assert.match(build, /only the supplied public material|supplied public material/iu);
+  assert.match(build, /OUTPUT CONTRACT/u);
   assert.match(build, /network/iu);
 
   const run = replicaRunPrompt(

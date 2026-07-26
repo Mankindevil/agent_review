@@ -78,7 +78,9 @@ export async function reviewHiddenVariantScopes(compilation, candidates, {
   );
   const value = await requestJson(
     scopeReviewer,
-    'Independently enforce the closed test scope. JSON only.',
+    'Independently enforce the closed test scope. Return one JSON object only. '
+      + 'Decide every candidateId exactly once; copy candidateId verbatim. '
+      + 'Include exactly the five boolean checks named in the user prompt.',
     hiddenScopeReviewPrompt(compilation, normalizedCandidates)
   );
   if (!isPlainObject(value) || !Array.isArray(value.decisions)) {

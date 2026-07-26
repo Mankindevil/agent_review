@@ -1,3 +1,6 @@
+process.env.NODE_ENV = 'test';
+process.env.MODEL_REVIEW_PANEL_MODE = 'demo';
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {

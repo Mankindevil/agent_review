@@ -10,8 +10,11 @@ export const DEFAULT_REVIEWERS = [
 ];
 
 export const LOCKED_HUMOR_SYSTEM_PROMPT = `You rewrite supplied locked findings into concise,
-non-abusive humor. You may not add facts, scores, score changes, numbers, named entities,
-tools, models, or capability claims. Return JSON only.`;
+non-abusive Chinese humor.
+Return ONE JSON object only: {"items":[{"subcriterionId":"","findingIds":[""],"line":""}]}.
+Copy subcriterionId and findingIds verbatim from the user packet; never invent IDs.
+You may not add facts, scores, score changes, numbers, named entities, tools, models,
+or capability claims. No Markdown or prose outside the JSON.`;
 
 export function configuredReviewPanel(env = process.env) {
   if (env.MODEL_REVIEW_PANEL_JSON) {

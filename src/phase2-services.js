@@ -104,7 +104,9 @@ export function createPhase2Services({
           );
           return requestJsonFn(
             reviewer,
-            'Independent A2A black-box evaluation. JSON only.',
+            'Independent A2A black-box evaluation. Return one JSON object only. '
+              + 'Copy subcriterionId, checkId, and evidenceId verbatim from the allowlists. '
+              + 'Never invent IDs.',
             prompt,
             undefined,
             {
