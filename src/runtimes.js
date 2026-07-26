@@ -11,7 +11,7 @@ import { startArkAnthropicProxy } from './ark-anthropic-proxy.js';
 import { prepareRuntimeWorkspace } from './runtime-sandbox.js';
 import { resolveRuntimeConfig } from './runtime-config.js';
 import { localCliEnv } from './runtime-environment.js';
-import { runLocalCliProcess } from './runtime-process.js';
+import { resolveCliExecutable, runLocalCliProcess } from './runtime-process.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -207,10 +207,11 @@ export function localCliArgs(runtimeId, prompt, { budget = '0.25', readiness = f
   if (runtimeId === 'cursor') {
     // Readiness probes only need the plain READY sentinel; text mode avoids
     // JSON envelope parsing and matches the fast path used by local smoke tests.
+    // Non-interactive temp workspaces need both --trust and --force/-f.
     if (readiness) {
       return ['-p', prompt, '--output-format', 'text', '--trust', '--force'];
     }
-    return ['-p', prompt, '--output-format', 'json', '--trust'];
+    return ['-p', prompt, '--output-format', 'json', '--trust', '--force'];
   }
   throw new Error(`Unsupported local Runtime: ${runtimeId}`);
 }
@@ -247,7 +248,9 @@ async function callLocalCli(runtimeId, prompt, signal, sampling = {}, parentEnv 
   const startedAt = Date.now();
   const timeout = localRuntimeTimeout(parentEnv.LOCAL_RUNTIME_TIMEOUT_MS);
   const budget = parentEnv.CLAUDE_MAX_BUDGET_USD || '0.25';
-  const command = runtimeId === 'claude-code' ? 'claude' : 'cursor-agent';
+  const bareCommand = runtimeId === 'claude-code' ? 'claude' : 'cursor-agent';
+  const command = await resolveCliExecutable(bareCommand, { env: parentEnv })
+    || bareCommand;
   const args = localCliArgs(runtimeId, prompt, {
     budget,
     readiness: sampling?.readiness === true

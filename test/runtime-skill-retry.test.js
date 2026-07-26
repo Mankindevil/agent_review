@@ -33,7 +33,8 @@ test('uses documented Cursor Agent print arguments', () => {
   assert.deepEqual(localCliArgs('cursor', 'build a skill'), [
     '-p', 'build a skill',
     '--output-format', 'json',
-    '--trust'
+    '--trust',
+    '--force'
   ]);
   assert.deepEqual(localCliArgs('cursor', 'READY', { readiness: true }), [
     '-p', 'READY',

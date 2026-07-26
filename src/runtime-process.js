@@ -1,7 +1,84 @@
+import { constants as fsConstants, existsSync } from 'node:fs';
+import { access } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
+import path from 'node:path';
 
 const DEFAULT_MAX_BUFFER = 5_000_000;
 const DEFAULT_GRACE_MS = 1_000;
+
+/** Resolve a bare CLI name to an absolute PATHEXT candidate when possible. */
+export async function resolveCliExecutable(command, {
+  env = process.env,
+  accessImpl = access,
+  platform = process.platform
+} = {}) {
+  if (typeof command !== 'string' || !command.trim()) return null;
+  if (path.isAbsolute(command) || command.includes('/') || command.includes('\\')) {
+    return command;
+  }
+  for (const directory of String(env.PATH || env.Path || '').split(path.delimiter)) {
+    if (!directory) continue;
+    for (const name of executableNames(command, env, platform)) {
+      const candidate = path.join(directory, name);
+      try {
+        await accessImpl(candidate, fsConstants.X_OK);
+        return candidate;
+      } catch {
+        // Keep searching PATH / PATHEXT candidates.
+      }
+    }
+  }
+  return null;
+}
+
+function executableNames(command, env, platform) {
+  if (platform !== 'win32' || path.extname(command)) return [command];
+  const extensions = String(env.PATHEXT || '.EXE;.CMD;.BAT;.COM')
+    .split(';')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  // Prefer PowerShell shims when PATHEXT omits .PS1 (common for Agent CLIs).
+  return [command, ...extensions.map((ext) => `${command}${ext}`), `${command}.ps1`];
+}
+
+/**
+ * Prefer shell-less spawns on Windows so multiline `-p` prompts and flag
+ * tokens are not mangled by `cmd.exe /s /c`.
+ */
+export function normalizeCliSpawn(command, args, {
+  platform = process.platform,
+  env = process.env,
+  existsSyncImpl = existsSync
+} = {}) {
+  const argv = Array.isArray(args) ? [...args] : [];
+  if (platform !== 'win32') {
+    return { command, args: argv, shell: false, windowsHide: true };
+  }
+
+  let target = typeof command === 'string' ? command : '';
+  const lower = target.toLowerCase();
+  if (lower.endsWith('.cmd') || lower.endsWith('.bat')) {
+    const sibling = target.replace(/\.(cmd|bat)$/iu, '.ps1');
+    if (existsSyncImpl(sibling)) target = sibling;
+  }
+
+  if (target.toLowerCase().endsWith('.exe')) {
+    return { command: target, args: argv, shell: false, windowsHide: true };
+  }
+
+  if (target.toLowerCase().endsWith('.ps1')) {
+    const root = env.SystemRoot || env.SYSTEMROOT || 'C:\\Windows';
+    return {
+      command: path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', target, ...argv],
+      shell: false,
+      windowsHide: true
+    };
+  }
+
+  // Bare command names still need cmd.exe PATHEXT resolution.
+  return { command: target, args: argv, shell: true, windowsHide: true };
+}
 
 export function runLocalCliProcess(command, args, {
   cwd,
@@ -12,7 +89,8 @@ export function runLocalCliProcess(command, args, {
   graceMs = DEFAULT_GRACE_MS,
   spawnImpl = spawn,
   killImpl = process.kill,
-  platform = process.platform
+  platform = process.platform,
+  existsSyncImpl = existsSync
 } = {}) {
   if (signal?.aborted) return Promise.reject(abortReason(signal));
 
@@ -26,15 +104,17 @@ export function runLocalCliProcess(command, args, {
     let stdoutBytes = 0;
     let stderrBytes = 0;
     const detached = platform !== 'win32';
-    // Windows Agent/CLI shims are usually `.cmd`; spawn without a shell cannot
-    // resolve PATHEXT and fails with ENOENT / EINVAL on the bare command name.
-    const shell = platform === 'win32';
-    const child = spawnImpl(command, args, {
+    const normalized = normalizeCliSpawn(command, args, {
+      platform,
+      env: env || process.env,
+      existsSyncImpl
+    });
+    const child = spawnImpl(normalized.command, normalized.args, {
       cwd,
       env,
       detached,
-      shell,
-      windowsHide: true,
+      shell: normalized.shell,
+      windowsHide: normalized.windowsHide,
       stdio: ['ignore', 'pipe', 'pipe']
     });
 
