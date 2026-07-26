@@ -247,6 +247,15 @@ function safeError(message, code) {
 
 function normalizeTransportError(error) {
   if (error?.code && ['security', 'dns', 'timeout', 'cancelled', 'response-too-large', 'instrumentation'].includes(error.code)) return error;
-  if (error?.code?.startsWith?.('ERR_TLS') || error?.code?.startsWith?.('CERT_')) return safeError('TLS 握手失败', 'tls');
-  return safeError(error?.message || '远程连接失败', 'connection');
+  const code = String(error?.code || error?.cause?.code || '');
+  const message = String(error?.message || error?.cause?.message || '');
+  if (
+    code.startsWith('ERR_TLS')
+    || code.startsWith('CERT_')
+    || code === 'UND_ERR_SOCKET'
+    || /disconnected before secure tls|tls handshake|certificate/iu.test(message)
+  ) {
+    return safeError(message || 'TLS 握手失败', 'tls');
+  }
+  return safeError(message || '远程连接失败', 'connection');
 }

@@ -36,6 +36,61 @@ export function withTimeout(signal, timeoutMs) {
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
+export function networkFailureMessage(error) {
+  if (!error) return 'remote connection failed';
+  const parts = [];
+  let current = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    const message = current instanceof Error
+      ? current.message
+      : typeof current === 'string'
+        ? current
+        : '';
+    if (message && !parts.includes(message)) parts.push(message);
+    current = current.cause;
+  }
+  return parts.join(': ') || 'remote connection failed';
+}
+
+export function isTransientNetworkFailure(error) {
+  const code = String(error?.code || error?.cause?.code || '');
+  if ([
+    'ECONNRESET',
+    'ECONNREFUSED',
+    'ETIMEDOUT',
+    'EPIPE',
+    'EAI_AGAIN',
+    'UND_ERR_SOCKET',
+    'UND_ERR_CONNECT_TIMEOUT',
+    'UND_ERR_HEADERS_TIMEOUT',
+    'UND_ERR_BODY_TIMEOUT'
+  ].includes(code)) {
+    return true;
+  }
+  return /socket hang up|disconnected before secure tls|network socket|econnreset|econnrefused|etimedout|fetch failed|tls handshake/iu
+    .test(networkFailureMessage(error));
+}
+
+export async function withTransientNetworkRetry(operation, {
+  attempts = 3,
+  delaysMs = [250, 750, 1500]
+} = {}) {
+  if (typeof operation !== 'function') throw new TypeError('operation is required');
+  const total = Number.isSafeInteger(attempts) && attempts > 0 ? attempts : 3;
+  let lastError;
+  for (let attempt = 0; attempt < total; attempt += 1) {
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      lastError = error;
+      if (!isTransientNetworkFailure(error) || attempt >= total - 1) throw error;
+      const delay = delaysMs[Math.min(attempt, delaysMs.length - 1)] || 250;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw lastError;
+}
+
 export function safeJson(text, options = {}) {
   const requiredKeys = Array.isArray(options.requiredKeys)
     ? options.requiredKeys.filter((key) => typeof key === 'string' && key)

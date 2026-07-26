@@ -52,6 +52,7 @@ import {
   validReplicaIdsFor
 } from './arena-release.js';
 import { getReplicaReviewPolicy } from './replica-human-review.js';
+import { networkFailureMessage } from './utils.js';
 
 export { releaseReplicaArena } from './arena-release.js';
 
@@ -2832,10 +2833,11 @@ function safeErrorDetail(error) {
     const head = error.message || 'aggregate failure';
     return causes.length ? `${head} (${causes.join('; ')})` : head;
   }
+  const detail = networkFailureMessage(error);
   if (typeof error.code === 'string' && error.code) {
-    return `${error.code}: ${error.message || 'failed'}`;
+    return `${error.code}: ${detail || 'failed'}`;
   }
-  return String(error.message || error);
+  return detail || String(error);
 }
 
 async function interruptEvaluation(context) {

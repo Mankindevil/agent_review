@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveSeed, normalizeSeed, normalizeTemperature, safeJson } from '../src/utils.js';
+import {
+  deriveSeed,
+  isTransientNetworkFailure,
+  networkFailureMessage,
+  normalizeSeed,
+  normalizeTemperature,
+  safeJson
+} from '../src/utils.js';
 
 test('normalizes and derives deterministic evaluation seeds', () => {
   assert.equal(normalizeSeed('20260720'), 20260720);
@@ -26,6 +33,17 @@ test('extracts balanced JSON when a CLI adds Chinese prose', () => {
 
 test('reports a stable error when no JSON value exists', () => {
   assert.throws(() => safeJson('只有说明，没有结构化结果'), /未找到合法 JSON/);
+});
+
+test('network failure helpers unwrap TLS disconnect causes', () => {
+  const err = new TypeError('fetch failed');
+  err.cause = Object.assign(
+    new Error('Client network socket disconnected before secure TLS connection was established'),
+    { code: 'UND_ERR_SOCKET' }
+  );
+  assert.match(networkFailureMessage(err), /secure TLS connection/u);
+  assert.equal(isTransientNetworkFailure(err), true);
+  assert.equal(isTransientNetworkFailure(new Error('panel review must contain a reviews array')), false);
 });
 
 test('prefers the largest balanced JSON object and can require root keys', () => {

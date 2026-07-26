@@ -299,6 +299,41 @@ test('requestJson includes upstream HTTP error body snippets', async () => {
   }
 });
 
+test('requestJson retries transient TLS disconnects before failing', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls < 3) {
+      const err = new TypeError('fetch failed');
+      err.cause = Object.assign(
+        new Error('Client network socket disconnected before secure TLS connection was established'),
+        { code: 'UND_ERR_SOCKET' }
+      );
+      throw err;
+    }
+    return new Response(JSON.stringify({
+      choices: [{ finish_reason: 'stop', message: { content: '{"ok":true}' } }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  process.env.PANEL_TEST_KEY = 'test-secret';
+  try {
+    const result = await requestJson({
+      id: 'panel',
+      name: 'Panel',
+      kind: 'openai-compatible',
+      baseUrl: 'https://models.example/v1',
+      model: 'model-v1',
+      apiKeyEnv: 'PANEL_TEST_KEY'
+    }, 'system', 'prompt');
+    assert.deepEqual(result, { ok: true });
+    assert.equal(calls, 3);
+  } finally {
+    delete process.env.PANEL_TEST_KEY;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('requestJson rejects max_tokens truncation before accepting nested JSON fragments', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({

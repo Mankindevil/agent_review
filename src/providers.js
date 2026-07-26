@@ -1,6 +1,11 @@
 import { mockProfessionalReview } from './scoring.js';
 import { PROFESSIONAL_REVIEW_SYSTEM_PROMPT, professionalReviewPrompt } from './prompts.js';
-import { safeJson, withTimeout } from './utils.js';
+import {
+  networkFailureMessage,
+  safeJson,
+  withTimeout,
+  withTransientNetworkRetry
+} from './utils.js';
 
 export const DEFAULT_REVIEWERS = [
   { id: 'gpt', name: 'OpenAI 评审', model: 'GPT-5', kind: 'mock' },
@@ -297,26 +302,29 @@ function assertScore(value, field) {
 
 async function callOpenAICompatible(config, system, prompt, signal, sampling) {
   const timeoutMs = Number(process.env.MODEL_REVIEW_TIMEOUT_MS || 120_000);
-  let response;
-  try {
-    response = await fetch(config.baseUrl.replace(/\/$/, '') + '/chat/completions', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${resolveSecret(config.apiKeyEnv)}` },
-      body: JSON.stringify({
-        model: config.model,
-        temperature: sampling.temperature ?? 0,
-        ...(Number.isInteger(sampling.seed) ? { seed: sampling.seed } : {}),
-        max_tokens: sampling.maxTokens ?? Number(process.env.MODEL_REVIEW_MAX_TOKENS || 1200),
-        ...(config.id === 'doubao' ? { thinking: { type: 'disabled' } } : {}),
-        messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }]
-      }),
-      signal: withTimeout(signal, timeoutMs)
-    });
-  } catch (error) {
-    if (signal?.aborted) throw signal.reason || error;
-    if (error.name === 'TimeoutError') throw new Error(`${config.name}（${config.model}）超过 ${Math.round(timeoutMs / 1000)} 秒未返回；可调整 MODEL_REVIEW_TIMEOUT_MS`);
-    throw error;
-  }
+  const response = await withTransientNetworkRetry(async () => {
+    try {
+      return await fetch(config.baseUrl.replace(/\/$/, '') + '/chat/completions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${resolveSecret(config.apiKeyEnv)}` },
+        body: JSON.stringify({
+          model: config.model,
+          temperature: sampling.temperature ?? 0,
+          ...(Number.isInteger(sampling.seed) ? { seed: sampling.seed } : {}),
+          max_tokens: sampling.maxTokens ?? Number(process.env.MODEL_REVIEW_MAX_TOKENS || 1200),
+          ...(config.id === 'doubao' ? { thinking: { type: 'disabled' } } : {}),
+          messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }]
+        }),
+        signal: withTimeout(signal, timeoutMs)
+      });
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
+      if (error.name === 'TimeoutError') {
+        throw new Error(`${config.name}（${config.model}）超过 ${Math.round(timeoutMs / 1000)} 秒未返回；可调整 MODEL_REVIEW_TIMEOUT_MS`);
+      }
+      throw wrapProviderNetworkError(config, error);
+    }
+  });
   if (!response.ok) throw await httpStatusError(config, response);
   const json = await response.json();
   const choice = json.choices?.[0];
@@ -328,23 +336,34 @@ async function callOpenAICompatible(config, system, prompt, signal, sampling) {
 
 async function callAnthropic(config, system, prompt, signal, sampling) {
   const timeoutMs = Number(process.env.MODEL_REVIEW_TIMEOUT_MS || 120_000);
-  let response;
-  try {
-    response = await fetch(config.baseUrl || 'https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': resolveSecret(config.apiKeyEnv), 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: config.model, max_tokens: sampling.maxTokens ?? Number(process.env.MODEL_REVIEW_MAX_TOKENS || 1200), temperature: sampling.temperature ?? 0, system, messages: [{ role: 'user', content: prompt }] }),
-      signal: withTimeout(signal, timeoutMs)
-    });
-  } catch (error) {
-    if (signal?.aborted) throw signal.reason || error;
-    if (error.name === 'TimeoutError') throw new Error(`${config.name}（${config.model}）超过 ${Math.round(timeoutMs / 1000)} 秒未返回；可调整 MODEL_REVIEW_TIMEOUT_MS`);
-    throw error;
-  }
+  const response = await withTransientNetworkRetry(async () => {
+    try {
+      return await fetch(config.baseUrl || 'https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': resolveSecret(config.apiKeyEnv), 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: config.model, max_tokens: sampling.maxTokens ?? Number(process.env.MODEL_REVIEW_MAX_TOKENS || 1200), temperature: sampling.temperature ?? 0, system, messages: [{ role: 'user', content: prompt }] }),
+        signal: withTimeout(signal, timeoutMs)
+      });
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
+      if (error.name === 'TimeoutError') {
+        throw new Error(`${config.name}（${config.model}）超过 ${Math.round(timeoutMs / 1000)} 秒未返回；可调整 MODEL_REVIEW_TIMEOUT_MS`);
+      }
+      throw wrapProviderNetworkError(config, error);
+    }
+  });
   if (!response.ok) throw await httpStatusError(config, response);
   const json = await response.json();
   assertCompletionNotTruncated(config, json.stop_reason || json.choices?.[0]?.finish_reason);
   return json.content?.find((part) => part.type === 'text')?.text || '';
+}
+
+function wrapProviderNetworkError(config, error) {
+  const detail = networkFailureMessage(error);
+  const wrapped = new Error(`${config.name}（${config.model}）网络异常: ${detail}`);
+  wrapped.cause = error;
+  wrapped.code = error?.cause?.code || error?.code;
+  return wrapped;
 }
 
 function assertCompletionNotTruncated(config, finishReason) {
