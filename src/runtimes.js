@@ -17,8 +17,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 const CLAUDE_RUNTIME_SYSTEM_PROMPT = '你是 Agent 盲测平台中的隔离执行器。严格完成用户给出的单一任务，只输出最终内容。当前会话没有任何工具，不得浏览文件、探索代码库、启动子代理，也不得输出或模拟 tool_call、Bash、Explore 等工具调用。';
-const RUNTIME_READINESS_PROMPT =
-  'Output exactly the five ASCII letters READY with no punctuation or other text.';
+// Natural-language probes are often mangled by Claude Code + Ark/DeepSeek
+// backends (greeting / truncated "Do..." replies). A tiny JSON contract is
+// followed reliably by both Claude Code and Cursor Agent.
+export const RUNTIME_READINESS_PROMPT = JSON.stringify({
+  probe: true,
+  required_output: 'READY'
+});
 const DEFAULT_LOCAL_RUNTIME_TIMEOUT_MS = 180_000;
 const MAX_LOCAL_RUNTIME_TIMEOUT_MS = 1_200_000;
 
@@ -388,7 +393,9 @@ export async function probeRuntimeReadiness(runtimeId, config, {
 }
 
 function isReadinessSentinel(value) {
-  return typeof value === 'string' && value.trim().toUpperCase() === 'READY';
+  if (typeof value !== 'string') return false;
+  // Ark/DeepSeek backends sometimes append a trailing period to READY.
+  return /^\s*READY(?:[.!])?\s*$/i.test(value);
 }
 
 function extractCliText(stdout) {

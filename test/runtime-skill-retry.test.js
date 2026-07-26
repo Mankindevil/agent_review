@@ -5,7 +5,7 @@ import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, localRuntimeTimeout, probeRuntimeReadiness, runSkill, withRuntimeWorkspace } from '../src/runtimes.js';
+import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, localRuntimeTimeout, probeRuntimeReadiness, RUNTIME_READINESS_PROMPT, runSkill, withRuntimeWorkspace } from '../src/runtimes.js';
 import { prepareRuntimeWorkspace } from '../src/runtime-sandbox.js';
 import { runtimeBuildSkillPrompt } from '../src/prompts.js';
 import { applyArkClaudeEnv } from '../src/claude-env.js';
@@ -62,10 +62,8 @@ test('uses an unambiguous exact-token prompt for local readiness', async () => {
 
   assert.equal(ready, true);
   assert.equal(receivedSampling?.readiness, true);
-  assert.equal(
-    receivedPrompt,
-    'Output exactly the five ASCII letters READY with no punctuation or other text.'
-  );
+  assert.equal(receivedPrompt, RUNTIME_READINESS_PROMPT);
+  assert.match(receivedPrompt, /"required_output":"READY"/);
 });
 
 test('writes deny-by-default Cursor permissions only inside the temporary workspace', async () => {
@@ -281,6 +279,19 @@ test('rejects noncompliant nonempty readiness output', async () => {
   });
 
   assert.equal(ready, false);
+});
+
+test('accepts READY with a trailing period from flaky local backends', async () => {
+  const ready = await probeRuntimeReadiness('claude-code', {
+    source: 'local',
+    kind: 'local-cli',
+    command: 'claude'
+  }, {
+    env: { RUNTIME_PROBE_TIMEOUT_MS: '1000' },
+    localCall: async () => ({ text: 'READY.' })
+  });
+
+  assert.equal(ready, true);
 });
 
 test('isolates Claude Code from inherited provider credentials and persistent user directories', () => {

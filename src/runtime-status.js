@@ -1,4 +1,3 @@
-import { constants as fsConstants } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -6,7 +5,7 @@ import path from 'node:path';
 import { hasClaudeCredential, resolveClaudeBackend } from './claude-env.js';
 import { hasOwnEnvValue, resolveRuntimeConfig, runtimeConfigAuthenticated } from './runtime-config.js';
 import { cursorAuthConfigHome, localCliEnv } from './runtime-environment.js';
-import { runLocalCliProcess } from './runtime-process.js';
+import { resolveCliExecutable, runLocalCliProcess } from './runtime-process.js';
 import { probeRuntimeReadiness } from './runtimes.js';
 
 const readinessCache = new Map();
@@ -246,30 +245,7 @@ function statusEntry({
 }
 
 async function findExecutable(command, env, accessImpl) {
-  for (const directory of String(env.PATH || '').split(path.delimiter)) {
-    if (!directory) continue;
-    for (const name of executableNames(command, env)) {
-      const candidate = path.join(directory, name);
-      try {
-        await accessImpl(candidate, fsConstants.X_OK);
-        return candidate;
-      } catch {
-        // Continue searching PATHEXT candidates and PATH directories.
-      }
-    }
-  }
-  return null;
-}
-
-/** Windows shims are often `cursor-agent.cmd`; bare `cursor-agent` is not a real file. */
-function executableNames(command, env) {
-  if (typeof command !== 'string' || !command.trim()) return [];
-  if (process.platform !== 'win32' || path.extname(command)) return [command];
-  const extensions = String(env.PATHEXT || '.EXE;.CMD;.BAT;.COM')
-    .split(';')
-    .map((item) => item.trim())
-    .filter(Boolean);
-  return [command, ...extensions.map((ext) => `${command}${ext}`)];
+  return resolveCliExecutable(command, { env, accessImpl });
 }
 
 function readinessCacheKey(runtimeId, config, env) {

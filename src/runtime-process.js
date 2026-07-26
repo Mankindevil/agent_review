@@ -6,6 +6,22 @@ import path from 'node:path';
 const DEFAULT_MAX_BUFFER = 5_000_000;
 const DEFAULT_GRACE_MS = 1_000;
 
+/** Extra install locations when a long-lived Node process has a stale PATH. */
+export function wellKnownCliDirectories(command, {
+  env = process.env,
+  platform = process.platform
+} = {}) {
+  if (command !== 'cursor-agent' || platform !== 'win32') return [];
+  const directories = [];
+  if (typeof env.CURSOR_AGENT_HOME === 'string' && env.CURSOR_AGENT_HOME.trim()) {
+    directories.push(env.CURSOR_AGENT_HOME.trim());
+  }
+  if (typeof env.LOCALAPPDATA === 'string' && env.LOCALAPPDATA.trim()) {
+    directories.push(path.join(env.LOCALAPPDATA.trim(), 'cursor-agent'));
+  }
+  return directories;
+}
+
 /** Resolve a bare CLI name to an absolute PATHEXT candidate when possible. */
 export async function resolveCliExecutable(command, {
   env = process.env,
@@ -16,7 +32,11 @@ export async function resolveCliExecutable(command, {
   if (path.isAbsolute(command) || command.includes('/') || command.includes('\\')) {
     return command;
   }
-  for (const directory of String(env.PATH || env.Path || '').split(path.delimiter)) {
+  const directories = [
+    ...String(env.PATH || env.Path || '').split(path.delimiter),
+    ...wellKnownCliDirectories(command, { env, platform })
+  ];
+  for (const directory of directories) {
     if (!directory) continue;
     for (const name of executableNames(command, env, platform)) {
       const candidate = path.join(directory, name);
