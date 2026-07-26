@@ -160,7 +160,9 @@ export async function probeCursorAuthentication(executable, {
       cwd: workspace,
       timeout: 5_000,
       maxBuffer: 64_000,
-      env: localCliEnv('cursor', workspace, env)
+      env: localCliEnv('cursor', workspace, env, {
+        cursorConfigHome: cursorAuthConfigHome(env)
+      })
     });
     const output = `${stdout || ''}\n${stderr || ''}`.trim();
     if (!output || /not\s+logged|logged\s+out|unauthenticated|not\s+authenticated/i.test(output)) {

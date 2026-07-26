@@ -252,7 +252,11 @@ async function callLocalCli(runtimeId, prompt, signal, sampling = {}, parentEnv 
     if (runtimeId === 'claude-code' && (!claudeBackend || !hasClaudeCredential(parentEnv))) {
       throw new Error('AUTH_REQUIRED: selected Claude backend is unsupported or incomplete');
     }
-    const commandEnv = localCliEnv(runtimeId, workspace, parentEnv);
+    const commandEnv = localCliEnv(runtimeId, workspace, parentEnv, {
+      cursorConfigHome: runtimeId === 'cursor'
+        ? parentEnv.CURSOR_AUTH_CONFIG_HOME
+        : undefined
+    });
     if (runtimeId === 'claude-code' && claudeBackend === 'ark') {
       const model = parentEnv.CLAUDE_ARK_MODEL;
       arkProxy = await startArkAnthropicProxy({ baseUrl: parentEnv.ARK_BASE_URL, apiKey: parentEnv.ARK_API_KEY, model, signal, ...sampling });

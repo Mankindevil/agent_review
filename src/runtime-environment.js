@@ -29,11 +29,20 @@ export function localCliEnv(
     : null;
   if (runtimeId === 'cursor') env.AGENT_CLI_CREDENTIAL_STORE = 'file';
 
+  // Windows Cursor CLI persists tokens at %APPDATA%\Cursor\auth.json, not under
+  // XDG_CONFIG_HOME/cursor/. Point APPDATA at the auth home so isolated probes
+  // and runs can see the durable login without the host Roaming profile.
+  const windowsCursorAppData = runtimeId === 'cursor'
+    && process.platform === 'win32'
+    && disposableCursorConfigHome
+    ? disposableCursorConfigHome
+    : workspace;
+
   return {
     ...env,
     HOME: workspace,
     USERPROFILE: workspace,
-    APPDATA: workspace,
+    APPDATA: windowsCursorAppData,
     LOCALAPPDATA: workspace,
     XDG_CONFIG_HOME: disposableCursorConfigHome || workspace,
     XDG_CACHE_HOME: workspace,
