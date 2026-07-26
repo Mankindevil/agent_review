@@ -35,23 +35,32 @@ test('uses documented Cursor Agent print arguments', () => {
     '--output-format', 'json',
     '--trust'
   ]);
+  assert.deepEqual(localCliArgs('cursor', 'READY', { readiness: true }), [
+    '-p', 'READY',
+    '--output-format', 'text',
+    '--trust',
+    '--force'
+  ]);
 });
 
 test('uses an unambiguous exact-token prompt for local readiness', async () => {
   let receivedPrompt;
+  let receivedSampling;
   const ready = await probeRuntimeReadiness('claude-code', {
     source: 'local',
     kind: 'local-cli',
     command: 'claude'
   }, {
     env: { RUNTIME_PROBE_TIMEOUT_MS: '1000' },
-    localCall: async (_runtimeId, prompt) => {
+    localCall: async (_runtimeId, prompt, _signal, sampling) => {
       receivedPrompt = prompt;
+      receivedSampling = sampling;
       return { text: 'READY' };
     }
   });
 
   assert.equal(ready, true);
+  assert.equal(receivedSampling?.readiness, true);
   assert.equal(
     receivedPrompt,
     'Output exactly the five ASCII letters READY with no punctuation or other text.'
@@ -61,7 +70,9 @@ test('uses an unambiguous exact-token prompt for local readiness', async () => {
 test('writes deny-by-default Cursor permissions only inside the temporary workspace', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'cursor-sandbox-'));
   try {
-    await prepareRuntimeWorkspace('cursor', root);
+    await prepareRuntimeWorkspace('cursor', root, {
+      cursorAuthConfigHome: '/var/lib/agent-review/cursor-auth'
+    });
     const payload = JSON.parse(await readFile(path.join(root, '.cursor', 'cli.json'), 'utf8'));
     assert.deepEqual(payload.permissions.allow, []);
     assert.ok(payload.permissions.deny.includes('Shell(*)'));
@@ -144,7 +155,12 @@ test('isolates Cursor Agent from host secrets and persistent user directories', 
   assert.equal(env.DEEPSEEK_API_KEY, undefined);
   assert.equal(env.HOME, workspace);
   assert.equal(env.USERPROFILE, workspace);
-  assert.equal(env.APPDATA, workspace);
+  // Windows Cursor CLI reads %APPDATA%\Cursor\auth.json, so APPDATA must follow
+  // the durable/session auth home when one is supplied.
+  assert.equal(
+    env.APPDATA,
+    process.platform === 'win32' ? sessionConfigHome : workspace
+  );
   assert.equal(env.LOCALAPPDATA, workspace);
   assert.equal(env.XDG_CONFIG_HOME, sessionConfigHome);
   assert.notEqual(env.XDG_CONFIG_HOME, authConfigHome);

@@ -190,7 +190,7 @@ function localRuntimeModel(runtime) {
   return runtime.model;
 }
 
-export function localCliArgs(runtimeId, prompt, { budget = '0.25' } = {}) {
+export function localCliArgs(runtimeId, prompt, { budget = '0.25', readiness = false } = {}) {
   if (runtimeId === 'claude-code') {
     return [
       '-p', prompt,
@@ -205,6 +205,11 @@ export function localCliArgs(runtimeId, prompt, { budget = '0.25' } = {}) {
     ];
   }
   if (runtimeId === 'cursor') {
+    // Readiness probes only need the plain READY sentinel; text mode avoids
+    // JSON envelope parsing and matches the fast path used by local smoke tests.
+    if (readiness) {
+      return ['-p', prompt, '--output-format', 'text', '--trust', '--force'];
+    }
     return ['-p', prompt, '--output-format', 'json', '--trust'];
   }
   throw new Error(`Unsupported local Runtime: ${runtimeId}`);
@@ -243,7 +248,10 @@ async function callLocalCli(runtimeId, prompt, signal, sampling = {}, parentEnv 
   const timeout = localRuntimeTimeout(parentEnv.LOCAL_RUNTIME_TIMEOUT_MS);
   const budget = parentEnv.CLAUDE_MAX_BUDGET_USD || '0.25';
   const command = runtimeId === 'claude-code' ? 'claude' : 'cursor-agent';
-  const args = localCliArgs(runtimeId, prompt, { budget });
+  const args = localCliArgs(runtimeId, prompt, {
+    budget,
+    readiness: sampling?.readiness === true
+  });
   return withRuntimeWorkspace(runtimeId, async (workspace) => {
     try {
     const claudeBackend = runtimeId === 'claude-code'
@@ -322,15 +330,20 @@ export async function probeRuntimeReadiness(runtimeId, config, {
   localCall = callLocalCli,
   signal
 } = {}) {
-  const probeTimeout = Math.min(
-    localRuntimeTimeout(env.RUNTIME_PROBE_TIMEOUT_MS || '30000'),
-    60_000
-  );
+  // Local CLIs (especially cold-start Cursor on Windows) often exceed 60s.
+  // Keep the probe under the normal local-runtime ceiling, not an extra 60s cap.
+  const probeTimeout = localRuntimeTimeout(env.RUNTIME_PROBE_TIMEOUT_MS || '180000');
   const probeSignal = withTimeout(signal, probeTimeout);
   try {
     if (config.kind === 'local-cli') {
       const probeEnv = { ...env, LOCAL_RUNTIME_TIMEOUT_MS: String(probeTimeout) };
-      const result = await localCall(runtimeId, RUNTIME_READINESS_PROMPT, probeSignal, {}, probeEnv);
+      const result = await localCall(
+        runtimeId,
+        RUNTIME_READINESS_PROMPT,
+        probeSignal,
+        { readiness: true },
+        probeEnv
+      );
       return isReadinessSentinel(result.text);
     }
     if (config.kind === 'model-api') {
