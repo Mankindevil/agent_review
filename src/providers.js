@@ -220,7 +220,7 @@ export async function requestJson(
   system,
   prompt,
   signal,
-  { seed, temperature = 0, maxTokens = 16000 } = {}
+  { seed, temperature = 0, maxTokens = 24000, requiredKeys } = {}
 ) {
   if (reviewer.kind === 'mock') {
     throw new TypeError('mock reviewers require an injected deterministic evaluator');
@@ -229,7 +229,7 @@ export async function requestJson(
   const text = reviewer.kind === 'anthropic'
     ? await callAnthropic(reviewer, system, prompt, signal, sampling)
     : await callOpenAICompatible(reviewer, system, prompt, signal, sampling);
-  return safeJson(text);
+  return safeJson(text, { requiredKeys });
 }
 
 export async function requestLockedHumor(reviewer, prompt, signal, sampling = {}) {
@@ -319,7 +319,9 @@ async function callOpenAICompatible(config, system, prompt, signal, sampling) {
   }
   if (!response.ok) throw await httpStatusError(config, response);
   const json = await response.json();
-  const content = json.choices?.[0]?.message?.content;
+  const choice = json.choices?.[0];
+  assertCompletionNotTruncated(config, choice?.finish_reason);
+  const content = choice?.message?.content;
   if (Array.isArray(content)) return content.map((part) => typeof part === 'string' ? part : part?.text || '').filter(Boolean).join('\n');
   return content || '';
 }
@@ -341,7 +343,17 @@ async function callAnthropic(config, system, prompt, signal, sampling) {
   }
   if (!response.ok) throw await httpStatusError(config, response);
   const json = await response.json();
+  assertCompletionNotTruncated(config, json.stop_reason || json.choices?.[0]?.finish_reason);
   return json.content?.find((part) => part.type === 'text')?.text || '';
+}
+
+function assertCompletionNotTruncated(config, finishReason) {
+  const reason = String(finishReason || '').toLowerCase();
+  if (reason === 'length' || reason === 'max_tokens') {
+    throw new Error(
+      `${config.name}（${config.model}）输出被 max_tokens 截断；可提高 MODEL_REVIEW_MAX_TOKENS`
+    );
+  }
 }
 
 async function httpStatusError(config, response) {

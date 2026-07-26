@@ -36,17 +36,58 @@ export function withTimeout(signal, timeoutMs) {
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
-export function safeJson(text) {
+export function safeJson(text, options = {}) {
+  const requiredKeys = Array.isArray(options.requiredKeys)
+    ? options.requiredKeys.filter((key) => typeof key === 'string' && key)
+    : [];
   const cleaned = String(text).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-  try { return JSON.parse(cleaned); } catch { /* Some CLIs add prose before or after the JSON value. */ }
+  const candidates = [];
+
+  try {
+    candidates.push(JSON.parse(cleaned));
+  } catch {
+    // Some CLIs add prose before or after the JSON value.
+  }
 
   for (let start = 0; start < cleaned.length; start += 1) {
     if (cleaned[start] !== '{' && cleaned[start] !== '[') continue;
     const end = findJsonEnd(cleaned, start);
     if (end === -1) continue;
-    try { return JSON.parse(cleaned.slice(start, end + 1)); } catch { /* Try the next balanced value. */ }
+    try {
+      candidates.push(JSON.parse(cleaned.slice(start, end + 1)));
+    } catch {
+      // Try the next balanced value.
+    }
   }
-  throw new SyntaxError('模型输出中未找到合法 JSON');
+
+  const usable = requiredKeys.length
+    ? candidates.filter((value) => hasRequiredKeys(value, requiredKeys))
+    : candidates;
+  if (!usable.length) {
+    throw new SyntaxError(
+      requiredKeys.length
+        ? `模型输出中未找到包含 ${requiredKeys.join(', ')} 的合法 JSON`
+        : '模型输出中未找到合法 JSON'
+    );
+  }
+  return usable.reduce((best, current) => (
+    jsonSize(current) > jsonSize(best) ? current : best
+  ));
+}
+
+function hasRequiredKeys(value, requiredKeys) {
+  return Boolean(value)
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && requiredKeys.every((key) => Object.hasOwn(value, key));
+}
+
+function jsonSize(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), 'utf8');
+  } catch {
+    return 0;
+  }
 }
 
 function findJsonEnd(text, start) {

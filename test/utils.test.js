@@ -27,3 +27,18 @@ test('extracts balanced JSON when a CLI adds Chinese prose', () => {
 test('reports a stable error when no JSON value exists', () => {
   assert.throws(() => safeJson('只有说明，没有结构化结果'), /未找到合法 JSON/);
 });
+
+test('prefers the largest balanced JSON object and can require root keys', () => {
+  const prose = 'note {"taskCompleted":"partial"} then {"reviews":[{"subcriterionId":"a"}],"meta":1} done';
+  assert.deepEqual(safeJson(prose), {
+    reviews: [{ subcriterionId: 'a' }],
+    meta: 1
+  });
+
+  const truncated =
+    '{"reviews":[{"subcriterionId":"a","score":1,"conclusions":{"taskCompleted":"partial","criticalRisk":"no"}},{"subcriterionId":"b","conclusions":{"taskCompleted":"no"';
+  assert.throws(
+    () => safeJson(truncated, { requiredKeys: ['reviews'] }),
+    /reviews|未找到合法 JSON/u
+  );
+});

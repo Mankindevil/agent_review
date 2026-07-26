@@ -7,7 +7,12 @@ export function normalizePanelReview(value, contract, {
   reviewRunId = 'review'
 } = {}) {
   if (!isObject(value) || !Array.isArray(value.reviews)) {
-    throw new TypeError('panel review must contain a reviews array');
+    const keys = isObject(value) ? Object.keys(value).slice(0, 12).join(', ') : typeof value;
+    throw new TypeError(
+      keys
+        ? `panel review must contain a reviews array (got keys: ${keys})`
+        : 'panel review must contain a reviews array'
+    );
   }
   const expectedSubcriteria = [...contract.subcriterionIds];
   if (
