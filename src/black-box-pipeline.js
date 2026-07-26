@@ -2825,6 +2825,13 @@ async function writeRunLogFile(context, payload) {
 
 function safeErrorDetail(error) {
   if (!error) return 'unknown error';
+  if (error instanceof AggregateError && Array.isArray(error.errors) && error.errors.length) {
+    const causes = error.errors
+      .map((item) => item?.message || String(item))
+      .filter(Boolean);
+    const head = error.message || 'aggregate failure';
+    return causes.length ? `${head} (${causes.join('; ')})` : head;
+  }
   if (typeof error.code === 'string' && error.code) {
     return `${error.code}: ${error.message || 'failed'}`;
   }

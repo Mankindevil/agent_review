@@ -47,7 +47,7 @@ export function createPhase2Services({
           requestJsonFn(reviewer, system, prompt, undefined, {
             seed: deriveAttemptSeed(env, attempt, 11),
             temperature: 0,
-            maxTokens: Number(env.MODEL_REVIEW_MAX_TOKENS || 6000)
+            maxTokens: Number(env.MODEL_REVIEW_MAX_TOKENS || 16000)
           })
       });
     },
@@ -77,7 +77,7 @@ export function createPhase2Services({
           requestJsonFn(reviewer, system, prompt, undefined, {
             seed: deriveAttemptSeed(env, attempt, 29),
             temperature: 0,
-            maxTokens: Number(env.MODEL_REVIEW_MAX_TOKENS || 6000)
+            maxTokens: Number(env.MODEL_REVIEW_MAX_TOKENS || 16000)
           })
       });
     },
@@ -112,7 +112,7 @@ export function createPhase2Services({
             {
               seed: deriveAttemptSeed(env, index, 47),
               temperature: 0,
-              maxTokens: Number(env.MODEL_REVIEW_MAX_TOKENS || 6000)
+              maxTokens: Number(env.MODEL_REVIEW_MAX_TOKENS || 16000)
             }
           );
         }

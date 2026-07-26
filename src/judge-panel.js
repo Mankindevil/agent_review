@@ -171,9 +171,14 @@ async function requestPanelSeat({ reviewer, invoke, claimFallback }) {
       failures.push(panelFailure(fallback, error));
     }
   }
+  const causes = failures
+    .map((failure) => failure.message)
+    .filter(Boolean);
   throw new AggregateError(
     failures.map((failure) => new Error(failure.message)),
-    'no distinct registered reviewer remains for the failed panel seat'
+    causes.length
+      ? `no distinct registered reviewer remains for the failed panel seat: ${causes.join('; ')}`
+      : 'no distinct registered reviewer remains for the failed panel seat'
   );
 }
 

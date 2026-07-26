@@ -89,6 +89,48 @@ test('absolute panel prompt includes only evidence-safe fields and forbids outsi
   assert.doesNotMatch(prompt, /replicaArena|runtimeBuild/u);
 });
 
+test('absolute panel prompt budgets oversized evidence payloads under the context window', () => {
+  const huge = 'X'.repeat(120_000);
+  const prompt = absolutePanelPrompt(
+    [{ checkId: 'risk', subcriterionId: 'professionalism.evidenceReasoning' }],
+    {
+      submission: { redactedCard: { name: 'Agent' }, redactedExamples: [] },
+      testCatalog: [],
+      evidenceManifest: [
+        { evidenceId: 'ev_big', grade: 'B', kind: 'protocol-response' },
+        { evidenceId: 'ev_small', grade: 'C', kind: 'transport-fact' }
+      ],
+      redactedEvidence: [
+        {
+          evidenceId: 'ev_big',
+          grade: 'B',
+          kind: 'protocol-response',
+          payload: { body: huge }
+        },
+        {
+          evidenceId: 'ev_small',
+          grade: 'C',
+          kind: 'transport-fact',
+          payload: { status: 200 }
+        }
+      ],
+      objectiveCapability: { score: 80 }
+    },
+    {
+      disputedSubcriterionIds: [],
+      evidenceItemChars: 4_000,
+      evidenceBudgetBytes: 20_000
+    }
+  );
+
+  assert.ok(Buffer.byteLength(prompt, 'utf8') < 40_000);
+  assert.match(prompt, /ev_big/u);
+  assert.match(prompt, /ev_small/u);
+  assert.match(prompt, /_truncated|truncated/iu);
+  assert.doesNotMatch(prompt, /X{5000}/u);
+  assert.match(prompt, /"status":200/u);
+});
+
 test('humor rewrite prompt contains only locked findings and forbids score changes', () => {
   const prompt = humorRewritePrompt([{
     subcriterionId: 'scenarioValue.agentNecessity',

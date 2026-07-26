@@ -220,7 +220,7 @@ export async function requestJson(
   system,
   prompt,
   signal,
-  { seed, temperature = 0, maxTokens = 6000 } = {}
+  { seed, temperature = 0, maxTokens = 16000 } = {}
 ) {
   if (reviewer.kind === 'mock') {
     throw new TypeError('mock reviewers require an injected deterministic evaluator');
@@ -317,7 +317,7 @@ async function callOpenAICompatible(config, system, prompt, signal, sampling) {
     if (error.name === 'TimeoutError') throw new Error(`${config.name}（${config.model}）超过 ${Math.round(timeoutMs / 1000)} 秒未返回；可调整 MODEL_REVIEW_TIMEOUT_MS`);
     throw error;
   }
-  if (!response.ok) throw new Error(`${config.name} 返回 HTTP ${response.status}`);
+  if (!response.ok) throw await httpStatusError(config, response);
   const json = await response.json();
   const content = json.choices?.[0]?.message?.content;
   if (Array.isArray(content)) return content.map((part) => typeof part === 'string' ? part : part?.text || '').filter(Boolean).join('\n');
@@ -339,9 +339,26 @@ async function callAnthropic(config, system, prompt, signal, sampling) {
     if (error.name === 'TimeoutError') throw new Error(`${config.name}（${config.model}）超过 ${Math.round(timeoutMs / 1000)} 秒未返回；可调整 MODEL_REVIEW_TIMEOUT_MS`);
     throw error;
   }
-  if (!response.ok) throw new Error(`${config.name} 返回 HTTP ${response.status}`);
+  if (!response.ok) throw await httpStatusError(config, response);
   const json = await response.json();
   return json.content?.find((part) => part.type === 'text')?.text || '';
+}
+
+async function httpStatusError(config, response) {
+  let detail = '';
+  try {
+    detail = String(await response.text() || '')
+      .replace(/\s+/gu, ' ')
+      .trim()
+      .slice(0, 400);
+  } catch {
+    detail = '';
+  }
+  return new Error(
+    detail
+      ? `${config.name} 返回 HTTP ${response.status}: ${detail}`
+      : `${config.name} 返回 HTTP ${response.status}`
+  );
 }
 
 function resolveSecret(envName) {

@@ -274,6 +274,31 @@ test('requestJson uses the shared live adapter and caller sampling limits', asyn
   }
 });
 
+test('requestJson includes upstream HTTP error body snippets', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({ error: { message: 'ContextWindowExceededError: Got=1731360' } }),
+    { status: 400, headers: { 'content-type': 'application/json' } }
+  );
+  process.env.PANEL_TEST_KEY = 'test-secret';
+  try {
+    await assert.rejects(
+      () => requestJson({
+        id: 'panel',
+        name: 'Panel',
+        kind: 'openai-compatible',
+        baseUrl: 'https://models.example/v1',
+        model: 'model-v1',
+        apiKeyEnv: 'PANEL_TEST_KEY'
+      }, 'system', 'prompt'),
+      /HTTP 400.*ContextWindowExceededError/u
+    );
+  } finally {
+    delete process.env.PANEL_TEST_KEY;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('retries the same reviewer before using one pre-registered fallback', async () => {
   const calls = [];
   const result = await requestReviewerWithFallback({

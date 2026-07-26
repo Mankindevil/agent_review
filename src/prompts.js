@@ -375,14 +375,16 @@ export function absolutePanelPrompt(rubricChecks, evidencePackage, options = {})
   const allowedEvidenceIds = (evidencePackage?.evidenceManifest || [])
     .map((item) => item?.evidenceId)
     .filter((id) => typeof id === 'string' && id);
+  const budgeted = budgetPanelEvidencePackage(evidencePackage, options);
   const packet = {
     rubricVersion: options.rubricVersion || 'a2a-black-box-v1',
-    submission: evidencePackage.submission,
-    testCatalog: evidencePackage.testCatalog || [],
-    evidenceManifest: evidencePackage.evidenceManifest || [],
-    redactedEvidence: evidencePackage.redactedEvidence || [],
-    objectiveCapability: evidencePackage.objectiveCapability,
+    submission: budgeted.submission,
+    testCatalog: budgeted.testCatalog || [],
+    evidenceManifest: budgeted.evidenceManifest || [],
+    redactedEvidence: budgeted.redactedEvidence || [],
+    objectiveCapability: budgeted.objectiveCapability,
     rubricChecks: checks,
+    evidenceBudget: budgeted.evidenceBudget,
     ...(Array.isArray(options.disputedSubcriterionIds) &&
       options.disputedSubcriterionIds.length > 0
       ? { disputedSubcriterionIds: options.disputedSubcriterionIds }
@@ -405,6 +407,7 @@ OUTPUT CONTRACT (hard fail if violated):
   conclusions: {"taskCompleted":"yes|partial|no|not-applicable","criticalRisk":"yes|no|uncertain|not-applicable"}
 - checkEvidence items: {"checkId":"<from REQUIRED_CHECK_IDS>","evidenceIds":[...]}
 - Do not claim verified internal models/tools/memory/prompts/subagents/costs/tokens
+- Truncated evidence items include "_truncated":true and a "preview"; judge from available preview + metadata
 
 JUDGING RULES:
 - Use only the redacted Card, examples, platform-captured evidence, objective observations, and rubric checks
@@ -425,6 +428,119 @@ ${JSON.stringify(allowedEvidenceIds)}
 
 EVIDENCE_PACKET:
 ${JSON.stringify(packet)}`;
+}
+
+/**
+ * Shrink redacted evidence so the absolute panel prompt fits typical ~1M-token
+ * gateway windows. Keeps every evidenceId; truncates oversized payloads.
+ */
+export function budgetPanelEvidencePackage(evidencePackage, options = {}) {
+  const source = evidencePackage && typeof evidencePackage === 'object'
+    ? evidencePackage
+    : {};
+  let itemChars = positiveInt(
+    options.evidenceItemChars,
+    process.env.MODEL_REVIEW_EVIDENCE_ITEM_CHARS,
+    8_000
+  );
+  const budgetBytes = positiveInt(
+    options.evidenceBudgetBytes,
+    process.env.MODEL_REVIEW_EVIDENCE_BUDGET_BYTES,
+    1_200_000
+  );
+  const items = Array.isArray(source.redactedEvidence)
+    ? source.redactedEvidence
+    : [];
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    let truncatedCount = 0;
+    const redactedEvidence = items.map((item) => {
+      const { value, truncated } = truncateEvidencePayload(
+        item?.payload ?? item?.text ?? item,
+        itemChars
+      );
+      if (truncated) truncatedCount += 1;
+      return {
+        evidenceId: item?.evidenceId,
+        grade: item?.grade,
+        kind: item?.kind,
+        payload: value
+      };
+    });
+    const packetBytes = Buffer.byteLength(JSON.stringify({
+      submission: source.submission,
+      testCatalog: source.testCatalog || [],
+      evidenceManifest: source.evidenceManifest || [],
+      redactedEvidence,
+      objectiveCapability: source.objectiveCapability
+    }), 'utf8');
+    if (packetBytes <= budgetBytes || itemChars <= 500) {
+      return {
+        submission: source.submission,
+        testCatalog: source.testCatalog || [],
+        evidenceManifest: source.evidenceManifest || [],
+        redactedEvidence,
+        objectiveCapability: source.objectiveCapability,
+        evidenceBudget: {
+          truncated: truncatedCount > 0,
+          truncatedCount,
+          itemChars,
+          packetBytes,
+          budgetBytes
+        }
+      };
+    }
+    itemChars = Math.max(500, Math.floor(itemChars / 2));
+  }
+
+  return {
+    submission: source.submission,
+    testCatalog: source.testCatalog || [],
+    evidenceManifest: source.evidenceManifest || [],
+    redactedEvidence: items.map((item) => ({
+      evidenceId: item?.evidenceId,
+      grade: item?.grade,
+      kind: item?.kind,
+      payload: {
+        _truncated: true,
+        originalBytes: Buffer.byteLength(
+          JSON.stringify(item?.payload ?? item?.text ?? item ?? null),
+          'utf8'
+        ),
+        preview: ''
+      }
+    })),
+    objectiveCapability: source.objectiveCapability,
+    evidenceBudget: {
+      truncated: items.length > 0,
+      truncatedCount: items.length,
+      itemChars: 0,
+      packetBytes: 0,
+      budgetBytes
+    }
+  };
+}
+
+function truncateEvidencePayload(payload, itemChars) {
+  const raw = JSON.stringify(payload ?? null);
+  const bytes = Buffer.byteLength(raw, 'utf8');
+  if (bytes <= itemChars) return { value: payload, truncated: false };
+  return {
+    value: {
+      _truncated: true,
+      originalBytes: bytes,
+      preview: raw.slice(0, itemChars)
+    },
+    truncated: true
+  };
+}
+
+function positiveInt(optionValue, envValue, fallback) {
+  for (const candidate of [optionValue, envValue]) {
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value > 0) return Math.floor(value);
+  }
+  return fallback;
 }
 
 export function humorRewritePrompt(lockedFindings) {
