@@ -160,6 +160,12 @@ process.env.A2A_BLACK_BOX_V1_ENABLED = 'false';
 process.env.AGENT_DIAGNOSTICS_RATE_LIMIT = '100';
 process.env.ALLOW_PRIVATE_AGENT_URLS = 'true';
 process.env.ALLOW_PRIVATE_DIAGNOSTICS_URLS = 'true';
+process.env.MODEL_REVIEWERS_JSON = JSON.stringify([
+  { id: 'gpt', name: 'OpenAI 评审', model: 'GPT-5', kind: 'mock' },
+  { id: 'claude', name: 'Anthropic 评审', model: 'Claude Sonnet', kind: 'mock' },
+  { id: 'doubao', name: '豆包评审', model: 'Doubao Seed', kind: 'mock' },
+  { id: 'deepseek', name: 'DeepSeek 评审', model: 'DeepSeek', kind: 'mock' }
+]);
 process.env.REVIEW_PRINCIPALS_JSON = JSON.stringify([{
   principalId: 'judge-1',
   displayName: '评委一',
@@ -2084,6 +2090,7 @@ test('creates a V1 demo evaluation from agentExamples and optional authorization
       agentExamples,
       agentAuthorization: 'Bearer demo-agent-token',
       mode: 'demo',
+      scoringConfig: { mode: 'single', reviewerId: 'deepseek' },
       seed: 4242
     })
   });
@@ -2094,6 +2101,11 @@ test('creates a V1 demo evaluation from agentExamples and optional authorization
   assert.equal(created.agentExamples[0].id, 'example-1');
   assert.equal(created.authorizationRequired, true);
   assert.equal(Object.hasOwn(created, 'agentAuthorization'), false);
+  assert.deepEqual(created.scoringConfig, {
+    version: 'v1-model-arena/v1',
+    mode: 'single',
+    reviewerId: 'deepseek'
+  });
   let result;
   for (let attempt = 0; attempt < 40; attempt += 1) {
     result = await (await fetch(`${origin}/api/evaluations/${created.id}`)).json();
@@ -2103,6 +2115,61 @@ test('creates a V1 demo evaluation from agentExamples and optional authorization
   assert.equal(result.status, 'completed');
   assert.equal(result.seed, 4242);
   assert.equal(result.benchmark[0].case.name, '风险摘要');
+});
+
+test('rejects invalid V1 scoring configurations and unavailable live scoring before queueing', async () => {
+  const agentCard = {
+    name: 'Scoring Contract Agent',
+    description: 'Exercises V1 scoring configuration validation.',
+    supportedInterfaces: [{ url: 'https://example.com/a2a', protocolBinding: 'HTTP+JSON', protocolVersion: '1.0' }],
+    skills: [{ id: 'score', name: 'Score', description: 'Answer a scoring prompt.' }]
+  };
+  const agentExamples = [{
+    id: 'scoring-example',
+    name: 'Scoring example',
+    turns: [{
+      input: { parts: [{ type: 'text', text: 'Score this response.' }] },
+      acceptanceCriteria: [{
+        id: 'has-score',
+        type: 'contains',
+        description: 'Includes a score',
+        expected: ['score'],
+        required: true
+      }]
+    }]
+  }];
+  const invalidConfigs = [
+    { mode: 'unsupported' },
+    { mode: 'single', reviewerId: 'unknown' },
+    { mode: 'panel', reviewerId: 'deepseek' }
+  ];
+
+  for (const scoringConfig of invalidConfigs) {
+    const response = await fetch(`${origin}/api/evaluations`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentCard, agentExamples, mode: 'demo', scoringConfig })
+    });
+    assert.equal(response.status, 400);
+  }
+
+  const queuedBefore = (await (await fetch(`${origin}/api/evaluations`)).json()).length;
+  const unavailable = await fetch(`${origin}/api/evaluations`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      agentCard,
+      agentExamples,
+      mode: 'live',
+      scoringConfig: { mode: 'single', reviewerId: 'deepseek' }
+    })
+  });
+  const unavailableBody = await unavailable.json();
+  if (unavailable.status === 202) {
+    await fetch(`${origin}/api/evaluations/${unavailableBody.id}/cancel`, { method: 'POST' });
+  }
+  assert.equal(unavailable.status, 503);
+  assert.equal((await (await fetch(`${origin}/api/evaluations`)).json()).length, queuedBefore);
 });
 
 test('returns 404 when stopping an unknown evaluation', async () => {

@@ -156,6 +156,49 @@ async function waitFor(store, id, predicate, attempts = 120) {
   return store.get(id);
 }
 
+function successfulV1ScoringResult({ entries, config, evaluationMode }) {
+  return {
+    status: 'scored',
+    entries: entries.map((entry) => entry.mode === 'failed'
+      ? { ...entry, judgeReviews: [] }
+      : {
+          ...entry,
+          scoreStatus: 'scored',
+          score: 80,
+          dimensions: {
+            taskConstraint: 80,
+            professionalQuality: 80,
+            evidenceRisk: entry.dataVerification?.status === 'verified' ? 96 : 80,
+            artifactUsability: 80
+          },
+          judgeReviews: [{
+            reviewerId: 'deepseek',
+            reviewerName: 'DeepSeek 评审',
+            model: 'DeepSeek Live',
+            mode: evaluationMode,
+            status: 'scored',
+            rationale: 'Test fixture review.',
+            uncertainties: []
+          }]
+        }),
+    judging: {
+      version: 'v1-model-arena/v1',
+      status: 'scored',
+      mode: config.mode,
+      reviewerId: config.reviewerId,
+      requiredSeats: 1,
+      successfulSeats: 1,
+      seats: [{
+        reviewerId: 'deepseek',
+        reviewerName: 'DeepSeek 评审',
+        model: 'DeepSeek Live',
+        mode: evaluationMode,
+        status: 'scored'
+      }]
+    }
+  };
+}
+
 test('cancels an active evaluation and aborts its controller', async () => {
   const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-cancel-${process.pid}.json`));
   const pipeline = new EvaluationPipeline(store, new EventEmitter());
@@ -1195,6 +1238,196 @@ test('marks persisted running evaluations as interrupted after a restart', async
   assert.equal(store.get('eval_done').status, 'completed');
 });
 
+test('normalizes and persists the selected V1 scoring configuration', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-scoring-config-${process.pid}.json`));
+  const pipeline = new EvaluationPipeline(store, new EventEmitter());
+  const created = await pipeline.create({
+    agentCard: evaluation('template').agentCard,
+    cases: [{ name: 'case', prompt: 'test prompt' }],
+    mode: 'demo',
+    scoringConfig: { mode: 'single', reviewerId: 'deepseek' }
+  });
+
+  assert.deepEqual(created.scoringConfig, {
+    version: 'v1-model-arena/v1',
+    mode: 'single',
+    reviewerId: 'deepseek'
+  });
+  assert.equal((await waitFor(store, created.id, (value) => value.status === 'completed')).status, 'completed');
+});
+
+test('scores each V1 benchmark case once after every candidate output is present', async () => {
+  const envNames = [
+    'MODEL_REVIEWERS_JSON',
+    'RUNTIME_ADAPTERS_JSON',
+    'ENABLE_LOCAL_CLAUDE_CODE',
+    'ENABLE_LOCAL_CURSOR_AGENT',
+    'OPENAI_BASE_URL',
+    'OPENAI_API_KEY',
+    'ARK_BASE_URL',
+    'ARK_API_KEY'
+  ];
+  const originalEnv = Object.fromEntries(envNames.map((name) => [name, process.env[name]]));
+  const scoringCalls = [];
+  try {
+    process.env.MODEL_REVIEWERS_JSON = JSON.stringify([
+      { id: 'mock', name: 'Mock', model: 'Mock', kind: 'mock' }
+    ]);
+    process.env.RUNTIME_ADAPTERS_JSON = '{}';
+    process.env.ENABLE_LOCAL_CLAUDE_CODE = 'false';
+    process.env.ENABLE_LOCAL_CURSOR_AGENT = 'false';
+    delete process.env.OPENAI_BASE_URL;
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.ARK_BASE_URL;
+    delete process.env.ARK_API_KEY;
+    const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-case-scoring-${process.pid}.json`));
+    const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+      v1Reviewers: [{
+        id: 'deepseek',
+        name: 'DeepSeek 评审',
+        model: 'DeepSeek Live',
+        kind: 'openai-compatible'
+      }],
+      scoreV1Case: async (input) => {
+        scoringCalls.push(structuredClone(input));
+        assert.equal(input.entries.length, 4);
+        const failed = input.entries.find((entry) => entry.id === 'submitted');
+        assert.equal(failed.scoreStatus, 'execution-failed');
+        assert.equal(failed.score, 0);
+        assert.equal(failed.dimensions, null);
+        for (const entry of input.entries.filter((candidate) => candidate.id !== 'submitted')) {
+          assert.equal(entry.scoreStatus, 'pending');
+          assert.equal(entry.score, null);
+          assert.equal(entry.dimensions, null);
+        }
+        return {
+          status: 'scored',
+          judging: {
+            version: 'v1-model-arena/v1',
+            status: 'scored',
+            mode: 'single',
+            reviewerId: 'deepseek',
+            requiredSeats: 1,
+            successfulSeats: 1,
+            seats: [{
+              reviewerId: 'deepseek',
+              reviewerName: 'DeepSeek 评审',
+              model: 'DeepSeek Live',
+              mode: 'live',
+              status: 'scored'
+            }]
+          },
+          entries: input.entries.map((entry) => entry.mode === 'failed'
+            ? { ...entry, judgeReviews: [] }
+            : {
+                ...entry,
+                scoreStatus: 'scored',
+                score: 77,
+                dimensions: {
+                  taskConstraint: 77,
+                  professionalQuality: 77,
+                  evidenceRisk: 77,
+                  artifactUsability: 77
+                },
+                judgeReviews: [{
+                  reviewerId: 'deepseek',
+                  reviewerName: 'DeepSeek 评审',
+                  model: 'DeepSeek Live',
+                  mode: 'live',
+                  status: 'scored',
+                  rationale: 'Complete.',
+                  uncertainties: []
+                }]
+              })
+        };
+      }
+    });
+    pipeline.runSubmittedAgent = async () => {
+      throw new Error('submitted execution failed');
+    };
+
+    const created = await pipeline.create({
+      mode: 'live',
+      scoringConfig: { mode: 'single', reviewerId: 'deepseek' },
+      agentCard: evaluation('template').agentCard,
+      cases: [
+        { name: 'case one', prompt: 'first prompt' },
+        { name: 'case two', prompt: 'second prompt' }
+      ]
+    });
+    const result = await waitFor(store, created.id, (value) => value.status === 'completed');
+
+    assert.equal(result.status, 'completed');
+    assert.equal(scoringCalls.length, 2);
+    assert.deepEqual(scoringCalls.map((call) => call.testCase.name), ['case one', 'case two']);
+    assert.equal(result.benchmark.every((roundItem) => roundItem.judging.successfulSeats === 1), true);
+    assert.equal(result.benchmark.every((roundItem) =>
+      roundItem.entries.filter((entry) => entry.id !== 'submitted').every((entry) =>
+        entry.scoreStatus === 'scored' &&
+        entry.score === 77 &&
+        entry.judgeReviews[0].reviewerId === 'deepseek'
+      )
+    ), true);
+  } finally {
+    for (const name of envNames) {
+      if (originalEnv[name] === undefined) delete process.env[name];
+      else process.env[name] = originalEnv[name];
+    }
+  }
+});
+
+test('persists failed V1 model judging and stops before producing a verdict', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-scoring-failure-${process.pid}.json`));
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    scoreV1Case: async ({ entries, config }) => ({
+      status: 'failed',
+      entries: entries.map((entry) => ({
+        ...entry,
+        scoreStatus: entry.mode === 'failed' ? 'execution-failed' : 'model-failed',
+        score: entry.mode === 'failed' ? 0 : null,
+        dimensions: null,
+        judgeReviews: []
+      })),
+      judging: {
+        version: 'v1-model-arena/v1',
+        status: 'failed',
+        mode: config.mode,
+        reviewerId: config.reviewerId,
+        requiredSeats: 1,
+        successfulSeats: 0,
+        seats: [{
+          reviewerId: config.reviewerId,
+          reviewerName: 'DeepSeek 评审',
+          model: 'DeepSeek',
+          mode: 'demo',
+          status: 'failed',
+          failure: 'judge unavailable'
+        }]
+      }
+    })
+  });
+  const failures = [];
+  const fail = pipeline.fail.bind(pipeline);
+  pipeline.fail = async (evaluationId, error) => {
+    failures.push(error);
+    return fail(evaluationId, error);
+  };
+
+  const created = await pipeline.create({
+    mode: 'demo',
+    agentCard: evaluation('template').agentCard,
+    cases: [{ name: 'case', prompt: 'test prompt' }]
+  });
+  const result = await waitFor(store, created.id, (value) => value.status === 'failed');
+
+  assert.equal(result.status, 'failed');
+  assert.equal(failures[0].statusCode, 502);
+  assert.equal(result.benchmark[0].entries.length, 4);
+  assert.equal(result.benchmark[0].judging.status, 'failed');
+  assert.equal(Object.hasOwn(result, 'averages'), false);
+  assert.equal(Object.hasOwn(result, 'roast'), false);
+});
+
 test('persists each completed reviewer, runtime and benchmark entry incrementally', async () => {
   const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-incremental-${process.pid}.json`));
   const snapshots = [];
@@ -1299,7 +1532,15 @@ test('marks a failed live Agent call as failed coverage', async () => {
     delete process.env.ARK_BASE_URL;
     delete process.env.ARK_API_KEY;
     const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-coverage-${process.pid}.json`));
-    const pipeline = new EvaluationPipeline(store, new EventEmitter());
+    const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+      v1Reviewers: [{
+        id: 'deepseek',
+        name: 'DeepSeek 评审',
+        model: 'DeepSeek Live',
+        kind: 'openai-compatible'
+      }],
+      scoreV1Case: async (input) => successfulV1ScoringResult(input)
+    });
     const card = evaluation('template').agentCard;
     card.supportedInterfaces[0].url = `http://127.0.0.1:${failingAgent.address().port}/a2a`;
     const created = await pipeline.create({ mode: 'live', agentCard: card, cases: [{ name: 'failure', prompt: 'test prompt' }] });
@@ -1345,7 +1586,14 @@ test('uses one PandaAI snapshot to verify every benchmark output', async () => {
       dataQuery: async () => {
         queryCalls += 1;
         return { provider: 'pandaai', method: 'get_index_daily', rowCount: 1, truncated: false, data: [{ symbol: '000300.SH', date: '20250110', close: 11.3 }] };
-      }
+      },
+      v1Reviewers: [{
+        id: 'deepseek',
+        name: 'DeepSeek 评审',
+        model: 'DeepSeek Live',
+        kind: 'openai-compatible'
+      }],
+      scoreV1Case: async (input) => successfulV1ScoringResult(input)
     });
     const card = evaluation('template').agentCard;
     card.supportedInterfaces[0].url = `http://127.0.0.1:${agent.address().port}/a2a`;
@@ -1364,7 +1612,7 @@ test('uses one PandaAI snapshot to verify every benchmark output', async () => {
     assert.equal(queryCalls, 1, '同一用例的所有选手必须复用同一份参考快照');
     assert.equal(result.benchmark[0].dataEvidence.status, 'ready');
     assert.equal(result.benchmark[0].entries.find((entry) => entry.id === 'submitted').dataVerification.status, 'verified');
-    assert.equal(result.benchmark[0].entries.find((entry) => entry.id === 'submitted').dimensions.dataEvidence, 96);
+    assert.equal(result.benchmark[0].entries.find((entry) => entry.id === 'submitted').dimensions.evidenceRisk, 96);
     assert.ok(result.logs.some((log) => log.source === 'DATA' && log.phase === 'evidence'));
   } finally {
     await new Promise((resolve) => agent.close(resolve));

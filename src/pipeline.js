@@ -15,11 +15,16 @@ import {
   normalizeAgentExamples
 } from './submission.js';
 import { configuredReviewers, reviewAgent } from './providers.js';
-import { buildRoast, judgeOutput, scoreComplexity } from './scoring.js';
+import { buildRoast, scoreComplexity } from './scoring.js';
 import { buildSkill, RUNTIMES, runSkill } from './runtimes.js';
 import { average, deriveSeed, id, normalizeSeed, normalizeTemperature, now, round, stableNumber } from './utils.js';
 import { buildDataPlan, collectDataEvidence, normalizeTestCases, verifyOutputAgainstEvidence } from './data-verifier.js';
 import { queryPandaData } from './panda-data.js';
+import {
+  assertV1ScoringReady,
+  normalizeV1ScoringConfig,
+  scoreV1ArenaCase
+} from './v1-model-scoring.js';
 
 const PIPELINE_PRIVATE = new WeakMap();
 const V2_CONFIG = Object.freeze({
@@ -51,7 +56,9 @@ export class EvaluationPipeline {
       runBlackBox: options.runBlackBox || runBlackBoxFoundation,
       now: options.now || now,
       createId: options.createId || id,
-      policy: options.policy || PHASE1_EXECUTION_POLICY
+      policy: options.policy || PHASE1_EXECUTION_POLICY,
+      v1Reviewers: options.v1Reviewers ?? configuredReviewers(),
+      scoreV1Case: options.scoreV1Case || scoreV1ArenaCase
     });
   }
 
@@ -88,13 +95,16 @@ export class EvaluationPipeline {
       throw Object.assign(new Error('至少提供 agentExamples，或一个包含 prompt 的使用实例'), { statusCode: 400 });
     }
 
+    const scoringConfig = normalizeV1ScoringConfig(input.scoringConfig);
+    const reviewers = privateState(this).v1Reviewers;
+    assertV1ScoringReady(scoringConfig, input.mode === 'live' ? 'live' : 'demo', reviewers);
     const seed = normalizeSeed(input.seed ?? process.env.EVALUATION_SEED);
     const temperature = normalizeTemperature(process.env.MODEL_TEMPERATURE, 0);
     const reviewPlan = publicReviewPlan(configuredReviewers());
     const runtimePlan = publicRuntimePlan();
     const evaluation = {
       id: id(), createdAt: now(), updatedAt: now(), status: 'queued', mode: input.mode === 'live' ? 'live' : 'demo',
-      agentCard: input.agentCard, cases, validation, seed, temperature, reviewPlan, runtimePlan, progress: 0, stage: '等待评测舱', activeWork: null, logs: [],
+      agentCard: input.agentCard, cases, validation, seed, temperature, reviewPlan, runtimePlan, scoringConfig, progress: 0, stage: '等待评测舱', activeWork: null, logs: [],
       ...(agentExamples ? { agentExamples } : {}),
       ...(input.agentAuthorization !== undefined ? { authorizationRequired: true } : {})
     };
@@ -632,7 +642,7 @@ export class EvaluationPipeline {
       mode = 'failed';
       if (competitorId !== 'submitted') name = item.builds?.find((candidate) => candidate.runtimeId === competitorId)?.runtime || competitorId;
     }
-    const next = makeEntry(competitorId, name, output, testCase, mode, deriveSeed(item.seed, `judge:${caseIndex}:${competitorId}`), roundItem.dataEvidence);
+    const next = makeUnscoredEntry(competitorId, name, output, mode, deriveSeed(item.seed, `judge:${caseIndex}:${competitorId}`), roundItem.dataEvidence);
     const entryIndex = roundItem.entries.findIndex((entry) => entry.id === competitorId);
     if (entryIndex === -1) roundItem.entries.push(next); else roundItem.entries[entryIndex] = next;
   }
@@ -753,9 +763,9 @@ export class EvaluationPipeline {
         submittedOutput = `执行失败：${error.message}`;
         submittedMode = 'failed';
       }
-      entries.push(makeEntry('submitted', item.agentCard.name, submittedOutput, testCase, submittedMode, deriveSeed(item.seed, `judge:${index}:submitted`), dataEvidence));
+      entries.push(makeUnscoredEntry('submitted', item.agentCard.name, submittedOutput, submittedMode, deriveSeed(item.seed, `judge:${index}:submitted`), dataEvidence));
       await this.update(item, { benchmark, progress: 70 + Math.round((index / item.cases.length) * 22), stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, {
-        level: submittedMode === 'failed' ? 'error' : 'success', source: 'A2A', phase: 'benchmark', text: `${item.agentCard.name} 完成「${testCase.name}」`, detail: `score=${entries.at(-1).score}`, mode: submittedMode, durationMs: Date.now() - startedAt
+        level: submittedMode === 'failed' ? 'error' : 'success', source: 'A2A', phase: 'benchmark', text: `${item.agentCard.name} 完成「${testCase.name}」`, detail: `scoreStatus=${entries.at(-1).scoreStatus}`, mode: submittedMode, durationMs: Date.now() - startedAt
       });
       for (const build of builds) {
         signal?.throwIfAborted();
@@ -765,21 +775,52 @@ export class EvaluationPipeline {
           stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}`
         }, { level: 'info', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 开始执行「${testCase.name}」`, mode: build.error ? 'failed' : build.mode });
         if (build.error) {
-          entries.push(makeEntry(build.runtimeId, build.runtime, `执行失败：${build.error}`, testCase, 'failed', deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence));
+          entries.push(makeUnscoredEntry(build.runtimeId, build.runtime, `执行失败：${build.error}`, 'failed', deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence));
           await this.update(item, { benchmark, stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, { level: 'error', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 无法进入「${testCase.name}」`, detail: build.error, mode: 'failed' });
           continue;
         }
         startedAt = Date.now();
         try {
           const output = await runSkill(build, testCase, item.mode, { signal, ...phaseSampling(item, `run:${index}:${build.runtimeId}`) });
-          entries.push(makeEntry(build.runtimeId, build.runtime, output, testCase, build.mode, deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence));
+          entries.push(makeUnscoredEntry(build.runtimeId, build.runtime, output, build.mode, deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence));
         } catch (error) {
           if (signal?.aborted) throw signal.reason || error;
-          entries.push(makeEntry(build.runtimeId, build.runtime, `执行失败：${error.message}`, testCase, 'failed', deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence));
+          entries.push(makeUnscoredEntry(build.runtimeId, build.runtime, `执行失败：${error.message}`, 'failed', deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence));
         }
-        await this.update(item, { benchmark, stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, { level: entries.at(-1).mode === 'failed' ? 'error' : 'success', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 完成「${testCase.name}」`, detail: `score=${entries.at(-1).score}`, mode: entries.at(-1).mode, durationMs: Date.now() - startedAt });
+        await this.update(item, { benchmark, stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, { level: entries.at(-1).mode === 'failed' ? 'error' : 'success', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 完成「${testCase.name}」`, detail: `scoreStatus=${entries.at(-1).scoreStatus}`, mode: entries.at(-1).mode, durationMs: Date.now() - startedAt });
       }
-      await this.update(item, { benchmark, progress: 70 + Math.round(((index + 1) / item.cases.length) * 22), stage: `对测 ${index + 1}/${item.cases.length} 完成`, activeWork: null }, { level: 'success', source: 'ARENA', phase: 'benchmark', text: `「${testCase.name || `案例 ${index + 1}`}」完成同 prompt 对打`, detail: entries.map((entry) => `${entry.name}=${entry.score}`).join(' · '), mode: summarizeModes(entries.map((entry) => entry.mode)) });
+      const scoring = await privateState(this).scoreV1Case({
+        testCase,
+        entries,
+        config: item.scoringConfig,
+        reviewers: privateState(this).v1Reviewers,
+        evaluationMode: item.mode,
+        seed: deriveSeed(item.seed, `v1-case:${index}`),
+        signal
+      });
+      const roundItem = benchmark[index];
+      roundItem.entries = scoring.entries;
+      roundItem.judging = scoring.judging;
+      const scoringLine = v1ScoringLine(item.scoringConfig, scoring.judging);
+      if (scoring.status === 'failed') {
+        await this.update(item, {
+          benchmark,
+          stage: `对测 ${index + 1}/${item.cases.length} · ${scoringLine} 评分失败`,
+          activeWork: null
+        }, {
+          level: 'error',
+          source: 'ARENA',
+          phase: 'benchmark',
+          text: `「${testCase.name || `案例 ${index + 1}`}」模型评分失败`,
+          detail: `${scoringLine} · 成功席位 ${scoring.judging.successfulSeats}/${scoring.judging.requiredSeats}`,
+          mode: summarizeModes(roundItem.entries.map((entry) => entry.mode))
+        });
+        throw Object.assign(
+          new Error(`「${testCase.name || `案例 ${index + 1}`}」模型评分失败`),
+          { statusCode: 502 }
+        );
+      }
+      await this.update(item, { benchmark, progress: 70 + Math.round(((index + 1) / item.cases.length) * 22), stage: `对测 ${index + 1}/${item.cases.length} 完成 · ${scoringLine}`, activeWork: null }, { level: 'success', source: 'ARENA', phase: 'benchmark', text: `「${testCase.name || `案例 ${index + 1}`}」完成同 prompt 对打 · ${scoringLine}`, detail: `成功席位 ${scoring.judging.successfulSeats}/${scoring.judging.requiredSeats} · ${roundItem.entries.map((entry) => `${entry.name}=${entry.score}`).join(' · ')}`, mode: summarizeModes(roundItem.entries.map((entry) => entry.mode)) });
     }
 
     const averages = Object.fromEntries(['submitted', 'claude-code', 'cursor', 'doubao'].map((competitor) => {
@@ -1235,11 +1276,25 @@ function phaseSampling(item, scope) {
   return { seed: deriveSeed(item.seed, scope), temperature: normalizeTemperature(item.temperature, 0) };
 }
 
-function makeEntry(id, name, output, testCase, mode, seed, dataEvidence) {
+function makeUnscoredEntry(id, name, output, mode, seed, dataEvidence) {
   const dataVerification = verifyOutputAgainstEvidence(output, dataEvidence);
-  const judged = judgeOutput(testCase.prompt, output, `${id}:${seed}`, dataVerification);
-  if (mode === 'failed') judged.score = 0;
-  return { id, name, output, mode, judgeSeed: seed, dataVerification, ...judged };
+  return {
+    id,
+    name,
+    output,
+    mode,
+    judgeSeed: seed,
+    dataVerification,
+    scoreStatus: mode === 'failed' ? 'execution-failed' : 'pending',
+    score: mode === 'failed' ? 0 : null,
+    dimensions: null
+  };
+}
+
+function v1ScoringLine(config, judging) {
+  if (config.mode === 'panel') return '四模型匿名盲评';
+  const seat = judging?.seats?.find((candidate) => candidate.reviewerId === config.reviewerId);
+  return seat?.model || seat?.reviewerName || config.reviewerId;
 }
 
 function mockSubmittedOutput(card, testCase) {
