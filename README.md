@@ -54,7 +54,7 @@ verifies the cache and provider-call contract with that interpreter.
 - OpenAI、Anthropic、豆包、DeepSeek 从研究严谨性、数据纪律、回测可信度、风险合规、可复现性独立审稿；
 - Claude Code、Cursor、Doubao 三种 runtime 的 description-only Skill 现场直出抽象；
 - 现场复刻采用 description-only 信息防火墙：Runtime 只收到顶层 `description` 原文；记录支持展开 Skill 文件浏览器，逐个查看 `SKILL.md`、原始 `skill.json`、输入 description 与运行清单，并可复制完整内容；
-- 提交 Agent 与三个复刻 skill 的逐用例输出和分数对比；
+- 提交 Agent 与三个复刻 skill 的逐用例输出和 V1 模型竞技评分对比；支持 DeepSeek 默认单模型或 OpenAI、Anthropic、豆包、DeepSeek 四席匿名盲评；
 - SSE 实时进度：复杂度、每位模型评语、每个 Runtime Skill 和每位对测选手完成后立即展示；
 - 首次评测与单步重试都有定位到当前工作项的加载动效：评审卡、Description 直出行或对测选手卡会显示 LIVE/RETRY 扫描带、目标与序号；支持 reduced-motion；
 - 可真正中止模型请求与本地 CLI 的停止按钮，以及服务重启后的遗留任务识别；
@@ -140,6 +140,10 @@ Key 只应写入本机 `.env` 或密钥管理系统，不要写入 `.env.example
 #### 评审模型与 Runtime 模型独立配置
 
 评审模型、Runtime 模型、参赛 Agent 资格是三件事。评审模型由 `OPENAI_*`、`ARK_*`、`REVIEW_MODEL_*` 或 `MODEL_REVIEWERS_JSON` 配置；Runtime 模型由本地 CLI、方舟豆包 adapter 或 `RUNTIME_ADAPTERS_JSON` 配置；它们可以分别启用、分别使用各自的凭据。只有参赛 Agent Card 与最终报名表的声明要求 DeepSeek V4 Pro；这是参赛资格声明，不会改写平台的评审或 Runtime 配置。评审模型以及 Claude、Cursor、Doubao Runtime 不受该底模限制。
+
+- V1 “单模型”评分直接复用上述现有评审配置，可选择 `gpt`、`claude`、`doubao` 或 `deepseek`，默认 DeepSeek；旧 API 客户端省略 `scoringConfig` 时也规范化为 DeepSeek 单模型，不需要配置第二套凭据。
+- V1 “四模型匿名盲评”是网页默认选项，固定需要 OpenAI、Anthropic、豆包和 DeepSeek 四个真实评审席。`live` 创建阶段会检查阵容：单模型只要求所选席位可真实调用，四模型要求四席全部已配置，否则请求以缺失席位错误失败，不会先运行 Agent 或 Runtime。
+- V1 CASE 评分时，四模型至少两席成功才产生正式分数；单席失败或四席成功数不足时保留输出和席位错误，但不回退关键词规则分、模拟分或历史分。`demo` 可在无凭据时使用确定性模拟席位并明确标记；已存在的旧 V1 记录不会重算，页面标记为“历史规则评分”。
 
 - Claude Code 继续使用既有的 Ark 协议桥：`CLAUDE_BACKEND=ark` 时只通过 `ARK_BASE_URL`、`ARK_API_KEY` 和 `CLAUDE_ARK_MODEL` 访问方舟 DeepSeek endpoint，方舟 Key 不传入 Claude 子进程。后端选择严格失败关闭：`ark` 或 `deepseek` 的专属配置不完整时，不会回退到另一供应商或继承的 `ANTHROPIC_*` 凭据。
 - Cursor Agent 只使用持久账户登录，不接收 API Key。把 `CURSOR_AUTH_CONFIG_HOME` 设为仅服务账户可访问的绝对目录（生产为 `/var/lib/agent-review/cursor-auth`）；平台为 CLI 设置 `AGENT_CLI_CREDENTIAL_STORE=file`，仅将 `XDG_CONFIG_HOME` 指向该目录，其余 HOME/XDG/TMP 仍是一次性目录。登录凭据位于 `$CURSOR_AUTH_CONFIG_HOME/cursor/auth.json`，模型工具权限同时显式禁止读取该路径。
@@ -254,11 +258,11 @@ Content-Type: application/json
 3. 调用显式启用的本机 Claude/Cursor、方舟豆包或 `RUNTIME_ADAPTERS_JSON` 隔离服务，仅凭 description 直出 Skill。
 4. 在开启自动验真时，通过 PandaAI 建立同局共享的参考数据快照并复核可见输出。
 
-如果未配置真实 adapter，相关项会保留为 demo；调用失败会记录错误并继续执行其余选手。
+如果未配置真实 adapter，演示模式中的相关项会保留为 demo；V1 真实模式会在创建时按所选评分阵容检查评审席位，缺少凭据时失败关闭。运行中的单个调用失败会记录错误并按对应流程处理其余选手。
 
 运行页不会等待最终锐评才出报告。后端在每位评审、每个 Runtime 和每个同题选手结束时持久化完整快照并通过 SSE 推送；前端按“跑完一项，解锁一项”持续追加阶段产物。运行中的评测可点击“停止本次评测”，后端会通过 `AbortController` 中止当前 HTTP 请求或 CLI 子进程，并保留已经完成的结果。若服务在任务期间重启，遗留的 `queued/running` 记录会被标记为 `interrupted`，不再显示假运行。
 
-评测结束后，每张模型评审卡可“重跑该模型”，每条 Runtime 构建记录可“重建并对测”，每个同题选手可“重跑这一局”。Runtime 重建会自动用新 Skill 重新执行全部同 Prompt 测试用例，避免构建物与对战输出版本不一致。重试期间状态为 `retrying`，仍可停止；完成后新结果原位替换旧结果，平台重新计算专业度、四方实战均分、覆盖模式与最终“夯 / 人上人 / NPC / 拉”，并将前后摘要写入 `retryHistory`。
+评测结束后，每张模型评审卡可“重跑该模型”，每条 Runtime 构建记录可“重建并对测”，每个同题选手可“重跑这一局”。Runtime 重建会自动用新 Skill 重新执行全部同 Prompt 测试用例，避免构建物与对战输出版本不一致。V1 模型评分属于同场比较，因此任一候选重跑后会重新匿名评分该 CASE 的全部成功输出，并整体替换旧评分快照。重试期间状态为 `retrying`，仍可停止；完成后平台重新计算专业度、四方实战均分、覆盖模式与最终“夯 / 人上人 / NPC / 拉”，并将前后摘要写入 `retryHistory`。
 
 提交页的 `SEED` 默认是 `20260720`。同一个 seed 会为每位评审、每个 Runtime 构建和每个“用例 × 选手”派生不同但稳定的整数 seed；单步重试继续使用原来的子 seed。OpenAI-compatible、方舟豆包以及 Claude Code 的方舟协议桥会实际发送 `seed`，同时默认把 `temperature` 设为 `0`。原生 Anthropic Messages、Cursor Agent CLI 与用户提交的外部 A2A Agent 不保证支持 seed，因此这是“尽力确定性”，不能承诺底层服务升级、并发调度或模型权重变化后逐字节一致。
 
