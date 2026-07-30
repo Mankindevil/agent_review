@@ -41,3 +41,16 @@ test('brands every primary page as Panda AI锐评局 with local assets', async (
     assert.doesNotMatch(html, /class="brand-mark">锐</, page);
   }
 });
+
+test('reserves separate mobile header rows for the brand and navigation', async () => {
+  const styles = await readFile(new URL('public/styles.css', root), 'utf8');
+
+  assert.match(
+    styles,
+    /@media \(max-width: 700px\)[\s\S]*?\.site-header \{[^}]*display:grid;[^}]*grid-template-rows:38px 38px;/
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 700px\)[\s\S]*?\.site-header nav \{[^}]*grid-column:1\/-1;[^}]*grid-row:2;/
+  );
+});
