@@ -50,7 +50,7 @@ export async function resolveMarketReportDate({
   return {
     requestedDate: current.date,
     effectiveDate: candidate,
-    mode: 'implicit',
+    mode: 'latest-completed-trading-day',
     reason
   };
 }

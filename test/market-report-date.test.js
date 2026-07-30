@@ -47,6 +47,7 @@ test('an implicit intraday request uses the previous completed trading day', asy
     query
   });
   assert.equal(result.effectiveDate, '2026-07-29');
+  assert.equal(result.mode, 'latest-completed-trading-day');
   assert.equal(result.reason, 'REQUEST_DATE_NOT_COMPLETED');
 });
 
