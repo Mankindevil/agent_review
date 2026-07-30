@@ -13,6 +13,7 @@ import { renderReport } from './report-renderer.js';
 import { validateReport } from './report-validator.js';
 import { validateEvidencePack, validateOperation } from './schemas.js';
 import { deliveryKey } from './smtp-mailer.js';
+import { resolveMarketReportDate } from './report-date.js';
 
 const REPORT_VERSION = 'market-report-v1';
 const ALLOWED_TRIGGERS = new Set(['scheduled', 'manual', 'a2a']);
@@ -322,6 +323,7 @@ export class MarketOrchestrator {
     this.validator = dependencies.validator || validateReport;
     this.mailer = dependencies.mailer;
     this.acquireLock = dependencies.acquireLock || acquireRunLock;
+    this.resolveReportDate = dependencies.resolveReportDate || resolveMarketReportDate;
     this.clock = dependencies.clock || (() => new Date());
     this.createId = dependencies.createId || randomUUID;
   }
@@ -329,11 +331,14 @@ export class MarketOrchestrator {
   async run(input = {}) {
     const runId = String(this.createId());
     const taskId = `task-${runId}`;
-    const fallbackDate = dateInTimezone(this.clock(), this.config.timezone || 'Asia/Shanghai');
+    const now = this.clock();
+    const timezone = this.config.timezone || 'Asia/Shanghai';
+    const fallbackDate = dateInTimezone(now, timezone);
     const scopedOwner = input.ownerScope === undefined
       ? ownerScope(input.owner ?? 'system')
       : requireOwnerScope(input.ownerScope);
     let operation;
+    let dateSelection;
     let reportDate = fallbackDate;
     let trigger;
     let deliverEmail;
@@ -347,7 +352,13 @@ export class MarketOrchestrator {
         ? { operation: input.operation }
         : input.operation;
       operation = validateOperation(operationInput);
-      reportDate = operation.date || fallbackDate;
+      dateSelection = await this.resolveReportDate({
+        explicitDate: operation.date,
+        now,
+        timezone,
+        signal: input.signal
+      });
+      reportDate = dateSelection?.effectiveDate;
       if (!isRealDate(reportDate)) throw new TypeError('date must be a real YYYY-MM-DD date');
       trigger = input.trigger || 'manual';
       if (!ALLOWED_TRIGGERS.has(trigger)) throw new TypeError('trigger is unsupported');
@@ -414,6 +425,7 @@ export class MarketOrchestrator {
         owner: scopedOwner,
         ownerScope: scopedOwner,
         reportDate,
+        dateSelection,
         operation: operation.operation,
         requestedOperation: operation.operation,
         trigger,
@@ -431,7 +443,8 @@ export class MarketOrchestrator {
         taskId,
         trigger,
         reportDate,
-        timezone: this.config.timezone || 'Asia/Shanghai',
+        dateSelection,
+        timezone,
         reportVersion: REPORT_VERSION
       });
       let stage = 'worker';
@@ -440,13 +453,13 @@ export class MarketOrchestrator {
         activeStep = trace.startStep({
           skillId: operation.operation,
           tool: 'panda-market-worker',
-          detail: { reportDate }
+          detail: { reportDate, dateSelection }
         });
         const workerOperation = DAILY_COLLECTION_OPERATIONS.has(operation.operation)
           ? { ...operation, operation: 'daily-market-report', sections: [] }
           : operation;
         let evidence = await this.worker({
-          request: { ...workerOperation, date: reportDate, runId },
+          request: { ...workerOperation, date: reportDate, runId, dateSelection },
           config: this.config,
           signal: input.signal,
           onTrace: (event) => trace.addWorkerEvent(event)

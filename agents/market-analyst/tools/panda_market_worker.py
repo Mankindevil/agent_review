@@ -30,7 +30,7 @@ MAX_PRELIMINARY_CANDIDATES = 300
 MAX_FULL_ENRICHMENT = 100
 US_CONTEXT_SYMBOLS = ["SPY", "QQQ"]
 PUBLIC_REQUEST_FIELDS = {
-    "operation", "date", "topN", "minLiquidityCny", "cacheDays", "runId",
+    "operation", "date", "dateSelection", "topN", "minLiquidityCny", "cacheDays", "runId",
 }
 HOT_WEIGHTS = {"ret1": .25, "ret5": .20, "breadth5": .20, "turnover_heat": .15,
                "acceleration": .15, "lhb_activity": .05}
@@ -1373,6 +1373,10 @@ def _skipped_evidence_pack(request, requested, reason):
         "evidenceModelVersion": EVIDENCE_MODEL_VERSION,
         "runId": request.get("runId") or hashlib.sha256(run_seed.encode()).hexdigest()[:16],
         "reportDate": requested.isoformat(),
+        **(
+            {"dateSelection": dict(request["dateSelection"])}
+            if request.get("dateSelection") is not None else {}
+        ),
         "status": "skipped",
         "skipReason": reason,
         "markets": {},
@@ -2513,6 +2517,10 @@ def build_evidence_pack(request, collector, now):
         "evidenceModelVersion": EVIDENCE_MODEL_VERSION,
         "runId": request.get("runId") or hashlib.sha256(run_seed.encode()).hexdigest()[:16],
         "reportDate": requested.isoformat(),
+        **(
+            {"dateSelection": dict(request["dateSelection"])}
+            if request.get("dateSelection") is not None else {}
+        ),
         "status": "degraded" if missing_data else "complete",
         "markets": {
             "aShare": {"dataDate": requested.isoformat(), "rowCount": len(daily_rows)},

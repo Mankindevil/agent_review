@@ -414,6 +414,7 @@ class RunTrace {
       skillVersions: evidence?.skillVersions,
       metricVersion: evidence?.metricVersion,
       configFingerprint: evidence?.configFingerprint,
+      dateSelection: evidence?.dateSelection,
       lineageSummary: evidence?.lineageSummary,
       conclusionLineage: (evidence?.conclusions || []).map((item) => ({
         conclusionId: item.conclusion_id,

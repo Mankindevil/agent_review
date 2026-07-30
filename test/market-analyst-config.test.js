@@ -121,6 +121,73 @@ test('requires evidence pack fields and array evidence collections', () => {
   assert.throws(() => validateEvidencePack({ ...evidencePack, extension: deep }), /bounds/);
 });
 
+test('validates an exact optional date-selection record against the report date', () => {
+  const evidencePack = {
+    schemaVersion: '1.0',
+    evidenceModelVersion: '2.0',
+    runId: 'run-date-selection',
+    reportDate: '2026-07-29',
+    status: 'complete',
+    markets: {},
+    conclusions: [],
+    leaderboards: {},
+    sources: [],
+    missingData: []
+  };
+  const selection = {
+    requestedDate: '2026-07-30',
+    effectiveDate: '2026-07-29',
+    mode: 'latest-completed-trading-day',
+    reason: 'REQUEST_DATE_NOT_COMPLETED'
+  };
+
+  assert.equal(
+    validateEvidencePack({ ...evidencePack, dateSelection: selection }).dateSelection,
+    selection
+  );
+  for (const reason of [
+    null,
+    'REQUEST_DATE_NOT_COMPLETED',
+    'REQUEST_DATE_DATA_UNAVAILABLE'
+  ]) {
+    assert.doesNotThrow(() => validateEvidencePack({
+      ...evidencePack,
+      dateSelection: { ...selection, reason }
+    }));
+  }
+  assert.doesNotThrow(() => validateEvidencePack({
+    ...evidencePack,
+    dateSelection: {
+      requestedDate: '2026-07-29',
+      effectiveDate: '2026-07-29',
+      mode: 'explicit',
+      reason: null
+    }
+  }));
+
+  for (const dateSelection of [
+    { ...selection, requestedDate: '2026-02-30' },
+    { ...selection, effectiveDate: '2026-02-30' },
+    { ...selection, mode: 'implicit' },
+    { ...selection, mode: 'latest' },
+    { ...selection, reason: 'UNKNOWN_REASON' },
+    { ...selection, extra: true },
+    Object.fromEntries(Object.entries(selection).filter(([key]) => key !== 'reason'))
+  ]) {
+    assert.throws(
+      () => validateEvidencePack({ ...evidencePack, dateSelection }),
+      /dateSelection|date selection/i
+    );
+  }
+  assert.throws(
+    () => validateEvidencePack({
+      ...evidencePack,
+      dateSelection: { ...selection, effectiveDate: '2026-07-28' }
+    }),
+    /dateSelection|date selection/i
+  );
+});
+
 test('reuses authoritative Panda enablement readiness and username normalization', () => {
   const config = marketAgentConfig({
     PANDA_DATA_ENABLED: 'true',

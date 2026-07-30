@@ -41,6 +41,7 @@ function evidence(overrides = {}) {
 
 function dependencies(stateDir, overrides = {}) {
   const calls = {
+    resolveReportDate: 0,
     worker: 0,
     narrator: 0,
     renderer: 0,
@@ -49,7 +50,21 @@ function dependencies(stateDir, overrides = {}) {
   };
   const worker = async ({ request }) => {
     calls.worker += 1;
-    return evidence({ runId: request.runId, reportDate: request.date });
+    return evidence({
+      runId: request.runId,
+      reportDate: request.date,
+      ...(request.dateSelection ? { dateSelection: request.dateSelection } : {})
+    });
+  };
+  const resolveReportDate = async ({ explicitDate }) => {
+    calls.resolveReportDate += 1;
+    const effectiveDate = explicitDate || date;
+    return {
+      requestedDate: explicitDate || '2026-07-24',
+      effectiveDate,
+      mode: explicitDate ? 'explicit' : 'latest-completed-trading-day',
+      reason: explicitDate ? null : 'REQUEST_DATE_NOT_COMPLETED'
+    };
   };
   const narrator = async () => {
     calls.narrator += 1;
@@ -119,6 +134,7 @@ function dependencies(stateDir, overrides = {}) {
     deps: {
       store: new MarketTaskStore({ stateDir }),
       worker,
+      resolveReportDate,
       narrator,
       renderer,
       validator,
@@ -143,6 +159,157 @@ function request(overrides = {}) {
     ...overrides
   };
 }
+
+test('implicit dates resolve before the effective-date lock and propagate unchanged', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const events = [];
+  const dateSelection = {
+    requestedDate: '2026-07-30',
+    effectiveDate: '2026-07-29',
+    mode: 'latest-completed-trading-day',
+    reason: 'REQUEST_DATE_NOT_COMPLETED'
+  };
+  const fixture = dependencies(stateDir, {
+    clock: () => new Date('2026-07-30T05:00:00.000Z'),
+    async resolveReportDate(options) {
+      events.push('resolve');
+      assert.deepEqual(options, {
+        explicitDate: undefined,
+        now: new Date('2026-07-30T05:00:00.000Z'),
+        timezone: 'Asia/Shanghai',
+        signal: undefined
+      });
+      return dateSelection;
+    },
+    async acquireLock(options) {
+      events.push('lock');
+      assert.deepEqual(options, {
+        stateDir,
+        reportDate: '2026-07-29'
+      });
+      return {
+        async release() {
+          events.push('release');
+        }
+      };
+    },
+    async worker({ request: workerRequest }) {
+      events.push('worker');
+      assert.deepEqual(workerRequest, {
+        operation: 'daily-market-report',
+        sections: [],
+        topN: 10,
+        date: '2026-07-29',
+        runId: 'run-1',
+        dateSelection
+      });
+      return evidence({
+        runId: workerRequest.runId,
+        reportDate: workerRequest.date,
+        dateSelection: workerRequest.dateSelection
+      });
+    }
+  });
+
+  const result = await new MarketOrchestrator(fixture.config, fixture.deps).run(request({
+    operation: { operation: 'daily-market-report' },
+    trigger: 'a2a',
+    deliverEmail: false
+  }));
+
+  assert.equal(result.outcome, 'complete');
+  assert.equal(result.reportDate, '2026-07-29');
+  assert.deepEqual(events, ['resolve', 'lock', 'worker', 'release']);
+  const [task] = await fixture.deps.store.list();
+  assert.deepEqual(task.dateSelection, dateSelection);
+  const runDirectory = path.join(stateDir, 'runs', '20260729', result.runId);
+  const trace = JSON.parse(await readFile(path.join(runDirectory, 'run-trace.json'), 'utf8'));
+  assert.deepEqual(trace.dateSelection, dateSelection);
+  assert.deepEqual(trace.steps[0].detail, {
+    reportDate: '2026-07-29',
+    dateSelection
+  });
+});
+
+test('structured explicit dates remain strict throughout orchestration', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const events = [];
+  const dateSelection = {
+    requestedDate: date,
+    effectiveDate: date,
+    mode: 'explicit',
+    reason: null
+  };
+  const fixture = dependencies(stateDir, {
+    async resolveReportDate({ explicitDate }) {
+      events.push('resolve');
+      assert.equal(explicitDate, date);
+      return dateSelection;
+    },
+    async acquireLock({ reportDate }) {
+      events.push('lock');
+      assert.equal(reportDate, date);
+      return { async release() {} };
+    },
+    async worker({ request: workerRequest }) {
+      events.push('worker');
+      assert.equal(workerRequest.date, date);
+      assert.deepEqual(workerRequest.dateSelection, dateSelection);
+      return evidence({
+        runId: workerRequest.runId,
+        reportDate: workerRequest.date,
+        dateSelection: workerRequest.dateSelection
+      });
+    }
+  });
+
+  const result = await new MarketOrchestrator(fixture.config, fixture.deps).run(request({
+    trigger: 'a2a',
+    deliverEmail: false
+  }));
+
+  assert.equal(result.reportDate, date);
+  assert.deepEqual(events, ['resolve', 'lock', 'worker']);
+});
+
+test('date resolution failures persist a terminal task without locking or invoking the worker', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const events = [];
+  const fixture = dependencies(stateDir, {
+    async resolveReportDate() {
+      events.push('resolve');
+      throw new Error('Panda trading calendar unavailable');
+    },
+    async acquireLock() {
+      events.push('lock');
+      throw new Error('must not lock');
+    },
+    async worker() {
+      events.push('worker');
+      throw new Error('must not invoke worker');
+    }
+  });
+  const orchestrator = new MarketOrchestrator(fixture.config, fixture.deps);
+
+  const invalid = await orchestrator.run(request({
+    operation: { operation: 'get_stock_daily' },
+    trigger: 'a2a',
+    deliverEmail: false
+  }));
+  assert.equal(invalid.outcome, 'rejected');
+  assert.deepEqual(events, []);
+
+  const result = await orchestrator.run(request({
+    operation: { operation: 'daily-market-report' },
+    trigger: 'a2a',
+    deliverEmail: false
+  }));
+
+  assert.ok(['rejected', 'failed'].includes(result.outcome));
+  assert.deepEqual(events, ['resolve']);
+  const tasks = await fixture.deps.store.list();
+  assert.match(tasks.at(-1).error.message, /trading calendar unavailable/i);
+});
 
 test('successful report plus email failure retries email only from persisted artifacts', async (t) => {
   const stateDir = await temporaryDirectory(t);

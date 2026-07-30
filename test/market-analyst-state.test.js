@@ -31,17 +31,35 @@ import { runMarketWorker } from '../agents/market-analyst/worker-runner.js';
 
 const MAX_WORKER_OUTPUT_BYTES = 20 * 1024 * 1024;
 
+const dateSelection = {
+  requestedDate: '2026-07-24',
+  effectiveDate: '2026-07-23',
+  mode: 'latest-completed-trading-day',
+  reason: 'REQUEST_DATE_NOT_COMPLETED'
+};
+
 const evidencePack = {
   schemaVersion: '1.0',
   evidenceModelVersion: '2.0',
   runId: 'run-20260723',
   reportDate: '2026-07-23',
+  dateSelection,
   status: 'complete',
   markets: {},
   conclusions: [],
   leaderboards: {},
   sources: []
 };
+
+function workerRequest(overrides = {}) {
+  return {
+    operation: 'daily-market-report',
+    date: '2026-07-23',
+    dateSelection,
+    topN: 10,
+    ...overrides
+  };
+}
 
 async function temporaryDirectory(t) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'market-agent-state-'));
@@ -924,6 +942,7 @@ test('RunTrace records sanitized step, worker, model, email, and lineage detail'
     skillVersions: { 'daily-market-report': '1.0.0' },
     metricVersion: '2.0',
     configFingerprint: 'a'.repeat(64),
+    dateSelection,
     lineageSummary: { conclusionCount: 1, metricCount: 1, pandaCallCount: 1 },
     conclusions: [{
       conclusion_id: 'market-hot-industries',
@@ -947,6 +966,7 @@ test('RunTrace records sanitized step, worker, model, email, and lineage detail'
   assert.equal(output.applicationVersion, '1.0.0');
   assert.equal(output.metricVersion, '2.0');
   assert.equal(output.configFingerprint, 'a'.repeat(64));
+  assert.deepEqual(output.dateSelection, dateSelection);
   assert.deepEqual(output.conclusionLineage[0].pandaCalls, ['panda-call-1']);
   assert.equal(JSON.stringify(output).includes('jane.doe@example.com'), false);
   assert.equal(JSON.stringify(output).includes('should-not-persist'), false);
@@ -1123,6 +1143,7 @@ test('runMarketWorker sends only whitelisted JSON, controls cache by environment
     request: {
       operation: 'daily-market-report',
       date: '2026-07-23',
+      dateSelection,
       topN: 10,
       runId: 'run-20260723',
       cacheDir: 'C:\\attacker-cache',
@@ -1150,6 +1171,7 @@ test('runMarketWorker sends only whitelisted JSON, controls cache by environment
   assert.deepEqual(JSON.parse(capture.stdin), {
     operation: 'daily-market-report',
     date: '2026-07-23',
+    dateSelection,
     topN: 10,
     minLiquidityCny: 20_000_000,
     cacheDays: 30,
@@ -1164,7 +1186,7 @@ test('runMarketWorker rejects malformed evidence and nonzero exits', async (t) =
   const stateDir = await temporaryDirectory(t);
   await assert.rejects(
     runMarketWorker({
-      request: { operation: 'daily-market-report' },
+      request: workerRequest(),
       config: workerConfig(stateDir),
       spawnImpl: fakeSpawn((child) => completeChild(child, { stdout: '{not-json' }))
     }),
@@ -1172,7 +1194,7 @@ test('runMarketWorker rejects malformed evidence and nonzero exits', async (t) =
   );
   await assert.rejects(
     runMarketWorker({
-      request: { operation: 'daily-market-report' },
+      request: workerRequest(),
       config: workerConfig(stateDir),
       spawnImpl: fakeSpawn((child) => completeChild(child, {
         stdout: JSON.stringify({ ...evidencePack, schemaVersion: 1 })
@@ -1182,7 +1204,7 @@ test('runMarketWorker rejects malformed evidence and nonzero exits', async (t) =
   );
   await assert.rejects(
     runMarketWorker({
-      request: { operation: 'daily-market-report' },
+      request: workerRequest(),
       config: workerConfig(stateDir),
       spawnImpl: fakeSpawn((child) => completeChild(child, { code: 2 }))
     }),
@@ -1194,7 +1216,7 @@ test('worker omits empty Panda base URL and refuses disabled config', async (t) 
   const stateDir = await temporaryDirectory(t);
   const capture = {};
   const result = await runMarketWorker({
-    request: { operation: 'daily-market-report', date: '2026-07-23', topN: 1 },
+    request: workerRequest({ topN: 1 }),
     config: workerConfig(stateDir, {
       panda: {
         enabled: true,
@@ -1226,6 +1248,31 @@ test('worker omits empty Panda base URL and refuses disabled config', async (t) 
   );
 });
 
+test('runMarketWorker rejects malformed date-selection records before spawning Python', async (t) => {
+  const stateDir = await temporaryDirectory(t);
+  const invalidSelections = [
+    undefined,
+    { ...dateSelection, effectiveDate: '2026-07-22' },
+    { ...dateSelection, extra: true },
+    Object.fromEntries(Object.entries(dateSelection).filter(([key]) => key !== 'reason'))
+  ];
+
+  for (const invalid of invalidSelections) {
+    let spawnCount = 0;
+    assert.throws(
+      () => runMarketWorker({
+        request: workerRequest({ dateSelection: invalid }),
+        config: workerConfig(stateDir),
+        spawnImpl: () => {
+          spawnCount += 1;
+        }
+      }),
+      /dateSelection|date selection/i
+    );
+    assert.equal(spawnCount, 0);
+  }
+});
+
 test('runMarketWorker rejects non-worker operations before spawning Python', async (t) => {
   const stateDir = await temporaryDirectory(t);
   for (const operation of [
@@ -1254,7 +1301,7 @@ test('runMarketWorker stops a stderr chunk after malformed TRACE JSON', async (t
   const traces = [];
   await assert.rejects(
     runMarketWorker({
-      request: { operation: 'daily-market-report' },
+      request: workerRequest(),
       config: workerConfig(stateDir),
       spawnImpl: fakeSpawn((child) => completeChild(child, {
         stderr: 'TRACE {bad-json}\nTRACE {"type":"must-not-run"}\n'
@@ -1270,7 +1317,7 @@ test('runMarketWorker enforces its 20 MB output bound', async (t) => {
   const stateDir = await temporaryDirectory(t);
   await assert.rejects(
     runMarketWorker({
-      request: { operation: 'daily-market-report' },
+      request: workerRequest(),
       config: workerConfig(stateDir),
       spawnImpl: fakeSpawn((child) => {
         child.stdout.write(Buffer.alloc(MAX_WORKER_OUTPUT_BYTES + 1, 0x61));
@@ -1287,7 +1334,7 @@ test('runMarketWorker terminates on timeout and propagates abort', async (t) => 
   try {
     await assert.rejects(
       runMarketWorker({
-        request: { operation: 'daily-market-report' },
+        request: workerRequest(),
         config: workerConfig(stateDir, {
           workerTimeoutMs: 5,
           panda: { timeoutMs: 5_000 }
@@ -1303,7 +1350,7 @@ test('runMarketWorker terminates on timeout and propagates abort', async (t) => 
 
   const controller = new AbortController();
   const running = runMarketWorker({
-    request: { operation: 'daily-market-report' },
+    request: workerRequest(),
     config: workerConfig(stateDir),
     signal: controller.signal,
     spawnImpl: fakeSpawn(() => {})
@@ -1320,7 +1367,7 @@ test('runMarketWorker escalates ignored SIGTERM and cleans listeners before reje
   const capture = {};
   await assert.rejects(
     runMarketWorker({
-      request: { operation: 'daily-market-report' },
+      request: workerRequest(),
       config: workerConfig(stateDir, {
         workerTimeoutMs: 5,
         workerTerminationGraceMs: 5,
@@ -1343,7 +1390,7 @@ test('runMarketWorker has a final cleanup deadline when both signals are ignored
   const capture = {};
   await assert.rejects(
     runMarketWorker({
-      request: { operation: 'daily-market-report' },
+      request: workerRequest(),
       config: workerConfig(stateDir, {
         workerTimeoutMs: 5,
         workerTerminationGraceMs: 5,

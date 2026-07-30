@@ -1,7 +1,11 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validateEvidencePack, validateOperation } from './schemas.js';
+import {
+  validateDateSelection,
+  validateEvidencePack,
+  validateOperation
+} from './schemas.js';
 import { sanitizeTraceValue } from './run-trace.js';
 
 const MAX_OUTPUT_BYTES = 20 * 1024 * 1024;
@@ -36,9 +40,15 @@ function buildWorkerRequest(request, config) {
       'WORKER_OPERATION_UNSUPPORTED'
     );
   }
+  const dateSelection = validateDateSelection(
+    request.dateSelection,
+    operation.date,
+    { required: true, label: 'worker dateSelection' }
+  );
   const result = {
     operation: operation.operation,
     ...(operation.date ? { date: operation.date } : {}),
+    dateSelection,
     topN: operation.topN,
     minLiquidityCny: positiveInteger(config.minLiquidityCny, 'minLiquidityCny'),
     cacheDays: positiveInteger(config.cacheDays, 'cacheDays')

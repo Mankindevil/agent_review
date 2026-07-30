@@ -163,6 +163,62 @@ class AcceleratingPanda(FakePanda):
 
 
 class MarketWorkerTests(unittest.TestCase):
+    def test_date_selection_is_copied_into_complete_and_skipped_evidence_packs(self):
+        selection = {
+            "requestedDate": "2026-07-30",
+            "effectiveDate": "2026-07-29",
+            "mode": "latest-completed-trading-day",
+            "reason": "REQUEST_DATE_NOT_COMPLETED",
+        }
+
+        class CompletedPanda(FakePanda):
+            def get_last_trade_date(self, exchange="SH"):
+                return "20260729" if exchange == "SH" else "20260728"
+
+        complete = worker.build_evidence_pack(
+            {
+                "operation": "daily-market-report",
+                "date": "2026-07-29",
+                "dateSelection": selection,
+                "topN": 10,
+                "minLiquidityCny": 20_000_000,
+            },
+            worker.PandaCollector(CompletedPanda(), lambda _: None, None, 0),
+            now="2026-07-30T10:30:00Z",
+        )
+
+        class HolidayPanda(FakePanda):
+            def get_trade_cal(self, start_date=None, end_date=None, exchange="SH",
+                              is_trading_day=None, fields=None):
+                if exchange == "SH" and start_date == end_date == "20260729":
+                    return FakeFrame([{
+                        "nature_date": "20260729",
+                        "exchange": "SH",
+                        "is_trade": 0,
+                    }])
+                return super().get_trade_cal(
+                    start_date=start_date,
+                    end_date=end_date,
+                    exchange=exchange,
+                    is_trading_day=is_trading_day,
+                    fields=fields,
+                )
+
+        skipped = worker.build_evidence_pack(
+            {
+                "operation": "daily-market-report",
+                "date": "2026-07-29",
+                "dateSelection": selection,
+                "topN": 10,
+                "minLiquidityCny": 20_000_000,
+            },
+            worker.PandaCollector(HolidayPanda(), lambda _: None, None, 0),
+            now="2026-07-30T10:30:00Z",
+        )
+
+        self.assertEqual(complete["dateSelection"], selection)
+        self.assertEqual(skipped["dateSelection"], selection)
+
     def test_build_evidence_pack_uses_completed_trade_date_and_traces_every_call(self):
         trace = []
         collector = worker.PandaCollector(FakePanda(), trace.append, None, 0)

@@ -6,6 +6,18 @@ const OPERATIONS = new Set([
   'inspect-run-trace'
 ]);
 const EVIDENCE_STATUSES = new Set(['complete', 'degraded', 'skipped', 'failed']);
+const DATE_SELECTION_MODES = new Set(['explicit', 'latest-completed-trading-day']);
+const DATE_SELECTION_REASONS = new Set([
+  null,
+  'REQUEST_DATE_NOT_COMPLETED',
+  'REQUEST_DATE_DATA_UNAVAILABLE'
+]);
+const DATE_SELECTION_KEYS = new Set([
+  'requestedDate',
+  'effectiveDate',
+  'mode',
+  'reason'
+]);
 const REPORT_SECTION_IDS = new Set([
   'run-overview',
   'executive-summary',
@@ -43,6 +55,35 @@ function isRealDate(value) {
   return parsed.getUTCFullYear() === year
     && parsed.getUTCMonth() === month - 1
     && parsed.getUTCDate() === day;
+}
+
+export function validateDateSelection(value, reportDate, {
+  required = false,
+  label = 'dateSelection'
+} = {}) {
+  if (value === undefined && !required) return undefined;
+  if (!isRecord(value)) throw new TypeError(`${label} must be an object`);
+  const keys = Object.keys(value);
+  if (
+    keys.length !== DATE_SELECTION_KEYS.size
+    || keys.some((key) => !DATE_SELECTION_KEYS.has(key))
+    || [...DATE_SELECTION_KEYS].some((key) => !(key in value))
+  ) {
+    throw new TypeError(`${label} must contain exactly four declared keys`);
+  }
+  if (!isRealDate(value.requestedDate) || !isRealDate(value.effectiveDate)) {
+    throw new TypeError(`${label} dates must be real YYYY-MM-DD dates`);
+  }
+  if (!DATE_SELECTION_MODES.has(value.mode)) {
+    throw new TypeError(`${label} mode is unsupported`);
+  }
+  if (!DATE_SELECTION_REASONS.has(value.reason)) {
+    throw new TypeError(`${label} reason is unsupported`);
+  }
+  if (value.effectiveDate !== reportDate) {
+    throw new TypeError(`${label} effectiveDate must match reportDate`);
+  }
+  return value;
 }
 
 function assertBoundedEvidence(root) {
@@ -344,6 +385,7 @@ export function validateEvidencePack(value) {
   if (!isRealDate(value.reportDate)) {
     throw new TypeError('Evidence Pack reportDate must be a real YYYY-MM-DD date');
   }
+  validateDateSelection(value.dateSelection, value.reportDate);
   if (!EVIDENCE_STATUSES.has(value.status)) {
     throw new TypeError('Evidence Pack status is unsupported');
   }
