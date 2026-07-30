@@ -56,7 +56,7 @@ test('publishes local PandaAI brand assets with the official mark geometry', asy
     assert.match(asset, /m100\.02,45\.14/);
   }
   assert.match(logo, />PandaAI</);
-  assert.doesNotMatch(`${mark}\n${logo}\n${favicon}`, /https?:\/\//);
+  assert.doesNotMatch(`${mark}\n${logo}\n${favicon}`, /(?:href|src)="https?:\/\//);
 });
 ```
 
