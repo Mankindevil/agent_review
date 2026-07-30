@@ -114,3 +114,35 @@ test('rejects when both the candidate and predecessor have no universe data', as
     /universe data unavailable/i
   );
 });
+
+test('rejects an intraday predecessor that repeats its anchor before universe verification', async () => {
+  const calls = [];
+  const query = async (method) => {
+    calls.push(method);
+    if (method === 'get_last_trade_date') return { data: '20260730' };
+    if (method === 'get_prev_trade_date') return { data: '20260730' };
+    return { data: [{ symbol: '000001.SZ' }], rowCount: 1 };
+  };
+
+  await assert.rejects(
+    () => resolveMarketReportDate({ now: new Date('2026-07-30T05:00:00Z'), query }),
+    /previous trading date must precede its anchor/i
+  );
+  assert.deepEqual(calls, ['get_last_trade_date', 'get_prev_trade_date']);
+});
+
+test('rejects a fallback predecessor that advances past its anchor before universe verification', async () => {
+  const calls = [];
+  const query = async (method) => {
+    calls.push(method);
+    if (method === 'get_last_trade_date') return { data: '20260729' };
+    if (method === 'get_prev_trade_date') return { data: '20260730' };
+    return { data: [], rowCount: 0 };
+  };
+
+  await assert.rejects(
+    () => resolveMarketReportDate({ now: new Date('2026-07-30T08:30:00Z'), query }),
+    /previous trading date must precede its anchor/i
+  );
+  assert.deepEqual(calls, ['get_last_trade_date', 'get_trade_list', 'get_prev_trade_date']);
+});

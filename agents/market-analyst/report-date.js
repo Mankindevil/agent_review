@@ -23,22 +23,24 @@ export async function resolveMarketReportDate({
   let candidate = latest;
   let reason = null;
   if (current.hour < 15 && latest === current.date) {
-    candidate = await calendarDate(query, 'get_prev_trade_date', {
+    const previous = await calendarDate(query, 'get_prev_trade_date', {
       date: current.compact,
       exchange: 'SH',
       n: 1
     }, signal, 'previous');
-    rejectFutureDate(candidate, current.date, 'previous');
+    requirePredecessor(previous, current.date);
+    candidate = previous;
     reason = 'REQUEST_DATE_NOT_COMPLETED';
   }
 
   if (!(await hasUniverseData(query, candidate, signal))) {
-    candidate = await calendarDate(query, 'get_prev_trade_date', {
+    const previous = await calendarDate(query, 'get_prev_trade_date', {
       date: candidate.replaceAll('-', ''),
       exchange: 'SH',
       n: 1
     }, signal, 'previous');
-    rejectFutureDate(candidate, current.date, 'previous');
+    requirePredecessor(previous, candidate);
+    candidate = previous;
     if (!(await hasUniverseData(query, candidate, signal))) {
       throw new Error('Panda universe data unavailable for candidate and predecessor');
     }
@@ -97,4 +99,8 @@ function marketNow(now, timezone) {
 
 function rejectFutureDate(date, today, label) {
   if (date > today) throw new Error(`Panda returned future ${label} trading date`);
+}
+
+function requirePredecessor(date, anchor) {
+  if (date >= anchor) throw new Error('Panda previous trading date must precede its anchor');
 }
