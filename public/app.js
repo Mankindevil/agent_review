@@ -81,11 +81,7 @@ async function init() {
   if (route) openEvaluation(route[1]);
 }
 
-function bindEvents() {
-  $$('.mode-switch button').forEach((button) => button.addEventListener('click', () => {
-    state.mode = button.dataset.mode;
-    $$('.mode-switch button').forEach((item) => item.classList.toggle('selected', item === button));
-  }));
+function bindV1ScoringControls() {
   $$('.scoring-mode-switch button').forEach((button) => button.addEventListener('click', () => {
     state.scoringMode = button.dataset.scoringMode;
     $$('.scoring-mode-switch button').forEach((item) => {
@@ -98,6 +94,14 @@ function bindEvents() {
   $('#single-scoring-reviewer').addEventListener('change', (event) => {
     state.scoringReviewerId = event.currentTarget.value;
   });
+}
+
+function bindEvents() {
+  $$('.mode-switch button').forEach((button) => button.addEventListener('click', () => {
+    state.mode = button.dataset.mode;
+    $$('.mode-switch button').forEach((item) => item.classList.toggle('selected', item === button));
+  }));
+  bindV1ScoringControls();
   $$('.source-switch button').forEach((button) => button.addEventListener('click', () => setSourceType(button.dataset.source)));
   $('#add-case').addEventListener('click', () => addCase('', ''));
   $('#add-v2-example').addEventListener('click', () => addV2Example());
@@ -554,6 +558,43 @@ async function submitEvaluation() {
   return submitV1Evaluation(agentCard);
 }
 
+function selectedV1ScoringConfig() {
+  return state.scoringMode === 'single'
+    ? { mode: 'single', reviewerId: state.scoringReviewerId }
+    : { mode: 'panel' };
+}
+
+function buildV1CreateRequest({
+  agentCard,
+  agentExamples,
+  seed,
+  agentAuthorization
+}) {
+  return {
+    agentCard,
+    agentExamples,
+    mode: state.mode,
+    scoringConfig: selectedV1ScoringConfig(),
+    ...(seed !== undefined ? { seed } : {}),
+    ...(agentAuthorization ? { agentAuthorization } : {})
+  };
+}
+
+function buildV2CreateRequest({
+  agentCard,
+  agentExamples,
+  agentAuthorization,
+  skipHumanReview
+}) {
+  return {
+    schemaVersion: 2,
+    agentCard,
+    agentExamples,
+    ...(agentAuthorization ? { agentAuthorization } : {}),
+    skipHumanReview
+  };
+}
+
 async function submitV1Evaluation(agentCard) {
   let agentExamples;
   try { agentExamples = collectAgentExamples(); }
@@ -565,16 +606,12 @@ async function submitV1Evaluation(agentCard) {
   if (seed !== undefined && (!Number.isSafeInteger(seed) || seed < 0 || seed > 2_147_483_646)) {
     return showError('Seed 必须是 0–2147483646 的整数。');
   }
-  const request = {
+  const request = buildV1CreateRequest({
     agentCard,
     agentExamples,
-    mode: state.mode,
-    scoringConfig: state.scoringMode === 'single'
-      ? { mode: 'single', reviewerId: state.scoringReviewerId }
-      : { mode: 'panel' },
-    ...(seed !== undefined ? { seed } : {}),
-    ...(agentAuthorization ? { agentAuthorization } : {})
-  };
+    seed,
+    agentAuthorization
+  });
   const requestBody = JSON.stringify(request);
   authorizationInput.value = '';
   const button = $('#start-evaluation');
@@ -606,11 +643,12 @@ async function submitV2Evaluation(agentCard) {
   const agentAuthorization = authorizationInput.value.trim();
   const skipHumanReview = Boolean($('#skip-human-review')?.checked);
   const replicaReviewPolicy = collectReplicaReviewPolicy();
-  const request = {
-    schemaVersion: 2, agentCard, agentExamples,
-    ...(agentAuthorization ? { agentAuthorization } : {}),
+  const request = buildV2CreateRequest({
+    agentCard,
+    agentExamples,
+    agentAuthorization,
     skipHumanReview
-  };
+  });
   const requestBody = JSON.stringify(request);
   $('#agent-authorization').value = '';
   const button = $('#start-evaluation');
@@ -1234,18 +1272,25 @@ function skillCacheKey(evaluationId, runtimeId) {
   return `${evaluationId}:${runtimeId}:${(hash >>> 0).toString(36)}`;
 }
 
+function isV1ModelScoredRound(round, item) {
+  if (['single', 'panel'].includes(item?.scoringConfig?.mode)) return true;
+  return round?.judging?.version === 'v1-model-arena/v1'
+    && ['single', 'panel'].includes(round.judging.mode);
+}
+
 function renderV1Judging(round, item) {
-  if (!item.scoringConfig) {
+  const judging = round.judging || {};
+  const scoringConfig = item?.scoringConfig || (isV1ModelScoredRound(round, item) ? judging : null);
+  if (!scoringConfig) {
     return `<div class="v1-judging-summary historical"><div><small>SCORING SOURCE</small><b>历史规则评分</b></div><span>旧记录保留原分，不重新计算</span></div>`;
   }
-  const judging = round.judging || {};
   const seats = Array.isArray(judging.seats) ? judging.seats : [];
   const successfulSeats = Number.isFinite(judging.successfulSeats) ? judging.successfulSeats : 0;
-  const requiredSeats = item.scoringConfig.mode === 'panel' ? 4 : 1;
-  const singleSeat = seats.find((seat) => seat.reviewerId === item.scoringConfig.reviewerId);
-  const label = item.scoringConfig.mode === 'panel'
+  const requiredSeats = scoringConfig.mode === 'panel' ? 4 : 1;
+  const singleSeat = seats.find((seat) => seat.reviewerId === scoringConfig.reviewerId);
+  const label = scoringConfig.mode === 'panel'
     ? `四模型匿名盲评 · ${successfulSeats}/4`
-    : `单模型 · ${singleSeat?.reviewerName || item.scoringConfig.reviewerId || '未指定'}`;
+    : `单模型 · ${singleSeat?.reviewerName || scoringConfig.reviewerId || '未指定'}`;
   const status = judging.status === 'scored'
     ? '评分完成'
     : judging.status === 'failed'
@@ -1294,12 +1339,15 @@ function renderBattle(rounds, item) {
   const competitorPlan = activity ? competitorPlanFor(item) : [];
   return `<div class="section-title"><h3>同 Prompt 对打</h3><span>SAME INPUT · VISIBLE OUTPUT ONLY</span></div>${rounds.map((round,index)=>{
     const entries = round.entries || [];
-    const scored = entries.map((entry) => entry.score).filter(Number.isFinite);
+    const modelScoredRound = isV1ModelScoredRound(round, item);
+    const winnerEligible = (entry) => Number.isFinite(entry.score)
+      && (!modelScoredRound || entry.scoreStatus === 'scored');
+    const scored = entries.filter(winnerEligible).map((entry) => entry.score);
     const max = scored.length ? Math.max(...scored) : null;
     const cards = entries.map((entry) => {
       const working = activity?.caseIndex === index && activityMatches(activity, entry.id);
       const displayScore = Number.isFinite(entry.score) ? entry.score : '—';
-      const winner = Number.isFinite(entry.score) && entry.score === max;
+      const winner = winnerEligible(entry) && entry.score === max;
       return `<div class="battle-entry${working ? ' work-active' : ''}"><header><h4>${escapeHtml(entry.name)}</h4><strong class="${winner?'winner':''}">${displayScore}</strong></header><div class="battle-actions"><span class="mode">${escapeHtml((entry.mode || '').toUpperCase())}</span>${renderDataVerificationBadge(entry.dataVerification)}${retryButton('benchmark', entry.id, '重跑这一局', index)}</div><details><summary>查看完整输出</summary><pre>${escapeHtml(entry.output)}</pre></details>${renderDataChecks(entry.dataVerification)}${renderV1JudgeReviews(entry)}${working ? renderWorkLoader(activity, 'card') : ''}</div>`;
     });
     if (activity?.caseIndex === index && !entries.some((entry) => activityMatches(activity, entry.id))) {

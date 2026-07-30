@@ -67,6 +67,10 @@ test('renders V1 model scores and judge audit text safely', async () => {
     script.indexOf('function escapeHtml'),
     script.indexOf('function escapeAttr')
   );
+  const modelEraRenderer = script.slice(
+    script.indexOf('function isV1ModelScoredRound'),
+    script.indexOf('function renderV1Judging')
+  );
   const battleRenderer = script.slice(
     script.indexOf('function renderBattle'),
     script.indexOf('function renderDataEvidence')
@@ -92,7 +96,7 @@ test('renders V1 model scores and judge audit text safely', async () => {
     'renderQueuedWork',
     'renderV1Judging',
     'renderDataEvidence',
-    `${escapeRenderer}\n${battleRenderer}\nreturn renderBattle;`
+    `${escapeRenderer}\n${modelEraRenderer}\n${battleRenderer}\nreturn renderBattle;`
   )(
     () => null,
     () => [],
@@ -119,7 +123,7 @@ test('renders V1 model scores and judge audit text safely', async () => {
   assert.doesNotMatch(battle, /<h4>Pending<\/h4><strong class="winner">/);
 
   const renderers = Function(
-    `${escapeRenderer}\n${judgingRenderer}\n${reviewRenderer}\nreturn { renderV1Judging, renderV1JudgeReviews };`
+    `${escapeRenderer}\n${modelEraRenderer}\n${judgingRenderer}\n${reviewRenderer}\nreturn { renderV1Judging, renderV1JudgeReviews };`
   )();
   assert.match(renderers.renderV1Judging({}, {}), /历史规则评分/);
   const panelAudit = renderers.renderV1Judging({
@@ -150,7 +154,7 @@ test('renders V1 model scores and judge audit text safely', async () => {
   assert.match(reviewAudit, /&lt;svg onload=alert\(2\)&gt;/);
   assert.doesNotMatch(reviewAudit, /<script>|<svg onload/);
 
-  assert.match(battleRenderer, /filter\(Number\.isFinite\)/);
+  assert.match(battleRenderer, /filter\(winnerEligible\)/);
   assert.doesNotMatch(battleRenderer, /Math\.max\(\.\.\.entries\.map/);
   assert.match(battleRenderer, /Number\.isFinite\(entry\.score\)\s*\?\s*entry\.score\s*:\s*'—'/);
   for (const selector of [

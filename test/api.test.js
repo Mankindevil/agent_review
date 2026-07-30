@@ -1284,21 +1284,19 @@ test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
   assert.match(script, /function setBlackBoxModeUnavailable/);
   assert.match(script, /\$\('#v2-intake'\)\.classList\.remove\('hidden'\)/);
   assert.match(script, /function submitV1Evaluation/);
-  assert.match(script, /agentExamples,\s*mode:\s*state\.mode/);
   assert.match(script, /scoringMode:\s*'panel'/);
   assert.match(script, /scoringReviewerId:\s*'deepseek'/);
-  const v1Submit = script.slice(
-    script.indexOf('async function submitV1Evaluation'),
-    script.indexOf('async function submitV2Evaluation')
+  const v1RequestBuilder = script.slice(
+    script.indexOf('function buildV1CreateRequest'),
+    script.indexOf('function buildV2CreateRequest')
   );
-  const v2Submit = script.slice(
-    script.indexOf('async function submitV2Evaluation'),
-    script.indexOf('async function applyReplicaReviewPolicy')
+  const v2RequestBuilder = script.slice(
+    script.indexOf('function buildV2CreateRequest'),
+    script.indexOf('async function submitV1Evaluation')
   );
-  assert.match(v1Submit, /scoringConfig:/);
-  assert.match(v1Submit, /mode:\s*'single',\s*reviewerId:\s*state\.scoringReviewerId/);
-  assert.match(v1Submit, /:\s*\{\s*mode:\s*'panel'\s*\}/);
-  assert.doesNotMatch(v2Submit, /scoringConfig/);
+  assert.match(v1RequestBuilder, /mode:\s*state\.mode/);
+  assert.match(v1RequestBuilder, /scoringConfig:\s*selectedV1ScoringConfig\(\)/);
+  assert.doesNotMatch(v2RequestBuilder, /scoringConfig/);
   assert.match(script, /nextAvailableEditorId\(/);
   assert.match(script, /data-record-kind="v2"/);
   assert.match(script, /recordActionCopy\(isV2\)/);
