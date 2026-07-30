@@ -142,8 +142,8 @@ Key 只应写入本机 `.env` 或密钥管理系统，不要写入 `.env.example
 评审模型、Runtime 模型、参赛 Agent 资格是三件事。评审模型由 `OPENAI_*`、`ARK_*`、`REVIEW_MODEL_*` 或 `MODEL_REVIEWERS_JSON` 配置；Runtime 模型由本地 CLI、方舟豆包 adapter 或 `RUNTIME_ADAPTERS_JSON` 配置；它们可以分别启用、分别使用各自的凭据。只有参赛 Agent Card 与最终报名表的声明要求 DeepSeek V4 Pro；这是参赛资格声明，不会改写平台的评审或 Runtime 配置。评审模型以及 Claude、Cursor、Doubao Runtime 不受该底模限制。
 
 - V1 “单模型”评分直接复用上述现有评审配置，可选择 `gpt`、`claude`、`doubao` 或 `deepseek`，默认 DeepSeek；旧 API 客户端省略 `scoringConfig` 时也规范化为 DeepSeek 单模型，不需要配置第二套凭据。
-- V1 “四模型匿名盲评”是网页默认选项，固定需要 OpenAI、Anthropic、豆包和 DeepSeek 四个真实评审席。`live` 创建阶段会检查阵容：单模型只要求所选席位可真实调用，四模型要求四席全部已配置，否则请求以缺失席位错误失败，不会先运行 Agent 或 Runtime。
-- V1 CASE 评分时，四模型至少两席成功才产生正式分数；单席失败或四席成功数不足时保留输出和席位错误，但不回退关键词规则分、模拟分或历史分。`demo` 可在无凭据时使用确定性模拟席位并明确标记；已存在的旧 V1 记录不会重算，页面标记为“历史规则评分”。
+- V1 “四模型匿名盲评”是网页默认选项，固定需要 OpenAI、Anthropic、豆包和 DeepSeek 四席。`live` 创建阶段只按评审配置检查所需 ID 是否存在且不是 `mock`：单模型检查所选席位，四模型检查全部四席；缺席时请求失败，不会先运行 Agent 或 Runtime。该检查不探测网关，也不完整校验自定义 adapter 的 URL、模型或 `apiKeyEnv`，因此 `MODEL_REVIEWERS_JSON` 必须自行提供可调用的完整配置，错误仍可能在评分调用时暴露。
+- V1 CASE 评分时，四模型至少两席成功才产生正式分数；单席失败或四席成功数不足时保留输出和席位错误，但不回退关键词规则分、模拟分或历史分。`demo` 可在无凭据时使用确定性模拟席位并明确标记；已存在的旧 V1 记录不会自动迁移或重算，页面标记为“历史规则评分”。如果操作者显式重跑历史记录中的某一 CASE，缺失的旧评分配置会按 DeepSeek 单模型缺省值处理，并用本次模型评分替换该 CASE 的旧快照。
 
 - Claude Code 继续使用既有的 Ark 协议桥：`CLAUDE_BACKEND=ark` 时只通过 `ARK_BASE_URL`、`ARK_API_KEY` 和 `CLAUDE_ARK_MODEL` 访问方舟 DeepSeek endpoint，方舟 Key 不传入 Claude 子进程。后端选择严格失败关闭：`ark` 或 `deepseek` 的专属配置不完整时，不会回退到另一供应商或继承的 `ANTHROPIC_*` 凭据。
 - Cursor Agent 只使用持久账户登录，不接收 API Key。把 `CURSOR_AUTH_CONFIG_HOME` 设为仅服务账户可访问的绝对目录（生产为 `/var/lib/agent-review/cursor-auth`）；平台为 CLI 设置 `AGENT_CLI_CREDENTIAL_STORE=file`，仅将 `XDG_CONFIG_HOME` 指向该目录，其余 HOME/XDG/TMP 仍是一次性目录。登录凭据位于 `$CURSOR_AUTH_CONFIG_HOME/cursor/auth.json`，模型工具权限同时显式禁止读取该路径。
@@ -245,7 +245,7 @@ Content-Type: application/json
 }
 ```
 
-结果中的 `benchmark[].dataEvidence` 保存行数、字段、尾部样本、SHA-256 指纹和解析出的参考事实；每位选手的 `dataVerification` 标明 `verified / partial / contradicted / missing / not-claimed / unavailable`。查询失败只会标记验真不可用，不会伪造参考值；显式必填事实缺失或冲突会降低“数据证据”维度。
+结果中的 `benchmark[].dataEvidence` 保存行数、字段、尾部样本、SHA-256 指纹和解析出的参考事实；每位选手的 `dataVerification` 标明 `verified / partial / contradicted / missing / not-claimed / unavailable`。查询失败只会标记验真不可用，不会伪造参考值。对新 V1 模型竞技评分而言，必填事实缺失或冲突保留在这份独立审计结果中，不会由平台直接改写模型返回的“证据与风险意识”维度或总分。
 
 ## 演示模式与真实模式
 
@@ -258,7 +258,7 @@ Content-Type: application/json
 3. 调用显式启用的本机 Claude/Cursor、方舟豆包或 `RUNTIME_ADAPTERS_JSON` 隔离服务，仅凭 description 直出 Skill。
 4. 在开启自动验真时，通过 PandaAI 建立同局共享的参考数据快照并复核可见输出。
 
-如果未配置真实 adapter，演示模式中的相关项会保留为 demo；V1 真实模式会在创建时按所选评分阵容检查评审席位，缺少凭据时失败关闭。运行中的单个调用失败会记录错误并按对应流程处理其余选手。
+如果未配置真实 adapter，演示模式中的相关项会保留为 demo。V1 真实模式创建时会拒绝所需评审 ID 缺失或仍为 `mock` 的阵容；这不是网关连通性或自定义凭据的完整预检，自定义 adapter 的配置错误可能到评分调用时才暴露。运行中的单个调用失败会记录错误并按对应流程处理其余选手。
 
 运行页不会等待最终锐评才出报告。后端在每位评审、每个 Runtime 和每个同题选手结束时持久化完整快照并通过 SSE 推送；前端按“跑完一项，解锁一项”持续追加阶段产物。运行中的评测可点击“停止本次评测”，后端会通过 `AbortController` 中止当前 HTTP 请求或 CLI 子进程，并保留已经完成的结果。若服务在任务期间重启，遗留的 `queued/running` 记录会被标记为 `interrupted`，不再显示假运行。
 
