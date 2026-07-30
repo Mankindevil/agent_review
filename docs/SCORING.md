@@ -107,6 +107,8 @@ Claude Code、Cursor Agent 与 Doubao Agent 只收到顶层 `description` 原文
 - `mixed`：部分真实、部分模拟或失败；
 - `failed`：该步骤执行失败。
 
+V1 `live` 创建会在任何 Agent 或 Runtime 启动前检查所需评审席的受支持类型、`baseUrl`、`model`、`apiKeyEnv` 及其引用的本地密钥是否存在。该检查不发送网络请求；网关连通性、远端鉴权与模型可用性仍由实际调用判定。
+
 重试会替换旧结果并重算专业度、实战均分与最终评级，不取历史最高分。V1 任一同题候选重跑后会重评完整 CASE；根 seed 为 reviewer、Runtime、用例和评分席位派生稳定子 seed。
 
 金融结果只有在真实数据与投研 Skills 成功调用、数据版本和时点可审计、回测配置可复现时，才可以解释为一次真实技术实验；无论何种模式，系统输出都不构成投资建议。

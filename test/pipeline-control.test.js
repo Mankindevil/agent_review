@@ -166,6 +166,26 @@ function deferredValue() {
   return { promise, resolve, reject };
 }
 
+const V1_PIPELINE_SECRET_ENV = 'V1_PIPELINE_TEST_API_KEY';
+const originalV1PipelineSecret = process.env[V1_PIPELINE_SECRET_ENV];
+process.env[V1_PIPELINE_SECRET_ENV] = 'test-only-secret';
+test.after(() => {
+  if (originalV1PipelineSecret === undefined) delete process.env[V1_PIPELINE_SECRET_ENV];
+  else process.env[V1_PIPELINE_SECRET_ENV] = originalV1PipelineSecret;
+});
+
+function liveV1Reviewer(overrides = {}) {
+  return {
+    id: 'deepseek',
+    name: 'DeepSeek 评审',
+    model: 'DeepSeek Live',
+    kind: 'openai-compatible',
+    baseUrl: 'https://reviewer.example.test/v1',
+    apiKeyEnv: V1_PIPELINE_SECRET_ENV,
+    ...overrides
+  };
+}
+
 function successfulV1ScoringResult({ entries, config, evaluationMode }) {
   return {
     status: 'scored',
@@ -1360,6 +1380,43 @@ test('normalizes and persists the selected V1 scoring configuration', async () =
   assert.equal((await waitFor(store, created.id, (value) => value.status === 'completed')).status, 'completed');
 });
 
+test('rejects an uncredentialed custom live V1 reviewer before storing or starting work', async () => {
+  const missingSecretEnv = 'V1_PIPELINE_MISSING_API_KEY';
+  delete process.env[missingSecretEnv];
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v1-invalid-reviewer-${process.pid}.json`
+  ));
+  let setCalls = 0;
+  const originalSet = store.set.bind(store);
+  store.set = async (...args) => {
+    setCalls += 1;
+    return originalSet(...args);
+  };
+  let runCalls = 0;
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    v1Reviewers: [liveV1Reviewer({ apiKeyEnv: missingSecretEnv })]
+  });
+  pipeline.run = async () => {
+    runCalls += 1;
+  };
+
+  await assert.rejects(
+    () => pipeline.create({
+      agentCard: evaluation('template').agentCard,
+      cases: [{ name: 'case', prompt: 'test prompt' }],
+      mode: 'live',
+      scoringConfig: { mode: 'single', reviewerId: 'deepseek' }
+    }),
+    (error) => error.statusCode === 503 && /deepseek/u.test(error.message)
+  );
+  await new Promise(setImmediate);
+
+  assert.equal(setCalls, 0);
+  assert.equal(runCalls, 0);
+  assert.equal(store.list().length, 0);
+});
+
 test('scores each V1 benchmark case once after every candidate output is present', async () => {
   const envNames = [
     'MODEL_REVIEWERS_JSON',
@@ -1386,12 +1443,7 @@ test('scores each V1 benchmark case once after every candidate output is present
     delete process.env.ARK_API_KEY;
     const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-case-scoring-${process.pid}.json`));
     const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
-      v1Reviewers: [{
-        id: 'deepseek',
-        name: 'DeepSeek 评审',
-        model: 'DeepSeek Live',
-        kind: 'openai-compatible'
-      }],
+      v1Reviewers: [liveV1Reviewer()],
       scoreV1Case: async (input) => {
         scoringCalls.push(structuredClone(input));
         assert.equal(input.entries.length, 4);
@@ -1530,6 +1582,43 @@ test('persists failed V1 model judging and stops before producing a verdict', as
   assert.equal(result.benchmark[0].judging.status, 'failed');
   assert.equal(Object.hasOwn(result, 'averages'), false);
   assert.equal(Object.hasOwn(result, 'roast'), false);
+});
+
+test('preserves an initial V1 cancellation when scoring resolves after abort', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v1-initial-score-cancel-${process.pid}.json`
+  ));
+  const scoringStarted = deferredValue();
+  const scoringResult = deferredValue();
+  let scoringInput;
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    scoreV1Case: async (input) => {
+      scoringInput = structuredClone(input);
+      scoringStarted.resolve();
+      return scoringResult.promise;
+    }
+  });
+  const created = await pipeline.create({
+    mode: 'demo',
+    agentCard: evaluation('template').agentCard,
+    cases: [{ name: 'case', prompt: 'test prompt' }]
+  });
+  await scoringStarted.promise;
+
+  await pipeline.cancel(created.id);
+  scoringResult.resolve(successfulV1ScoringResult(scoringInput));
+  for (let attempt = 0; attempt < 40 && pipeline.activeRuns.has(created.id); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  const cancelled = store.get(created.id);
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.stage, '评测已停止');
+  assert.equal(Object.hasOwn(cancelled.benchmark[0], 'judging'), false);
+  assert.equal(Object.hasOwn(cancelled, 'averages'), false);
+  assert.equal(Object.hasOwn(cancelled, 'roast'), false);
+  assert.equal(Object.hasOwn(cancelled, 'completedAt'), false);
 });
 
 test('persists each completed reviewer, runtime and benchmark entry incrementally', async () => {
@@ -1857,6 +1946,53 @@ test('does not derive a V1 verdict when scored judging contains a null candidate
   assert.equal(Object.hasOwn(updated, 'completedAt'), false);
 });
 
+test('marks a historical V1 retry failed when its model-era round judging fails', async () => {
+  const store = new EvaluationStore(path.join(
+    tmpdir(),
+    `agent-roast-v1-retry-legacy-model-failure-${process.pid}.json`
+  ));
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    scoreV1Case: async ({ entries, config }) => ({
+      status: 'failed',
+      entries: entries.map((entry) => ({
+        ...entry,
+        scoreStatus: entry.mode === 'failed' ? 'execution-failed' : 'model-failed',
+        score: entry.mode === 'failed' ? 0 : null,
+        dimensions: null,
+        judgeReviews: []
+      })),
+      judging: {
+        version: 'v1-model-arena/v1',
+        status: 'failed',
+        mode: config.mode,
+        reviewerId: config.reviewerId,
+        requiredSeats: 1,
+        successfulSeats: 0,
+        seats: []
+      }
+    })
+  });
+  const item = completedV1Evaluation('eval_v1_retry_legacy_model_failure');
+  delete item.scoringConfig;
+  delete item.benchmark[0].judging;
+  await store.set(item);
+
+  await pipeline.retry(item.id, {
+    type: 'benchmark',
+    key: 'submitted',
+    caseIndex: 0
+  });
+  const updated = await waitFor(store, item.id, (value) =>
+    value.retryHistory?.length === 1
+  );
+
+  assert.equal(updated.benchmark[0].judging.status, 'failed');
+  assert.equal(updated.status, 'failed');
+  assert.equal(Object.hasOwn(updated, 'averages'), false);
+  assert.equal(Object.hasOwn(updated, 'roast'), false);
+  assert.equal(Object.hasOwn(updated, 'completedAt'), false);
+});
+
 test('retains entry-presence completeness for historical V1 retry records', async () => {
   const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-retry-legacy-${process.pid}.json`));
   const pipeline = new EvaluationPipeline(store, new EventEmitter());
@@ -1912,12 +2048,7 @@ test('marks a failed live Agent call as failed coverage', async () => {
     delete process.env.ARK_API_KEY;
     const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-coverage-${process.pid}.json`));
     const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
-      v1Reviewers: [{
-        id: 'deepseek',
-        name: 'DeepSeek 评审',
-        model: 'DeepSeek Live',
-        kind: 'openai-compatible'
-      }],
+      v1Reviewers: [liveV1Reviewer()],
       scoreV1Case: async (input) => successfulV1ScoringResult(input)
     });
     const card = evaluation('template').agentCard;
@@ -1966,12 +2097,7 @@ test('uses one PandaAI snapshot to verify every benchmark output', async () => {
         queryCalls += 1;
         return { provider: 'pandaai', method: 'get_index_daily', rowCount: 1, truncated: false, data: [{ symbol: '000300.SH', date: '20250110', close: 11.3 }] };
       },
-      v1Reviewers: [{
-        id: 'deepseek',
-        name: 'DeepSeek 评审',
-        model: 'DeepSeek Live',
-        kind: 'openai-compatible'
-      }],
+      v1Reviewers: [liveV1Reviewer()],
       scoreV1Case: async (input) => successfulV1ScoringResult(input)
     });
     const card = evaluation('template').agentCard;

@@ -1341,6 +1341,8 @@ function renderBattle(rounds, item) {
     const entries = round.entries || [];
     const modelScoredRound = isV1ModelScoredRound(round, item);
     const winnerEligible = (entry) => Number.isFinite(entry.score)
+      && entry.mode !== 'failed'
+      && entry.scoreStatus !== 'execution-failed'
       && (!modelScoredRound || entry.scoreStatus === 'scored');
     const scored = entries.filter(winnerEligible).map((entry) => entry.score);
     const max = scored.length ? Math.max(...scored) : null;

@@ -23,7 +23,8 @@ import { queryPandaData } from './panda-data.js';
 import {
   assertV1ScoringReady,
   normalizeV1ScoringConfig,
-  scoreV1ArenaCase
+  scoreV1ArenaCase,
+  V1_SCORING_VERSION
 } from './v1-model-scoring.js';
 
 const PIPELINE_PRIVATE = new WeakMap();
@@ -534,7 +535,7 @@ export class EvaluationPipeline {
     appendRetryHistory(item, step, previous, result, Date.now() - startedAt);
     const derived = recalculateDerived(item);
     const completed = hasCompleteBenchmark(item);
-    const scoringFailed = Boolean(item.scoringConfig && !completed);
+    const scoringFailed = hasV1ModelScoring(item) && !completed;
     if (scoringFailed) {
       delete item.averages;
       delete item.roast;
@@ -690,7 +691,7 @@ export class EvaluationPipeline {
     item.benchmark[caseIndex] = roundItem;
     const derived = recalculateDerived(item);
     Object.assign(item, derived);
-    if (item.scoringConfig && !hasCompleteBenchmark(item)) {
+    if (hasV1ModelScoring(item) && !hasCompleteBenchmark(item)) {
       delete item.averages;
       delete item.roast;
       delete item.completedAt;
@@ -848,11 +849,13 @@ export class EvaluationPipeline {
         seed: deriveSeed(item.seed, `v1-case:${index}`),
         signal
       });
+      signal?.throwIfAborted();
       const roundItem = benchmark[index];
       roundItem.entries = scoring.entries;
       roundItem.judging = scoring.judging;
       const scoringLine = v1ScoringLine(item.scoringConfig, scoring.judging);
       if (scoring.status === 'failed') {
+        signal?.throwIfAborted();
         await this.update(item, {
           benchmark,
           stage: `对测 ${index + 1}/${item.cases.length} · ${scoringLine} 评分失败`,
@@ -870,9 +873,11 @@ export class EvaluationPipeline {
           { statusCode: 502 }
         );
       }
+      signal?.throwIfAborted();
       await this.update(item, { benchmark, progress: 70 + Math.round(((index + 1) / item.cases.length) * 22), stage: `对测 ${index + 1}/${item.cases.length} 完成 · ${scoringLine}`, activeWork: null }, { level: 'success', source: 'ARENA', phase: 'benchmark', text: `「${testCase.name || `案例 ${index + 1}`}」完成同 prompt 对打 · ${scoringLine}`, detail: `成功席位 ${scoring.judging.successfulSeats}/${scoring.judging.requiredSeats} · ${roundItem.entries.map((entry) => `${entry.name}=${entry.score}`).join(' · ')}`, mode: summarizeModes(roundItem.entries.map((entry) => entry.mode)) });
     }
 
+    signal?.throwIfAborted();
     const averages = Object.fromEntries(['submitted', 'claude-code', 'cursor', 'doubao'].map((competitor) => {
       const scores = benchmark.flatMap((roundItem) => roundItem.entries.filter((entry) => entry.id === competitor).map((entry) => entry.score));
       return [competitor, round(average(scores), 1)];
@@ -880,6 +885,7 @@ export class EvaluationPipeline {
     const roast = buildRoast(averages.submitted, averages['claude-code'], averages.doubao, professional.score, complexity);
     const coverage = coverageSnapshot(item, professionalMode, runtimeMode, benchmark);
     const overallMode = summarizeModes(Object.values(coverage));
+    signal?.throwIfAborted();
     await this.update(item, { averages, roast, coverage, overallMode, status: 'completed', progress: 100, stage: '锐评出炉', completedAt: now(), activeWork: null }, { level: 'success', source: 'VERDICT', phase: 'complete', text: roast.headline, detail: `tier=${roast.tier.label} · submitted=${averages.submitted} · claude=${averages['claude-code']} · doubao=${averages.doubao}`, mode: overallMode });
   }
 
@@ -1278,13 +1284,27 @@ function hasCompleteBenchmark(item) {
   const hasEveryEntry = item.cases?.length > 0
     && item.benchmark?.length === item.cases.length
     && item.benchmark.every((roundItem) => competitors.every((competitor) => roundItem.entries?.some((entry) => entry.id === competitor)));
-  if (!hasEveryEntry || !item.scoringConfig) return Boolean(hasEveryEntry);
+  if (!hasEveryEntry) return false;
   return item.benchmark.every((roundItem) =>
-    roundItem.judging?.status === 'scored'
-    && competitors.every((competitor) =>
-      roundItem.entries.some((entry) => entry.id === competitor && Number.isFinite(entry.score))
+    !isV1ModelScoringRound(item, roundItem)
+    || (
+      roundItem.judging?.status === 'scored'
+      && competitors.every((competitor) =>
+        roundItem.entries.some((entry) => entry.id === competitor && Number.isFinite(entry.score))
+      )
     )
   );
+}
+
+function hasV1ModelScoring(item) {
+  return ['single', 'panel'].includes(item?.scoringConfig?.mode)
+    || item.benchmark?.some((roundItem) => isV1ModelScoringRound(item, roundItem));
+}
+
+function isV1ModelScoringRound(item, roundItem) {
+  if (['single', 'panel'].includes(item?.scoringConfig?.mode)) return true;
+  return roundItem?.judging?.version === V1_SCORING_VERSION
+    && ['single', 'panel'].includes(roundItem.judging.mode);
 }
 
 function recalculateDerived(item) {

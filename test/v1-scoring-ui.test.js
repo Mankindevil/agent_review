@@ -118,6 +118,35 @@ test('excludes execution failures from model-era winner ties', async () => {
   assert.doesNotMatch(tiedAtZero, /<h4>Failed zero<\/h4><strong class="winner">/);
 });
 
+test('excludes failed historical entries from all-failed and tied-zero winners', async () => {
+  const { renderBattle } = rendererHarness(await appSource());
+  const allFailed = renderBattle([{
+    case: { name: 'Historical all failed', prompt: 'Prompt' },
+    entries: [
+      { id: 'a', name: 'Failed A', score: 0, mode: 'failed', output: '' },
+      {
+        id: 'b',
+        name: 'Failed B',
+        score: 0,
+        scoreStatus: 'execution-failed',
+        mode: 'demo',
+        output: ''
+      }
+    ]
+  }], {});
+  assert.doesNotMatch(allFailed, /class="winner"/);
+
+  const tiedAtZero = renderBattle([{
+    case: { name: 'Historical zero tie', prompt: 'Prompt' },
+    entries: [
+      { id: 'scored', name: 'Historical zero', score: 0, mode: 'demo', output: '' },
+      { id: 'failed', name: 'Failed zero', score: 0, mode: 'failed', output: '' }
+    ]
+  }], {});
+  assert.match(tiedAtZero, /<h4>Historical zero<\/h4><strong class="winner">0<\/strong>/);
+  assert.doesNotMatch(tiedAtZero, /<h4>Failed zero<\/h4><strong class="winner">/);
+});
+
 test('mode clicks and reviewer changes affect only the V1 create payload', async () => {
   const source = await appSource();
   const controlsSource = sourceBetween(

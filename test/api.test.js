@@ -160,11 +160,12 @@ process.env.A2A_BLACK_BOX_V1_ENABLED = 'false';
 process.env.AGENT_DIAGNOSTICS_RATE_LIMIT = '100';
 process.env.ALLOW_PRIVATE_AGENT_URLS = 'true';
 process.env.ALLOW_PRIVATE_DIAGNOSTICS_URLS = 'true';
+delete process.env.API_TEST_MISSING_REVIEWER_KEY;
 process.env.MODEL_REVIEWERS_JSON = JSON.stringify([
-  { id: 'gpt', name: 'OpenAI 评审', model: 'GPT-5', kind: 'mock' },
-  { id: 'claude', name: 'Anthropic 评审', model: 'Claude Sonnet', kind: 'mock' },
-  { id: 'doubao', name: '豆包评审', model: 'Doubao Seed', kind: 'mock' },
-  { id: 'deepseek', name: 'DeepSeek 评审', model: 'DeepSeek', kind: 'mock' }
+  { id: 'gpt', name: 'OpenAI 评审', model: 'GPT-5', kind: 'openai-compatible', baseUrl: 'https://reviewer.example.test/v1', apiKeyEnv: 'API_TEST_MISSING_REVIEWER_KEY' },
+  { id: 'claude', name: 'Anthropic 评审', model: 'Claude Sonnet', kind: 'openai-compatible', baseUrl: 'https://reviewer.example.test/v1', apiKeyEnv: 'API_TEST_MISSING_REVIEWER_KEY' },
+  { id: 'doubao', name: '豆包评审', model: 'Doubao Seed', kind: 'openai-compatible', baseUrl: 'https://reviewer.example.test/v1', apiKeyEnv: 'API_TEST_MISSING_REVIEWER_KEY' },
+  { id: 'deepseek', name: 'DeepSeek 评审', model: 'DeepSeek', kind: 'openai-compatible', baseUrl: 'https://reviewer.example.test/v1', apiKeyEnv: 'API_TEST_MISSING_REVIEWER_KEY' }
 ]);
 process.env.REVIEW_PRINCIPALS_JSON = JSON.stringify([{
   principalId: 'judge-1',

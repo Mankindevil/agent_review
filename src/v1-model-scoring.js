@@ -25,6 +25,15 @@ const WEIGHTS = Object.freeze({
   evidenceRisk: 0.2,
   artifactUsability: 0.1
 });
+const LIVE_REVIEWER_KINDS = Object.freeze([
+  'openai-compatible',
+  'anthropic'
+]);
+const LIVE_REVIEWER_FIELDS = Object.freeze([
+  'baseUrl',
+  'model',
+  'apiKeyEnv'
+]);
 
 export function normalizeV1ScoringConfig(value) {
   if (value === undefined) {
@@ -60,12 +69,13 @@ export function assertV1ScoringReady(config, evaluationMode, reviewers) {
   const requiredIds = config?.mode === 'panel'
     ? V1_REVIEWER_IDS
     : [config?.reviewerId];
-  const missing = requiredIds.filter((id) => {
+  const unavailable = requiredIds.flatMap((id) => {
     const reviewer = reviewerById.get(id);
-    return !reviewer || reviewer.kind === 'mock';
+    const reason = liveReviewerReadinessFailure(reviewer);
+    return reason ? [`${id} (${reason})`] : [];
   });
-  if (missing.length) {
-    throw httpError(503, `V1 model scoring is unavailable; missing reviewer seats: ${missing.join(', ')}`);
+  if (unavailable.length) {
+    throw httpError(503, `V1 model scoring is unavailable; reviewer seats: ${unavailable.join(', ')}`);
   }
 }
 
@@ -83,6 +93,7 @@ export async function scoreV1ArenaCase({
   if (!Array.isArray(entries)) throw new TypeError('entries must be an array');
   if (!Array.isArray(reviewers)) throw new TypeError('reviewers must be an array');
   assertV1ScoringReady(config, evaluationMode, reviewers);
+  signal?.throwIfAborted();
 
   const normalizedEntries = entries.map((entry) => ({ ...structuredClone(entry) }));
   const successfulEntries = normalizedEntries.filter((entry) => !isExecutionFailed(entry));
@@ -114,6 +125,7 @@ export async function scoreV1ArenaCase({
     signal,
     invokeJudge
   })));
+  signal?.throwIfAborted();
   const seats = settled.map((result, index) => result.status === 'fulfilled'
     ? result.value
     : failedSeat(seatReviewers[index], evaluationMode, result.reason));
@@ -340,6 +352,21 @@ function failedSeat(reviewer, evaluationMode, error) {
 
 function demoReviewer(id) {
   return { id, name: id, model: 'Deterministic Demo', kind: 'mock' };
+}
+
+function liveReviewerReadinessFailure(reviewer) {
+  if (!reviewer || reviewer.kind === 'mock') return 'missing live reviewer';
+  if (!LIVE_REVIEWER_KINDS.includes(reviewer.kind)) {
+    return `unsupported kind ${String(reviewer.kind || 'missing')}`;
+  }
+  const missingField = LIVE_REVIEWER_FIELDS.find((field) =>
+    typeof reviewer[field] !== 'string' || !reviewer[field].trim()
+  );
+  if (missingField) return `missing ${missingField}`;
+  if (!process.env[reviewer.apiKeyEnv]) {
+    return `missing secret ${reviewer.apiKeyEnv}`;
+  }
+  return null;
 }
 
 function isExecutionFailed(entry) {

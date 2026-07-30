@@ -6,6 +6,14 @@ import {
   scoreV1ArenaCase
 } from '../src/v1-model-scoring.js';
 
+const LIVE_SECRET_ENV = 'V1_MODEL_SCORING_TEST_API_KEY';
+const originalLiveSecret = process.env[LIVE_SECRET_ENV];
+process.env[LIVE_SECRET_ENV] = 'test-only-secret';
+test.after(() => {
+  if (originalLiveSecret === undefined) delete process.env[LIVE_SECRET_ENV];
+  else process.env[LIVE_SECRET_ENV] = originalLiveSecret;
+});
+
 test('defaults missing V1 scoring config to DeepSeek single-model judging', () => {
   assert.deepEqual(normalizeV1ScoringConfig(), {
     version: 'v1-model-arena/v1',
@@ -45,10 +53,44 @@ test('requires every configured live reviewer seat and permits demo scoring', ()
     () => assertV1ScoringReady(
       { version: 'v1-model-arena/v1', mode: 'panel' },
       'live',
-      [{ id: 'gpt', kind: 'openai-compatible' }]
+      [liveReviewer('gpt')]
     ),
     (error) => error.statusCode === 503 && /claude.*doubao.*deepseek/u.test(error.message)
   );
+});
+
+test('rejects malformed and uncredentialed custom live reviewer seats before scoring', () => {
+  const config = {
+    version: 'v1-model-arena/v1',
+    mode: 'single',
+    reviewerId: 'deepseek'
+  };
+  const missingSecretEnv = 'V1_MODEL_SCORING_MISSING_API_KEY';
+  delete process.env[missingSecretEnv];
+  const invalidReviewers = [
+    { ...liveReviewer('deepseek'), kind: 'unsupported' },
+    { ...liveReviewer('deepseek'), baseUrl: '' },
+    { ...liveReviewer('deepseek'), model: '' },
+    { ...liveReviewer('deepseek'), apiKeyEnv: '' },
+    { ...liveReviewer('deepseek'), apiKeyEnv: missingSecretEnv }
+  ];
+
+  for (const reviewer of invalidReviewers) {
+    assert.throws(
+      () => assertV1ScoringReady(config, 'live', [reviewer]),
+      (error) => error.statusCode === 503 && /deepseek/u.test(error.message)
+    );
+  }
+  assert.doesNotThrow(() => assertV1ScoringReady(
+    config,
+    'live',
+    [liveReviewer('deepseek')]
+  ));
+  assert.doesNotThrow(() => assertV1ScoringReady(
+    config,
+    'live',
+    [liveReviewer('deepseek', { kind: 'anthropic' })]
+  ));
 });
 
 test('single judge scores all successful candidates anonymously and server recomputes total', async () => {
@@ -61,7 +103,7 @@ test('single judge scores all successful candidates anonymously and server recom
       { id: 'cursor', name: 'Cursor Agent', output: 'auth failed', mode: 'failed' }
     ],
     config: { version: 'v1-model-arena/v1', mode: 'single', reviewerId: 'deepseek' },
-    reviewers: [{ id: 'deepseek', name: 'DeepSeek', model: 'ds', kind: 'openai-compatible' }],
+    reviewers: [liveReviewer('deepseek', { name: 'DeepSeek', model: 'ds' })],
     evaluationMode: 'live',
     seed: 7,
     invokeJudge: async ({ prompt, candidateIds }) => {
@@ -89,6 +131,30 @@ test('single judge scores all successful candidates anonymously and server recom
   assert.equal(result.judging.successfulSeats, 1);
   assert.equal(result.judging.status, 'scored');
   assert.doesNotMatch(seen[0], /Secret Agent|Doubao Agent|submitted|cursor/u);
+});
+
+test('propagates caller cancellation after reviewer promises settle', async () => {
+  const controller = new AbortController();
+  const reason = Object.assign(new Error('caller cancelled V1 scoring'), {
+    name: 'AbortError'
+  });
+  const scoring = scoreV1ArenaCase({
+    testCase: { name: '日报', prompt: '生成日报' },
+    entries: [
+      { id: 'submitted', name: 'Secret Agent', output: 'answer A', mode: 'live' }
+    ],
+    config: { version: 'v1-model-arena/v1', mode: 'single', reviewerId: 'deepseek' },
+    reviewers: [liveReviewer('deepseek')],
+    evaluationMode: 'live',
+    seed: 7,
+    signal: controller.signal,
+    invokeJudge: async () => {
+      controller.abort(reason);
+      throw new Error('provider request rejected after abort');
+    }
+  });
+
+  await assert.rejects(scoring, (error) => error === reason);
 });
 
 test('panel requires two successful seats and aggregates candidate totals by median', async () => {
@@ -137,7 +203,7 @@ test('all execution failures receive zeroes without calling a judge', async () =
       { id: 'doubao', name: 'Doubao Agent', output: 'failed', mode: 'failed' }
     ],
     config: { version: 'v1-model-arena/v1', mode: 'single', reviewerId: 'deepseek' },
-    reviewers: [{ id: 'deepseek', name: 'DeepSeek', model: 'ds', kind: 'openai-compatible' }],
+    reviewers: [liveReviewer('deepseek', { name: 'DeepSeek', model: 'ds' })],
     evaluationMode: 'live',
     seed: 7,
     invokeJudge: async () => {
@@ -156,12 +222,9 @@ function panelFixture(outcomes) {
     testCase: { name: '日报', prompt: '生成日报' },
     entries: [{ id: 'submitted', name: 'Secret Agent', output: 'answer A', mode: 'live' }],
     config: { version: 'v1-model-arena/v1', mode: 'panel' },
-    reviewers: ['gpt', 'claude', 'doubao', 'deepseek'].map((id) => ({
-      id,
-      name: id,
-      model: `${id}-model`,
-      kind: 'openai-compatible'
-    })),
+    reviewers: ['gpt', 'claude', 'doubao', 'deepseek'].map((id) =>
+      liveReviewer(id)
+    ),
     evaluationMode: 'live',
     seed: 7,
     invokeJudge: async ({ reviewer, candidateIds }) => {
@@ -182,5 +245,17 @@ function panelFixture(outcomes) {
         }))
       };
     }
+  };
+}
+
+function liveReviewer(id, overrides = {}) {
+  return {
+    id,
+    name: id,
+    model: `${id}-model`,
+    kind: 'openai-compatible',
+    baseUrl: 'https://reviewer.example.test/v1',
+    apiKeyEnv: LIVE_SECRET_ENV,
+    ...overrides
   };
 }
