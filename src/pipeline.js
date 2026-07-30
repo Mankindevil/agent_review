@@ -599,8 +599,9 @@ export class EvaluationPipeline {
         activeWork: benchmarkActivity(step.key, step.shortLabel, item.benchmark[caseIndex].case, caseIndex, item.benchmark.length, true),
         stage: `${step.shortLabel} 对测 ${caseIndex + 1}/${item.benchmark.length}`
       });
-      await this.replaceBenchmarkOutput(item, caseIndex, step.key, signal);
-      await this.scoreBenchmarkRound(item, caseIndex, signal);
+      const outputRound = await this.replaceBenchmarkOutput(item, caseIndex, step.key, signal);
+      const scoredRound = await this.scoreBenchmarkRound(item, caseIndex, signal, outputRound);
+      this.commitBenchmarkRound(item, caseIndex, scoredRound);
       const entry = item.benchmark[caseIndex].entries.find((candidate) => candidate.id === step.key);
       await this.update(item, { benchmark: item.benchmark, stage: `${step.shortLabel} 对测 ${caseIndex + 1}/${item.benchmark.length}` }, {
         level: entry?.mode === 'failed' ? 'error' : 'success', source: 'RETRY', phase: 'benchmark',
@@ -610,8 +611,9 @@ export class EvaluationPipeline {
   }
 
   async retryBenchmark(item, step, signal) {
-    await this.replaceBenchmarkOutput(item, step.caseIndex, step.key, signal);
-    await this.scoreBenchmarkRound(item, step.caseIndex, signal);
+    const outputRound = await this.replaceBenchmarkOutput(item, step.caseIndex, step.key, signal);
+    const scoredRound = await this.scoreBenchmarkRound(item, step.caseIndex, signal, outputRound);
+    this.commitBenchmarkRound(item, step.caseIndex, scoredRound);
   }
 
   async runSubmittedAgent(item, caseIndex, signal) {
@@ -632,8 +634,9 @@ export class EvaluationPipeline {
   }
 
   async replaceBenchmarkOutput(item, caseIndex, competitorId, signal) {
-    const roundItem = item.benchmark?.[caseIndex];
-    if (!roundItem) throw new Error(`用例 ${caseIndex + 1} 不存在`);
+    const currentRound = item.benchmark?.[caseIndex];
+    if (!currentRound) throw new Error(`用例 ${caseIndex + 1} 不存在`);
+    const roundItem = structuredClone(currentRound);
     const testCase = roundItem.case;
     let output;
     let mode = item.mode;
@@ -659,10 +662,12 @@ export class EvaluationPipeline {
     const next = makeUnscoredEntry(competitorId, name, output, mode, deriveSeed(item.seed, `judge:${caseIndex}:${competitorId}`), roundItem.dataEvidence);
     const entryIndex = roundItem.entries.findIndex((entry) => entry.id === competitorId);
     if (entryIndex === -1) roundItem.entries.push(next); else roundItem.entries[entryIndex] = next;
+    signal?.throwIfAborted();
+    return roundItem;
   }
 
-  async scoreBenchmarkRound(item, caseIndex, signal) {
-    const roundItem = item.benchmark?.[caseIndex];
+  async scoreBenchmarkRound(item, caseIndex, signal, detachedRound) {
+    const roundItem = detachedRound || structuredClone(item.benchmark?.[caseIndex]);
     if (!roundItem) throw new Error(`用例 ${caseIndex + 1} 不存在`);
     const scoring = await privateState(this).scoreV1Case({
       testCase: roundItem.case,
@@ -673,9 +678,23 @@ export class EvaluationPipeline {
       seed: deriveSeed(item.seed, `v1-case:${caseIndex}`),
       signal
     });
-    roundItem.entries = scoring.entries;
-    roundItem.judging = scoring.judging;
-    return scoring;
+    signal?.throwIfAborted();
+    return {
+      ...roundItem,
+      entries: scoring.entries,
+      judging: scoring.judging
+    };
+  }
+
+  commitBenchmarkRound(item, caseIndex, roundItem) {
+    item.benchmark[caseIndex] = roundItem;
+    const derived = recalculateDerived(item);
+    Object.assign(item, derived);
+    if (item.scoringConfig && !hasCompleteBenchmark(item)) {
+      delete item.averages;
+      delete item.roast;
+      delete item.completedAt;
+    }
   }
 
   async failRetry(item, step, previous, previousStatus, error) {

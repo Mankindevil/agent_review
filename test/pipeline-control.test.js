@@ -156,6 +156,16 @@ async function waitFor(store, id, predicate, attempts = 120) {
   return store.get(id);
 }
 
+function deferredValue() {
+  let resolve;
+  let reject;
+  const promise = new Promise((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function successfulV1ScoringResult({ entries, config, evaluationMode }) {
   return {
     status: 'scored',
@@ -1628,6 +1638,99 @@ test('rescoring a retried V1 competitor replaces the complete CASE score snapsho
   assert.equal(updated.benchmark[0].entries.every((entry) => entry.score === 80), true);
 });
 
+test('keeps the live V1 CASE and derived verdict unchanged while benchmark rescoring is pending', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-retry-atomic-pending-${process.pid}.json`));
+  const scoringStarted = deferredValue();
+  const scoringResult = deferredValue();
+  let scoringInput;
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    scoreV1Case: async (input) => {
+      scoringInput = structuredClone(input);
+      scoringStarted.resolve();
+      return scoringResult.promise;
+    }
+  });
+  const item = completedV1Evaluation('eval_v1_retry_atomic_pending');
+  const previousRound = structuredClone(item.benchmark[0]);
+  const previousAverages = structuredClone(item.averages);
+  const previousRoast = structuredClone(item.roast);
+  await store.set(item);
+
+  await pipeline.retry(item.id, { type: 'benchmark', key: 'submitted', caseIndex: 0 });
+  await scoringStarted.promise;
+
+  const pending = store.get(item.id);
+  assert.deepEqual(pending.benchmark[0], previousRound);
+  assert.deepEqual(pending.averages, previousAverages);
+  assert.deepEqual(pending.roast, previousRoast);
+  assert.equal(pending.completedAt, item.completedAt);
+
+  scoringResult.resolve(successfulV1ScoringResult(scoringInput));
+  const updated = await waitFor(store, item.id, (value) =>
+    value.status === 'completed' && value.retryHistory?.length === 1
+  );
+  assert.equal(updated.benchmark[0].entries.every((entry) => entry.score === 80), true);
+});
+
+test('retains the coherent V1 CASE and derived verdict when benchmark rescoring rejects', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-retry-atomic-reject-${process.pid}.json`));
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    scoreV1Case: async () => {
+      throw new Error('judge transport rejected');
+    }
+  });
+  const item = completedV1Evaluation('eval_v1_retry_atomic_reject');
+  const previousRound = structuredClone(item.benchmark[0]);
+  const previousAverages = structuredClone(item.averages);
+  const previousRoast = structuredClone(item.roast);
+  await store.set(item);
+
+  await pipeline.retry(item.id, { type: 'benchmark', key: 'submitted', caseIndex: 0 });
+  const updated = await waitFor(store, item.id, (value) =>
+    value.status === 'completed' && value.retryHistory?.length === 1
+  );
+
+  assert.deepEqual(updated.benchmark[0], previousRound);
+  assert.deepEqual(updated.averages, previousAverages);
+  assert.deepEqual(updated.roast, previousRoast);
+  assert.equal(updated.completedAt, item.completedAt);
+  assert.match(updated.retryHistory[0].result.error, /judge transport rejected/);
+});
+
+test('retains the coherent V1 CASE when cancellation wins a pending benchmark rescore', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-retry-atomic-cancel-${process.pid}.json`));
+  const scoringStarted = deferredValue();
+  const scoringResult = deferredValue();
+  let scoringInput;
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    scoreV1Case: async (input) => {
+      scoringInput = structuredClone(input);
+      scoringStarted.resolve();
+      return scoringResult.promise;
+    }
+  });
+  const item = completedV1Evaluation('eval_v1_retry_atomic_cancel');
+  const previousRound = structuredClone(item.benchmark[0]);
+  const previousAverages = structuredClone(item.averages);
+  const previousRoast = structuredClone(item.roast);
+  await store.set(item);
+
+  await pipeline.retry(item.id, { type: 'benchmark', key: 'submitted', caseIndex: 0 });
+  await scoringStarted.promise;
+  await pipeline.cancel(item.id);
+  scoringResult.resolve(successfulV1ScoringResult(scoringInput));
+  for (let attempt = 0; attempt < 20 && pipeline.activeRuns.has(item.id); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  const cancelled = store.get(item.id);
+  assert.equal(cancelled.status, 'cancelled');
+  assert.deepEqual(cancelled.benchmark[0], previousRound);
+  assert.deepEqual(cancelled.averages, previousAverages);
+  assert.deepEqual(cancelled.roast, previousRoast);
+  assert.equal(cancelled.completedAt, item.completedAt);
+});
+
 test('rescoring a rebuilt V1 runtime occurs once per affected CASE', async () => {
   const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-retry-build-${process.pid}.json`));
   const scoreCalls = [];
@@ -1654,6 +1757,41 @@ test('rescoring a rebuilt V1 runtime occurs once per affected CASE', async () =>
     roundItem.judging.status === 'scored' &&
     roundItem.entries.every((entry) => Number.isFinite(entry.score))
   ), true);
+});
+
+test('keeps the live V1 CASE coherent during rejected build-retry rescoring', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-retry-build-atomic-${process.pid}.json`));
+  const scoringStarted = deferredValue();
+  const scoringResult = deferredValue();
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    scoreV1Case: async () => {
+      scoringStarted.resolve();
+      return scoringResult.promise;
+    }
+  });
+  const item = completedV1Evaluation('eval_v1_retry_build_atomic');
+  const previousRound = structuredClone(item.benchmark[0]);
+  const previousAverages = structuredClone(item.averages);
+  const previousRoast = structuredClone(item.roast);
+  await store.set(item);
+
+  await pipeline.retry(item.id, { type: 'build', key: 'claude-code' });
+  await scoringStarted.promise;
+
+  const pending = store.get(item.id);
+  assert.deepEqual(pending.benchmark[0], previousRound);
+  assert.deepEqual(pending.averages, previousAverages);
+  assert.deepEqual(pending.roast, previousRoast);
+
+  scoringResult.reject(new Error('build retry judge rejected'));
+  const updated = await waitFor(store, item.id, (value) =>
+    value.status === 'completed' && value.retryHistory?.length === 1
+  );
+  assert.deepEqual(updated.benchmark[0], previousRound);
+  assert.deepEqual(updated.averages, previousAverages);
+  assert.deepEqual(updated.roast, previousRoast);
+  assert.equal(updated.completedAt, item.completedAt);
+  assert.match(updated.retryHistory[0].result.error, /build retry judge rejected/);
 });
 
 test('does not retain a V1 verdict when retry scoring leaves partial scores', async () => {
