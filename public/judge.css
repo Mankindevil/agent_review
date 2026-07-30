@@ -31,8 +31,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   min-height: 74px; padding: 12px clamp(20px, 4vw, 64px); display: flex; align-items: center;
   justify-content: space-between; border-bottom: 1px solid var(--ink); background: rgba(248, 250, 249, .94);
 }
-.brand { display: flex; gap: 12px; align-items: center; color: inherit; text-decoration: none; }
-.brand-mark { display: grid; place-items: center; width: 42px; height: 42px; color: white; background: var(--ink); font: 800 24px/1 var(--display); box-shadow: 4px 4px 0 var(--blue); }
+.brand { display: flex; gap: 10px; align-items: center; min-width: 0; color: inherit; text-decoration: none; }
+.brand-logo { display: block; flex: 0 0 auto; height: 28px; }
+.brand-logo img { display: block; width: auto; height: 28px; }
+.brand-divider { flex: 0 0 1px; width: 1px; height: 30px; background: var(--line); }
+.brand-copy { min-width: 0; }
 .brand b { display: block; font: 800 17px/1.1 var(--display); letter-spacing: .04em; }
 .brand small, .back-link { font: 10px/1 var(--mono); letter-spacing: .12em; }
 .brand small { display: block; margin-top: 5px; color: var(--muted); }
@@ -118,5 +121,5 @@ input, select, textarea { width: 100%; border: 1px solid var(--ink); border-radi
 .queue-card-form-actions { margin-top: 12px; }
 .queue-card-form-actions button { min-height: 42px; width: 100%; padding: 10px 14px; border: 1px solid var(--ink); color: white; background: var(--blue); font-weight: 800; }
 @media (max-width: 900px) { .intro { grid-template-columns: 1fr; } .queue-card-dimension-list { grid-template-columns: 1fr; } .queue-card-dimension-list li { border-left: none; border-top: 1px solid var(--line); } .queue-card-dimension-list li:first-child { border-top: none; } }
-@media (max-width: 560px) { .topbar { align-items: flex-start; gap: 16px; } .back-link { margin-top: 16px; } main { padding: 28px 16px 48px; } h1 { font-size: 54px; } .rules-strip span { font-size: 9px; } }
+@media (max-width: 560px) { .topbar { align-items: flex-start; gap: 16px; } .brand-logo,.brand-logo img { width:26px; height:27px; }.brand-divider { height:26px; }.brand small { display:none; } .back-link { margin-top: 16px; } main { padding: 28px 16px 48px; } h1 { font-size: 54px; } .rules-strip span { font-size: 9px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; } }

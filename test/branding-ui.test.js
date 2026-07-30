@@ -3,6 +3,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const root = new URL('../', import.meta.url);
+const pages = [
+  'public/index.html',
+  'public/methodology.html',
+  'public/judge.html',
+  'public/agent-check.html'
+];
 
 test('publishes local PandaAI brand assets with the official mark geometry', async () => {
   const [mark, logo, favicon] = await Promise.all([
@@ -19,4 +25,17 @@ test('publishes local PandaAI brand assets with the official mark geometry', asy
   }
   assert.match(logo, />PandaAI</);
   assert.doesNotMatch(`${mark}\n${logo}\n${favicon}`, /(?:href|src)="https?:\/\//);
+});
+
+test('brands every primary page as Panda AI锐评局 with local assets', async () => {
+  for (const page of pages) {
+    const html = await readFile(new URL(page, root), 'utf8');
+    assert.match(html, /<title>[^<]*Panda AI锐评局[^<]*<\/title>/, page);
+    assert.match(html, /<link rel="icon" href="\/favicon\.svg" type="image\/svg\+xml">/, page);
+    assert.match(html, /aria-label="Panda AI锐评局首页"/, page);
+    assert.match(html, /src="\/assets\/pandaai-logo\.svg"/, page);
+    assert.match(html, /srcset="\/assets\/pandaai-mark\.svg"/, page);
+    assert.match(html, />锐评局</, page);
+    assert.doesNotMatch(html, /class="brand-mark">锐</, page);
+  }
 });

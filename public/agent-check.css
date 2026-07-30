@@ -39,17 +39,11 @@ a { color: inherit; }
   background: rgba(248, 250, 249, .94);
   backdrop-filter: blur(10px);
 }
-.brand { display: flex; gap: 12px; align-items: center; text-decoration: none; }
-.brand-mark {
-  display: grid;
-  place-items: center;
-  width: 42px;
-  height: 42px;
-  color: white;
-  background: var(--ink);
-  font: 800 24px/1 var(--display);
-  box-shadow: 4px 4px 0 var(--blue);
-}
+.brand { display: flex; gap: 10px; align-items: center; min-width: 0; text-decoration: none; }
+.brand-logo { display: block; flex: 0 0 auto; height: 28px; }
+.brand-logo img { display: block; width: auto; height: 28px; }
+.brand-divider { flex: 0 0 1px; width: 1px; height: 30px; background: var(--line); }
+.brand-copy { min-width: 0; }
 .brand b { display: block; font: 800 17px/1.1 var(--display); letter-spacing: .04em; }
 .brand small {
   display: block;
@@ -646,6 +640,9 @@ fieldset > small { display: block; margin-top: 8px; color: var(--muted); }
 }
 @media (max-width: 620px) {
   .topbar { align-items: flex-start; }
+  .brand-logo, .brand-logo img { width: 26px; height: 27px; }
+  .brand-divider { height: 26px; }
+  .brand small { display: none; }
   .back-link { margin-top: 9px; }
   main { padding-left: 12px; padding-right: 12px; }
   .hero h1 { font-size: 54px; }
