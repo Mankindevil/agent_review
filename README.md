@@ -245,7 +245,7 @@ Content-Type: application/json
 }
 ```
 
-结果中的 `benchmark[].dataEvidence` 保存行数、字段、尾部样本、SHA-256 指纹和解析出的参考事实；每位选手的 `dataVerification` 标明 `verified / partial / contradicted / missing / not-claimed / unavailable`。查询失败只会标记验真不可用，不会伪造参考值。对新 V1 模型竞技评分而言，必填事实缺失或冲突保留在这份独立审计结果中，不会由平台直接改写模型返回的“证据与风险意识”维度或总分。
+结果中的 `benchmark[].dataEvidence` 保存行数、字段、尾部样本、SHA-256 指纹和解析出的参考事实；每位选手的 `dataVerification` 标明 `verified / partial / contradicted / missing / not-claimed / unavailable`。查询失败只会标记验真不可用，不会伪造参考值。对新 V1 模型竞技评分而言，`dataVerification` 只作为独立审计结果保存，不会进入发送给评审模型的候选包或 Prompt，V1 评分器也不读取它来计算“证据与风险意识”维度或总分。
 
 ## 演示模式与真实模式
 
