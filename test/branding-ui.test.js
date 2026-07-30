@@ -42,6 +42,12 @@ test('brands every primary page as Panda AI锐评局 with local assets', async (
   }
 });
 
+test('uses the original electronic bonsai roast in the homepage hero', async () => {
+  const home = await readFile(new URL('public/index.html', root), 'utf8');
+
+  assert.match(home, /<h1>你的 Agent<br>到底是不是<br><em>电子盆栽？<\/em><\/h1>/);
+});
+
 test('offers the V1 scoring panel with a DeepSeek single-model default', async () => {
   const home = await readFile(new URL('public/index.html', root), 'utf8');
 
