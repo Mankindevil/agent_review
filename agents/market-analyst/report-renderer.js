@@ -93,6 +93,14 @@ function dataCutoffs(markets) {
     .join('；') || '—';
 }
 
+export function dateSelectionNotice(selection) {
+  if (!selection || selection.reason === null) return '';
+  if (selection.reason === 'REQUEST_DATE_DATA_UNAVAILABLE') {
+    return `请求日期 ${selection.requestedDate} 暂无完整市场数据，已使用最近已完成交易日 ${selection.effectiveDate}。`;
+  }
+  return `请求日期 ${selection.requestedDate} 尚未形成完整收盘数据，已使用最近已完成交易日 ${selection.effectiveDate}。`;
+}
+
 function contributions(row) {
   if (row?.scoreContributions && typeof row.scoreContributions === 'object') {
     return valueText(row.scoreContributions);
@@ -247,12 +255,14 @@ function sectionContent(evidence, narrative) {
     )
     : [['evidence-pack.json', NOT_RECORDED]];
   const degraded = evidence.status === 'degraded';
+  const selectionNotice = dateSelectionNotice(evidence.dateSelection);
   const overview = [
     ['报告日', evidence.reportDate],
     ['数据截止', dataCutoffs(evidence.markets)],
     ['运行状态', evidence.status],
     ['完整性', degraded ? '数据不完整' : '完整'],
-    ['覆盖率', valueText(evidence.coverage)]
+    ['覆盖率', valueText(evidence.coverage)],
+    ...(selectionNotice ? [['报告日期回退说明', selectionNotice]] : [])
   ];
   const deterministicSummary = markdownTable(
     ['结论 ID', '公式版本', '置信度', '限制'],

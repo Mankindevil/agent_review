@@ -260,6 +260,63 @@ test('degraded report title and body identify every missing Panda method', () =>
   assert.deepEqual(validateReport({ evidence: pack, markdown: report.markdown }), { valid: true });
 });
 
+test('report consistently discloses a completed-trading-day date fallback', () => {
+  const pack = evidence({
+    reportDate: '2026-07-29',
+    dateSelection: {
+      requestedDate: '2026-07-30',
+      effectiveDate: '2026-07-29',
+      mode: 'latest-completed-trading-day',
+      reason: 'REQUEST_DATE_NOT_COMPLETED'
+    }
+  });
+  const notice = '请求日期 2026-07-30 尚未形成完整收盘数据，已使用最近已完成交易日 2026-07-29。';
+  const report = renderReport(pack);
+
+  for (const rendered of [report.markdown, report.html, report.text]) {
+    assert.match(rendered, /2026-07-30/);
+    assert.match(rendered, /2026-07-29/);
+    assert.match(rendered, new RegExp(notice));
+  }
+  assert.deepEqual(validateReport({ evidence: pack, markdown: report.markdown }), { valid: true });
+  assert.throws(
+    () => validateReport({ evidence: pack, markdown: report.markdown.replace(notice, '') }),
+    /date fallback notice/i
+  );
+
+  const explicitReport = renderReport(evidence({
+    reportDate: '2026-07-29',
+    dateSelection: {
+      requestedDate: '2026-07-29',
+      effectiveDate: '2026-07-29',
+      mode: 'explicit',
+      reason: null
+    }
+  }));
+  for (const rendered of [explicitReport.markdown, explicitReport.html, explicitReport.text]) {
+    assert.doesNotMatch(rendered, /已使用最近已完成交易日/);
+  }
+});
+
+test('report discloses an unavailable-data date fallback', () => {
+  const pack = evidence({
+    reportDate: '2026-07-29',
+    dateSelection: {
+      requestedDate: '2026-07-30',
+      effectiveDate: '2026-07-29',
+      mode: 'latest-completed-trading-day',
+      reason: 'REQUEST_DATE_DATA_UNAVAILABLE'
+    }
+  });
+  const notice = '请求日期 2026-07-30 暂无完整市场数据，已使用最近已完成交易日 2026-07-29。';
+  const report = renderReport(pack);
+
+  for (const rendered of [report.markdown, report.html, report.text]) {
+    assert.match(rendered, new RegExp(notice));
+  }
+  assert.deepEqual(validateReport({ evidence: pack, markdown: report.markdown }), { valid: true });
+});
+
 test('worker-shaped rows never invent unavailable component values', () => {
   const pack = evidence({
     leaderboards: {

@@ -2,6 +2,7 @@ import {
   DATA_DATE_UNAVAILABLE,
   REPORT_DISPLAY_CAPS,
   REPORT_SECTIONS,
+  dateSelectionNotice,
   truncationMarker
 } from './report-renderer.js';
 import { sanitizeTraceValue } from './run-trace.js';
@@ -364,6 +365,10 @@ function assertReportContract(evidence, markdown) {
   }
   if (!markdown.includes('本报告仅供研究与信息交流，不构成投资建议')) {
     throw new RangeError('report missing research-only disclaimer');
+  }
+  const selectionNotice = dateSelectionNotice(evidence.dateSelection);
+  if (selectionNotice && !markdown.includes(selectionNotice)) {
+    throw new RangeError('report missing date fallback notice');
   }
   if (evidence.status === 'degraded') {
     if (!markdown.includes('数据不完整')) {
