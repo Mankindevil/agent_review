@@ -7,7 +7,9 @@ const pages = [
   'public/index.html',
   'public/methodology.html',
   'public/judge.html',
-  'public/agent-check.html'
+  'public/agent-check.html',
+  'public/appeal.html',
+  'public/evidence.html'
 ];
 
 test('publishes local PandaAI brand assets with the official mark geometry', async () => {

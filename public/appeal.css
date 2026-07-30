@@ -2,6 +2,15 @@
 body { margin:0; color:var(--appeal-ink); background:var(--appeal-paper); font-family:Inter,system-ui,"PingFang SC","Microsoft YaHei",sans-serif; }
 main { width:min(850px,calc(100% - 32px)); margin:8vh auto; }
 a { color:inherit; }
+.brand { display:flex; align-items:center; gap:10px; min-width:0; color:inherit; text-decoration:none; }
+.brand-logo { display:block; flex:0 0 auto; height:28px; }
+.brand-logo img { display:block; width:auto; height:28px; }
+.brand-divider { flex:0 0 1px; width:1px; height:30px; background:var(--appeal-line); }
+.brand-copy { min-width:0; }
+.brand b { display:block; font-size:15px; letter-spacing:.08em; }
+.brand small { display:block; margin-top:3px; color:#667875; font:8px/1.3 ui-monospace,Consolas,monospace; letter-spacing:.12em; }
+.compact-brand { width:max-content; margin-bottom:14px; }
+.appeal-back { display:inline-block; margin-bottom:18px; }
 header > small, label > span { display:block; letter-spacing:.12em; font:11px ui-monospace,Consolas,monospace; }
 h1 { margin:.25rem 0; font-size:clamp(2.2rem,7vw,4.6rem); letter-spacing:-.07em; }
 .deck { max-width:650px; line-height:1.7; color:#50615e; }
@@ -11,12 +20,12 @@ input, select, textarea { width:100%; margin-top:6px; border:1px solid var(--app
 textarea { min-height:130px; resize:vertical; }
 button { border:0; padding:11px 16px; background:var(--appeal-ink); color:white; font-weight:800; cursor:pointer; }
 button:hover { background:var(--appeal-alert); }
-button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline:3px solid rgba(14,124,120,.35); outline-offset:2px; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline:3px solid rgba(14,124,120,.35); outline-offset:2px; }
 #status { min-height:1.5em; color:var(--appeal-alert); }
 #timeline article { box-shadow:none; }
 #timeline header { display:flex; justify-content:space-between; gap:12px; }
 .comparison { font:12px/1.6 ui-monospace,Consolas,monospace; overflow-wrap:anywhere; }
 ol { padding-left:20px; } li { margin:8px 0; } time { display:block; color:#667875; font-size:.85em; }
 .error { color:var(--appeal-alert); }
-@media (max-width:600px) { main { margin:32px auto; } .appeal-form, #timeline article { padding:16px; box-shadow:4px 4px 0 var(--appeal-ink); } }
+@media (max-width:600px) { main { margin:32px auto; } .brand-logo,.brand-logo img { width:26px; height:27px; }.brand-divider { height:26px; }.brand small { display:none; } .appeal-form, #timeline article { padding:16px; box-shadow:4px 4px 0 var(--appeal-ink); } }
 @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto !important; } }

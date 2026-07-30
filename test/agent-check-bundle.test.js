@@ -19,7 +19,10 @@ const EXPECTED_APP_FILES = [
   'public/agent-check-helpers.js',
   'public/agent-check.html',
   'public/agent-check.js',
+  'public/assets/pandaai-logo.svg',
+  'public/assets/pandaai-mark.svg',
   'public/example-import.js',
+  'public/favicon.svg',
   'src/a2a.js',
   'src/agent-diagnostics.js',
   'src/diagnostics-guard.js',
@@ -65,6 +68,15 @@ test('builds application trees from an exact standalone allowlist', async () => 
     assert.deepEqual([...APP_FILES].sort(), EXPECTED_APP_FILES.sort());
     assert.deepEqual(await verifyAppBundle(result.windowsDir), EXPECTED_APP_FILES.sort());
     assert.deepEqual(await verifyAppBundle(result.macDir), EXPECTED_APP_FILES.sort());
+
+    const bundledHtml = await readFile(
+      path.join(result.windowsDir, 'public/agent-check.html'),
+      'utf8'
+    );
+    assert.match(bundledHtml, /src="\/assets\/pandaai-logo\.svg"/);
+    assert.match(bundledHtml, /srcset="\/assets\/pandaai-mark\.svg"/);
+    assert.match(bundledHtml, /href="\/favicon\.svg"/);
+    assert.doesNotMatch(bundledHtml, /(?:src|srcset|href)="https?:\/\/[^"]*(?:pandaai|logo|favicon)/i);
 
     const bundledPackage = JSON.parse(await readFile(
       path.join(result.windowsDir, 'package.json'),
