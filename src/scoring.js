@@ -60,6 +60,7 @@ export function mockProfessionalReview(reviewer, card, complexity, evaluationSee
   };
 }
 
+// Legacy compatibility scorer only. No new V1 pipeline path may invoke this helper.
 export function judgeOutput(prompt, output, identity, dataVerification) {
   const content = String(output || '');
   const taskCompletion = content.length > 80 ? 80 : content.length > 25 ? 66 : 38;

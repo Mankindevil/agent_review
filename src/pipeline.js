@@ -534,17 +534,29 @@ export class EvaluationPipeline {
     appendRetryHistory(item, step, previous, result, Date.now() - startedAt);
     const derived = recalculateDerived(item);
     const completed = hasCompleteBenchmark(item);
+    const scoringFailed = Boolean(item.scoringConfig && !completed);
+    if (scoringFailed) {
+      delete item.averages;
+      delete item.roast;
+      delete item.completedAt;
+    }
     await this.update(item, {
       ...derived,
-      status: completed ? 'completed' : previousStatus,
-      stage: completed ? '单步复核完成，锐评已重算' : '单步复核完成',
+      status: completed ? 'completed' : scoringFailed ? 'failed' : previousStatus,
+      stage: completed ? '单步复核完成，锐评已重算' : scoringFailed ? '单步复核完成，模型评分失败' : '单步复核完成',
       retrying: null,
       activeWork: null,
       ...(completed ? { completedAt: now() } : {})
     }, {
-      level: result.error ? 'error' : 'success', source: 'RETRY', phase: step.type,
-      text: result.error ? `${step.shortLabel} 重试仍失败` : `${step.shortLabel} 重试完成，综合评分已更新`,
-      detail: retryDeltaText(previous, result), mode: result.mode || item.mode, durationMs: Date.now() - startedAt
+      level: result.error || scoringFailed ? 'error' : 'success', source: 'RETRY', phase: step.type,
+      text: result.error
+        ? `${step.shortLabel} 重试仍失败`
+        : scoringFailed
+          ? `${step.shortLabel} 重试输出已更新，但模型评分失败`
+          : `${step.shortLabel} 重试完成，综合评分已更新`,
+      detail: scoringFailed ? 'CASE 未形成完整正式分数，已移除旧的派生评级' : retryDeltaText(previous, result),
+      mode: result.mode || item.mode,
+      durationMs: Date.now() - startedAt
     });
   }
 
@@ -587,7 +599,8 @@ export class EvaluationPipeline {
         activeWork: benchmarkActivity(step.key, step.shortLabel, item.benchmark[caseIndex].case, caseIndex, item.benchmark.length, true),
         stage: `${step.shortLabel} 对测 ${caseIndex + 1}/${item.benchmark.length}`
       });
-      await this.replaceBenchmarkEntry(item, caseIndex, step.key, signal);
+      await this.replaceBenchmarkOutput(item, caseIndex, step.key, signal);
+      await this.scoreBenchmarkRound(item, caseIndex, signal);
       const entry = item.benchmark[caseIndex].entries.find((candidate) => candidate.id === step.key);
       await this.update(item, { benchmark: item.benchmark, stage: `${step.shortLabel} 对测 ${caseIndex + 1}/${item.benchmark.length}` }, {
         level: entry?.mode === 'failed' ? 'error' : 'success', source: 'RETRY', phase: 'benchmark',
@@ -597,7 +610,8 @@ export class EvaluationPipeline {
   }
 
   async retryBenchmark(item, step, signal) {
-    await this.replaceBenchmarkEntry(item, step.caseIndex, step.key, signal);
+    await this.replaceBenchmarkOutput(item, step.caseIndex, step.key, signal);
+    await this.scoreBenchmarkRound(item, step.caseIndex, signal);
   }
 
   async runSubmittedAgent(item, caseIndex, signal) {
@@ -617,7 +631,7 @@ export class EvaluationPipeline {
     return callA2AAgent(item.agentCard, prompt, 45_000, signal, { authorization });
   }
 
-  async replaceBenchmarkEntry(item, caseIndex, competitorId, signal) {
+  async replaceBenchmarkOutput(item, caseIndex, competitorId, signal) {
     const roundItem = item.benchmark?.[caseIndex];
     if (!roundItem) throw new Error(`用例 ${caseIndex + 1} 不存在`);
     const testCase = roundItem.case;
@@ -645,6 +659,23 @@ export class EvaluationPipeline {
     const next = makeUnscoredEntry(competitorId, name, output, mode, deriveSeed(item.seed, `judge:${caseIndex}:${competitorId}`), roundItem.dataEvidence);
     const entryIndex = roundItem.entries.findIndex((entry) => entry.id === competitorId);
     if (entryIndex === -1) roundItem.entries.push(next); else roundItem.entries[entryIndex] = next;
+  }
+
+  async scoreBenchmarkRound(item, caseIndex, signal) {
+    const roundItem = item.benchmark?.[caseIndex];
+    if (!roundItem) throw new Error(`用例 ${caseIndex + 1} 不存在`);
+    const scoring = await privateState(this).scoreV1Case({
+      testCase: roundItem.case,
+      entries: roundItem.entries,
+      config: item.scoringConfig || normalizeV1ScoringConfig(),
+      reviewers: privateState(this).v1Reviewers,
+      evaluationMode: item.mode,
+      seed: deriveSeed(item.seed, `v1-case:${caseIndex}`),
+      signal
+    });
+    roundItem.entries = scoring.entries;
+    roundItem.judging = scoring.judging;
+    return scoring;
   }
 
   async failRetry(item, step, previous, previousStatus, error) {
@@ -1225,9 +1256,16 @@ function retryDeltaText(previous, result) {
 
 function hasCompleteBenchmark(item) {
   const competitors = ['submitted', ...RUNTIMES.map((runtime) => runtime.id)];
-  return item.cases?.length > 0
+  const hasEveryEntry = item.cases?.length > 0
     && item.benchmark?.length === item.cases.length
     && item.benchmark.every((roundItem) => competitors.every((competitor) => roundItem.entries?.some((entry) => entry.id === competitor)));
+  if (!hasEveryEntry || !item.scoringConfig) return Boolean(hasEveryEntry);
+  return item.benchmark.every((roundItem) =>
+    roundItem.judging?.status === 'scored'
+    && competitors.every((competitor) =>
+      roundItem.entries.some((entry) => entry.id === competitor && Number.isFinite(entry.score))
+    )
+  );
 }
 
 function recalculateDerived(item) {

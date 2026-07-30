@@ -199,6 +199,100 @@ function successfulV1ScoringResult({ entries, config, evaluationMode }) {
   };
 }
 
+function completedV1Evaluation(id, caseNames = ['case']) {
+  const cases = caseNames.map((name, index) => ({
+    name,
+    prompt: `test prompt ${index + 1}`
+  }));
+  const competitorNames = {
+    submitted: 'Test Agent',
+    'claude-code': 'Claude Code',
+    cursor: 'Cursor Agent',
+    doubao: 'Doubao Agent'
+  };
+  const dimensions = {
+    taskConstraint: 75,
+    professionalQuality: 75,
+    evidenceRisk: 75,
+    artifactUsability: 75
+  };
+  return {
+    ...evaluation(id, 'completed'),
+    cases,
+    completedAt: '2026-07-30T00:00:00.000Z',
+    seed: 42,
+    temperature: 0,
+    scoringConfig: {
+      version: 'v1-model-arena/v1',
+      mode: 'single',
+      reviewerId: 'deepseek'
+    },
+    complexity: { score: 70 },
+    professional: {
+      score: 80,
+      mode: 'demo',
+      reviews: [{ reviewerId: 'gpt', reviewer: 'OpenAI', model: 'GPT', score: 80, mode: 'demo' }]
+    },
+    builds: ['claude-code', 'cursor', 'doubao'].map((runtimeId) => ({
+      runtimeId,
+      runtime: competitorNames[runtimeId],
+      model: `${competitorNames[runtimeId]} Model`,
+      mode: 'demo',
+      baselineInput: 'description-only',
+      skill: {
+        name: `${runtimeId}-skill`,
+        description: 'test',
+        instructions: ['Run the test task.'],
+        tools: []
+      }
+    })),
+    benchmark: cases.map((testCase, caseIndex) => ({
+      case: testCase,
+      dataEvidence: { status: 'not-configured', source: 'pandaai', fetchedAt: null, queries: [] },
+      entries: ['submitted', 'claude-code', 'cursor', 'doubao'].map((competitorId) => ({
+        id: competitorId,
+        name: competitorNames[competitorId],
+        output: `${competitorId} output for ${testCase.name}`,
+        mode: 'demo',
+        judgeSeed: caseIndex + 1,
+        dataVerification: { status: 'not-configured', score: null, checks: [] },
+        scoreStatus: 'scored',
+        score: 75,
+        dimensions,
+        judgeReviews: []
+      })),
+      judging: {
+        version: 'v1-model-arena/v1',
+        status: 'scored',
+        mode: 'single',
+        reviewerId: 'deepseek',
+        requiredSeats: 1,
+        successfulSeats: 1,
+        seats: []
+      }
+    })),
+    averages: {
+      submitted: 75,
+      'claude-code': 75,
+      cursor: 75,
+      doubao: 75
+    },
+    roast: buildTestRoast(),
+    coverage: { agent: 'demo', models: 'demo', runtimes: 'demo' },
+    overallMode: 'demo'
+  };
+}
+
+function buildTestRoast() {
+  return {
+    tier: { code: 'ELITE', label: '人上人', tone: 'great', stamp: '人上人' },
+    headline: 'existing verdict',
+    deltaClaude: 0,
+    deltaDoubao: 0,
+    professionalAverage: 80
+  };
+}
+
 test('cancels an active evaluation and aborts its controller', async () => {
   const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-cancel-${process.pid}.json`));
   const pipeline = new EvaluationPipeline(store, new EventEmitter());
@@ -1503,6 +1597,153 @@ test('retries an individual stage and recalculates the derived verdict', async (
     if (oldBaseUrl === undefined) delete process.env.OPENAI_BASE_URL; else process.env.OPENAI_BASE_URL = oldBaseUrl;
     if (oldApiKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = oldApiKey;
   }
+});
+
+test('rescoring a retried V1 competitor replaces the complete CASE score snapshot', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-retry-case-${process.pid}.json`));
+  const scoreCalls = [];
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    scoreV1Case: async (input) => {
+      scoreCalls.push(structuredClone(input));
+      return successfulV1ScoringResult(input);
+    }
+  });
+  const item = completedV1Evaluation('eval_v1_retry_case');
+  await store.set(item);
+
+  await pipeline.retry(item.id, { type: 'benchmark', key: 'submitted', caseIndex: 0 });
+  const updated = await waitFor(store, item.id, (value) =>
+    value.status === 'completed' && value.retryHistory?.length === 1
+  );
+
+  assert.equal(scoreCalls.length, 1);
+  assert.deepEqual(scoreCalls[0].entries.map((entry) => entry.id), [
+    'submitted',
+    'claude-code',
+    'cursor',
+    'doubao'
+  ]);
+  assert.equal(scoreCalls[0].entries.find((entry) => entry.id === 'submitted').score, null);
+  assert.equal(updated.benchmark[0].judging.version, 'v1-model-arena/v1');
+  assert.equal(updated.benchmark[0].entries.every((entry) => entry.score === 80), true);
+});
+
+test('rescoring a rebuilt V1 runtime occurs once per affected CASE', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-retry-build-${process.pid}.json`));
+  const scoreCalls = [];
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    scoreV1Case: async (input) => {
+      scoreCalls.push(structuredClone(input));
+      return successfulV1ScoringResult(input);
+    }
+  });
+  const item = completedV1Evaluation('eval_v1_retry_build', ['case one', 'case two']);
+  await store.set(item);
+
+  await pipeline.retry(item.id, { type: 'build', key: 'claude-code' });
+  const updated = await waitFor(store, item.id, (value) =>
+    value.status === 'completed' && value.retryHistory?.length === 1
+  );
+
+  assert.equal(scoreCalls.length, 2);
+  assert.deepEqual(scoreCalls.map((call) => call.testCase.name), ['case one', 'case two']);
+  assert.equal(scoreCalls.every((call) =>
+    call.entries.find((entry) => entry.id === 'claude-code').score === null
+  ), true);
+  assert.equal(updated.benchmark.every((roundItem) =>
+    roundItem.judging.status === 'scored' &&
+    roundItem.entries.every((entry) => Number.isFinite(entry.score))
+  ), true);
+});
+
+test('does not retain a V1 verdict when retry scoring leaves partial scores', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-retry-failed-score-${process.pid}.json`));
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    scoreV1Case: async ({ entries, config }) => ({
+      status: 'failed',
+      entries: entries.map((entry) => ({
+        ...entry,
+        scoreStatus: 'model-failed',
+        score: null,
+        dimensions: null,
+        judgeReviews: []
+      })),
+      judging: {
+        version: 'v1-model-arena/v1',
+        status: 'failed',
+        mode: config.mode,
+        reviewerId: config.reviewerId,
+        requiredSeats: 1,
+        successfulSeats: 0,
+        seats: []
+      }
+    })
+  });
+  const item = completedV1Evaluation('eval_v1_retry_failed_score');
+  await store.set(item);
+
+  await pipeline.retry(item.id, { type: 'benchmark', key: 'submitted', caseIndex: 0 });
+  const updated = await waitFor(store, item.id, (value) => value.retryHistory?.length === 1);
+
+  assert.equal(updated.benchmark[0].judging.status, 'failed');
+  assert.equal(updated.benchmark[0].entries.every((entry) => entry.score === null), true);
+  assert.equal(updated.status, 'failed');
+  assert.equal(Object.hasOwn(updated, 'averages'), false);
+  assert.equal(Object.hasOwn(updated, 'roast'), false);
+  assert.equal(Object.hasOwn(updated, 'completedAt'), false);
+});
+
+test('does not derive a V1 verdict when scored judging contains a null candidate score', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-retry-null-score-${process.pid}.json`));
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    scoreV1Case: async (input) => {
+      const scoring = successfulV1ScoringResult(input);
+      const cursor = scoring.entries.find((entry) => entry.id === 'cursor');
+      cursor.scoreStatus = 'model-failed';
+      cursor.score = null;
+      cursor.dimensions = null;
+      return scoring;
+    }
+  });
+  const item = completedV1Evaluation('eval_v1_retry_null_score');
+  await store.set(item);
+
+  await pipeline.retry(item.id, { type: 'benchmark', key: 'submitted', caseIndex: 0 });
+  const updated = await waitFor(store, item.id, (value) => value.retryHistory?.length === 1);
+
+  assert.equal(updated.benchmark[0].judging.status, 'scored');
+  assert.equal(updated.benchmark[0].entries.find((entry) => entry.id === 'cursor').score, null);
+  assert.equal(updated.status, 'failed');
+  assert.equal(Object.hasOwn(updated, 'averages'), false);
+  assert.equal(Object.hasOwn(updated, 'roast'), false);
+  assert.equal(Object.hasOwn(updated, 'completedAt'), false);
+});
+
+test('retains entry-presence completeness for historical V1 retry records', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-retry-legacy-${process.pid}.json`));
+  const pipeline = new EvaluationPipeline(store, new EventEmitter());
+  const item = completedV1Evaluation('eval_v1_retry_legacy');
+  delete item.scoringConfig;
+  delete item.benchmark[0].judging;
+  item.benchmark[0].entries.forEach((entry) => {
+    entry.score = null;
+  });
+  delete item.averages;
+  delete item.roast;
+  await store.set(item);
+
+  await pipeline.retry(item.id, { type: 'review', key: 'gpt' });
+  const updated = await waitFor(store, item.id, (value) =>
+    value.status === 'completed' && value.retryHistory?.length === 1
+  );
+
+  assert.deepEqual(updated.averages, {
+    submitted: 0,
+    'claude-code': 0,
+    cursor: 0,
+    doubao: 0
+  });
+  assert.ok(updated.roast?.tier);
 });
 
 test('produces identical demo scores for the same explicit seed', async () => {

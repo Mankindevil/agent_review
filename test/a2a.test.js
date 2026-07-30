@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import {
   assertSafeAgentUrl,
   buildA2ARequest,
@@ -1076,6 +1077,11 @@ test('rewards auditable financial research output over unsupported return claims
   assert.ok(disciplined.score > hype.score);
   assert.equal(disciplined.dimensions.dataEvidence, 86);
   assert.equal(disciplined.dimensions.riskDisclosure, 88);
+});
+
+test('keeps the legacy rule scorer out of the V1 pipeline', async () => {
+  const pipelineSource = await readFile(new URL('../src/pipeline.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(pipelineSource, /\bjudgeOutput\b/);
 });
 
 test('uses only 夯, 人上人, NPC and 拉 verdict tiers', () => {
