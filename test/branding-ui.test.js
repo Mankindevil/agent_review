@@ -47,10 +47,34 @@ test('reserves separate mobile header rows for the brand and navigation', async 
 
   assert.match(
     styles,
-    /@media \(max-width: 700px\)[\s\S]*?\.site-header \{[^}]*display:grid;[^}]*grid-template-rows:38px 38px;/
+    /@media \(max-width: 700px\)[\s\S]*?\.site-header \{[^}]*gap:0;[^}]*display:grid;[^}]*grid-template-rows:38px 38px;/
   );
   assert.match(
     styles,
     /@media \(max-width: 700px\)[\s\S]*?\.site-header nav \{[^}]*grid-column:1\/-1;[^}]*grid-row:2;/
+  );
+});
+
+test('uses the compact brand before the desktop header becomes crowded', async () => {
+  const styles = await readFile(new URL('public/styles.css', root), 'utf8');
+  const home = await readFile(new URL('public/index.html', root), 'utf8');
+
+  for (const page of pages) {
+    const html = await readFile(new URL(page, root), 'utf8');
+    assert.match(
+      html,
+      /<source media="\(max-width: 1000px\)" srcset="\/assets\/pandaai-mark\.svg">/,
+      page
+    );
+  }
+  assert.match(home, /href="\/styles\.css\?v=20260730-header2"/);
+
+  assert.match(
+    styles,
+    /@media \(max-width: 1000px\)[\s\S]*?\.brand-logo,\.brand-logo img \{[^}]*width:26px;[^}]*height:27px;/
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 1000px\)[\s\S]*?\.brand small,\.system-state span \{[^}]*display:none;/
   );
 });
