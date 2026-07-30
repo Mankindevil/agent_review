@@ -16,7 +16,7 @@ import {
 } from './example-import.js?v=20260725-examples1';
 import { renderV2Result as renderV2ResultView } from './result-v2.js';
 
-const state = { mode: 'demo', sourceType: 'direct', blackBoxEnabled: false, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), skillRequestToken: 0, activeWorkTimer: null, activeWorkKey: null };
+const state = { mode: 'demo', scoringMode: 'panel', scoringReviewerId: 'deepseek', sourceType: 'direct', blackBoxEnabled: false, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), skillRequestToken: 0, activeWorkTimer: null, activeWorkKey: null };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const DEFAULT_REVIEW_PLAN = [
@@ -86,6 +86,18 @@ function bindEvents() {
     state.mode = button.dataset.mode;
     $$('.mode-switch button').forEach((item) => item.classList.toggle('selected', item === button));
   }));
+  $$('.scoring-mode-switch button').forEach((button) => button.addEventListener('click', () => {
+    state.scoringMode = button.dataset.scoringMode;
+    $$('.scoring-mode-switch button').forEach((item) => {
+      const selected = item === button;
+      item.classList.toggle('selected', selected);
+      item.setAttribute('aria-pressed', String(selected));
+    });
+    $('.single-reviewer').classList.toggle('hidden', state.scoringMode !== 'single');
+  }));
+  $('#single-scoring-reviewer').addEventListener('change', (event) => {
+    state.scoringReviewerId = event.currentTarget.value;
+  });
   $$('.source-switch button').forEach((button) => button.addEventListener('click', () => setSourceType(button.dataset.source)));
   $('#add-case').addEventListener('click', () => addCase('', ''));
   $('#add-v2-example').addEventListener('click', () => addV2Example());
@@ -557,6 +569,9 @@ async function submitV1Evaluation(agentCard) {
     agentCard,
     agentExamples,
     mode: state.mode,
+    scoringConfig: state.scoringMode === 'single'
+      ? { mode: 'single', reviewerId: state.scoringReviewerId }
+      : { mode: 'panel' },
     ...(seed !== undefined ? { seed } : {}),
     ...(agentAuthorization ? { agentAuthorization } : {})
   };
@@ -1219,15 +1234,73 @@ function skillCacheKey(evaluationId, runtimeId) {
   return `${evaluationId}:${runtimeId}:${(hash >>> 0).toString(36)}`;
 }
 
+function renderV1Judging(round, item) {
+  if (!item.scoringConfig) {
+    return `<div class="v1-judging-summary historical"><div><small>SCORING SOURCE</small><b>历史规则评分</b></div><span>旧记录保留原分，不重新计算</span></div>`;
+  }
+  const judging = round.judging || {};
+  const seats = Array.isArray(judging.seats) ? judging.seats : [];
+  const successfulSeats = Number.isFinite(judging.successfulSeats) ? judging.successfulSeats : 0;
+  const requiredSeats = item.scoringConfig.mode === 'panel' ? 4 : 1;
+  const singleSeat = seats.find((seat) => seat.reviewerId === item.scoringConfig.reviewerId);
+  const label = item.scoringConfig.mode === 'panel'
+    ? `四模型匿名盲评 · ${successfulSeats}/4`
+    : `单模型 · ${singleSeat?.reviewerName || item.scoringConfig.reviewerId || '未指定'}`;
+  const status = judging.status === 'scored'
+    ? '评分完成'
+    : judging.status === 'failed'
+      ? '模型评分失败'
+      : '评分待完成';
+  const failures = seats.filter((seat) => seat.failure).map((seat) => `
+    <div class="v1-judge-failure">
+      <b>${escapeHtml(seat.reviewerName || seat.reviewerId || '评审席')}</b>
+      <span>${escapeHtml(seat.failure)}</span>
+    </div>
+  `).join('');
+  return `<div class="v1-judging-summary${judging.status === 'failed' ? ' failed' : ''}"><div><small>SCORING SOURCE</small><b>${escapeHtml(label)}</b></div><span>${escapeHtml(status)} · 阵容 ${requiredSeats} 席</span>${failures ? `<div class="v1-judge-failures">${failures}</div>` : ''}</div>`;
+}
+
+function renderV1JudgeReviews(entry) {
+  if (entry.scoreStatus === 'execution-failed') {
+    return `<div class="v1-judge-audit execution-failed"><b>执行失败 · 固定 0 分</b><span>该输出未发送给评分模型</span></div>`;
+  }
+  const dimensions = entry.dimensions && typeof entry.dimensions === 'object'
+    ? Object.entries(entry.dimensions)
+    : [];
+  const dimensionLabels = {
+    taskConstraint: '任务约束',
+    professionalQuality: '专业质量',
+    evidenceRisk: '证据风险',
+    artifactUsability: '产物可用性'
+  };
+  const dimensionRows = dimensions.map(([key, value]) => `
+    <div><span>${escapeHtml(dimensionLabels[key] || key)}</span><i style="--value:${Number.isFinite(value) ? value : 0}%"></i><b>${Number.isFinite(value) ? value : '—'}</b></div>
+  `).join('');
+  const reviews = (Array.isArray(entry.judgeReviews) ? entry.judgeReviews : []).map((review) => {
+    const uncertainties = (Array.isArray(review.uncertainties) ? review.uncertainties : [])
+      .map((uncertainty) => `<li>${escapeHtml(uncertainty)}</li>`)
+      .join('');
+    return `<article><header><b>${escapeHtml(review.reviewerName || review.reviewerId || '评审席')}</b><span>${escapeHtml(review.model || '—')} · ${escapeHtml((review.mode || '').toUpperCase())}</span></header><p>${escapeHtml(review.rationale || '未提供评分理由')}</p>${uncertainties ? `<div><small>不确定性</small><ul>${uncertainties}</ul></div>` : ''}</article>`;
+  }).join('');
+  const pending = entry.scoreStatus === 'model-failed'
+    ? `<p class="v1-audit-empty">模型评分未形成有效数字，保留输出等待重试。</p>`
+    : '';
+  if (!dimensionRows && !reviews && !pending) return '';
+  return `<details class="v1-judge-audit"${entry.scoreStatus === 'model-failed' ? ' open' : ''}><summary>模型评分审计</summary>${pending}${dimensionRows ? `<div class="v1-dimension-grid">${dimensionRows}</div>` : ''}${reviews ? `<div class="v1-review-list">${reviews}</div>` : ''}</details>`;
+}
+
 function renderBattle(rounds, item) {
   const activity = activityOfType(item, 'benchmark');
   const competitorPlan = activity ? competitorPlanFor(item) : [];
   return `<div class="section-title"><h3>同 Prompt 对打</h3><span>SAME INPUT · VISIBLE OUTPUT ONLY</span></div>${rounds.map((round,index)=>{
     const entries = round.entries || [];
-    const max = entries.length ? Math.max(...entries.map((entry) => entry.score)) : null;
+    const scored = entries.map((entry) => entry.score).filter(Number.isFinite);
+    const max = scored.length ? Math.max(...scored) : null;
     const cards = entries.map((entry) => {
       const working = activity?.caseIndex === index && activityMatches(activity, entry.id);
-      return `<div class="battle-entry${working ? ' work-active' : ''}"><header><h4>${escapeHtml(entry.name)}</h4><strong class="${entry.score===max?'winner':''}">${entry.score}</strong></header><div class="battle-actions"><span class="mode">${entry.mode.toUpperCase()}</span>${renderDataVerificationBadge(entry.dataVerification)}${retryButton('benchmark', entry.id, '重跑这一局', index)}</div><details><summary>查看完整输出</summary><pre>${escapeHtml(entry.output)}</pre></details>${renderDataChecks(entry.dataVerification)}${working ? renderWorkLoader(activity, 'card') : ''}</div>`;
+      const displayScore = Number.isFinite(entry.score) ? entry.score : '—';
+      const winner = Number.isFinite(entry.score) && entry.score === max;
+      return `<div class="battle-entry${working ? ' work-active' : ''}"><header><h4>${escapeHtml(entry.name)}</h4><strong class="${winner?'winner':''}">${displayScore}</strong></header><div class="battle-actions"><span class="mode">${escapeHtml((entry.mode || '').toUpperCase())}</span>${renderDataVerificationBadge(entry.dataVerification)}${retryButton('benchmark', entry.id, '重跑这一局', index)}</div><details><summary>查看完整输出</summary><pre>${escapeHtml(entry.output)}</pre></details>${renderDataChecks(entry.dataVerification)}${renderV1JudgeReviews(entry)}${working ? renderWorkLoader(activity, 'card') : ''}</div>`;
     });
     if (activity?.caseIndex === index && !entries.some((entry) => activityMatches(activity, entry.id))) {
       cards.push(`<div class="battle-entry battle-entry-loading work-active"><header><h4>${escapeHtml(activity.target || '对测选手')}</h4><strong>···</strong></header>${renderWorkLoader(activity, 'card')}</div>`);
@@ -1237,7 +1310,7 @@ function renderBattle(rounds, item) {
         cards.push(`<div class="battle-entry battle-entry-queued">${renderQueuedWork(competitor.name, '等待同 Prompt 执行', competitorIndex + 1, competitorPlan.length)}</div>`);
       }
     });
-    return `<article class="battle-round"><div class="battle-prompt"><span>CASE ${String(index+1).padStart(2,'0')}<br>${escapeHtml(round.case.name)}</span><p>${escapeHtml(round.case.prompt)}</p></div>${renderDataEvidence(round.dataEvidence)}<div class="battle-grid">${cards.join('')}</div></article>`;
+    return `<article class="battle-round"><div class="battle-prompt"><span>CASE ${String(index+1).padStart(2,'0')}<br>${escapeHtml(round.case.name)}</span><p>${escapeHtml(round.case.prompt)}</p></div>${renderV1Judging(round, item)}${renderDataEvidence(round.dataEvidence)}<div class="battle-grid">${cards.join('')}</div></article>`;
   }).join('')}`;
 }
 

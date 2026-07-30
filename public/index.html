@@ -60,6 +60,22 @@
             <small>尽力复现 · 可覆盖</small>
           </label>
           </div>
+          <fieldset class="scoring-config" id="v1-scoring-config">
+            <legend>评分阵容</legend>
+            <div class="scoring-mode-switch" role="group" aria-label="V1 评分阵容">
+              <button type="button" data-scoring-mode="single" aria-pressed="false">单模型</button>
+              <button type="button" class="selected" data-scoring-mode="panel" aria-pressed="true">四模型匿名盲评</button>
+            </div>
+            <label class="single-reviewer hidden" for="single-scoring-reviewer">
+              评分模型
+              <select id="single-scoring-reviewer">
+                <option value="gpt">OpenAI</option>
+                <option value="claude">Anthropic</option>
+                <option value="doubao">豆包</option>
+                <option value="deepseek" selected>DeepSeek</option>
+              </select>
+            </label>
+          </fieldset>
           <div class="runtime-health data-health" id="data-source-health" aria-live="polite"><span>DATA SOURCE</span><i>正在检查 PandaAI Quant…</i></div>
           <div class="runtime-health" id="runtime-health" aria-live="polite"><span>RUNTIME PROBE</span><i>正在检查本机执行器…</i></div>
         </div>
