@@ -43,9 +43,9 @@ A2A_REPEAT_COUNT=1
 
 ## 数据流与职责
 
-- `task-service` 只负责解析操作，并保留日期是否由调用者显式提供。
-- `orchestrator` 负责把显式/隐式日期信息传给 Worker，不提前猜测交易日。
-- Panda Worker 使用交易日历和 `get_last_trade_date` 确定隐式请求的实际报告日。
+- `task-service` 只负责解析操作；是否存在 `operation.date` 即为显式/隐式日期边界。
+- `orchestrator` 在获取按日期划分的运行锁之前，通过现有 Panda bridge 查询 `get_last_trade_date`、必要时查询 `get_prev_trade_date`，并以 `get_trade_list` 验证候选日期确有市场数据。
+- Panda Worker 使用解析后的实际报告日执行完整采集，并再次执行现有交易日历与完整性校验。
 - Evidence Pack、Run Trace 和报告渲染器使用实际报告日，并记录日期选择元数据。
 
 建议的元数据：
@@ -94,4 +94,3 @@ Agent 的终态保持成功或数据降级状态，而不是因为正常的盘�
 6. Panda 无法给出最近交易日时不静默回退。
 7. Evidence Pack、Run Trace 与三种报告格式包含一致的日期回退说明。
 8. 现有 Agent、Worker、报告验证和 V2 执行调优测试全部通过。
-
