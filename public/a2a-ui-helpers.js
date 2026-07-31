@@ -8,6 +8,20 @@ export function evaluationModeFromHealth(payload) {
   };
 }
 
+export function requestedEvaluationVersion(search = '') {
+  const values = new URLSearchParams(String(search)).getAll('version');
+  if (values.length !== 1) return null;
+  return values[0] === 'v1' || values[0] === 'v2' ? values[0] : null;
+}
+
+export function resolveEvaluationVersion(requestedVersion, v2Available) {
+  const selectedVersion = requestedVersion || (v2Available ? 'v2' : 'v1');
+  return {
+    selectedVersion,
+    usable: selectedVersion === 'v1' || v2Available
+  };
+}
+
 export function nextAvailableEditorId(values, prefix) {
   const occupied = new Set(values);
   let ordinal = 1;

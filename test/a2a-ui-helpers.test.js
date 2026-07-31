@@ -4,7 +4,9 @@ import {
   evaluationModeFromHealth,
   nextAvailableEditorId,
   recordActionCopy,
-  recordActionFailure
+  recordActionFailure,
+  requestedEvaluationVersion,
+  resolveEvaluationVersion
 } from '../public/a2a-ui-helpers.js';
 
 test('requires an explicit boolean health capability before resolving evaluation mode', () => {
@@ -67,4 +69,35 @@ test('formats empty and upstream delete failures without duplicate prefixes', ()
   assert.equal(recordActionFailure(true, '删除失败：权限不足'), '删除失败：权限不足');
   assert.equal(recordActionFailure(false), '删除失败');
   assert.equal(recordActionFailure(false, '权限不足'), '删除失败：权限不足');
+});
+
+test('parses only one explicit V1 or V2 query value', () => {
+  assert.equal(requestedEvaluationVersion('?version=v1'), 'v1');
+  assert.equal(requestedEvaluationVersion('?version=v2'), 'v2');
+  assert.equal(requestedEvaluationVersion(''), null);
+  assert.equal(requestedEvaluationVersion('?version=v3'), null);
+  assert.equal(requestedEvaluationVersion('?version=v1&version=v2'), null);
+});
+
+test('separates selected evaluation version from V2 availability', () => {
+  assert.deepEqual(resolveEvaluationVersion('v1', true), {
+    selectedVersion: 'v1',
+    usable: true
+  });
+  assert.deepEqual(resolveEvaluationVersion('v2', true), {
+    selectedVersion: 'v2',
+    usable: true
+  });
+  assert.deepEqual(resolveEvaluationVersion('v2', false), {
+    selectedVersion: 'v2',
+    usable: false
+  });
+  assert.deepEqual(resolveEvaluationVersion(null, true), {
+    selectedVersion: 'v2',
+    usable: true
+  });
+  assert.deepEqual(resolveEvaluationVersion(null, false), {
+    selectedVersion: 'v1',
+    usable: true
+  });
 });
