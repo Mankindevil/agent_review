@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { buildEvaluationCreateRequest } from '../public/evaluation-version-ui.js';
 
 const root = new URL('../', import.meta.url);
 
@@ -204,8 +205,9 @@ test('mode clicks and reviewer changes affect only the V1 create payload', async
 
   const builders = Function(
     'state',
+    'buildEvaluationCreateRequest',
     `${requestSource}\nreturn { buildV1CreateRequest, buildV2CreateRequest };`
-  )(state);
+  )(state, buildEvaluationCreateRequest);
   const input = {
     agentCard: { name: 'Agent' },
     agentExamples: [{ id: 'example' }],

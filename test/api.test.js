@@ -1237,8 +1237,8 @@ test('serves localized loading effects with reduced-motion support', async () =>
   assert.match(app, /review-card-queued/);
   const indexResponse = await fetch(`${origin}/`);
   const index = await indexResponse.text();
-  assert.match(index, /app\.js\?v=20260731-version-switch1/);
-  assert.match(index, /styles\.css\?v=20260731-version-switch1/);
+  assert.match(index, /app\.js\?v=20260731-version-switch2/);
+  assert.match(index, /styles\.css\?v=20260731-version-switch2/);
 });
 
 test('serves the feature-gated V2 chain-of-custody intake editor', async () => {

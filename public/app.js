@@ -9,14 +9,20 @@ import {
 import {
   canDeleteEvaluation,
   canStopEvaluation,
-  evaluationActionOptions,
-  restoreV2StartButton
+  evaluationActionOptions
 } from './evaluation-actions.js?v=20260725-hardening1';
 import {
   parseExampleMarkdown,
   skillExamplesFromCard
 } from './example-import.js?v=20260725-examples1';
 import { renderV2Result as renderV2ResultView } from './result-v2.js';
+import {
+  buildEvaluationCreateRequest,
+  evaluationVersionUiState,
+  homepageHistoryUrl,
+  restoreLandingStartButton,
+  selectedSubmissionVersion
+} from './evaluation-version-ui.js?v=20260731-version-switch2';
 
 const state = { mode: 'demo', scoringMode: 'panel', scoringReviewerId: 'deepseek', sourceType: 'direct', selectedVersion: null, v2Available: null, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), skillRequestToken: 0, activeWorkTimer: null, activeWorkKey: null };
 const requestedVersion = requestedEvaluationVersion(location.search);
@@ -550,6 +556,8 @@ async function readFile(file) {
 }
 
 async function submitEvaluation() {
+  const version = selectedSubmissionVersion(state);
+  if (!version) return showError(evaluationVersionUiState(state).message);
   showError('');
   let agentCard;
   if (state.sourceType === 'direct') {
@@ -557,7 +565,7 @@ async function submitEvaluation() {
   } else {
     try { agentCard = state.resolvedCard || await resolveRemoteCard(); } catch { return; }
   }
-  if (state.selectedVersion === 'v2') return submitV2Evaluation(agentCard);
+  if (version === 'v2') return submitV2Evaluation(agentCard);
   return submitV1Evaluation(agentCard);
 }
 
@@ -573,14 +581,14 @@ function buildV1CreateRequest({
   seed,
   agentAuthorization
 }) {
-  return {
+  return buildEvaluationCreateRequest('v1', {
     agentCard,
     agentExamples,
     mode: state.mode,
     scoringConfig: selectedV1ScoringConfig(),
-    ...(seed !== undefined ? { seed } : {}),
-    ...(agentAuthorization ? { agentAuthorization } : {})
-  };
+    seed,
+    agentAuthorization
+  });
 }
 
 function buildV2CreateRequest({
@@ -589,13 +597,12 @@ function buildV2CreateRequest({
   agentAuthorization,
   skipHumanReview
 }) {
-  return {
-    schemaVersion: 2,
+  return buildEvaluationCreateRequest('v2', {
     agentCard,
     agentExamples,
-    ...(agentAuthorization ? { agentAuthorization } : {}),
+    agentAuthorization,
     skipHumanReview
-  };
+  });
 }
 
 async function submitV1Evaluation(agentCard) {
@@ -1535,7 +1542,7 @@ async function loadEvaluationDefaults() {
   }
 }
 
-function applyEvaluationVersion({ selectedVersion, usable }, v2Available) {
+function applyEvaluationVersion({ selectedVersion }, v2Available) {
   const isV2 = selectedVersion === 'v2';
   state.selectedVersion = selectedVersion;
   state.v2Available = v2Available;
@@ -1557,18 +1564,14 @@ function applyEvaluationVersion({ selectedVersion, usable }, v2Available) {
       ? '按 Example → Turn → Part → Criterion 的执行顺序登记公开样本；每个 Example 固定采样三次。'
       : '按 Example → Turn → Part → Criterion 登记公开样本；live 时按 turn 顺序调用并复用 context。';
   }
-  const button = $('#start-evaluation');
-  button.disabled = !usable;
-  $('span', button).textContent = isV2 ? '启动 A2A 证据评测' : '送进研究终审台';
-  if (!usable) showError('V2 证据评测当前未启用，请切换到 V1 经典评测。');
+  const versionState = restoreLandingStartButton($('#start-evaluation'), state);
+  if (!versionState.usable) showError(versionState.message);
 }
 
 function setEvaluationHealthUnavailable() {
   state.healthResolved = false;
-  const button = $('#start-evaluation');
-  button.disabled = true;
-  $('span', button).textContent = '无法确认评测模式';
-  showError('无法从服务确认评测模式，请稍后刷新重试。');
+  const versionState = restoreLandingStartButton($('#start-evaluation'), state);
+  showError(versionState.message);
 }
 
 function animateCounters(root) {
@@ -1735,10 +1738,11 @@ function showLanding() {
   state.lastStage = null;
   state.completedRendered = null;
   state.verdictRevealToken += 1;
-  history.replaceState(null, '', location.pathname);
+  history.replaceState(null, '', homepageHistoryUrl(location.pathname, location.search));
   $('#evaluation-view').classList.add('hidden');
   $('#landing-view').classList.remove('hidden');
-  if (state.selectedVersion === 'v2') restoreV2StartButton($('#start-evaluation'));
+  const versionState = restoreLandingStartButton($('#start-evaluation'), state);
+  if (!versionState.usable) showError(versionState.message);
   scrollTo({ top: 0, behavior: 'smooth' });
 }
 function openHistory() { $('#history-drawer').classList.add('open'); $('#drawer-backdrop').classList.add('open'); $('#history-drawer').setAttribute('aria-hidden','false'); loadHistory(); }

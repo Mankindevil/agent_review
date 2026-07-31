@@ -61,7 +61,7 @@ h1 em::after { content: ""; position: absolute; left: 0; bottom: -5px; width: 10
 .intake-card { position: relative; z-index: 2; background: var(--panel); border: 1px solid #bfc5c7; box-shadow: var(--shadow), 10px 10px 0 var(--ink); padding: 28px; max-height: calc(100vh - 116px); overflow-y: auto; scrollbar-width: thin; }
 .intake-card::after { content:""; position:absolute; z-index:3; pointer-events:none; left:0; right:0; top:-18%; height:64px; opacity:.17; background:linear-gradient(180deg,transparent,var(--blue),transparent); animation:intake-scan 7s cubic-bezier(.55,0,.45,1) infinite; }
 .evaluation-version-switch { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:0 0 22px; padding:4px; background:#dfe3e4; border:1px solid var(--ink); }
-.evaluation-version-switch a { min-width:0; padding:11px 12px; color:var(--muted); text-decoration:none; border:1px solid transparent; }
+.evaluation-version-switch a { min-width:0; padding:11px 12px; color:#52635f; text-decoration:none; border:1px solid transparent; }
 .evaluation-version-switch a span,.evaluation-version-switch a small { display:block; }
 .evaluation-version-switch a span { font:900 13px/1.2 var(--display); letter-spacing:.02em; }
 .evaluation-version-switch a small { margin-top:4px; font:8px/1.35 var(--mono); }

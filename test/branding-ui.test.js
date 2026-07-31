@@ -203,7 +203,7 @@ test('uses the compact brand before the desktop header becomes crowded', async (
       page
     );
   }
-  assert.match(home, /href="\/styles\.css\?v=20260731-version-switch1"/);
+  assert.match(home, /href="\/styles\.css\?v=20260731-version-switch2"/);
 
   assert.match(
     styles,
