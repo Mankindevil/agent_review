@@ -1237,8 +1237,8 @@ test('serves localized loading effects with reduced-motion support', async () =>
   assert.match(app, /review-card-queued/);
   const indexResponse = await fetch(`${origin}/`);
   const index = await indexResponse.text();
-  assert.match(index, /app\.js\?v=20260726-v1examples1/);
-  assert.match(index, /styles\.css\?v=20260726-v1examples1/);
+  assert.match(index, /app\.js\?v=20260731-version-switch1/);
+  assert.match(index, /styles\.css\?v=20260731-version-switch1/);
 });
 
 test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
@@ -1281,8 +1281,8 @@ test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
   assert.match(script, /acceptanceCriteria/);
   assert.match(script, /constraints/);
   assert.match(script, /evaluationModeFromHealth\(payload\)/);
-  assert.match(script, /function setBlackBoxMode/);
-  assert.match(script, /function setBlackBoxModeUnavailable/);
+  assert.match(script, /function applyEvaluationVersion/);
+  assert.match(script, /function setEvaluationHealthUnavailable/);
   assert.match(script, /\$\('#v2-intake'\)\.classList\.remove\('hidden'\)/);
   assert.match(script, /function submitV1Evaluation/);
   assert.match(script, /scoringMode:\s*'panel'/);

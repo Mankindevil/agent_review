@@ -18,3 +18,14 @@ test('offers shareable V1 and V2 homepage links with accessible copy', async () 
   assert.match(css, /\.evaluation-version-switch a\[aria-current="page"\]/);
   assert.match(css, /@media \(max-width: 700px\)/);
 });
+
+test('dispatches and renders from selected version instead of capability alone', async () => {
+  const script = await readFile(new URL('public/app.js', root), 'utf8');
+  assert.match(script, /requestedEvaluationVersion\(location\.search\)/);
+  assert.match(script, /resolveEvaluationVersion\(requestedVersion,\s*mode\.enabled\)/);
+  assert.match(script, /state\.selectedVersion === 'v2'/);
+  assert.match(script, /data-evaluation-version/);
+  assert.match(script, /setAttribute\('aria-current', 'page'\)/);
+  assert.match(script, /V2 证据评测当前未启用/);
+  assert.doesNotMatch(script, /if \(state\.blackBoxEnabled\) return submitV2Evaluation/);
+});

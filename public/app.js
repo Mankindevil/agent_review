@@ -2,8 +2,10 @@ import {
   evaluationModeFromHealth,
   nextAvailableEditorId,
   recordActionCopy,
-  recordActionFailure
-} from './a2a-ui-helpers.js?v=20260725-a2a1';
+  recordActionFailure,
+  requestedEvaluationVersion,
+  resolveEvaluationVersion
+} from './a2a-ui-helpers.js?v=20260731-version-switch1';
 import {
   canDeleteEvaluation,
   canStopEvaluation,
@@ -16,7 +18,8 @@ import {
 } from './example-import.js?v=20260725-examples1';
 import { renderV2Result as renderV2ResultView } from './result-v2.js';
 
-const state = { mode: 'demo', scoringMode: 'panel', scoringReviewerId: 'deepseek', sourceType: 'direct', blackBoxEnabled: false, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), skillRequestToken: 0, activeWorkTimer: null, activeWorkKey: null };
+const state = { mode: 'demo', scoringMode: 'panel', scoringReviewerId: 'deepseek', sourceType: 'direct', selectedVersion: null, v2Available: null, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), skillRequestToken: 0, activeWorkTimer: null, activeWorkKey: null };
+const requestedVersion = requestedEvaluationVersion(location.search);
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const DEFAULT_REVIEW_PLAN = [
@@ -554,7 +557,7 @@ async function submitEvaluation() {
   } else {
     try { agentCard = state.resolvedCard || await resolveRemoteCard(); } catch { return; }
   }
-  if (state.blackBoxEnabled) return submitV2Evaluation(agentCard);
+  if (state.selectedVersion === 'v2') return submitV2Evaluation(agentCard);
   return submitV1Evaluation(agentCard);
 }
 
@@ -1524,33 +1527,43 @@ async function loadEvaluationDefaults() {
     const input = $('#evaluation-seed');
     if (!input.dataset.edited && Number.isInteger(payload.evaluationSeed)) input.value = payload.evaluationSeed;
     input.title = `服务默认 seed：${payload.evaluationSeed} · temperature：${payload.modelTemperature}`;
-    setBlackBoxMode(mode.enabled);
+    const versionState = resolveEvaluationVersion(requestedVersion, mode.enabled);
+    applyEvaluationVersion(versionState, mode.enabled);
   } catch {
     $('#evaluation-seed').placeholder = '20260720';
-    setBlackBoxModeUnavailable();
+    setEvaluationHealthUnavailable();
   }
 }
 
-function setBlackBoxMode(enabled) {
-  state.blackBoxEnabled = enabled;
+function applyEvaluationVersion({ selectedVersion, usable }, v2Available) {
+  const isV2 = selectedVersion === 'v2';
+  state.selectedVersion = selectedVersion;
+  state.v2Available = v2Available;
   state.healthResolved = true;
-  $$('.legacy-only').forEach((element) => element.classList.toggle('hidden', enabled));
-  $('#v2-card-heading').classList.toggle('hidden', !enabled);
+  $$('[data-evaluation-version]').forEach((link) => {
+    const selected = link.dataset.evaluationVersion === selectedVersion;
+    link.classList.toggle('selected', selected);
+    if (selected) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  });
+  $$('.legacy-only').forEach((element) => element.classList.toggle('hidden', isV2));
+  $('#v2-card-heading').classList.toggle('hidden', !isV2);
   // Example editor + agent token are shared by V1 and V2; skip-human / replica stay V2-only.
   $('#v2-intake').classList.remove('hidden');
-  $$('.v2-only').forEach((element) => element.classList.toggle('hidden', !enabled));
+  $$('.v2-only').forEach((element) => element.classList.toggle('hidden', !isV2));
   const blurb = $('#v2-examples-blurb');
   if (blurb) {
-    blurb.textContent = enabled
+    blurb.textContent = isV2
       ? '按 Example → Turn → Part → Criterion 的执行顺序登记公开样本；每个 Example 固定采样三次。'
       : '按 Example → Turn → Part → Criterion 登记公开样本；live 时按 turn 顺序调用并复用 context。';
   }
   const button = $('#start-evaluation');
-  button.disabled = false;
-  $('span', button).textContent = enabled ? '启动 A2A 证据评测' : '送进研究终审台';
+  button.disabled = !usable;
+  $('span', button).textContent = isV2 ? '启动 A2A 证据评测' : '送进研究终审台';
+  if (!usable) showError('V2 证据评测当前未启用，请切换到 V1 经典评测。');
 }
 
-function setBlackBoxModeUnavailable() {
+function setEvaluationHealthUnavailable() {
   state.healthResolved = false;
   const button = $('#start-evaluation');
   button.disabled = true;
@@ -1725,7 +1738,7 @@ function showLanding() {
   history.replaceState(null, '', location.pathname);
   $('#evaluation-view').classList.add('hidden');
   $('#landing-view').classList.remove('hidden');
-  if (state.blackBoxEnabled) restoreV2StartButton($('#start-evaluation'));
+  if (state.selectedVersion === 'v2') restoreV2StartButton($('#start-evaluation'));
   scrollTo({ top: 0, behavior: 'smooth' });
 }
 function openHistory() { $('#history-drawer').classList.add('open'); $('#drawer-backdrop').classList.add('open'); $('#history-drawer').setAttribute('aria-hidden','false'); loadHistory(); }
