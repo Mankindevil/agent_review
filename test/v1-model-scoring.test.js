@@ -2,8 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assertV1ScoringReady,
+  capabilityScore,
+  LEGACY_V1_SCORING_VERSION,
+  latencyScore,
   normalizeV1ScoringConfig,
-  scoreV1ArenaCase
+  scoreV1ArenaCase,
+  V1_SCORING_VERSION
 } from '../src/v1-model-scoring.js';
 
 const LIVE_SECRET_ENV = 'V1_MODEL_SCORING_TEST_API_KEY';
@@ -14,9 +18,9 @@ test.after(() => {
   else process.env[LIVE_SECRET_ENV] = originalLiveSecret;
 });
 
-test('defaults missing V1 scoring config to DeepSeek single-model judging', () => {
+test('defaults new V1 scoring config to the v2 arena contract', () => {
   assert.deepEqual(normalizeV1ScoringConfig(), {
-    version: 'v1-model-arena/v1',
+    version: 'v1-model-arena/v2',
     mode: 'single',
     reviewerId: 'deepseek'
   });
@@ -24,13 +28,162 @@ test('defaults missing V1 scoring config to DeepSeek single-model judging', () =
 
 test('accepts panel config and rejects a reviewer on panel mode', () => {
   assert.deepEqual(normalizeV1ScoringConfig({ mode: 'panel' }), {
-    version: 'v1-model-arena/v1',
+    version: 'v1-model-arena/v2',
     mode: 'panel'
   });
   assert.throws(
     () => normalizeV1ScoringConfig({ mode: 'panel', reviewerId: 'deepseek' }),
     /reviewerId/
   );
+});
+
+test('preserves explicitly persisted v1 configurations for historical retries', () => {
+  assert.deepEqual(normalizeV1ScoringConfig({
+    version: 'v1-model-arena/v1',
+    mode: 'single',
+    reviewerId: 'deepseek'
+  }), {
+    version: LEGACY_V1_SCORING_VERSION,
+    mode: 'single',
+    reviewerId: 'deepseek'
+  });
+  assert.equal(V1_SCORING_VERSION, 'v1-model-arena/v2');
+});
+
+test('derives latency and capability from server-side execution records at exact boundaries', () => {
+  assert.equal(latencyScore(60_000), 100);
+  assert.equal(latencyScore(330_000), 50);
+  assert.equal(latencyScore(600_000), 0);
+  assert.equal(capabilityScore({ status: 'failed', durationMs: 1 }), 0);
+  assert.equal(capabilityScore({ status: 'succeeded', durationMs: 60_000 }), 100);
+  assert.equal(capabilityScore({ status: 'succeeded', durationMs: 600_000 }), 70);
+});
+
+test('v2 panel shares scenario judgement, recomputes 20/60/20 totals, and omits execution metadata from judges', async () => {
+  const seen = [];
+  const result = await scoreV1ArenaCase({
+    testCase: { name: '因子研究', prompt: '计算 Rank IC', constraints: ['使用月频数据'] },
+    entries: [
+      {
+        id: 'submitted-runtime-id',
+        name: 'Secret Agent Name',
+        output: '候选 A：给出月频 Rank IC 与分组回测。',
+        mode: 'live',
+        execution: { status: 'succeeded', durationMs: 330_000 },
+        durationMs: 330_000,
+        dataVerification: { secret: 'DATA_VERIFICATION_SENTINEL' }
+      },
+      {
+        id: 'claude-runtime-id',
+        name: 'Claude Runtime Name',
+        output: '候选 B：给出因子定义和限制说明。',
+        mode: 'live',
+        execution: { status: 'succeeded', durationMs: 60_000 }
+      },
+      {
+        id: 'failed-runtime-id',
+        name: 'Failed Runtime Name',
+        output: '执行失败。',
+        mode: 'failed',
+        execution: { status: 'failed', durationMs: 1 }
+      }
+    ],
+    config: { version: V1_SCORING_VERSION, mode: 'panel' },
+    reviewers: ['gpt', 'claude', 'doubao', 'deepseek'].map((id) => liveReviewer(id)),
+    evaluationMode: 'live',
+    seed: 73,
+    invokeJudge: async ({ prompt, candidateIds }) => {
+      seen.push(prompt);
+      return v2JudgeResponse(candidateIds, { providerProse: 'ignored provider prose' });
+    }
+  });
+
+  const first = result.entries.find((entry) => entry.id === 'submitted-runtime-id');
+  const second = result.entries.find((entry) => entry.id === 'claude-runtime-id');
+  const failed = result.entries.find((entry) => entry.id === 'failed-runtime-id');
+  assert.equal(result.status, 'scored');
+  assert.equal(first.score, 76);
+  assert.equal(second.score, 79);
+  assert.deepEqual(first.dimensions, {
+    scenarioValue: 70,
+    professionalQuality: 75,
+    agentCapability: 85
+  });
+  assert.deepEqual(second.dimensions, {
+    scenarioValue: 70,
+    professionalQuality: 75,
+    agentCapability: 100
+  });
+  assert.equal(first.detail.scenario.score, 70);
+  assert.equal(first.detail.professionalism.score, 75);
+  assert.equal(first.detail.capability.executionSuccessScore, 100);
+  assert.equal(first.detail.capability.latencyScore, 50);
+  assert.equal(first.detail.capability.capabilityScore, 85);
+  assert.deepEqual(first.detail.scenario, second.detail.scenario);
+  assert.equal(result.judging.scenario.reviews.length, 4);
+  assert.equal(first.judgeReviews.length, 4);
+  assert.equal(failed.score, 0);
+  assert.equal(failed.scoreStatus, 'execution-failed');
+  assert.equal(failed.dimensions, null);
+  assert.equal(failed.detail.capability.capabilityScore, 0);
+  assert.equal(failed.detail.scenario, null);
+  assert.equal(failed.detail.professionalism, null);
+  assert.equal(first.judgeReviews[0].providerProse, undefined);
+  assert.equal(result.judging.scenario.reviews[0].providerProse, undefined);
+  for (const prompt of seen) {
+    assert.doesNotMatch(prompt, /Secret Agent Name|Claude Runtime Name|submitted-runtime-id|claude-runtime-id|failed-runtime-id|DATA_VERIFICATION_SENTINEL|durationMs|execution|latency|runtime/i);
+  }
+});
+
+test('v2 rejects unknown scoring dimensions instead of accepting provider-generated fields', async () => {
+  const result = await scoreV1ArenaCase({
+    testCase: { name: '日报', prompt: '生成日报' },
+    entries: [{ id: 'submitted', name: 'Agent', output: '结果', mode: 'live', execution: { status: 'succeeded', durationMs: 1 } }],
+    config: { version: V1_SCORING_VERSION, mode: 'single', reviewerId: 'gpt' },
+    reviewers: [liveReviewer('gpt')],
+    evaluationMode: 'live',
+    seed: 12,
+    invokeJudge: async ({ candidateIds }) => ({
+      ...v2JudgeResponse(candidateIds),
+      scores: candidateIds.map((candidateId) => ({
+        ...v2JudgeResponse([candidateId]).scores[0],
+        candidateId,
+        dimensions: {
+          taskCompletion: 90,
+          methodProfessionalism: 80,
+          evidenceDataQuality: 70,
+          riskUncertainty: 60,
+          artifactUsability: 50,
+          inventedDimension: 100
+        }
+      }))
+    })
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.entries[0].score, null);
+  assert.equal(result.entries[0].scoreStatus, 'model-failed');
+});
+
+test('v2 hard-zeros an execution status failure even when a legacy mode is stale', async () => {
+  const result = await scoreV1ArenaCase({
+    testCase: { name: '日报', prompt: '生成日报' },
+    entries: [
+      { id: 'ok', name: 'OK', output: '可见结果', mode: 'live', execution: { status: 'succeeded', durationMs: 60_000 } },
+      { id: 'failed', name: 'Stale mode', output: '错误文本', mode: 'live', execution: { status: 'failed', durationMs: 1 } }
+    ],
+    config: { version: V1_SCORING_VERSION, mode: 'single', reviewerId: 'gpt' },
+    reviewers: [liveReviewer('gpt')],
+    evaluationMode: 'live',
+    seed: 13,
+    invokeJudge: async ({ candidateIds }) => v2JudgeResponse(candidateIds)
+  });
+
+  const failed = result.entries.find((entry) => entry.id === 'failed');
+  assert.equal(result.entries.find((entry) => entry.id === 'ok').score, 79);
+  assert.equal(failed.score, 0);
+  assert.equal(failed.scoreStatus, 'execution-failed');
+  assert.equal(failed.judgeReviews.length, 0);
 });
 
 test('requires every configured live reviewer seat and permits demo scoring', () => {
@@ -308,6 +461,30 @@ function panelFixture(outcomes) {
         }))
       };
     }
+  };
+}
+
+function v2JudgeResponse(candidateIds, extras = {}) {
+  return {
+    scenario: {
+      dimensions: { problemComplexity: 80, agentSuitability: 60 },
+      rationale: '该任务包含多阶段研究，但部分步骤可固定化。',
+      uncertainties: [],
+      ...extras
+    },
+    scores: candidateIds.map((candidateId) => ({
+      candidateId,
+      dimensions: {
+        taskCompletion: 90,
+        methodProfessionalism: 80,
+        evidenceDataQuality: 70,
+        riskUncertainty: 60,
+        artifactUsability: 50
+      },
+      rationale: '方法完整且结果可复核。',
+      uncertainties: [],
+      ...extras
+    }))
   };
 }
 
