@@ -26,13 +26,14 @@ test('systemd runs as the dedicated user with the root-managed environment-file 
   assert.match(unit, /^Restart=on-failure$/m);
 });
 
-test('nginx keeps ACME on HTTP and exposes the full V1 and V2 platform through TLS', async () => {
+test('nginx keeps ACME on HTTP and exposes only the allowlisted public V1 surface through TLS', async () => {
   const bootstrap = await read('nginx-bootstrap.conf');
   const production = await read('nginx-production.conf');
   assert.match(bootstrap, /\/\.well-known\/acme-challenge\//);
   assert.match(production, /listen 443 ssl http2/);
   assert.match(production, /client_max_body_size 4m;/);
   for (const pathname of [
+    '/',
     '/agent-check',
     '/agent-check.js',
     '/agent-check-helpers.js',
@@ -48,16 +49,21 @@ test('nginx keeps ACME on HTTP and exposes the full V1 and V2 platform through T
     assert.match(production, new RegExp(`location = ${pathname.replaceAll('/', '\\/')}\\s*\\{`), pathname);
   }
   assert.match(exactLocation(production, '/agent-check.html'), /return 308 \/agent-check;/);
-  assert.match(
-    production,
-    /location \/\s*\{[\s\S]*?proxy_pass http:\/\/127\.0\.0\.1:4173;[\s\S]*?proxy_buffering off;[\s\S]*?proxy_read_timeout 1260s;[\s\S]*?\}/
-  );
-  assert.doesNotMatch(
-    production.slice(production.lastIndexOf('location / {')),
-    /proxy_set_header X-Forwarded-Proto/,
-    'proxy_params already sets X-Forwarded-Proto'
-  );
-  assert.doesNotMatch(production, /location \/\s*\{\s*return 404;\s*\}/);
+  for (const pathname of [
+    '/app.js',
+    '/styles.css',
+    '/a2a-ui-helpers.js',
+    '/evaluation-actions.js',
+    '/example-import.js',
+    '/result-v2.js',
+    '/rubric-labels.js',
+    '/evaluation-version-ui.js',
+    '/methodology.html',
+    '/methodology.css'
+  ]) {
+    assert.match(production, new RegExp(`location = ${pathname.replaceAll('/', '\\/')}\\s*\\{`), pathname);
+  }
+  assert.match(production, /location \/\s*\{\s*return 404;\s*\}/);
   assert.match(
     exactLocation(production, '/agent-check'),
     /proxy_pass http:\/\/127\.0\.0\.1:4173\/agent-check\.html;/
@@ -70,6 +76,37 @@ test('nginx keeps ACME on HTTP and exposes the full V1 and V2 platform through T
   assert.match(production, /proxy_read_timeout 1260s/);
   assert.match(production, /ssl_certificate \/etc\/letsencrypt\/live\/__PUBLIC_IP__\/fullchain\.pem/);
   assert.match(production, /return 301 https:\/\/__PUBLIC_IP__\$request_uri;/);
+});
+
+test('nginx allows only the public evaluation methods, then rejects destructive and unmatched routes', async () => {
+  const production = await read('nginx-production.conf');
+  const evaluationCollection = exactLocation(production, '/api/evaluations');
+  assert.match(evaluationCollection, /\^\(GET\|HEAD\|POST\)\$/);
+  for (const route of [
+    String.raw`location ~ ^/api/evaluations/[^/]+$`,
+    String.raw`location ~ ^/api/evaluations/[^/]+/(?:events|report\.pdf)$`,
+    String.raw`location ~ ^/api/evaluations/[^/]+/builds/[^/]+/skill$`
+  ]) {
+    assert.match(production, new RegExp(`${route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?\\^\\(GET\\|HEAD\\)\\$`), route);
+  }
+  assert.match(
+    production,
+    /location ~ \^\/api\/evaluations\/\[\^\/\]\+\$\s*\{\s*if \(\$request_method !~ "\^\(GET\|HEAD\)\$"\) \{ return 405; \}/,
+    'DELETE /api/evaluations/:id is rejected by the GET/HEAD-only detail contract'
+  );
+  for (const route of [
+    String.raw`location ~ ^/api/evaluations/[^/]+/(?:cancel|retry)$`
+  ]) {
+    assert.match(production, new RegExp(`${route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?\\$request_method != POST`), route);
+  }
+  for (const pathname of ['/api/agent-cards/resolve', '/api/agent-diagnostics']) {
+    assert.match(exactLocation(production, pathname), /\$request_method != POST/, pathname);
+  }
+  assert.match(production, /location ~ \^\/api\/\(\?:admin\|internal\|appeals\)\(\?:\/\|\$\)\s*\{\s*return 404;/);
+  assert.match(production, /location ~ \^\/api\/evaluations\/\[\^\/\]\+\/\(\?:appeals\|evidence\(\?:-manifest\)\?\)\(\?:\/\|\$\)\s*\{\s*return 404;/);
+  assert.match(production, /location \/\s*\{\s*return 404;\s*\}/);
+  const tlsFallback = production.slice(production.lastIndexOf('location / {'));
+  assert.doesNotMatch(tlsFallback, /proxy_pass http:\/\/127\.0\.0\.1:4173;/);
 });
 
 test('nginx rejects methods outside each public route contract', async () => {
@@ -179,11 +216,12 @@ test('production operations never shell-source the protected systemd environment
   );
 });
 
-test('production operations document the full public V1 and V2 platform and SSH tunnel', async () => {
+test('production operations document the public V1 allowlist and private V2 access tunnel', async () => {
   const operations = await readDoc('PRODUCTION_OPERATIONS.md');
-  assert.match(operations, /Public full application: <https:\/\/14\.103\.143\.171\/>/);
+  assert.match(operations, /Public V1 application: <https:\/\/14\.103\.143\.171\/>/);
   assert.match(operations, /Browser diagnostics: <https:\/\/14\.103\.143\.171\/agent-check>/);
   assert.match(operations, /ssh -N -L 4173:127\.0\.0\.1:4173 root@14\.103\.143\.171/);
+  assert.match(operations, /does not pass through the public Nginx allowlist/);
   assert.match(operations, /^require_200 https:\/\/14\.103\.143\.171\/$/m);
   assert.match(operations, /require_200 https:\/\/14\.103\.143\.171\/app\.js/);
   assert.match(operations, /require_200 https:\/\/14\.103\.143\.171\/api\/evaluations/);
@@ -191,6 +229,9 @@ test('production operations document the full public V1 and V2 platform and SSH 
   assert.match(operations, /require_200 https:\/\/14\.103\.143\.171\/agent-check\.css/);
   assert.match(operations, /require_308 https:\/\/14\.103\.143\.171\/agent-check\.html/);
   assert.match(operations, /require_401_post https:\/\/14\.103\.143\.171\/api\/agent-diagnostics/);
+  assert.match(operations, /require_404 https:\/\/14\.103\.143\.171\/judge\.html/);
+  assert.match(operations, /require_404 https:\/\/14\.103\.143\.171\/appeal\.html/);
+  assert.match(operations, /require_405_delete https:\/\/14\.103\.143\.171\/api\/evaluations\/release-route-contract/);
   assert.match(operations, /\$tunnelStatus[\s\S]*http:\/\/127\.0\.0\.1:4173\/[\s\S]*-ne ['"]200['"]/);
 });
 
