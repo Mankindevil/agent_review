@@ -53,6 +53,9 @@ export function compactPandaQueries(queries, options = {}) {
     }
 
     const rows = Array.isArray(sourceResult.data) ? sourceResult.data : [];
+    const originalRows = Number.isInteger(sourceResult.rowCount) && sourceResult.rowCount >= rows.length
+      ? sourceResult.rowCount
+      : rows.length;
     const { data: _data, originalRows: _originalRows, keptRows: _keptRows,
       droppedRows: _droppedRows, truncated: _truncated, ...metadata } = sourceResult;
     const candidateRows = [];
@@ -60,10 +63,10 @@ export function compactPandaQueries(queries, options = {}) {
       ...source,
       result: {
         ...metadata,
-        originalRows: rows.length,
+        originalRows,
         keptRows: candidateRows.length,
-        droppedRows: rows.length - candidateRows.length,
-        truncated: sourceResult.truncated === true || candidateRows.length < rows.length,
+        droppedRows: originalRows - candidateRows.length,
+        truncated: sourceResult.truncated === true || candidateRows.length < originalRows,
         data: candidateRows
       }
     });

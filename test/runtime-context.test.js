@@ -78,3 +78,21 @@ test('Panda compaction keeps result metadata while omitting only complete rows',
   assert.equal(result.keptRows + result.droppedRows, 2);
   assert.ok(result.data.every((row) => typeof row.symbol === 'string'));
 });
+
+test('Panda compaction accounts for rows omitted by an already truncated source result', () => {
+  const compacted = compactPandaQueries([{
+    method: 'get_factor',
+    status: 'ready',
+    result: {
+      rowCount: 1000,
+      truncated: true,
+      data: Array.from({ length: 500 }, (_, index) => ({ symbol: `${index}` }))
+    }
+  }]);
+
+  const result = compacted.queries[0].result;
+  assert.equal(result.originalRows, 1000);
+  assert.equal(result.keptRows, 500);
+  assert.equal(result.droppedRows, 500);
+  assert.equal(result.truncated, true);
+});

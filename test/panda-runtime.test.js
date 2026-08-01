@@ -230,6 +230,78 @@ test('live financial Runtime plans allowlisted Panda queries and receives real q
   }
 });
 
+test('remote Runtime executes platform Panda queries and receives compacted evidence without Panda credentials', async () => {
+  const originalAdapters = process.env.RUNTIME_ADAPTERS_JSON;
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const platformQueries = [];
+  process.env.RUNTIME_ADAPTERS_JSON = JSON.stringify({
+    cursor: { kind: 'remote-http', url: 'https://runtime.example/cursor' }
+  });
+  globalThis.fetch = async (_url, options) => {
+    const request = JSON.parse(options.body);
+    requests.push({ request, headers: options.headers });
+    if (request.action === 'panda_query_plan') {
+      return new Response(JSON.stringify({
+        queries: [{
+          method: 'get_factor',
+          params: { start_date: '20240101', end_date: '20240131', factors: ['close'] },
+          purpose: '取得月末收盘价'
+        }]
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    assert.equal(request.action, 'run_skill');
+    assert.equal(request.pandaEvidence.queries[0].result.data[0].close, 10.5);
+    assert.equal(request.pandaEvidence.queries[0].result.originalRows, 1);
+    assert.equal(request.pandaInstructions.requireTruncationDisclosure, true);
+    return new Response(JSON.stringify({ output: '远程 Runtime 已使用平台 Panda 证据。' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+
+  try {
+    const output = await runSkill({
+      runtime: 'Cursor Agent',
+      runtimeId: 'cursor',
+      mode: 'live',
+      skill: {
+        name: 'factor-research',
+        description: '研究量化因子',
+        instructions: ['先取数后计算'],
+        tools: ['panda_data']
+      }
+    }, { prompt: '研究沪深 300 收盘价。' }, 'live', {
+      pandaData: {
+        enabled: true,
+        allowedMethods: ['get_factor'],
+        interfaceReference: '## get_factor\nstart_date / end_date / factors',
+        query: async (method, params) => {
+          platformQueries.push({ method, params });
+          return {
+            provider: 'pandaai',
+            method,
+            rowCount: 1,
+            data: [{ date: '20240131', symbol: '000001.SZ', close: 10.5 }]
+          };
+        }
+      }
+    });
+
+    assert.equal(output, '远程 Runtime 已使用平台 Panda 证据。');
+    assert.deepEqual(requests.map(({ request }) => request.action), ['panda_query_plan', 'run_skill']);
+    assert.equal(requests[0].headers.authorization, undefined);
+    assert.deepEqual(platformQueries, [{
+      method: 'get_factor',
+      params: { start_date: '20240101', end_date: '20240131', factors: ['close'] }
+    }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalAdapters === undefined) delete process.env.RUNTIME_ADAPTERS_JSON;
+    else process.env.RUNTIME_ADAPTERS_JSON = originalAdapters;
+  }
+});
+
 test('Panda query planning rejects methods outside the configured allowlist without querying', async () => {
   const originalAdapters = process.env.RUNTIME_ADAPTERS_JSON;
   const originalKey = process.env.PANDA_RUNTIME_TEST_KEY;

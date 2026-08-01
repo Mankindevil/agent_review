@@ -248,24 +248,86 @@ export async function runSkill(build, testCase, mode, {
     );
   }
   if (mode === 'live' && config?.kind === 'remote-http') {
+    const context = pandaContext(pandaData);
+    const usesPanda = context && build.skill?.tools?.includes('panda_data');
+    if (usesPanda) {
+      if (typeof pandaData.query !== 'function') {
+        throw new Error('Panda Data Runtime 查询网关未配置');
+      }
+      const planRequest = {
+        action: 'panda_query_plan',
+        skill: build.skill,
+        prompt: testCase.prompt,
+        pandaData: publicPandaContext(pandaData),
+        pandaPlanPrompt: runtimePandaQueryPlanPrompt(build.skill, testCase.prompt, context),
+        seed,
+        temperature
+      };
+      const planPayload = await callRemoteRuntime(config, build.runtimeId, planRequest, signal, onContextUsage);
+      const plan = normalizePandaQueryPlan(planPayload.plan || planPayload, context.allowedMethods);
+      const queries = [];
+      for (const query of plan) {
+        signal?.throwIfAborted();
+        try {
+          const result = await pandaData.query(query.method, query.params, { signal });
+          queries.push({ ...query, status: 'ready', result });
+        } catch (error) {
+          if (signal?.aborted) throw signal.reason || error;
+          queries.push({
+            ...query,
+            status: 'failed',
+            error: String(error?.message || error).slice(0, 500)
+          });
+        }
+      }
+      const compacted = compactPandaQueries(queries);
+      const pandaEvidence = {
+        provider: 'pandaai',
+        sdk: 'panda_data',
+        interfaceDocument: '接口文档.md',
+        queries: compacted.queries,
+        budget: compacted.budget
+      };
+      const request = {
+        action: 'run_skill',
+        skill: build.skill,
+        prompt: testCase.prompt,
+        pandaEvidence,
+        pandaInstructions: {
+          requireTruncationDisclosure: true,
+          text: '只能使用 pandaEvidence 中的真实结果。若任一查询的 truncated 为 true，必须披露 originalRows、keptRows、droppedRows，并说明截断对结论的影响。'
+        },
+        seed,
+        temperature
+      };
+      const payload = await callRemoteRuntime(config, build.runtimeId, request, signal, onContextUsage);
+      const output = payload.output;
+      if (typeof output !== 'string' || !output.trim()) throw new Error(`${build.runtime} adapter 没有返回非空 output`);
+      return output;
+    }
     const request = { action: 'run_skill', skill: build.skill, prompt: testCase.prompt, seed, temperature };
-    inspectRuntimeContext('', JSON.stringify(request), {
-      scope: `runtime-remote-request:${build.runtimeId}`,
-      onUsage: onContextUsage
-    });
-    const response = await fetch(config.url, {
-      method: 'POST',
-      headers: runtimeAdapterHeaders(config),
-      body: JSON.stringify(request),
-      signal: withTimeout(signal, 120_000)
-    });
-    if (!response.ok) throw new Error(`${build.runtime} 执行返回 HTTP ${response.status}`);
-    const output = (await response.json()).output;
+    const payload = await callRemoteRuntime(config, build.runtimeId, request, signal, onContextUsage);
+    const output = payload.output;
     if (typeof output !== 'string' || !output.trim()) throw new Error(`${build.runtime} adapter 没有返回非空 output`);
     return output;
   }
   const lead = build.runtimeId === 'claude-code' ? '我先检查约束并给出可复核结果。' : build.runtimeId === 'cursor' ? '已按任务流程执行并整理产物。' : '任务已完成，下面是处理结果。';
   return `${lead}\n\n1. 任务理解：${testCase.prompt}\n2. 执行依据：使用 ${build.skill.tools.join('、') || '文本推理'}，按技能边界逐项处理。\n3. 结果：已形成结构化交付，并标出需要人工确认的假设。\n4. 风险：真实文件或外部系统未提供时，不声称已经修改。`;
+}
+
+async function callRemoteRuntime(config, runtimeId, request, signal, onContextUsage) {
+  inspectRuntimeContext('', JSON.stringify(request), {
+    scope: `runtime-remote-request:${runtimeId}`,
+    onUsage: onContextUsage
+  });
+  const response = await fetch(config.url, {
+    method: 'POST',
+    headers: runtimeAdapterHeaders(config),
+    body: JSON.stringify(request),
+    signal: withTimeout(signal, 120_000)
+  });
+  if (!response.ok) throw new Error(`${runtimeId} runtime 返回 HTTP ${response.status}`);
+  return response.json();
 }
 
 async function runLiveSkillWithOptionalPanda(
