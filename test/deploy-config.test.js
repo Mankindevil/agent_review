@@ -26,22 +26,38 @@ test('systemd runs as the dedicated user with the root-managed environment-file 
   assert.match(unit, /^Restart=on-failure$/m);
 });
 
-test('nginx keeps ACME on HTTP and exposes only diagnostics routes through TLS', async () => {
+test('nginx keeps ACME on HTTP and exposes the full V1 and V2 platform through TLS', async () => {
   const bootstrap = await read('nginx-bootstrap.conf');
   const production = await read('nginx-production.conf');
   assert.match(bootstrap, /\/\.well-known\/acme-challenge\//);
   assert.match(production, /listen 443 ssl http2/);
+  assert.match(production, /client_max_body_size 4m;/);
   for (const pathname of [
     '/agent-check',
     '/agent-check.js',
+    '/agent-check-helpers.js',
+    '/example-import.js',
     '/agent-check.css',
+    '/favicon.svg',
+    '/assets/pandaai-logo.svg',
+    '/assets/pandaai-mark.svg',
+    '/api/agent-cards/resolve',
     '/api/agent-diagnostics',
     '/api/health'
   ]) {
     assert.match(production, new RegExp(`location = ${pathname.replaceAll('/', '\\/')}\\s*\\{`), pathname);
   }
   assert.match(exactLocation(production, '/agent-check.html'), /return 308 \/agent-check;/);
-  assert.match(production, /location \/\s*\{\s*return 404;\s*\}/);
+  assert.match(
+    production,
+    /location \/\s*\{[\s\S]*?proxy_pass http:\/\/127\.0\.0\.1:4173;[\s\S]*?proxy_buffering off;[\s\S]*?proxy_read_timeout 1260s;[\s\S]*?\}/
+  );
+  assert.doesNotMatch(
+    production.slice(production.lastIndexOf('location / {')),
+    /proxy_set_header X-Forwarded-Proto/,
+    'proxy_params already sets X-Forwarded-Proto'
+  );
+  assert.doesNotMatch(production, /location \/\s*\{\s*return 404;\s*\}/);
   assert.match(
     exactLocation(production, '/agent-check'),
     /proxy_pass http:\/\/127\.0\.0\.1:4173\/agent-check\.html;/
@@ -62,7 +78,12 @@ test('nginx rejects methods outside each public route contract', async () => {
     '/agent-check',
     '/agent-check.html',
     '/agent-check.js',
+    '/agent-check-helpers.js',
+    '/example-import.js',
     '/agent-check.css',
+    '/favicon.svg',
+    '/assets/pandaai-logo.svg',
+    '/assets/pandaai-mark.svg',
     '/api/health'
   ]) {
     assert.match(
@@ -71,6 +92,10 @@ test('nginx rejects methods outside each public route contract', async () => {
       pathname
     );
   }
+  assert.match(
+    exactLocation(production, '/api/agent-cards/resolve'),
+    /if \(\$request_method != POST\)\s*\{\s*return 405;/
+  );
   assert.match(
     exactLocation(production, '/api/agent-diagnostics'),
     /if \(\$request_method != POST\)\s*\{\s*return 405;/
@@ -154,19 +179,19 @@ test('production operations never shell-source the protected systemd environment
   );
 });
 
-test('production operations document the temporary public allowlist and SSH tunnel', async () => {
+test('production operations document the full public V1 and V2 platform and SSH tunnel', async () => {
   const operations = await readDoc('PRODUCTION_OPERATIONS.md');
+  assert.match(operations, /Public full application: <https:\/\/14\.103\.143\.171\/>/);
   assert.match(operations, /Browser diagnostics: <https:\/\/14\.103\.143\.171\/agent-check>/);
   assert.match(operations, /ssh -N -L 4173:127\.0\.0\.1:4173 root@14\.103\.143\.171/);
+  assert.match(operations, /^require_200 https:\/\/14\.103\.143\.171\/$/m);
+  assert.match(operations, /require_200 https:\/\/14\.103\.143\.171\/app\.js/);
+  assert.match(operations, /require_200 https:\/\/14\.103\.143\.171\/api\/evaluations/);
   assert.match(operations, /require_200 https:\/\/14\.103\.143\.171\/agent-check\.js/);
   assert.match(operations, /require_200 https:\/\/14\.103\.143\.171\/agent-check\.css/);
   assert.match(operations, /require_308 https:\/\/14\.103\.143\.171\/agent-check\.html/);
   assert.match(operations, /require_401_post https:\/\/14\.103\.143\.171\/api\/agent-diagnostics/);
-  assert.match(operations, /^require_404 https:\/\/14\.103\.143\.171\/$/m);
-  assert.match(operations, /require_404 https:\/\/14\.103\.143\.171\/api\/evaluations/);
-  assert.match(operations, /require_404 https:\/\/14\.103\.143\.171\/methodology\.html/);
   assert.match(operations, /\$tunnelStatus[\s\S]*http:\/\/127\.0\.0\.1:4173\/[\s\S]*-ne ['"]200['"]/);
-  assert.doesNotMatch(operations, /^require_200 https:\/\/14\.103\.143\.171\/$/m);
 });
 
 test('standard release renders, validates, installs, and can roll back nginx', async () => {
@@ -322,9 +347,26 @@ test('V1 release runbook installs and smoke-tests the complete PDF report path',
   assert.match(environment, /^MODEL_CONTEXT_WARN_RATIO=0\.8$/m);
   assert.match(operations, /\.venv\/bin\/python -m pip install -r requirements-data\.txt/);
   assert.match(operations, /\.venv\/bin\/python -c ['"]import reportlab['"]/);
+  assert.match(operations, /apt-get install -y poppler-utils/);
+  assert.match(operations, /command -v pdfinfo/);
   assert.match(operations, /\/api\/evaluations\/\$\{?evaluation_id\}?\/report\.pdf/);
   assert.match(operations, /Content-Type:\s*application\/pdf/i);
   assert.match(operations, /pdfinfo/);
   assert.match(operations, /completed V1/i);
+  assert.match(operations, /V1 Panda Runtime 查询桥/);
+  assert.match(operations, /invalid output is `502`/);
+  assert.match(operations, /renderer is `503`/);
+  assert.match(operations, /timeout is `504`/);
   assert.match(operations, /rollback/i);
+
+  const releaseStart = operations.indexOf('## Safe release and rollback');
+  const releaseEnd = operations.indexOf('The rendered Nginx configuration', releaseStart);
+  const release = operations.slice(releaseStart, releaseEnd);
+  const evaluationId = release.indexOf("evaluation_id='<completed V1 evaluation id>'");
+  const promotion = release.indexOf('release_switched=1');
+  const trap = release.indexOf('trap release_cleanup EXIT');
+  const reportSmoke = release.indexOf('/api/evaluations/${evaluation_id}/report.pdf');
+  const disarm = release.lastIndexOf('trap - EXIT');
+  assert.ok(evaluationId >= 0 && evaluationId < promotion);
+  assert.ok(trap >= 0 && trap < reportSmoke && reportSmoke < disarm);
 });

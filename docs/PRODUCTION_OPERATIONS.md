@@ -18,6 +18,9 @@ cd /opt/agent-review/app
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-data.txt
 npm install
+sudo apt-get update
+sudo apt-get install -y poppler-utils
+command -v pdfinfo
 sudo install -o root -g root -m 0644 deploy/market-analyst.service /etc/systemd/system/
 sudo install -o root -g root -m 0644 deploy/market-report.service /etc/systemd/system/
 sudo install -o root -g root -m 0644 deploy/market-report.timer /etc/systemd/system/
@@ -293,12 +296,15 @@ wait_for_health() {
 }
 release_sha='<approved full Git SHA>'
 [[ "$release_sha" =~ ^[0-9a-fA-F]{40}$ ]]
+evaluation_id='<completed V1 evaluation id>'
+case "$evaluation_id" in ''|*[^A-Za-z0-9_-]*) echo 'set one completed V1 evaluation id' >&2; exit 1;; esac
 expected_release_dir="/opt/agent-review/releases/$release_sha"
 release_dir="$(readlink -f "$expected_release_dir")"
 test "$release_dir" = "$expected_release_dir"
 test -d "$release_dir"
 test -f "$release_dir/package.json"
 sudo -u agent-review -- sh -c 'cd "$1" && npm ci && python3 -m venv .venv && .venv/bin/python -m pip install -r requirements-data.txt && .venv/bin/python -c "import reportlab" && npm test && npm run check' sh "$release_dir"
+command -v pdfinfo >/dev/null
 nginx_template="$release_dir/deploy/nginx-production.conf"
 test -f "$nginx_template"
 nginx_live=/etc/nginx/sites-available/agent-review
@@ -310,6 +316,9 @@ retrieval_key_live=/root/agent-review-access-key.txt
 retrieval_key_state=missing
 retrieval_key_backup=''
 nginx_rendered="$(mktemp)"
+report_headers="$(mktemp)"
+report_pdf="$(mktemp --suffix=.pdf)"
+evaluation_json="$(mktemp)"
 sed 's/__PUBLIC_IP__/14.103.143.171/g' "$nginx_template" > "$nginx_rendered"
 test -s "$nginx_rendered"
 sudo test -f "$nginx_live"
@@ -337,7 +346,7 @@ release_switched=0
 nginx_promoted=0
 release_cleanup() {
   status=$?
-  rm -f -- "$nginx_rendered" || true
+  rm -f -- "$nginx_rendered" "$report_headers" "$report_pdf" "$evaluation_json" || true
   sudo rm -f -- "$stage_link" "$recovery_link" "$nginx_stage" || true
   if [ "$release_switched" -eq 1 ]; then
     sudo ln -s "$previous_dir" "$recovery_link" || true
@@ -366,23 +375,23 @@ sudo mv -Tf "$stage_link" /opt/agent-review/app
 release_switched=1
 sudo systemctl restart agent-review
 wait_for_health
-rm -f -- "$nginx_rendered"
-trap - EXIT
-```
-
-The rendered Nginx configuration is installed only after the existing file is backed up. Any failure after promotion restores that backup, validates it with `nginx -t`, reloads Nginx, and restores the previous application symlink if it had already moved. Record every printed rollback input with the release: the previous release, Nginx backup, root-only environment backup, retrieval-key state, and retrieval-key backup path when the state is `present`. A `missing` state is deliberate and must also be recorded. Both root-only backups must survive until the release is accepted.
-
-### Completed V1 PDF acceptance
-
-After health is green, select a known completed `schemaVersion: 1` V1 evaluation ID from the release state; do not use a V2, running, demo-only fixture, or a guessed ID. The report is generated on demand, so this also verifies the release virtual environment rather than a cached static file.
-
-```bash
-set -euo pipefail
-evaluation_id='<completed V1 evaluation id>'
-case "$evaluation_id" in ''|*[^A-Za-z0-9_-]*) echo 'set one completed V1 evaluation id' >&2; exit 1;; esac
-report_headers="$(mktemp)"
-report_pdf="$(mktemp --suffix=.pdf)"
-trap 'rm -f -- "$report_headers" "$report_pdf"' EXIT
+curl --fail --silent --show-error --max-redirs 0 \
+  --output "$evaluation_json" \
+  "https://14.103.143.171/api/evaluations/${evaluation_id}"
+python3 - "$evaluation_json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding='utf-8'))
+if value.get('schemaVersion') != 1 or value.get('status') != 'completed':
+    raise SystemExit('evaluation_id must select a completed V1 evaluation')
+entries = [entry for round_ in value.get('benchmark', []) for entry in round_.get('entries', [])]
+usage = [usage for entry in entries for usage in entry.get('execution', {}).get('contextUsage', [])]
+queries = [query for round_ in value.get('benchmark', []) for query in round_.get('dataEvidence', {}).get('queries', [])]
+if not queries:
+    raise SystemExit('completed V1 evaluation must include a Panda Runtime query')
+if any(item.get('status') == 'exceeded' for item in usage):
+    raise SystemExit('V1 Panda Runtime context budget exceeded')
+PY
+# V1 Panda Runtime 查询桥：已验证 allowlisted 查询审计存在且上下文没有 exceeded。
 curl --fail --silent --show-error --max-redirs 0 \
   --dump-header "$report_headers" \
   --output "$report_pdf" \
@@ -391,9 +400,17 @@ grep -qi '^Content-Type: application/pdf' "$report_headers"
 grep -qi '^Cache-Control: no-store' "$report_headers"
 pdfinfo "$report_pdf"
 test -s "$report_pdf"
+rm -f -- "$nginx_rendered" "$report_headers" "$report_pdf" "$evaluation_json"
+trap - EXIT
 ```
 
-The endpoint is only valid for a completed V1 record: missing IDs return `404`; V2 and non-completed records return `409`. If the request is not `200`, lacks `Content-Type: application/pdf`, or `pdfinfo` cannot parse it, treat the release as failed and run the recorded rollback before attempting another PDF request. The report route must never stream a partial PDF on renderer failure.
+The rendered Nginx configuration is installed only after the existing file is backed up. Any failure after promotion restores that backup, validates it with `nginx -t`, reloads Nginx, and restores the previous application symlink if it had already moved. Record every printed rollback input with the release: the previous release, Nginx backup, root-only environment backup, retrieval-key state, and retrieval-key backup path when the state is `present`. A `missing` state is deliberate and must also be recorded. Both root-only backups must survive until the release is accepted.
+
+### Completed V1 PDF acceptance is part of promotion
+
+Before promotion, select a known completed `schemaVersion: 1` V1 evaluation that includes a Panda Runtime query; do not use a V2, running, demo-only fixture, or a guessed ID. The guarded release transaction keeps its rollback trap active through the selected V1 audit check, Panda query/context check, report download, `Content-Type`, cache-control and `pdfinfo` validation. It disarms the trap only after every acceptance check passes, so there is no manual post-promotion acceptance gap.
+
+The endpoint is only valid for a completed V1 record: missing IDs return `404`; V2 and non-completed records return `409`; report generator failure/invalid output is `502`; unavailable Python/renderer is `503`; and generator timeout is `504`. If the request is not `200`, lacks `Content-Type: application/pdf`, `pdfinfo` cannot parse it, or the V1/Panda audit is missing/exceeded, the trap restores the recorded previous release before another PDF request. The report route must never stream a partial PDF on renderer failure.
 
 If post-deployment acceptance fails, use the exact paths and retrieval-key state recorded by the release command. Do not guess a SHA or select the newest backup:
 

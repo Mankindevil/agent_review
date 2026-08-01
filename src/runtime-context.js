@@ -14,8 +14,8 @@ export class RuntimeContextBudgetError extends RangeError {
 export function inspectRuntimeContext(system, prompt, options = {}) {
   const normalizedSystem = typeof system === 'string' ? system : String(system ?? '');
   const normalizedPrompt = typeof prompt === 'string' ? prompt : String(prompt ?? '');
-  const maxInputBytes = positiveInteger(options.maxInputBytes, RUNTIME_CONTEXT_MAX_BYTES);
-  const warnRatio = validWarnRatio(options.warnRatio) ? options.warnRatio : RUNTIME_CONTEXT_WARN_RATIO;
+  const policy = readRuntimeContextPolicy(options.env, options);
+  const { maxInputBytes, warnRatio } = policy;
   const systemBytes = Buffer.byteLength(normalizedSystem, 'utf8');
   const promptBytes = Buffer.byteLength(normalizedPrompt, 'utf8');
   const inputBytes = systemBytes + promptBytes;
@@ -34,6 +34,22 @@ export function inspectRuntimeContext(system, prompt, options = {}) {
   if (typeof options.onUsage === 'function') options.onUsage(usage);
   if (usage.status === 'exceeded') throw new RuntimeContextBudgetError(usage);
   return { system: normalizedSystem, prompt: normalizedPrompt, usage };
+}
+
+export function readRuntimeContextPolicy(env = process.env, options = {}) {
+  const source = env && typeof env === 'object' ? env : {};
+  return {
+    maxInputBytes: positiveInteger(
+      options.maxInputBytes,
+      source.MODEL_CONTEXT_MAX_BYTES,
+      RUNTIME_CONTEXT_MAX_BYTES
+    ),
+    warnRatio: warnRatio(
+      options.warnRatio,
+      source.MODEL_CONTEXT_WARN_RATIO,
+      RUNTIME_CONTEXT_WARN_RATIO
+    )
+  };
 }
 
 export function compactPandaQueries(queries, options = {}) {
@@ -99,12 +115,24 @@ export function compactPandaQueries(queries, options = {}) {
   };
 }
 
-function positiveInteger(value, fallback) {
-  return Number.isInteger(value) && value > 0 ? value : fallback;
+function positiveInteger(...values) {
+  for (const value of values) {
+    const parsed = typeof value === 'string' && !/^[1-9]\d*$/u.test(value)
+      ? Number.NaN
+      : Number(value);
+    if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  }
+  return RUNTIME_CONTEXT_MAX_BYTES;
 }
 
-function validWarnRatio(value) {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
+function warnRatio(...values) {
+  for (const value of values) {
+    const parsed = typeof value === 'string' && !/^(?:0(?:\.\d+)?|\.\d+|1(?:\.0+)?)$/u.test(value)
+      ? Number.NaN
+      : Number(value);
+    if (Number.isFinite(parsed) && parsed > 0 && parsed < 1) return parsed;
+  }
+  return RUNTIME_CONTEXT_WARN_RATIO;
 }
 
 function serializedBytes(value) {

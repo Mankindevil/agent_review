@@ -42,6 +42,35 @@ test('Runtime context reports UTF-8 usage to observers before rejecting', () => 
   assert.equal(usageRecords[0].estimatedTokens, Math.ceil(usageRecords[0].inputBytes / 4));
 });
 
+test('Runtime context reads strict V1 environment limits while explicit options override them', () => {
+  const env = {
+    MODEL_CONTEXT_MAX_BYTES: '64',
+    MODEL_CONTEXT_WARN_RATIO: '0.5'
+  };
+  const constrained = inspectRuntimeContext('系统', '中'.repeat(10), { env });
+  assert.equal(constrained.usage.maxInputBytes, 64);
+  assert.equal(constrained.usage.warnRatio, 0.5);
+  assert.equal(constrained.usage.status, 'warning');
+  assert.throws(
+    () => inspectRuntimeContext('系统', '中'.repeat(30), { env }),
+    (error) => error.code === 'MODEL_CONTEXT_BUDGET_EXCEEDED'
+  );
+
+  const overridden = inspectRuntimeContext('system', 'prompt', {
+    env,
+    maxInputBytes: 128,
+    warnRatio: 0.75
+  });
+  assert.equal(overridden.usage.maxInputBytes, 128);
+  assert.equal(overridden.usage.warnRatio, 0.75);
+
+  const fallback = inspectRuntimeContext('system', 'prompt', {
+    env: { MODEL_CONTEXT_MAX_BYTES: '1.5', MODEL_CONTEXT_WARN_RATIO: '1' }
+  });
+  assert.equal(fallback.usage.maxInputBytes, 1_500_000);
+  assert.equal(fallback.usage.warnRatio, 0.8);
+});
+
 test('Panda compaction keeps complete rows under per-query and aggregate byte budgets', () => {
   const compacted = compactPandaQueries([
     { method: 'get_factor', status: 'ready', result: { rowCount: 4, data: rows } },
@@ -95,4 +124,10 @@ test('Panda compaction accounts for rows omitted by an already truncated source 
   assert.equal(result.keptRows, 500);
   assert.equal(result.droppedRows, 500);
   assert.equal(result.truncated, true);
+});
+
+test('Panda compaction keeps the fixed 240 KB per-query and 600 KB aggregate defaults', () => {
+  const compacted = compactPandaQueries([{ method: 'get_factor', result: { data: [] } }]);
+  assert.equal(compacted.budget.perQueryBytes, 240_000);
+  assert.equal(compacted.budget.totalBytes, 600_000);
 });
