@@ -401,7 +401,8 @@ function pdfTokens(source) {
     }
     if (character === '/') {
       let end = index + 1; while (end < source.length && !/[\s\[\]<>()/]/u.test(source[end])) end += 1;
-      if (!append({ kind: 'name', value: source.slice(index + 1, end) })) return null;
+      const value = decodePdfName(source, index + 1, end);
+      if (value === null || !append({ kind: 'name', value })) return null;
       index = end; continue;
     }
     let end = index + 1; while (end < source.length && !/[\s\[\]<>()/]/u.test(source[end])) end += 1;
@@ -409,6 +410,29 @@ function pdfTokens(source) {
     index = end;
   }
   return tokens;
+}
+function decodePdfName(source, start, end) {
+  const chunks = [];
+  let segmentStart = start;
+  for (let index = start; index < end; index += 1) {
+    if (source[index] !== '#') continue;
+    if (index + 2 >= end) return null;
+    const high = pdfHexValue(source.charCodeAt(index + 1));
+    const low = pdfHexValue(source.charCodeAt(index + 2));
+    if (high < 0 || low < 0) return null;
+    chunks.push(source.slice(segmentStart, index), String.fromCharCode(high * 16 + low));
+    index += 2;
+    segmentStart = index + 1;
+  }
+  if (!chunks.length) return source.slice(start, end);
+  chunks.push(source.slice(segmentStart, end));
+  return chunks.join('');
+}
+function pdfHexValue(code) {
+  if (code >= 48 && code <= 57) return code - 48;
+  if (code >= 65 && code <= 70) return code - 55;
+  if (code >= 97 && code <= 102) return code - 87;
+  return -1;
 }
 function parsePdfValue(tokens, index) {
   const token = tokens[index];
@@ -419,6 +443,7 @@ function parsePdfValue(tokens, index) {
     while (tokens[cursor]?.kind !== '>>') {
       const key = tokens[cursor];
       if (!key || key.kind !== 'name') return null;
+      if (Object.hasOwn(entries, key.value)) return null;
       const parsed = parsePdfValue(tokens, cursor + 1);
       if (!parsed) return null;
       entries[key.value] = parsed.value;

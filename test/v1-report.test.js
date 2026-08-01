@@ -177,6 +177,53 @@ test('accepts a valid traditional PDF whose live objects use nonzero xref genera
   });
 });
 
+test('accepts PDF Name escapes in page-tree keys and values with uppercase and lowercase hex digits', async () => {
+  const pdf = traditionalPdf({
+    1: '<< /T#79pe /Cata#6cog /Pag#65s 2 0 R >>',
+    2: '<< /Ty#70e /Pag#65s /#4Bids [3 0 R] /Co#75nt 1 >>',
+    3: '<< /Typ#65 /Pa#67e /Par#65nt 2 0 R >>'
+  });
+  await withInjectedRendererPdf('escaped-semantic-names', pdf, async (rendererPath) => {
+    const generated = await generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: rendererPath });
+    assert.equal(generated.toString('latin1'), pdf);
+  });
+});
+
+test('rejects an escaped Parent key on the root Pages dictionary', async () => {
+  const pdf = traditionalPdf({
+    1: '<< /Type /Catalog /Pages 2 0 R >>',
+    2: '<< /Type /Pages /Par#65nt 9 0 R /Kids [3 0 R] /Count 1 >>',
+    3: '<< /Type /Page /Parent 2 0 R >>'
+  });
+  await withInjectedRendererPdf('escaped-root-parent', pdf, async (rendererPath) => {
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: rendererPath }), { statusCode: 502 });
+  });
+});
+
+test('rejects duplicate dictionary keys that collide after PDF Name decoding', async () => {
+  const pdf = traditionalPdf({
+    1: '<< /Type /Catalog /Pages 2 0 R >>',
+    2: '<< /Type /Pages /Kids [3 0 R] /Count 1 /Co#75nt 1 >>',
+    3: '<< /Type /Page /Parent 2 0 R >>'
+  });
+  await withInjectedRendererPdf('duplicate-normalized-key', pdf, async (rendererPath) => {
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: rendererPath }), { statusCode: 502 });
+  });
+});
+
+test('rejects malformed and incomplete PDF Name hexadecimal escapes', async () => {
+  for (const [name, escapedName] of [['malformed-name-escape', 'bad#G1'], ['incomplete-name-escape', 'bad#']]) {
+    const pdf = traditionalPdf({
+      1: '<< /Type /Catalog /Pages 2 0 R >>',
+      2: `<< /Type /Pages /Kids [3 0 R] /Count 1 /Note /${escapedName} >>`,
+      3: '<< /Type /Page /Parent 2 0 R >>'
+    });
+    await withInjectedRendererPdf(name, pdf, async (rendererPath) => {
+      await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: rendererPath }), { statusCode: 502 });
+    });
+  }
+});
+
 test('rejects malformed, failed, timed-out, and oversized renderer output without returning partial PDF bytes', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'v1-report-renderer-'));
   const script = async (name, body) => {

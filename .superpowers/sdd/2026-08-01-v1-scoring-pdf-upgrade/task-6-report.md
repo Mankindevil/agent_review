@@ -267,3 +267,56 @@ The focused command reports 17/17 passing tests. The existing untracked fixture
 remains a 15-page A4 ReportLab PDF; `pdfplumber` reconfirmed its report title,
 running footer and submitted-output sentinel. The known full `api.test.js`
 loopback `EPERM` suite was not rerun; the no-socket route suite above passed.
+
+## Fix round 5 / 5
+
+### Root cause and focused TDD RED
+
+- PDF Name tokens were stored with their raw spelling, so hexadecimal byte
+  escapes were never decoded before semantic dictionary lookup. An escaped
+  `/Par#65nt` key was therefore invisible to the root `/Pages` guard, while
+  escaped `Type`, `Catalog`, `Pages`, `Page` and `Kids` names were not
+  recognized as their valid PDF meanings.
+- Dictionary insertion silently overwrote raw duplicate keys and did not detect
+  differently spelled names that become identical after PDF Name decoding.
+
+Four focused tests were added first. They failed against the previous parser:
+escaped semantic names were rejected, while an escaped root `Parent`, a
+duplicate normalized `Count`, and malformed/incomplete `#` escapes were
+accepted.
+
+### GREEN implementation and malformed-name policy
+
+- Name tokens now decode every valid `#hh` byte escape during tokenization,
+  accepting both uppercase and lowercase hexadecimal digits. The same decoded
+  token representation is used for dictionary keys and name values.
+- A `#` without exactly two following hexadecimal digits makes tokenization
+  fail, conservatively rejecting the generated PDF instead of treating an
+  ambiguous spelling as a distinct name.
+- Dictionary parsing rejects any repeated decoded key, including collisions
+  between literal and escaped spellings, instead of overwriting an earlier
+  entry.
+- Decoding is a single forward scan over each bounded Name token. Existing
+  1 MiB object, 400,000-token, xref, page-tree and 32 MiB PDF limits are
+  unchanged.
+
+### Self-review and verification
+
+The escaped-name test covers semantic keys and values, `Type`, `Catalog`,
+`Pages`, `Page`, `Kids`, `Parent`, and uppercase/lowercase hex. Separate tests
+cover the root-Parent bypass, normalized duplicate keys, and malformed plus
+incomplete escapes.
+
+Commands passed:
+
+```text
+node --test test/v1-report.test.js test/v1-report-route.test.js test/result-ui.test.js
+# 21/21 tests passed
+npm run check
+# Syntax OK · 206 JavaScript files
+git diff --check
+```
+
+The retained `output/pdf/v1-agent-review-fixture.pdf` remains a valid 15-page
+A4 ReportLab PDF according to `pdfinfo`. `pdfplumber` reconfirmed all pages are
+A4 and found the report title, running footer and submitted-output sentinel.
