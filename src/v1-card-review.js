@@ -50,7 +50,8 @@ export function aggregateV1CardReviews(reviews) {
     review?.version === V1_CARD_REVIEW_VERSION &&
     !review.error &&
     Number.isFinite(review.score) &&
-    review.score > 0 &&
+    review.score >= 0 &&
+    review.score <= 100 &&
     CARD_REVIEW_DIMENSIONS.every((key) => Number.isFinite(review.dimensions?.[key]))
   );
   return {

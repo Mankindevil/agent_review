@@ -150,3 +150,43 @@ test('Card review aggregation retains the version and averages valid seats', () 
   assert.equal(snapshot.mode, 'mixed');
   assert.equal(snapshot.reviews.length, 3);
 });
+
+test('Card review aggregation includes valid zero-score seats', () => {
+  const zero = normalizeV1CardReview({
+    score: 0,
+    dimensions: {
+      positioningClarity: 0,
+      skillDesign: 0,
+      protocolCoherence: 0,
+      ioExampleQuality: 0,
+      boundaryRiskDisclosure: 0
+    },
+    comment: '声明缺失。',
+    risk: '边界未说明。'
+  });
+  const perfect = normalizeV1CardReview({
+    score: 100,
+    dimensions: {
+      positioningClarity: 100,
+      skillDesign: 100,
+      protocolCoherence: 100,
+      ioExampleQuality: 100,
+      boundaryRiskDisclosure: 100
+    },
+    comment: '声明完整。',
+    risk: '边界已说明。'
+  });
+  const snapshot = aggregateV1CardReviews([
+    { ...zero, mode: 'demo' },
+    { ...perfect, mode: 'demo' },
+    { ...perfect, mode: 'failed', error: 'timeout' }
+  ]);
+  assert.equal(snapshot.score, 50);
+  assert.deepEqual(snapshot.dimensions, {
+    positioningClarity: 50,
+    skillDesign: 50,
+    protocolCoherence: 50,
+    ioExampleQuality: 50,
+    boundaryRiskDisclosure: 50
+  });
+});
