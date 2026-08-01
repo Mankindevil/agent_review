@@ -145,8 +145,8 @@ async function scoreLegacyV1ArenaCase({
   signal?.throwIfAborted();
 
   const normalizedEntries = entries.map((entry) => ({ ...structuredClone(entry) }));
-  const successfulEntries = normalizedEntries.filter((entry) => !isExecutionFailed(entry));
-  const failedEntries = normalizedEntries.filter(isExecutionFailed);
+  const successfulEntries = normalizedEntries.filter((entry) => !isLegacyExecutionFailed(entry));
+  const failedEntries = normalizedEntries.filter(isLegacyExecutionFailed);
   for (const entry of failedEntries) {
     entry.score = 0;
     entry.scoreStatus = 'execution-failed';
@@ -232,8 +232,9 @@ async function scoreV2ArenaCase({
   signal?.throwIfAborted();
 
   const normalizedEntries = entries.map((entry) => ({ ...structuredClone(entry) }));
-  const successfulEntries = normalizedEntries.filter((entry) => !isExecutionFailed(entry));
-  const failedEntries = normalizedEntries.filter(isExecutionFailed);
+  for (const entry of normalizedEntries) assertAuthoritativeExecution(entry.execution);
+  const successfulEntries = normalizedEntries.filter((entry) => !isV2ExecutionFailed(entry));
+  const failedEntries = normalizedEntries.filter(isV2ExecutionFailed);
   for (const entry of failedEntries) applyFailedV2Score(entry);
 
   if (!successfulEntries.length) {
@@ -477,25 +478,18 @@ function applyFailedV2Score(entry) {
 }
 
 function capabilityDetails(entry) {
-  const source = isObject(entry?.execution) ? entry.execution : {};
-  const status = source.status || (isExecutionFailed(entry) ? 'failed' : 'succeeded');
-  const durationMs = Number.isFinite(source.durationMs)
-    ? source.durationMs
-    : Number.isFinite(entry?.durationMs) ? entry.durationMs : 600_000;
-  const succeeded = status === 'succeeded' && hasVisibleOutput(entry?.output);
-  const executionSuccessScore = succeeded ? 100 : 0;
-  const latency = latencyScore(durationMs);
+  const execution = assertAuthoritativeExecution(entry?.execution);
+  const executionSuccessScore = execution.status === 'succeeded' ? 100 : 0;
+  const latency = latencyScore(execution.durationMs);
   return {
-    status: status === 'succeeded' ? 'succeeded' : 'failed',
-    durationMs,
-    timingScope: source.timingScope || 'end-to-end-wall-clock',
-    includesNetwork: source.includesNetwork !== false,
-    toolObservation: source.toolObservation || 'unavailable',
+    status: execution.status,
+    durationMs: execution.durationMs,
+    timingScope: execution.timingScope || 'end-to-end-wall-clock',
+    includesNetwork: execution.includesNetwork !== false,
+    toolObservation: execution.toolObservation || 'unavailable',
     executionSuccessScore,
     latencyScore: latency,
-    capabilityScore: status === 'succeeded'
-      ? round(executionSuccessScore * 0.7 + latency * 0.3, 1)
-      : 0
+    capabilityScore: capabilityScore(execution)
   };
 }
 
@@ -506,15 +500,22 @@ export function latencyScore(durationMs) {
 }
 
 export function capabilityScore(execution) {
-  const status = execution?.status;
-  if (status !== 'succeeded') return 0;
-  return round(70 + latencyScore(execution?.durationMs) * 0.3, 1);
+  const normalized = assertAuthoritativeExecution(execution);
+  if (normalized.status !== 'succeeded') return 0;
+  return round(70 + latencyScore(normalized.durationMs) * 0.3, 1);
 }
 
-function hasVisibleOutput(value) {
-  return typeof value === 'string'
-    ? value.trim().length > 0
-    : value !== null && value !== undefined;
+function assertAuthoritativeExecution(value) {
+  if (!isObject(value)) {
+    throw new TypeError('V2 scoring requires an authoritative execution record');
+  }
+  if (!['succeeded', 'failed'].includes(value.status)) {
+    throw new TypeError('V2 scoring requires authoritative execution.status');
+  }
+  if (!Number.isFinite(value.durationMs) || value.durationMs < 0) {
+    throw new TypeError('V2 scoring requires authoritative execution.durationMs as a finite non-negative number');
+  }
+  return value;
 }
 
 function publicTestCase(testCase) {
@@ -776,10 +777,13 @@ function liveReviewerReadinessFailure(reviewer) {
   return null;
 }
 
-function isExecutionFailed(entry) {
-  return entry?.execution?.status === 'failed'
-    || entry?.mode === 'failed'
+function isLegacyExecutionFailed(entry) {
+  return entry?.mode === 'failed'
     || entry?.scoreStatus === 'execution-failed';
+}
+
+function isV2ExecutionFailed(entry) {
+  return entry?.execution?.status === 'failed';
 }
 
 function assertResolvedConfig(config) {

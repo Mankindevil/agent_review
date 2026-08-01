@@ -59,6 +59,81 @@ test('derives latency and capability from server-side execution records at exact
   assert.equal(capabilityScore({ status: 'succeeded', durationMs: 600_000 }), 70);
 });
 
+test('rejects missing or malformed authoritative execution durations instead of fabricating a capability score', async () => {
+  for (const durationMs of [undefined, null, -1, '60000']) {
+    await assert.rejects(
+      scoreV1ArenaCase({
+        testCase: { name: '日报', prompt: '生成日报' },
+        entries: [{
+          id: 'submitted',
+          name: 'Agent',
+          output: '结果',
+          mode: 'live',
+          execution: durationMs === undefined
+            ? { status: 'succeeded' }
+            : { status: 'succeeded', durationMs }
+        }],
+        config: { version: V1_SCORING_VERSION, mode: 'single', reviewerId: 'gpt' },
+        reviewers: [liveReviewer('gpt')],
+        evaluationMode: 'live',
+        seed: 31,
+        invokeJudge: async ({ candidateIds }) => v2JudgeResponse(candidateIds)
+      }),
+      /authoritative execution.*durationMs/u
+    );
+  }
+  await assert.rejects(
+    scoreV1ArenaCase({
+      testCase: { name: '日报', prompt: '生成日报' },
+      entries: [{ id: 'submitted', name: 'Agent', output: '结果', mode: 'live' }],
+      config: { version: V1_SCORING_VERSION, mode: 'single', reviewerId: 'gpt' },
+      reviewers: [liveReviewer('gpt')],
+      evaluationMode: 'live',
+      seed: 32
+    }),
+    /authoritative execution/u
+  );
+  assert.equal(capabilityScore({ status: 'succeeded', durationMs: 0 }), 100);
+});
+
+test('v2 returns a scored empty arena without calling a judge', async () => {
+  let calls = 0;
+  const result = await scoreV1ArenaCase({
+    testCase: { name: '日报', prompt: '生成日报' },
+    entries: [],
+    config: { version: V1_SCORING_VERSION, mode: 'single', reviewerId: 'gpt' },
+    reviewers: [liveReviewer('gpt')],
+    evaluationMode: 'live',
+    seed: 33,
+    invokeJudge: async () => {
+      calls += 1;
+      throw new Error('must not be called');
+    }
+  });
+
+  assert.equal(calls, 0);
+  assert.equal(result.status, 'scored');
+  assert.deepEqual(result.entries, []);
+  assert.deepEqual(result.judging.scenario.reviews, []);
+});
+
+test('v2 retains capability details when no judge seat succeeds', async () => {
+  const result = await scoreV1ArenaCase({
+    testCase: { name: '日报', prompt: '生成日报' },
+    entries: [{ id: 'submitted', name: 'Agent', output: '结果', mode: 'live', execution: { status: 'succeeded', durationMs: 60_000 } }],
+    config: { version: V1_SCORING_VERSION, mode: 'single', reviewerId: 'gpt' },
+    reviewers: [liveReviewer('gpt')],
+    evaluationMode: 'live',
+    seed: 34,
+    invokeJudge: async () => { throw new Error('judge unavailable'); }
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.entries[0].scoreStatus, 'model-failed');
+  assert.equal(result.entries[0].detail.capability.capabilityScore, 100);
+  assert.deepEqual(result.judging.scenario.reviews, []);
+});
+
 test('v2 panel shares scenario judgement, recomputes 20/60/20 totals, and omits execution metadata from judges', async () => {
   const seen = [];
   const result = await scoreV1ArenaCase({
@@ -184,6 +259,41 @@ test('v2 hard-zeros an execution status failure even when a legacy mode is stale
   assert.equal(failed.score, 0);
   assert.equal(failed.scoreStatus, 'execution-failed');
   assert.equal(failed.judgeReviews.length, 0);
+});
+
+test('legacy v1 ignores execution status and keeps its original mode-based failure predicate', async () => {
+  const result = await scoreV1ArenaCase({
+    testCase: { name: '日报', prompt: '生成日报' },
+    entries: [{
+      id: 'legacy-live',
+      name: 'Legacy Agent',
+      output: '旧版输出',
+      mode: 'live',
+      execution: { status: 'failed', durationMs: 1 }
+    }],
+    config: { version: LEGACY_V1_SCORING_VERSION, mode: 'single', reviewerId: 'gpt' },
+    reviewers: [liveReviewer('gpt')],
+    evaluationMode: 'live',
+    seed: 14,
+    invokeJudge: async ({ candidateIds }) => ({
+      scores: candidateIds.map((candidateId) => ({
+        candidateId,
+        dimensions: {
+          taskConstraint: 80,
+          professionalQuality: 70,
+          evidenceRisk: 60,
+          artifactUsability: 50
+        },
+        total: 70,
+        rationale: '历史评分继续按旧规则处理。',
+        uncertainties: []
+      }))
+    })
+  });
+
+  assert.equal(result.status, 'scored');
+  assert.equal(result.entries[0].score, 70);
+  assert.equal(result.entries[0].scoreStatus, 'scored');
 });
 
 test('requires every configured live reviewer seat and permits demo scoring', () => {
