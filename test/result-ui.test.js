@@ -44,6 +44,59 @@ function cardReviewRendererHarness(source) {
   );
 }
 
+function v2HistoryRendererHarness(source) {
+  const escape = sourceBetween(source, 'function escapeHtml', 'function escapeAttr');
+  const history = sourceBetween(source, 'function renderV2HistoryItem', 'async function deleteEvaluation');
+  const projection = sourceBetween(source, 'function statusOf', 'function shouldSubscribe');
+  return Function(
+    'canDeleteEvaluation', 'formatTime',
+    `${escape}\n${history}\n${projection}\nreturn { statusOf, stageOf, progressOf, renderV2HistoryItem };`
+  )(
+    (item) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(item?.execution?.status),
+    () => '08/02 12:34'
+  );
+}
+
+test('renders retained shared V2 history without restoring a public V2 intake', async () => {
+  const [app, html] = await Promise.all([
+    readFile(new URL('public/app.js', root), 'utf8'),
+    readFile(new URL('public/index.html', root), 'utf8')
+  ]);
+  const { statusOf, stageOf, progressOf, renderV2HistoryItem } = v2HistoryRendererHarness(app);
+  const running = {
+    id: 'eval_v2_history',
+    schemaVersion: 2,
+    createdAt: '2026-08-02T03:34:00.000Z',
+    execution: { status: 'running', stage: 'replica-human', progress: 137 },
+    evidenceManifest: { items: [{ id: 'evidence-1' }, { id: 'evidence-2' }] }
+  };
+
+  assert.equal(statusOf(running), 'running');
+  assert.equal(stageOf(running), 'replica-human');
+  assert.equal(progressOf(running), 100);
+  assert.equal(progressOf({ ...running, execution: { ...running.execution, progress: -5 } }), 0);
+  assert.equal(progressOf({ ...running, execution: { ...running.execution, progress: Number.NaN } }), 0);
+
+  const runningMarkup = renderV2HistoryItem(running);
+  assert.match(runningMarkup, /history-item-v2/);
+  assert.match(runningMarkup, /data-evaluation-id="eval_v2_history"/);
+  assert.match(runningMarkup, />100%<\/span>/);
+  assert.match(runningMarkup, /running · replica-human · 2 evidence/);
+  assert.match(runningMarkup, /data-record-kind="v2"/);
+  assert.match(runningMarkup, /title="请先停止本次评测" disabled/);
+
+  const completedMarkup = renderV2HistoryItem({
+    ...running,
+    execution: { status: 'completed', progress: 62 }
+  });
+  assert.match(completedMarkup, />62%<\/span>/);
+  assert.match(completedMarkup, /completed · qualification · 2 evidence/);
+  assert.match(completedMarkup, /title="删除这条卷宗"/);
+  assert.doesNotMatch(completedMarkup, / disabled/);
+
+  assert.doesNotMatch(html, /id="v2-intake"|data-evaluation-version="v2"|href="\/judge\.html"|href="\/appeal\.html"/);
+});
+
 test('publishes the ordered evidence-led dual-track result surface', async () => {
   const [renderer, evidencePage, evidenceScript, evidenceStyle, app] = await Promise.all([
     readFile(new URL('public/result-v2.js', root), 'utf8'),

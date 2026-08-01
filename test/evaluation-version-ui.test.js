@@ -23,6 +23,7 @@ test('exposes only the live V1 intake on the public homepage', async () => {
   assert.doesNotMatch(html, /id="v2-intake"/);
   assert.doesNotMatch(html, /id="skip-human-review"/);
   assert.doesNotMatch(css, /\.evaluation-version-switch\s*\{/);
+  assert.match(html, /app\.js\?v=20260802-v1-pdf-release1/);
   assert.match(script, /mode: 'live'/);
   assert.match(script, /selectedVersion: 'v1'/);
   assert.doesNotMatch(script, /requestedEvaluationVersion\(location\.search\)/);
