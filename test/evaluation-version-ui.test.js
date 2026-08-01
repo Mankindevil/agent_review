@@ -12,6 +12,23 @@ import {
 
 const root = new URL('../', import.meta.url);
 
+function homepageDestinations(html) {
+  const attributes = /\b(?:href|action|formaction)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/giu;
+  return [...html.matchAll(attributes)].map((match) => match[1] ?? match[2] ?? match[3]);
+}
+
+function assertNoReviewConsoleDestinations(html) {
+  const blocked = homepageDestinations(html).filter((destination) => {
+    try {
+      const pathname = new URL(destination, 'https://public.example/').pathname;
+      return /(?:^|\/)(?:judge|appeal)(?:\.html)?\/?$/iu.test(pathname);
+    } catch {
+      return false;
+    }
+  });
+  assert.deepEqual(blocked, []);
+}
+
 test('exposes only the live V1 intake on the public homepage', async () => {
   const [html, script, css] = await Promise.all([
     readFile(new URL('public/index.html', root), 'utf8'),
@@ -28,6 +45,31 @@ test('exposes only the live V1 intake on the public homepage', async () => {
   assert.match(script, /selectedVersion: 'v1'/);
   assert.doesNotMatch(script, /requestedEvaluationVersion\(location\.search\)/);
   assert.doesNotMatch(script, /resolveEvaluationVersion\(requestedVersion/);
+});
+
+test('homepage excludes judge and appeal destinations across common URL and attribute forms', async () => {
+  const html = await readFile(new URL('public/index.html', root), 'utf8');
+
+  assertNoReviewConsoleDestinations(html);
+  for (const navigation of [
+    '<a href="/judge.html">judge</a>',
+    "<a href='judge?queue=open'>judge</a>",
+    '<form action=./appeal.html#open></form>',
+    '<button formaction="https://ops.example/review/judge?queue=open">judge</button>',
+    "<a href='//ops.example/appeal?case=1'>appeal</a>"
+  ]) {
+    assert.throws(
+      () => assertNoReviewConsoleDestinations(`${html}\n${navigation}`),
+      /Expected values to be strictly deep-equal/u,
+      navigation
+    );
+  }
+
+  assert.doesNotThrow(() => assertNoReviewConsoleDestinations(`${html}
+    <p>The judge and appeal consoles are unavailable; do not navigate to judge.html or appeal?case=1.</p>
+    <a href="/methodology.html?topic=appeal">Read the appeal policy</a>`));
+  assert.doesNotMatch(html, /\bid\s*=\s*(?:"v2-intake"|'v2-intake'|v2-intake(?=\s|>))/iu);
+  assert.doesNotMatch(html, /\bdata-evaluation-version\s*=\s*(?:"v2"|'v2'|v2(?=\s|>))/iu);
 });
 
 test('pins every public homepage query to usable V1 without probing V2 capability', () => {

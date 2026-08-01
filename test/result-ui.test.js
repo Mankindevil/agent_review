@@ -44,25 +44,41 @@ function cardReviewRendererHarness(source) {
   );
 }
 
-function v2HistoryRendererHarness(source) {
-  const escape = sourceBetween(source, 'function escapeHtml', 'function escapeAttr');
-  const history = sourceBetween(source, 'function renderV2HistoryItem', 'async function deleteEvaluation');
-  const projection = sourceBetween(source, 'function statusOf', 'function shouldSubscribe');
-  return Function(
-    'canDeleteEvaluation', 'formatTime',
-    `${escape}\n${history}\n${projection}\nreturn { statusOf, stageOf, progressOf, renderV2HistoryItem };`
-  )(
-    (item) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(item?.execution?.status),
-    () => '08/02 12:34'
+function v2HistoryIntegrationHarness(appSource, actionsSource, items) {
+  const history = sourceBetween(appSource, 'async function loadHistory', 'async function deleteEvaluation');
+  const projection = sourceBetween(appSource, 'function statusOf', 'function escapeHtml');
+  const escape = sourceBetween(appSource, 'function escapeHtml', 'function signed');
+  const formatTime = appSource.slice(appSource.indexOf('function formatTime'));
+  const terminalStatuses = sourceBetween(
+    actionsSource,
+    'const TERMINAL_STATUSES',
+    'export function evaluationActionOptions'
   );
+  const deletePolicy = sourceBetween(
+    actionsSource,
+    'export function canDeleteEvaluation',
+    'export function restoreV2StartButton'
+  ).replace('export function canDeleteEvaluation', 'function canDeleteEvaluation');
+  const elements = new Map([
+    ['#history-count', { textContent: '' }],
+    ['#history-list', { innerHTML: '' }]
+  ]);
+  const state = { historyLoadToken: 0 };
+  const $ = (selector) => elements.get(selector);
+  const fetch = async () => ({ ok: true, json: async () => items });
+  const production = Function(
+    'state', '$', 'fetch',
+    `${terminalStatuses}\n${deletePolicy}\n${history}\n${projection}\n${escape}\n${formatTime}\nreturn { loadHistory, statusOf, stageOf, progressOf, canDeleteEvaluation, renderV2HistoryItem };`
+  )(state, $, fetch);
+
+  return { ...production, elements };
 }
 
-test('renders retained shared V2 history without restoring a public V2 intake', async () => {
-  const [app, html] = await Promise.all([
+test('production loadHistory dispatches schema-v2 records through the retained V2 renderer', async () => {
+  const [app, actions] = await Promise.all([
     readFile(new URL('public/app.js', root), 'utf8'),
-    readFile(new URL('public/index.html', root), 'utf8')
+    readFile(new URL('public/evaluation-actions.js', root), 'utf8')
   ]);
-  const { statusOf, stageOf, progressOf, renderV2HistoryItem } = v2HistoryRendererHarness(app);
   const running = {
     id: 'eval_v2_history',
     schemaVersion: 2,
@@ -70,14 +86,18 @@ test('renders retained shared V2 history without restoring a public V2 intake', 
     execution: { status: 'running', stage: 'replica-human', progress: 137 },
     evidenceManifest: { items: [{ id: 'evidence-1' }, { id: 'evidence-2' }] }
   };
+  const harness = v2HistoryIntegrationHarness(app, actions, [running]);
 
-  assert.equal(statusOf(running), 'running');
-  assert.equal(stageOf(running), 'replica-human');
-  assert.equal(progressOf(running), 100);
-  assert.equal(progressOf({ ...running, execution: { ...running.execution, progress: -5 } }), 0);
-  assert.equal(progressOf({ ...running, execution: { ...running.execution, progress: Number.NaN } }), 0);
+  assert.equal(harness.statusOf(running), 'running');
+  assert.equal(harness.stageOf(running), 'replica-human');
+  assert.equal(harness.progressOf(running), 100);
+  assert.equal(harness.progressOf({ ...running, execution: { ...running.execution, progress: -5 } }), 0);
+  assert.equal(harness.progressOf({ ...running, execution: { ...running.execution, progress: Number.NaN } }), 0);
+  assert.equal(harness.canDeleteEvaluation(running), false);
 
-  const runningMarkup = renderV2HistoryItem(running);
+  await harness.loadHistory();
+  const runningMarkup = harness.elements.get('#history-list').innerHTML;
+  assert.equal(harness.elements.get('#history-count').textContent, 1);
   assert.match(runningMarkup, /history-item-v2/);
   assert.match(runningMarkup, /data-evaluation-id="eval_v2_history"/);
   assert.match(runningMarkup, />100%<\/span>/);
@@ -85,16 +105,63 @@ test('renders retained shared V2 history without restoring a public V2 intake', 
   assert.match(runningMarkup, /data-record-kind="v2"/);
   assert.match(runningMarkup, /title="请先停止本次评测" disabled/);
 
-  const completedMarkup = renderV2HistoryItem({
+  const completed = {
     ...running,
     execution: { status: 'completed', progress: 62 }
-  });
+  };
+  const completedHarness = v2HistoryIntegrationHarness(app, actions, [completed]);
+  assert.equal(completedHarness.canDeleteEvaluation(completed), true);
+  await completedHarness.loadHistory();
+  const completedMarkup = completedHarness.elements.get('#history-list').innerHTML;
   assert.match(completedMarkup, />62%<\/span>/);
   assert.match(completedMarkup, /completed · qualification · 2 evidence/);
   assert.match(completedMarkup, /title="删除这条卷宗"/);
   assert.doesNotMatch(completedMarkup, / disabled/);
 
-  assert.doesNotMatch(html, /id="v2-intake"|data-evaluation-version="v2"|href="\/judge\.html"|href="\/appeal\.html"/);
+  const dispatch = 'item.schemaVersion === 2 ? renderV2HistoryItem(item) : renderLegacyHistoryItem(item)';
+  const reversedDispatch = 'item.schemaVersion === 2 ? renderLegacyHistoryItem(item) : renderV2HistoryItem(item)';
+  assert.match(app, new RegExp(dispatch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  const mutatedHarness = v2HistoryIntegrationHarness(app.replace(dispatch, reversedDispatch), actions, [running]);
+  await mutatedHarness.loadHistory();
+  assert.throws(
+    () => assert.match(mutatedHarness.elements.get('#history-list').innerHTML, /history-item-v2/),
+    { name: 'AssertionError' },
+    'the V2 renderer assertion must reject a reversed production dispatch'
+  );
+});
+
+test('production V2 history rendering escapes hostile identifiers and projected text', async () => {
+  const [app, actions] = await Promise.all([
+    readFile(new URL('public/app.js', root), 'utf8'),
+    readFile(new URL('public/evaluation-actions.js', root), 'utf8')
+  ]);
+  const malicious = {
+    id: 'eval" autofocus onfocus="alert(1)"><svg>',
+    title: '<iframe srcdoc="<script>alert(4)</script>">',
+    schemaVersion: 2,
+    createdAt: '2026-08-02T03:34:00.000Z',
+    execution: {
+      status: '<img src=x onerror="alert(2)">completed',
+      stage: '"><script>alert(3)</script>',
+      progress: 50
+    },
+    evidenceManifest: { items: [] }
+  };
+  const harness = v2HistoryIntegrationHarness(app, actions, [malicious]);
+
+  await harness.loadHistory();
+  const markup = harness.elements.get('#history-list').innerHTML;
+  const escapedId = 'eval&quot; autofocus onfocus=&quot;alert(1)&quot;&gt;&lt;svg&gt;';
+
+  assert.ok(markup.includes(`data-evaluation-id="${escapedId}"`));
+  assert.ok(markup.includes(`data-delete-evaluation="${escapedId}"`));
+  assert.match(markup, /&lt;img src=x onerror=&quot;alert\(2\)&quot;&gt;completed/);
+  assert.match(markup, /&quot;&gt;&lt;script&gt;alert\(3\)&lt;\/script&gt;/);
+  assert.match(markup, /title="请先停止本次评测" disabled/);
+  assert.doesNotMatch(markup, /data-evaluation-id="eval" autofocus/);
+  assert.doesNotMatch(markup, /data-delete-evaluation="eval" autofocus/);
+  assert.doesNotMatch(markup, /alert\(4\)/, 'untrusted item title must not enter V2 history markup');
+  assert.doesNotMatch(markup, /<svg>|<img|<script>|<iframe/);
 });
 
 test('publishes the ordered evidence-led dual-track result surface', async () => {

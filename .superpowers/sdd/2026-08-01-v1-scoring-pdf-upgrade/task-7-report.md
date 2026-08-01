@@ -31,8 +31,9 @@ node --test test/deploy-config.test.js
 npm run check
 ```
 
-Result: `13/13` deployment assertions passed; syntax check passed (`206 JavaScript
-files`).
+Result: `13/13` deployment assertions passed. The syntax check of the then-current
+dirty working tree passed (`206 JavaScript files`); the independently exported
+Task 7 staged tree below contains and checks exactly `204 JavaScript files`.
 
 ## Staged-tree verification
 
@@ -117,7 +118,9 @@ node --test test/deploy-config.test.js test/runtime-context.test.js test/panda-r
 npm run check
 ```
 
-Result: `27/27` tests passed; syntax passed (`206 JavaScript files`).
+Result: `27/27` tests passed; the current dirty working-tree syntax check passed
+(`206 JavaScript files`). The independently exported intended tree below passed
+with `204 JavaScript files`.
 
 `src/runtime-context.js` now reads strict environment values (positive safe
 integer bytes and ratio strictly inside `(0, 1)`), falls back safely for invalid
@@ -358,6 +361,86 @@ node --test test/deploy-config.test.js test/runtime-context.test.js \
   test/v1-report.test.js test/v1-report-route.test.js
 ```
 
-Result: `83/83` passed. `npm run check` also passed (`206 JavaScript files`),
-and the scoped diff check was clean. No V2 controls or links were restored. No
-push or deployment was attempted in this fix round.
+Result: `83/83` passed. The current dirty working-tree `npm run check` also passed
+(`206 JavaScript files`); this is distinct from the intended Task 7 tree's exact
+`204 JavaScript files`. The scoped diff check was clean. No V2 controls or links
+were restored. No push or deployment was attempted in this fix round.
+
+## Fix round 5/5
+
+### Executed V2 history integration and dispatch mutation
+
+The former source-extracted test invoked `renderV2HistoryItem` directly and
+replaced `canDeleteEvaluation` with a test stub, so it could stay green if
+production `loadHistory` dispatched V2 records to the legacy renderer. The new
+harness executes the production `loadHistory` body with controlled fetch and DOM
+boundaries. It extracts the real `statusOf`, `stageOf`, `progressOf`,
+`renderV2HistoryItem`, and dispatch from `public/app.js`, together with the real
+terminal-status set and `canDeleteEvaluation` from
+`public/evaluation-actions.js`.
+
+Running and completed fixtures verify projection, progress clamping, evidence
+count, and the real disabled/enabled delete policy through the history-list DOM
+output. A reversed-dispatch mutant is executed through the same harness; the
+assertion requiring `history-item-v2` rejects it with an `AssertionError`.
+
+### V2 history HTML safety
+
+The RED fixture used a V2 identifier that closed the data attribute and injected
+`autofocus`, `onfocus`, and an SVG element. The original renderer emitted the
+breakout in both `data-evaluation-id` and `data-delete-evaluation`. It also
+included hostile status, stage, and title fields so text projection and unused
+metadata were checked in the same production path.
+
+`renderV2HistoryItem` now derives one `escapeAttr`-encoded identifier and uses it
+for the open control, delete control, and delete accessibility label. The test
+requires exact encoded identifiers, encoded status/stage text, no raw element or
+attribute breakout, and no rendering of the untrusted title.
+
+### Public homepage exclusion coverage
+
+The homepage assertion now parses navigation-bearing `href`, `action`, and
+`formaction` attributes instead of scanning ordinary prose. Its mutation matrix
+rejects judge/appeal paths with or without `.html`, with queries/fragments, with
+single/double/unquoted attributes, and in root-relative, document-relative,
+scheme-relative, and absolute forms. An explanatory paragraph plus a methodology
+query containing the word `appeal` remains accepted. V2 intake IDs and V2 version
+attributes remain independently forbidden.
+
+### RED / GREEN and release suite
+
+The corrected RED command was:
+
+```bash
+node --test test/result-ui.test.js
+```
+
+Result: `8/9` passed. The hostile-history test failed because the rendered
+`data-evaluation-id` began `data-evaluation-id="eval" autofocus ...` instead of
+containing the encoded identifier.
+
+After the production escape, the focused browser/result command passed:
+
+```bash
+node --test test/evaluation-version-ui.test.js test/result-ui.test.js
+```
+
+Result: `16/16` passed.
+
+The exact prior release command, now containing two additional behavioral tests,
+passed in the dirty working tree and in an isolated export of the scoped staged
+source-and-test tree:
+
+```bash
+node --test test/deploy-config.test.js test/runtime-context.test.js \
+  test/panda-runtime.test.js test/v1-card-review.test.js \
+  test/v1-model-scoring.test.js test/pipeline-panda-runtime.test.js \
+  test/evaluation-version-ui.test.js test/result-ui.test.js \
+  test/v1-report.test.js test/v1-report-route.test.js
+npm run check
+```
+
+Result: `85/85` passed in both locations. The current dirty worktree syntax count
+was `206 JavaScript files`, while the isolated intended Task 7 source-and-test
+tree passed with the correct `204 JavaScript files`. No push or deployment was
+attempted.

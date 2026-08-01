@@ -1713,8 +1713,9 @@ function renderLegacyHistoryItem(item) {
 function renderV2HistoryItem(item) {
   const canDelete = canDeleteEvaluation(item);
   const label = statusOf(item);
+  const safeId = escapeAttr(item.id);
   const deleteTitle = canDelete ? '删除这条卷宗' : '请先停止本次评测';
-  return `<article class="history-item history-item-v2"><button class="history-open" type="button" data-evaluation-id="${item.id}"><header><span>${formatTime(item.createdAt)}</span><span>${progressOf(item)}%</span></header><h3>A2A 证据卷宗</h3><p>${escapeHtml(label)} · ${escapeHtml(stageOf(item) || 'qualification')} · ${item.evidenceManifest?.items?.length || 0} evidence</p></button><button class="history-delete" type="button" data-delete-evaluation="${item.id}" data-record-kind="v2" aria-label="${canDelete ? '删除' : '运行中，暂不可删除'} ${escapeHtml(item.id)} 的评测记录" title="${deleteTitle}"${canDelete ? '' : ' disabled'}><i aria-hidden="true">×</i><span>删除</span></button></article>`;
+  return `<article class="history-item history-item-v2"><button class="history-open" type="button" data-evaluation-id="${safeId}"><header><span>${formatTime(item.createdAt)}</span><span>${progressOf(item)}%</span></header><h3>A2A 证据卷宗</h3><p>${escapeHtml(label)} · ${escapeHtml(stageOf(item) || 'qualification')} · ${item.evidenceManifest?.items?.length || 0} evidence</p></button><button class="history-delete" type="button" data-delete-evaluation="${safeId}" data-record-kind="v2" aria-label="${canDelete ? '删除' : '运行中，暂不可删除'} ${safeId} 的评测记录" title="${deleteTitle}"${canDelete ? '' : ' disabled'}><i aria-hidden="true">×</i><span>删除</span></button></article>`;
 }
 
 async function deleteEvaluation(button) {
