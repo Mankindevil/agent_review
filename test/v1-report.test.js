@@ -6,6 +6,8 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { projectV1Report, generateV1ReportPdf } from '../src/v1-report.js';
+import { inspectRuntimeContext } from '../src/runtime-context.js';
+import { scoreComplexity } from '../src/scoring.js';
 
 const exec = promisify(execFile);
 const python = '/Users/jintingzhou/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3';
@@ -90,6 +92,71 @@ test('strictly projects only complete V1 report data without recursive secrets o
   assert.throws(() => projectV1Report(completeV1Fixture({ professional: { reviews: [...fixture.professional.reviews.slice(0, 3), fixture.professional.reviews[0]] } })), /Card 评审席位/);
   assert.throws(() => projectV1Report(completeV1Fixture({ benchmark: fixture.benchmark.map((round) => ({ ...round, entries: round.entries.slice(0, 3) })) })), /候选集/);
   assert.throws(() => projectV1Report(completeV1Fixture({ benchmark: fixture.benchmark.map((round) => ({ ...round, entries: [...round.entries.slice(0, 3), round.entries[0]] })) })), /候选集/);
+});
+
+test('projects complete accepted Card fields and real scoring/context audit shapes', () => {
+  const fixture = completeV1Fixture();
+  fixture.agentCard = {
+    ...fixture.agentCard,
+    defaultInputModes: ['text/plain'],
+    defaultOutputModes: ['text/markdown'],
+    capabilities: {
+      streaming: true,
+      pushNotifications: false,
+      stateTransitionHistory: true,
+      extendedAgentCard: false,
+      extensions: [{ uri: 'urn:capability:trace', description: '公开能力扩展' }]
+    },
+    supportedInterfaces: [{
+      url: 'https://agent.example/a2a', protocolBinding: 'JSONRPC', protocolVersion: '1.0', tenant: 'desk-7'
+    }],
+    provider: { organization: '公开机构', url: 'https://provider.example' },
+    securitySchemes: { bearer: { type: 'http', scheme: 'bearer', description: '公开授权说明' } },
+    security: [{ bearer: ['read:report'] }],
+    signatures: [{ protected: 'public-header', signature: 'public-signature' }],
+    extensions: [{ uri: 'urn:agent:public', description: '公开 Card 扩展' }],
+    skills: [{
+      ...fixture.agentCard.skills[0],
+      inputModes: ['application/json'],
+      outputModes: ['text/markdown']
+    }],
+    unknownSecret: 'must-not-project'
+  };
+  fixture.complexity = scoreComplexity(fixture.agentCard, fixture.benchmark.map((round) => round.case));
+  const context = inspectRuntimeContext('系统', '用户 Prompt', {
+    scope: 'runtime-final:claude-code',
+    maxInputBytes: 1000,
+    warnRatio: 0.8
+  }).usage;
+  fixture.builds[0].contextUsage = [context];
+  fixture.benchmark[0].entries[0].execution.contextUsage = [context];
+
+  const dto = projectV1Report(fixture);
+  assert.deepEqual(dto.agentCard.skills[0].inputModes, ['application/json']);
+  assert.deepEqual(dto.agentCard.skills[0].outputModes, ['text/markdown']);
+  assert.equal(dto.agentCard.supportedInterfaces[0].tenant, 'desk-7');
+  assert.deepEqual(dto.agentCard.capabilities, fixture.agentCard.capabilities);
+  assert.deepEqual(dto.agentCard.provider, fixture.agentCard.provider);
+  assert.deepEqual(dto.agentCard.securitySchemes, fixture.agentCard.securitySchemes);
+  assert.deepEqual(dto.agentCard.security, fixture.agentCard.security);
+  assert.deepEqual(dto.agentCard.signatures, fixture.agentCard.signatures);
+  assert.deepEqual(dto.agentCard.extensions, fixture.agentCard.extensions);
+  assert.equal(JSON.stringify(dto).includes('must-not-project'), false);
+  assert.deepEqual(dto.scoring.complexity.dimensions, fixture.complexity.dimensions);
+  assert.deepEqual(dto.builds[0].contextUsage[0], {
+    scope: 'runtime-final:claude-code',
+    status: 'ok',
+    systemBytes: 6,
+    promptBytes: 13,
+    inputBytes: 19,
+    totalBytes: 19,
+    estimatedTokens: 5,
+    maxInputBytes: 1000,
+    warnRatio: 0.8,
+    remainingBytes: 981,
+    usageRatio: 0.019
+  });
+  assert.deepEqual(dto.benchmark[0].entries[0].execution.contextUsage[0], dto.builds[0].contextUsage[0]);
 });
 
 test('projects supported object-valued data fact selectors through fixed credential-safe fields', () => {

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { renderV2Result } from '../public/result-v2.js';
 
 const read = (name) => readFile(new URL(`../deploy/${name}`, import.meta.url), 'utf8');
 const readDoc = (name) => readFile(new URL(`../docs/${name}`, import.meta.url), 'utf8');
@@ -107,6 +108,30 @@ test('nginx allows only the public evaluation methods, then rejects destructive 
   assert.match(production, /location \/\s*\{\s*return 404;\s*\}/);
   const tlsFallback = production.slice(production.lastIndexOf('location / {'));
   assert.doesNotMatch(tlsFallback, /proxy_pass http:\/\/127\.0\.0\.1:4173;/);
+});
+
+test('retained V2 detail suppresses controls whose private endpoints Nginx blocks', async () => {
+  const production = await read('nginx-production.conf');
+  const markup = renderV2Result({
+    id: 'eval-v2-retained',
+    schemaVersion: 2,
+    governance: { phase: 'final', modelLockedAt: '2026-08-02T00:00:00Z' },
+    trackStatus: { overall: 'final' },
+    resultV2: {
+      absolute: { total: 80, confidence: 0.8 },
+      rating: {},
+      replica: {
+        status: 'released',
+        skills: [{ runtimeId: 'claude-code', runtimeName: 'Claude Code', skillName: 'replica-skill' }],
+        cases: [{ testId: 'case-1', prompt: '公开 Prompt', scores: { submitted: 80, 'replica:claude-code': 70 } }]
+      }
+    }
+  }, { escapeHtml: String });
+
+  assert.match(production, /location ~ \^\/api\/evaluations\/\[\^\/\]\+\/\(\?:appeals\|evidence/);
+  assert.doesNotMatch(production, /location ~ \^\/api\/evaluations\/\[\^\/\]\+\/replica/);
+  assert.doesNotMatch(markup, /data-skill-api="replica"|data-replica-output=/);
+  assert.match(markup, /完整 Skill 与原始输出仅在私有管理入口可查/);
 });
 
 test('nginx rejects methods outside each public route contract', async () => {
@@ -381,10 +406,12 @@ test('diagnostics key rotation atomically keeps the environment and retrieval co
 });
 
 test('V1 release runbook installs and smoke-tests the complete PDF report path', async () => {
-  const [operations, environment] = await Promise.all([
+  const [operations, environment, packageSource] = await Promise.all([
     readDoc('PRODUCTION_OPERATIONS.md'),
-    readFile(new URL('../.env.example', import.meta.url), 'utf8')
+    readFile(new URL('../.env.example', import.meta.url), 'utf8'),
+    readFile(new URL('../package.json', import.meta.url), 'utf8')
   ]);
+  const packageJson = JSON.parse(packageSource);
   assert.match(environment, /^REPORT_PDF_PYTHON=\.venv\/bin\/python$/m);
   assert.match(environment, /^MODEL_CONTEXT_MAX_BYTES=1500000$/m);
   assert.match(environment, /^MODEL_CONTEXT_WARN_RATIO=0\.8$/m);
@@ -401,6 +428,16 @@ test('V1 release runbook installs and smoke-tests the complete PDF report path',
   assert.match(operations, /renderer is `503`/);
   assert.match(operations, /timeout is `504`/);
   assert.match(operations, /rollback/i);
+  assert.match(operations, /npm run test:v1-release/);
+  assert.match(operations, /V2.*已知.*非全绿/s);
+  assert.doesNotMatch(operations.slice(operations.indexOf('## Safe release and rollback'), operations.indexOf('The rendered Nginx configuration')), /&& npm test &&/);
+  for (const filename of [
+    'test/deploy-config.test.js', 'test/runtime-context.test.js',
+    'test/panda-runtime.test.js', 'test/v1-card-review.test.js',
+    'test/v1-model-scoring.test.js', 'test/pipeline-control.test.js',
+    'test/pipeline-panda-runtime.test.js', 'test/evaluation-version-ui.test.js',
+    'test/result-ui.test.js', 'test/v1-report.test.js', 'test/v1-report-route.test.js'
+  ]) assert.match(packageJson.scripts['test:v1-release'], new RegExp(filename.replaceAll('.', '\\.')));
 
   const releaseStart = operations.indexOf('## Safe release and rollback');
   const releaseEnd = operations.indexOf('The rendered Nginx configuration', releaseStart);

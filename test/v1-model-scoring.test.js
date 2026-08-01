@@ -261,6 +261,39 @@ test('v2 hard-zeros an execution status failure even when a legacy mode is stale
   assert.equal(failed.judgeReviews.length, 0);
 });
 
+test('v2 defensively hard-zeros succeeded executions without visible final output', async () => {
+  let judgedCandidates = 0;
+  const result = await scoreV1ArenaCase({
+    testCase: { name: '日报', prompt: '生成日报' },
+    entries: [
+      { id: 'ok', name: 'OK', output: '可见结果', mode: 'live', execution: { status: 'succeeded', durationMs: 60_000 } },
+      { id: 'empty', name: 'Empty', output: '', mode: 'live', execution: { status: 'succeeded', durationMs: 1 } },
+      { id: 'blank', name: 'Blank', output: ' \n\t ', mode: 'live', execution: { status: 'succeeded', durationMs: 1 } },
+      { id: 'object', name: 'Object', output: { text: 'hidden' }, mode: 'live', execution: { status: 'succeeded', durationMs: 1 } }
+    ],
+    config: { version: V1_SCORING_VERSION, mode: 'single', reviewerId: 'gpt' },
+    reviewers: [liveReviewer('gpt')],
+    evaluationMode: 'live',
+    seed: 15,
+    invokeJudge: async ({ candidateIds }) => {
+      judgedCandidates = candidateIds.length;
+      return v2JudgeResponse(candidateIds);
+    }
+  });
+
+  assert.equal(judgedCandidates, 1);
+  assert.equal(result.entries.find((entry) => entry.id === 'ok').score, 79);
+  for (const id of ['empty', 'blank', 'object']) {
+    const entry = result.entries.find((candidate) => candidate.id === id);
+    assert.equal(entry.score, 0);
+    assert.equal(entry.scoreStatus, 'execution-failed');
+    assert.equal(entry.detail.capability.executionSuccessScore, 0);
+    assert.equal(entry.detail.capability.latencyScore, 100, '失败仍保留实测耗时分用于审计');
+    assert.equal(entry.detail.capability.capabilityScore, 0);
+    assert.equal(entry.judgeReviews.length, 0);
+  }
+});
+
 test('legacy v1 ignores execution status and keeps its original mode-based failure predicate', async () => {
   const result = await scoreV1ArenaCase({
     testCase: { name: '日报', prompt: '生成日报' },

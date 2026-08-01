@@ -9,7 +9,8 @@ process.env.NODE_ENV = 'test';
 process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-v1-report-route-${process.pid}.json`);
 process.env.A2A_BLACK_BOX_V1_ENABLED = 'false';
 
-const { server, evaluationStore } = await import('../server.js');
+const { server, evaluationStore, pipeline } = await import('../server.js');
+const reportPython = '/Users/jintingzhou/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3';
 
 function completeV1ReportFixture(id) {
   const reviews = ['gpt', 'claude', 'doubao', 'deepseek'].map((reviewerId) => ({ reviewerId, reviewer: reviewerId, model: reviewerId, score: 80, comment: '完成', dimensions: {} }));
@@ -38,6 +39,44 @@ function requestReport(id) {
     server.emit('request', request, response);
   });
 }
+
+test('fresh V1 create completes and downloads its report without a store reload', async () => {
+  const created = await pipeline.create({
+    mode: 'demo',
+    seed: 8082,
+    scoringConfig: { mode: 'single', reviewerId: 'deepseek' },
+    agentCard: {
+      name: 'Fresh Report Agent',
+      description: '面向金融研究的多步分析 Agent。',
+      supportedInterfaces: [{
+        url: 'https://example.com/a2a', protocolBinding: 'HTTP+JSON', protocolVersion: '1.0'
+      }],
+      skills: [{ id: 'research', name: '研究', description: '生成完整研究报告。' }]
+    },
+    cases: [{ name: '新建报告', prompt: '请输出一份包含方法、证据与风险的完整研究报告。' }]
+  });
+  let completed;
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    completed = evaluationStore.get(created.id);
+    if (completed?.status === 'completed') break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const previousPython = process.env.REPORT_PDF_PYTHON;
+  try {
+    assert.equal(created.schemaVersion, 1);
+    assert.equal(completed?.schemaVersion, 1);
+    assert.equal(completed?.status, 'completed');
+    process.env.REPORT_PDF_PYTHON = reportPython;
+    const report = await requestReport(created.id);
+    assert.equal(report.status, 200);
+    assert.equal(report.headers.get('content-type'), 'application/pdf');
+    assert.equal(report.headers.get('content-disposition'), `attachment; filename="agent-review-${created.id}.pdf"`);
+    assert.equal(report.body.subarray(0, 5).toString(), '%PDF-');
+  } finally {
+    if (previousPython === undefined) delete process.env.REPORT_PDF_PYTHON; else process.env.REPORT_PDF_PYTHON = previousPython;
+    await evaluationStore.delete(created.id);
+  }
+});
 
 test('maps incomplete V1 topology and failed renderers to JSON without partial PDF bytes', async () => {
   const completed = completeV1ReportFixture('v1-route-complete');

@@ -136,7 +136,7 @@ export class EvaluationPipeline {
     const reviewPlan = publicReviewPlan(configuredReviewers());
     const runtimePlan = publicRuntimePlan();
     const evaluation = {
-      id: id(), createdAt: now(), updatedAt: now(), status: 'queued', mode: input.mode === 'live' ? 'live' : 'demo',
+      id: id(), schemaVersion: 1, createdAt: now(), updatedAt: now(), status: 'queued', mode: input.mode === 'live' ? 'live' : 'demo',
       agentCard: input.agentCard, cases, validation, seed, temperature, reviewPlan, runtimePlan, scoringConfig, progress: 0, stage: '等待评测舱', activeWork: null, logs: [],
       ...(agentExamples ? { agentExamples } : {}),
       ...(input.agentAuthorization !== undefined ? { authorizationRequired: true } : {})
@@ -715,7 +715,7 @@ export class EvaluationPipeline {
         if (signal.aborted) throw signal.reason || measured.error;
         output = `执行失败：${measured.error.message}`;
         mode = 'failed';
-        execution = executionSnapshot('failed', measured.durationMs, runtimeContext.contextUsage);
+        execution = executionSnapshot('failed', measured.durationMs, runtimeContext.contextUsage, measured.failureStage);
       } else {
         output = measured.value;
         execution = executionSnapshot('succeeded', measured.durationMs, runtimeContext.contextUsage);
@@ -742,7 +742,7 @@ export class EvaluationPipeline {
           if (signal.aborted) throw signal.reason || measured.error;
           output = `执行失败：${measured.error.message}`;
           mode = 'failed';
-          execution = executionSnapshot('failed', measured.durationMs, runtimeContext.contextUsage);
+          execution = executionSnapshot('failed', measured.durationMs, runtimeContext.contextUsage, measured.failureStage);
         } else {
           output = measured.value;
           execution = executionSnapshot('succeeded', measured.durationMs, runtimeContext.contextUsage);
@@ -838,7 +838,9 @@ export class EvaluationPipeline {
         await this.update(item, { professional: professionalSnapshot(professionalReviews) }, { level: 'error', source: 'MODEL', phase: 'review', text: `${reviewer.model} 调用失败`, detail: error.message, mode: 'failed', durationMs: Date.now() - startedAt });
       }
     }
-    const validProfessional = professionalReviews.filter((review) => review.score > 0);
+    const validProfessional = professionalReviews.filter((review) =>
+      !review.error && Number.isFinite(review.score)
+    );
     const professional = professionalSnapshot(professionalReviews);
     const professionalMode = professional.mode;
     const pandaRuntime = await this.pandaRuntimeContext();
@@ -927,7 +929,8 @@ export class EvaluationPipeline {
         executionSnapshot(
           submittedMode === 'failed' ? 'failed' : 'succeeded',
           submittedExecution.durationMs,
-          submittedContext.contextUsage
+          submittedContext.contextUsage,
+          submittedExecution.failureStage
         )
       ));
       await this.update(item, { benchmark, progress: 70 + Math.round((index / item.cases.length) * 22), stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, {
@@ -964,7 +967,7 @@ export class EvaluationPipeline {
           entries.push(makeUnscoredEntry(
             build.runtimeId, build.runtime, `执行失败：${runtimeExecution.error.message}`, 'failed',
             deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence,
-            executionSnapshot('failed', runtimeExecution.durationMs, runtimeContext.contextUsage)
+            executionSnapshot('failed', runtimeExecution.durationMs, runtimeContext.contextUsage, runtimeExecution.failureStage)
           ));
         } else {
           entries.push(makeUnscoredEntry(
@@ -1538,7 +1541,17 @@ async function measureV1Execution(monotonicNow, invoke) {
   const startedAt = readMonotonic(monotonicNow);
   try {
     const value = await invoke();
-    return { value, durationMs: elapsedMonotonic(monotonicNow, startedAt) };
+    const durationMs = elapsedMonotonic(monotonicNow, startedAt);
+    if (typeof value !== 'string' || !value.trim()) {
+      return {
+        error: Object.assign(new Error('未返回可见最终输出'), {
+          code: 'VISIBLE_FINAL_OUTPUT_REQUIRED'
+        }),
+        durationMs,
+        failureStage: 'final-output'
+      };
+    }
+    return { value, durationMs };
   } catch (error) {
     return { error, durationMs: elapsedMonotonic(monotonicNow, startedAt) };
   }

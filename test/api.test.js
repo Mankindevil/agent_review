@@ -2259,6 +2259,7 @@ test('downloads a completed V1 report and rejects unavailable records without pa
     assert.match(ok.headers.get('content-type'), /application\/pdf/);
     assert.match(ok.headers.get('content-disposition'), /attachment/);
     assert.equal(ok.headers.get('cache-control'), 'no-store');
+    assert.equal(ok.headers.get('content-disposition'), 'attachment; filename="agent-review-eval_v1_pdf_api.pdf"');
     assert.equal(bytes.subarray(0, 5).toString(), '%PDF-');
     assert.equal((await fetch(`${origin}/api/evaluations/missing/report.pdf`)).status, 404);
     assert.equal((await fetch(`${origin}/api/evaluations/${running.id}/report.pdf`)).status, 409);

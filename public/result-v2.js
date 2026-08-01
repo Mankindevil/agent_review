@@ -144,7 +144,7 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
     <article class="v2-result-report v2-result-report--gaps" data-result-section="evidence-gaps">
       <header><div><small>UNCERTAINTY REGISTER</small><h3>不可验证声明与证据缺口</h3></div></header>
       <p>${absolute.evidenceGaps?.length ? escapeHtml(absolute.evidenceGaps.join(' · ')) : '当前没有已记录的证据缺口。'}</p>
-      <a href="/evidence.html#${encodeURIComponent(item.id)}">打开脱敏证据回放</a>
+      <p class="v2-private-control-note">证据回放属于私有管理功能，公开入口不提供操作控件。</p>
     </article>`;
 }
 
@@ -243,9 +243,8 @@ function renderReplicaReleasedDetail(replica, evaluationId, escapeHtml) {
           <span>—</span>
           <code>${escapeHtml(skill.skillName || 'replica-skill')}</code>
           <span class="ok">✓ RELEASED</span>
-          <button class="skill-detail-toggle" type="button" data-skill-detail="${escapeHtml(skill.runtimeId || '')}" data-skill-api="replica" aria-expanded="false"><i aria-hidden="true">⌁</i><span>查看 Skill</span></button>
+          <span class="v2-private-control-note">私有管理入口可查</span>
         </div>
-        <div class="skill-inspector hidden" data-skill-inspector><div class="skill-inspector-loading"><i></i><span>正在装载目录快照…</span></div></div>
       </article>`).join('')
     : '<p>释放后未附带 Skill 元数据。</p>';
   const caseBlocks = cases.length
@@ -260,10 +259,7 @@ function renderReplicaReleasedDetail(replica, evaluationId, escapeHtml) {
         return `
           <div class="battle-entry">
             <header><h4>${escapeHtml(label)}</h4><strong>${value(score)}</strong></header>
-            <details class="v2-replica-output" data-replica-output="${escapeHtml(evaluationId)}" data-test-id="${escapeHtml(entry.testId || '')}" data-repeat-index="${escapeHtml(String(entry.repeatIndex ?? 0))}" data-source-id="${escapeHtml(sourceId)}">
-              <summary>查看完整输出</summary>
-              <pre class="v2-replica-output-body">展开后加载…</pre>
-            </details>
+            <small class="v2-private-control-note">原始输出仅在私有管理入口可查</small>
           </div>`;
       }).join('');
       return `
@@ -279,6 +275,7 @@ function renderReplicaReleasedDetail(replica, evaluationId, escapeHtml) {
   return `
     <section class="v2-replica-detail" data-result-section="replica-skills">
       <div class="section-title"><h3>复刻直出 Skill</h3><span>DESCRIPTION-ONLY SKILL BUILD</span></div>
+      <p class="v2-private-control-note">完整 Skill 与原始输出仅在私有管理入口可查。</p>
       <div class="build-list">${skillRows}</div>
     </section>
     <section class="v2-replica-detail" data-result-section="replica-battle">

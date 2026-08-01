@@ -634,7 +634,7 @@ export const server = createServer(async (request, response) => {
       }
       response.writeHead(200, {
         'content-type': 'application/pdf',
-        'content-disposition': `attachment; filename="v1-agent-review-${safeAttachmentName(item.id)}.pdf"`,
+        'content-disposition': `attachment; filename="agent-review-${safeAttachmentName(item.id)}.pdf"`,
         'cache-control': 'no-store',
         'content-length': pdf.length
       });

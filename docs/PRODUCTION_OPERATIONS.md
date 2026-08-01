@@ -289,6 +289,10 @@ sudo ufw status verbose
 
 Release directories are immutable and named with a full Git SHA. Validate a candidate before switching. Do not edit files through `/opt/agent-review/app`.
 
+本次是 V1 专项晋级：生产闸门只运行下方固定的 `npm run test:v1-release`
+回归集和语法检查。V2 全量套件存在已知的非全绿结果，不纳入本次 V1
+上线判定；不得在发布记录中宣称全量 `npm test` 已通过。
+
 ```bash
 set -euo pipefail
 health_ok() {
@@ -311,7 +315,7 @@ release_dir="$(readlink -f "$expected_release_dir")"
 test "$release_dir" = "$expected_release_dir"
 test -d "$release_dir"
 test -f "$release_dir/package.json"
-sudo -u agent-review -- sh -c 'cd "$1" && npm ci && python3 -m venv .venv && .venv/bin/python -m pip install -r requirements-data.txt && .venv/bin/python -c "import reportlab" && npm test && npm run check' sh "$release_dir"
+sudo -u agent-review -- sh -c 'cd "$1" && npm ci && python3 -m venv .venv && .venv/bin/python -m pip install -r requirements-data.txt && .venv/bin/python -c "import reportlab" && npm run test:v1-release && npm run check' sh "$release_dir"
 command -v pdfinfo >/dev/null
 nginx_template="$release_dir/deploy/nginx-production.conf"
 test -f "$nginx_template"

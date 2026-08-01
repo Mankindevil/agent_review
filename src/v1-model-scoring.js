@@ -233,6 +233,16 @@ async function scoreV2ArenaCase({
 
   const normalizedEntries = entries.map((entry) => ({ ...structuredClone(entry) }));
   for (const entry of normalizedEntries) assertAuthoritativeExecution(entry.execution);
+  for (const entry of normalizedEntries) {
+    if (entry.execution.status === 'succeeded' && !hasVisibleFinalOutput(entry.output)) {
+      entry.execution = {
+        ...entry.execution,
+        status: 'failed',
+        failureStage: entry.execution.failureStage || 'final-output'
+      };
+      entry.mode = 'failed';
+    }
+  }
   const successfulEntries = normalizedEntries.filter((entry) => !isV2ExecutionFailed(entry));
   const failedEntries = normalizedEntries.filter(isV2ExecutionFailed);
   for (const entry of failedEntries) applyFailedV2Score(entry);
@@ -784,6 +794,10 @@ function isLegacyExecutionFailed(entry) {
 
 function isV2ExecutionFailed(entry) {
   return entry?.execution?.status === 'failed';
+}
+
+function hasVisibleFinalOutput(value) {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function assertResolvedConfig(config) {

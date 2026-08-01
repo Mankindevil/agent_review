@@ -99,13 +99,30 @@ export async function generateV1ReportPdf(dto, options = {}) {
 function projectCard(card) {
   return {
     ...strings(card, ['name', 'description', 'version', 'protocolVersion', 'url', 'preferredTransport']),
-    supportedInterfaces: array(card?.supportedInterfaces).map((value) => strings(value, ['url', 'protocolBinding', 'protocolVersion'])),
-    capabilities: bools(card?.capabilities, ['streaming', 'pushNotifications']),
+    supportedInterfaces: array(card?.supportedInterfaces).map((value) => strings(value, ['url', 'protocolBinding', 'protocolVersion', 'tenant'])),
+    capabilities: projectCapabilities(card?.capabilities),
     defaultInputModes: stringArray(card?.defaultInputModes),
     defaultOutputModes: stringArray(card?.defaultOutputModes),
     skills: array(card?.skills).map((skill) => ({
-      ...strings(skill, ['id', 'name', 'description']), tags: stringArray(skill?.tags), examples: stringArray(skill?.examples)
-    }))
+      ...strings(skill, ['id', 'name', 'description']),
+      tags: stringArray(skill?.tags),
+      examples: stringArray(skill?.examples),
+      inputModes: stringArray(skill?.inputModes),
+      outputModes: stringArray(skill?.outputModes)
+    })),
+    ...(isPlainObject(card?.provider) ? { provider: projectPublicJson(card.provider) } : {}),
+    ...(isPlainObject(card?.securitySchemes) ? { securitySchemes: projectPublicJson(card.securitySchemes) } : {}),
+    ...(Array.isArray(card?.security) ? { security: projectPublicJson(card.security) } : {}),
+    ...(Array.isArray(card?.signatures) ? { signatures: projectPublicJson(card.signatures) } : {}),
+    ...(Array.isArray(card?.extensions) ? { extensions: projectPublicJson(card.extensions) } : {})
+  };
+}
+
+function projectCapabilities(value) {
+  if (!isPlainObject(value)) return {};
+  return {
+    ...bools(value, ['streaming', 'pushNotifications', 'stateTransitionHistory', 'extendedAgentCard']),
+    ...(Array.isArray(value.extensions) ? { extensions: projectPublicJson(value.extensions) } : {})
   };
 }
 
@@ -172,7 +189,23 @@ function projectDetail(value) {
 }
 
 function projectExecution(value) { return value ? { ...strings(value, ['status', 'timingScope', 'toolObservation', 'failureStage']), ...bools(value, ['includesNetwork']), ...numbers(value, ['durationMs']), contextUsage: array(value.contextUsage).map(projectContextUsage) } : null; }
-function projectContextUsage(value) { return { ...strings(value, ['phase', 'query', 'queryMethod', 'status', 'warning']), ...numbers(value, ['inputBytes', 'budgetBytes', 'originalRows', 'keptRows', 'droppedRows', 'truncatedRows', 'rowCount']) }; }
+function projectContextUsage(value) {
+  const totalBytes = Number.isFinite(value?.totalBytes)
+    ? value.totalBytes
+    : Number.isFinite(value?.inputBytes) ? value.inputBytes : undefined;
+  const maxInputBytes = Number.isFinite(value?.maxInputBytes) ? value.maxInputBytes : undefined;
+  return {
+    ...strings(value, ['scope', 'status']),
+    ...numbers(value, ['systemBytes', 'promptBytes', 'inputBytes', 'estimatedTokens', 'maxInputBytes', 'warnRatio']),
+    ...(Number.isFinite(totalBytes) ? { totalBytes } : {}),
+    ...(Number.isFinite(totalBytes) && Number.isFinite(maxInputBytes)
+      ? {
+          remainingBytes: Math.max(0, maxInputBytes - totalBytes),
+          usageRatio: Math.round((totalBytes / maxInputBytes) * 1000) / 1000
+        }
+      : {})
+  };
+}
 function projectDataEvidence(value) { return value ? { ...strings(value, ['status', 'source', 'fetchedAt']), queries: array(value.queries).map((query) => ({ ...strings(query, ['id', 'label', 'method', 'status', 'error', 'fingerprint']), ...numbers(query, ['minRows', 'rowCount', 'returnedRows']), ...bools(query, ['truncated']), requiredFields: stringArray(query?.requiredFields), fields: stringArray(query?.fields), missingFields: stringArray(query?.missingFields), params: projectDataParams(query?.params), facts: array(query?.facts).map(projectFact) })) } : null; }
 function projectDataParams(value) { return Object.fromEntries(PUBLIC_PANDA_PARAM_KEYS.filter((key) => isPublicDataValue(value?.[key])).map((key) => [key, projectDataValue(value[key])])); }
 function projectFact(value) {
@@ -203,9 +236,22 @@ function projectRoast(value) { return { ...strings(value, ['headline', 'summary'
 function strings(value, keys) { return Object.fromEntries(keys.filter((key) => typeof value?.[key] === 'string').map((key) => [key, value[key]])); }
 function numbers(value, keys) { return Object.fromEntries(keys.filter((key) => Number.isFinite(value?.[key])).map((key) => [key, value[key]])); }
 function bools(value, keys) { return Object.fromEntries(keys.filter((key) => typeof value?.[key] === 'boolean').map((key) => [key, value[key]])); }
-function scoreObject(value) { return { ...strings(value, ['verdict', 'reason']), ...numbers(value, ['score']), dimensions: numbers(value?.dimensions, ['taskComplexity', 'dataDependency', 'workflowDepth', 'agentNecessity', 'reproducibility']) }; }
+function scoreObject(value) { return { ...strings(value, ['verdict', 'reason']), ...numbers(value, ['score']), dimensions: numbers(value?.dimensions, ['researchDepth', 'dataDependency', 'temporalState', 'decisionUncertainty', 'workflowReuse']) }; }
 function array(value) { return Array.isArray(value) ? value : []; }
 function stringArray(value) { return array(value).filter((item) => typeof item === 'string'); }
+function isPlainObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+function projectPublicJson(value, depth = 0) {
+  if (depth > 20) throw new RangeError('Agent Card 公开扩展层级过深');
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (Number.isFinite(value)) return value;
+  if (Array.isArray(value)) return value.map((item) => projectPublicJson(item, depth + 1));
+  if (isPlainObject(value)) {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([, item]) => item !== undefined && typeof item !== 'function' && typeof item !== 'symbol')
+      .map(([key, item]) => [key, projectPublicJson(item, depth + 1)]));
+  }
+  throw new TypeError('Agent Card 公开字段包含不可序列化值');
+}
 function positiveInteger(value, fallback) { return Number.isSafeInteger(value) && value > 0 ? value : fallback; }
 function safeError(error) { return String(error?.message || error).replace(/[\r\n]+/g, ' ').slice(0, 300); }
 function sanitizeStderr(value) { return String(value || '').replace(/[\r\n]+/g, ' ').replace(/(?:password|secret|token|authorization|credential)\s*[=:]\s*\S+/giu, '[REDACTED]').slice(0, 500); }

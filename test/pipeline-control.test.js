@@ -1640,6 +1640,8 @@ test('persists each completed reviewer, runtime and benchmark entry incrementall
   assert.ok(snapshots.some((item) => item.activeWork?.type === 'build'));
   assert.ok(snapshots.some((item) => item.activeWork?.type === 'benchmark'));
   assert.equal(store.get(created.id).status, 'completed');
+  assert.equal(created.schemaVersion, 1);
+  assert.equal(store.get(created.id).schemaVersion, 1);
   assert.equal(store.get(created.id).activeWork, null);
   assert.equal(store.get(created.id).seed, 424242);
   assert.equal(store.get(created.id).temperature, 0);
@@ -1649,6 +1651,33 @@ test('persists each completed reviewer, runtime and benchmark entry incrementall
   assert.deepEqual(Object.keys(store.get(created.id).reviewPlan[0]).sort(), ['id', 'model', 'name']);
   assert.equal(store.get(created.id).professional.reviews.every((review) => Number.isInteger(review.seed)), true);
   assert.equal(store.get(created.id).builds.every((build) => Number.isInteger(build.seed)), true);
+});
+
+test('fresh V1 runs classify empty, whitespace and non-string Runtime outputs as failed', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-visible-output-${process.pid}.json`));
+  const outputs = ['', ' \n\t ', { text: 'not a final string' }];
+  let invocation = 0;
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    runSkillFn: async () => outputs[invocation++],
+    scoreV1Case: async (input) => successfulV1ScoringResult(input)
+  });
+  const created = await pipeline.create({
+    mode: 'demo',
+    agentCard: evaluation('template').agentCard,
+    cases: [{ name: 'case', prompt: 'test prompt' }]
+  });
+  const completed = await waitFor(store, created.id, (value) => value.status === 'completed');
+  const runtimes = completed.benchmark[0].entries.filter((entry) => entry.id !== 'submitted');
+
+  assert.equal(runtimes.length, 3);
+  for (const entry of runtimes) {
+    assert.equal(entry.execution.status, 'failed');
+    assert.equal(entry.mode, 'failed');
+    assert.equal(entry.scoreStatus, 'execution-failed');
+    assert.equal(entry.score, 0);
+    assert.equal(entry.dimensions, null);
+    assert.match(entry.output, /未返回可见最终输出/);
+  }
 });
 
 test('retries an individual stage and recalculates the derived verdict', async () => {
@@ -1932,6 +1961,49 @@ test('keeps the live V1 CASE and derived verdict unchanged while benchmark resco
     value.status === 'completed' && value.retryHistory?.length === 1
   );
   assert.equal(updated.benchmark[0].entries.every((entry) => entry.score === 80), true);
+});
+
+test('whitespace Runtime retry is classified failed before atomic CASE replacement', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-retry-visible-output-${process.pid}.json`));
+  const scoringStarted = deferredValue();
+  const scoringResult = deferredValue();
+  let scoringInput;
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    runSkillFn: async () => ' \n\t ',
+    scoreV1Case: async (input) => {
+      scoringInput = structuredClone(input);
+      scoringStarted.resolve();
+      return scoringResult.promise;
+    }
+  });
+  const item = completedV1Evaluation('eval_v1_retry_visible_output');
+  item.scoringConfig = { version: 'v1-model-arena/v2', mode: 'single', reviewerId: 'deepseek' };
+  item.benchmark[0].judging.version = 'v1-model-arena/v2';
+  item.benchmark[0].entries.forEach((entry) => {
+    entry.execution = {
+      status: 'succeeded', durationMs: 999, timingScope: 'end-to-end-wall-clock',
+      includesNetwork: true, toolObservation: 'unavailable', contextUsage: []
+    };
+  });
+  const previousRound = structuredClone(item.benchmark[0]);
+  await store.set(item);
+
+  await pipeline.retry(item.id, { type: 'benchmark', key: 'claude-code', caseIndex: 0 });
+  await scoringStarted.promise;
+  const candidate = scoringInput.entries.find((entry) => entry.id === 'claude-code');
+  assert.equal(candidate.execution.status, 'failed');
+  assert.equal(candidate.mode, 'failed');
+  assert.equal(candidate.scoreStatus, 'execution-failed');
+  assert.equal(candidate.score, 0);
+  assert.match(candidate.output, /未返回可见最终输出/);
+  assert.deepEqual(store.get(item.id).benchmark[0], previousRound);
+
+  scoringResult.resolve(successfulV1ScoringResult(scoringInput));
+  const updated = await waitFor(store, item.id, (value) => value.retryHistory?.length === 1);
+  const persisted = updated.benchmark[0].entries.find((entry) => entry.id === 'claude-code');
+  assert.equal(persisted.execution.status, 'failed');
+  assert.equal(persisted.score, 0);
+  assert.equal(persisted.scoreStatus, 'execution-failed');
 });
 
 test('retains the coherent V1 CASE and derived verdict when benchmark rescoring rejects', async () => {

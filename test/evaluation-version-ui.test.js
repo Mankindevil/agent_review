@@ -45,6 +45,9 @@ test('exposes only the live V1 intake on the public homepage', async () => {
   assert.match(script, /selectedVersion: 'v1'/);
   assert.doesNotMatch(script, /requestedEvaluationVersion\(location\.search\)/);
   assert.doesNotMatch(script, /resolveEvaluationVersion\(requestedVersion/);
+  assert.match(html, /Agent Card 设计质量/);
+  assert.match(html, /定位、Skills、协议、输入输出与能力边界/);
+  assert.doesNotMatch(html, /数据纪律、回测可信度、风险合规与可复现性/);
 });
 
 test('homepage excludes judge and appeal destinations across common URL and attribute forms', async () => {

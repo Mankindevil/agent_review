@@ -44,6 +44,13 @@ function cardReviewRendererHarness(source) {
   );
 }
 
+function completedTriadRendererHarness(source) {
+  const triad = sourceBetween(source, 'function renderCompletedScoreTriad', 'function v2StatusCopy');
+  return Function('scoreCard', `${triad}\nreturn renderCompletedScoreTriad;`)(
+    (title, score, verdict, detail) => `<article><h4>${title}</h4><b>${score}</b><span>${verdict}</span><p>${detail}</p></article>`
+  );
+}
+
 function v2HistoryIntegrationHarness(appSource, actionsSource, items) {
   const history = sourceBetween(appSource, 'async function loadHistory', 'async function deleteEvaluation');
   const projection = sourceBetween(appSource, 'function statusOf', 'function escapeHtml');
@@ -200,7 +207,8 @@ test('publishes the ordered evidence-led dual-track result surface', async () =>
   assert.match(renderer, /差异未稳定/);
   assert.match(renderer, /待复刻/);
   assert.match(renderer, /same-track only/);
-  assert.match(renderer, /data-skill-api="replica"/);
+  assert.doesNotMatch(renderer, /data-skill-api="replica"|data-replica-output=/);
+  assert.match(renderer, /完整 Skill 与原始输出仅在私有管理入口可查/);
   assert.match(renderer, /同题复现对打/);
   assert.doesNotMatch(renderer, /v2-result-findings/);
   assert.match(app, /function renderResult\(item\)/);
@@ -331,7 +339,7 @@ test('renders V1 Arena v2 in audit order while preserving legacy v1 names', asyn
       scenario: {
         score: 82,
         dimensions: { problemComplexity: 84, agentSuitability: 80 },
-        reviews: [{ reviewerName: 'OpenAI 评审', model: 'GPT-5', mode: 'live', rationale: '涉及多阶段数据与研究判断。' }]
+        reviews: [{ reviewerName: 'OpenAI 评审', model: 'GPT-5', mode: 'live', rationale: '涉及多阶段数据与研究判断。', uncertainties: ['<场景证据有限>'] }]
       }
     },
     entries: [{
@@ -339,7 +347,7 @@ test('renders V1 Arena v2 in audit order while preserving legacy v1 names', asyn
       dimensions: { scenarioValue: 82, professionalQuality: 89, agentCapability: 85 },
       detail: {
         professionalism: { dimensions: { taskCompletion: 95, methodProfessionalism: 90, evidenceDataQuality: 85, riskUncertainty: 80, artifactUsability: 88 } },
-        capability: { durationMs: 123456, toolObservation: 'unavailable' }
+        capability: { status: 'succeeded', durationMs: 123456, timingScope: 'end-to-end-wall-clock', includesNetwork: true, toolObservation: 'unavailable', executionSuccessScore: 100, latencyScore: 88.2, capabilityScore: 96.5 }
       },
       judgeReviews: [{ reviewerName: 'OpenAI 评审', model: 'GPT-5', mode: 'live', rationale: '方法完整，边界清楚。', uncertainties: ['未取得内部工具轨迹。'] }]
     }]
@@ -348,9 +356,13 @@ test('renders V1 Arena v2 in audit order while preserving legacy v1 names', asyn
   for (const label of [
     '场景价值', '问题复杂度', 'Agent 适配度', '专业度', 'Agent 能力',
     '任务完成度', '方法专业度', '证据与数据质量', '风险与不确定性', '产物可用性',
-    '端到端耗时', '包含网络及协议开销', '未观测 Agent 内部工具调用', 'OpenAI 评审'
+    '执行状态', '执行成功分', '耗时分', '能力分', '端到端耗时',
+    '包含网络及协议开销', '未观测 Agent 内部工具调用', 'OpenAI 评审'
   ]) assert.match(v2Markup, new RegExp(label));
   assert.match(v2Markup, /123\.5 s/);
+  assert.match(v2Markup, /96\.5/);
+  assert.match(v2Markup, /&lt;场景证据有限&gt;/);
+  assert.doesNotMatch(v2Markup, /<场景证据有限>/);
   assert.ok(v2Markup.indexOf('场景价值') < v2Markup.indexOf('任务完成度'));
   assert.ok(v2Markup.indexOf('任务完成度') < v2Markup.indexOf('端到端耗时'));
 
@@ -364,6 +376,50 @@ test('renders V1 Arena v2 in audit order while preserving legacy v1 names', asyn
   }], { scoringConfig: { version: 'v1-model-arena/v1', mode: 'single', reviewerId: 'deepseek' } });
   for (const label of ['任务约束', '专业质量', '证据风险', '产物可用性']) assert.match(legacyMarkup, new RegExp(label));
   assert.doesNotMatch(legacyMarkup, /端到端耗时/);
+});
+
+test('renders failed and missing V1 v2 capability audits without fabricating success', async () => {
+  const app = await readFile(new URL('public/app.js', root), 'utf8');
+  const renderBattle = v1ArenaRendererHarness(app);
+  const markup = renderBattle([{
+    case: { name: '执行边界', prompt: '检查失败和缺失字段' },
+    judging: { version: 'v1-model-arena/v2', mode: 'single', status: 'scored', successfulSeats: 1 },
+    entries: [{
+      id: 'failed', name: '失败候选', mode: 'failed', output: '执行失败', score: 0,
+      scoreStatus: 'execution-failed', dimensions: null,
+      detail: { capability: { status: 'failed', durationMs: 0, timingScope: 'end-to-end-wall-clock', includesNetwork: true, toolObservation: 'unavailable', executionSuccessScore: 0, latencyScore: 0, capabilityScore: 0 } },
+      judgeReviews: []
+    }, {
+      id: 'missing', name: '旧的不完整快照', mode: 'live', output: '可见', score: null,
+      scoreStatus: 'model-failed', dimensions: null, detail: {}, judgeReviews: []
+    }]
+  }], { scoringConfig: { version: 'v1-model-arena/v2', mode: 'single', reviewerId: 'deepseek' } });
+
+  assert.match(markup, /执行失败 · 固定 0 分/);
+  assert.match(markup, /执行状态/);
+  assert.match(markup, />failed</);
+  assert.match(markup, /执行成功分<\/span><b>0<\/b>/);
+  assert.match(markup, /耗时分<\/span><b>0<\/b>/);
+  assert.match(markup, /能力分<\/span><b>0<\/b>/);
+  assert.match(markup, /未提供/);
+});
+
+test('completed V1 triad describes Agent Card design and counts valid zero-score seats', async () => {
+  const app = await readFile(new URL('public/app.js', root), 'utf8');
+  const renderTriad = completedTriadRendererHarness(app);
+  const markup = renderTriad({
+    complexity: { score: 70, verdict: '值得 Agent 化', reason: '多阶段工作流' },
+    professional: {
+      score: 50,
+      reviews: [{ score: 0 }, { score: 100 }, { score: Number.NaN, error: '失败' }, { score: 42, error: '上游失败' }]
+    },
+    averages: { submitted: 80, 'claude-code': 70, cursor: 60, doubao: 50 }
+  });
+
+  assert.match(markup, /Agent Card 设计质量/);
+  assert.match(markup, /定位、Skills、协议、输入输出与能力边界/);
+  assert.match(markup, /2 位评审/);
+  assert.doesNotMatch(markup, /五个金融硬指标|金融专业度/);
 });
 
 test('renders Card review labels from its version and safely handles missing or unsafe fields', async () => {

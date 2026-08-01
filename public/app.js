@@ -916,11 +916,7 @@ function renderLegacyResult(item) {
       </div>
       <div class="verdict-copy"><small>FINAL VERDICT / ${escapeHtml(tier.label)}</small><h3>${renderHeadline(item.roast.headline)}</h3><p>提交 Agent 实战均分 <b>${item.averages.submitted}</b>，对 Claude Code ${signed(item.roast.deltaClaude)}，对豆包 ${signed(item.roast.deltaDoubao)}。</p>${renderRecalculationNote(item)}</div>
     </section>
-    <div class="score-triad">
-      ${scoreCard('01 / 必要性', complexity.score, complexity.verdict, complexity.reason, complexity.score >= 60)}
-      ${scoreCard('02 / 金融专业度', item.professional.score, '四模型独立审稿', `${item.professional.reviews.filter(r=>r.score>0).length} 位评审从五个金融硬指标独立打分。`, false)}
-      ${scoreCard('03 / 实战力', item.averages.submitted, '提交 Agent 同题均分', `Claude ${item.averages['claude-code']} · Cursor ${item.averages.cursor} · 豆包 ${item.averages.doubao}`, true)}
-    </div>
+    ${renderCompletedScoreTriad(item)}
     ${renderComplexity(complexity)}
     ${renderReviews(item.professional.reviews, item)}
     ${renderBuilds(item.builds, item)}
@@ -928,6 +924,19 @@ function renderLegacyResult(item) {
   `;
   revealVerdictInView(root, item.id);
   return true;
+}
+
+function renderCompletedScoreTriad(item) {
+  const complexity = item.complexity || {};
+  const professional = item.professional || {};
+  const averages = item.averages || {};
+  const successfulReviews = (Array.isArray(professional.reviews) ? professional.reviews : [])
+    .filter((review) => !review?.error && Number.isFinite(review?.score)).length;
+  return `<div class="score-triad">
+    ${scoreCard('01 / 必要性', complexity.score, complexity.verdict, complexity.reason, complexity.score >= 60)}
+    ${scoreCard('02 / Agent Card 设计质量', professional.score, '四模型独立审稿', `${successfulReviews} 位评审从定位、Skills、协议、输入输出与能力边界五项设计维度独立打分。`, false)}
+    ${scoreCard('03 / 实战力', averages.submitted, '提交 Agent 同题均分', `Claude ${averages['claude-code']} · Cursor ${averages.cursor} · 豆包 ${averages.doubao}`, true)}
+  </div>`;
 }
 
 function v2StatusCopy(item) {
@@ -1335,9 +1344,9 @@ function renderV1Judging(round, item) {
 }
 
 function renderV1JudgeReviews(entry, arenaV2 = false) {
-  if (entry.scoreStatus === 'execution-failed') {
-    return `<div class="v1-judge-audit execution-failed"><b>执行失败 · 固定 0 分</b><span>该输出未发送给评分模型</span></div>`;
-  }
+  const failedNotice = entry.scoreStatus === 'execution-failed'
+    ? `<p class="v1-audit-empty"><b>执行失败 · 固定 0 分</b><br>该输出未发送给评分模型。</p>`
+    : '';
   const dimensions = arenaV2
     ? entry.detail?.professionalism?.dimensions
     : entry.dimensions;
@@ -1371,10 +1380,23 @@ function renderV1JudgeReviews(entry, arenaV2 = false) {
     ? `<p class="v1-audit-empty">模型评分未形成有效数字，保留输出等待重试。</p>`
     : '';
   const execution = entry.detail?.capability;
-  const executionMetrics = arenaV2 && execution ? `<section class="v1-execution-metrics"><div><small>OBJECTIVE EXECUTION</small><b>端到端耗时</b><strong>${formatExecutionDuration(execution.durationMs)}</strong></div><p>包含网络及协议开销；${escapeHtml(execution.toolObservation === 'unavailable' ? '未观测 Agent 内部工具调用' : `工具观测：${execution.toolObservation || '未提供'}`)}</p></section>` : '';
-  if (!dimensionRows && !reviews && !pending && !executionMetrics) return '';
+  const executionMetrics = arenaV2 ? renderV1ExecutionMetrics(execution) : '';
+  if (!dimensionRows && !reviews && !pending && !failedNotice && !executionMetrics) return '';
   const summary = arenaV2 ? '模型审计与专业五项' : '模型评分审计';
-  return `<details class="v1-judge-audit"${entry.scoreStatus === 'model-failed' ? ' open' : ''}><summary>${summary}</summary>${pending}${dimensionRows ? `<div class="v1-dimension-grid">${dimensionRows}</div>` : ''}${executionMetrics}${reviews ? `<div class="v1-review-list">${reviews}</div>` : ''}</details>`;
+  return `<details class="v1-judge-audit${entry.scoreStatus === 'execution-failed' ? ' execution-failed' : ''}"${['model-failed', 'execution-failed'].includes(entry.scoreStatus) ? ' open' : ''}><summary>${summary}</summary>${failedNotice}${pending}${dimensionRows ? `<div class="v1-dimension-grid">${dimensionRows}</div>` : ''}${executionMetrics}${reviews ? `<div class="v1-review-list">${reviews}</div>` : ''}</details>`;
+}
+
+function renderV1ExecutionMetrics(execution) {
+  const value = (field) => Number.isFinite(execution?.[field]) ? execution[field] : '未提供';
+  const status = typeof execution?.status === 'string' && execution.status ? execution.status : '未提供';
+  const toolNotice = execution?.toolObservation === 'unavailable'
+    ? '未观测 Agent 内部工具调用'
+    : `工具观测：${execution?.toolObservation || '未提供'}`;
+  return `<section class="v1-execution-metrics">
+    <div><small>OBJECTIVE EXECUTION</small><b>端到端耗时</b><strong>${formatExecutionDuration(execution?.durationMs)}</strong></div>
+    <div class="v1-execution-components"><span>执行状态</span><b>${escapeHtml(status)}</b><span>执行成功分</span><b>${value('executionSuccessScore')}</b><span>耗时分</span><b>${value('latencyScore')}</b><span>能力分</span><b>${value('capabilityScore')}</b></div>
+    <p>耗时为平台端到端墙钟统计，包含网络及协议开销；${escapeHtml(toolNotice)}。</p>
+  </section>`;
 }
 
 function formatExecutionDuration(durationMs) {
@@ -1387,7 +1409,11 @@ function renderV1ArenaV2Scenario(judging) {
   if (!scenario?.dimensions) return '';
   const labels = { problemComplexity: '问题复杂度', agentSuitability: 'Agent 适配度' };
   const rows = Object.entries(scenario.dimensions).map(([key, value]) => `<div><span>${escapeHtml(labels[key] || key)}</span><i style="--value:${Number.isFinite(value) ? value : 0}%"></i><b>${Number.isFinite(value) ? value : '—'}</b></div>`).join('');
-  const reviews = (scenario.reviews || []).map((review) => `<article><header><b>${escapeHtml(review.reviewerName || review.reviewerId || '评审席')}</b><span>${escapeHtml(review.model || '—')} · ${escapeHtml((review.mode || '').toUpperCase())}</span></header><p>${escapeHtml(review.rationale || '未提供场景评语')}</p></article>`).join('');
+  const reviews = (scenario.reviews || []).map((review) => {
+    const uncertainties = (Array.isArray(review.uncertainties) ? review.uncertainties : [])
+      .map((uncertainty) => `<li>${escapeHtml(uncertainty)}</li>`).join('');
+    return `<article><header><b>${escapeHtml(review.reviewerName || review.reviewerId || '评审席')}</b><span>${escapeHtml(review.model || '—')} · ${escapeHtml((review.mode || '').toUpperCase())}</span></header><p>${escapeHtml(review.rationale || '未提供场景评语')}</p>${uncertainties ? `<div><small>不确定性</small><ul>${uncertainties}</ul></div>` : ''}</article>`;
+  }).join('');
   return `<section class="v1-arena-scenario"><header><div><small>SHARED SCENARIO / 20%</small><h4>场景价值 <b>${Number.isFinite(scenario.score) ? scenario.score : '—'}</b></h4></div><p>同一 Prompt 共享评分，不随候选 Agent 改变。</p></header><div class="v1-dimension-grid">${rows}</div>${reviews ? `<div class="v1-review-list">${reviews}</div>` : ''}</section>`;
 }
 

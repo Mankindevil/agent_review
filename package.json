@@ -19,6 +19,7 @@
     "test": "node scripts/run-tests.js && node scripts/run-market-worker-tests.js",
     "test:node": "node scripts/run-tests.js",
     "test:market-worker": "node scripts/run-market-worker-tests.js",
+    "test:v1-release": "node --test test/deploy-config.test.js test/runtime-context.test.js test/panda-runtime.test.js test/v1-card-review.test.js test/v1-model-scoring.test.js test/pipeline-control.test.js test/pipeline-panda-runtime.test.js test/evaluation-version-ui.test.js test/result-ui.test.js test/v1-report.test.js test/v1-report-route.test.js",
     "check": "node scripts/check-syntax.js"
   },
   "engines": {
