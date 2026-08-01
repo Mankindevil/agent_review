@@ -167,3 +167,52 @@ This is not an application child-process or server-handle leak. The committed
 `test/v1-report-route.test.js` uses the real exported server and direct request
 emission (no socket) to execute the same route-level incomplete-topology,
 non-zero-renderer and oversize/no-partial-response assertions in this sandbox.
+
+## Fix round 3 / 5
+
+### Root cause and TDD red phase
+
+- A persisted custom `reviewPlan` is the authoritative Card-review topology,
+  but report eligibility always required the default reviewer ids. This rejected
+  a valid completed record with its configured failed seat recorded.
+- The structural PDF gate found `/Type /Page` by scanning raw object text. A
+  `/Bogus` dictionary could therefore pass by placing that text in a literal
+  string, and there was no proof of `/Kids` ownership, parent links, counts or
+  an acyclic page tree.
+
+Focused tests were first added for the persisted custom plan (including a
+`failed` seat) and for valid-looking traditional PDFs containing a bogus page,
+a `/Kids` cycle, an incorrect `/Parent`, or a `/Pages` node without `/Kids`.
+They failed against the previous gate.
+
+### Fixes
+
+- When `evaluation.reviewPlan` is persisted, eligibility now derives the exact
+  unique reviewer-id set from that array; it falls back to `V1_REVIEWER_IDS`
+  only when no plan is persisted. Runtime candidate requirements remain the
+  submitted candidate plus all three configured runtimes.
+- The PDF gate now parses bounded classic xref entries and object dictionaries,
+  ignores literal strings/comments rather than scanning arbitrary content, and
+  walks only `/Kids`. It rejects cycles, tree depth above 64, more than 100,000
+  page-tree nodes, mismatched `/Parent` links, malformed `/Count` values and
+  missing `/Kids` collections.
+- Parser work is bounded by the existing 32 MiB output cap plus a 100,000-entry
+  xref limit, 1 MiB object limit and 400,000-token limit. Parsed dictionaries
+  use null-prototype maps so untrusted PDF names cannot affect parser state.
+
+### Verification
+
+Commands passed:
+
+```text
+node --test test/v1-report.test.js test/v1-report-route.test.js test/result-ui.test.js
+npm run check
+git diff --check
+```
+
+The renderer was not changed in this round, so the final fixture was not
+regenerated. Structural QA on `output/pdf/v1-agent-review-fixture.pdf` still
+reports a 15-page A4 PDF; `pdfplumber` confirms the title, running footer and
+submitted-output sentinel. As in round 2, the sandbox-wide API suite remains
+blocked before route execution by loopback `listen` returning `EPERM`; the
+no-socket route harness above remains green.

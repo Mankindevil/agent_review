@@ -10,6 +10,26 @@ import { projectV1Report, generateV1ReportPdf } from '../src/v1-report.js';
 const exec = promisify(execFile);
 const python = '/Users/jintingzhou/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3';
 
+function traditionalPdf(objects, root = 1) {
+  const maxObject = Math.max(...Object.keys(objects).map(Number));
+  let source = '%PDF-1.7\n';
+  const offsets = new Map();
+  for (let objectNumber = 1; objectNumber <= maxObject; objectNumber += 1) {
+    if (!objects[objectNumber]) continue;
+    offsets.set(objectNumber, Buffer.byteLength(source));
+    source += `${objectNumber} 0 obj\n${objects[objectNumber]}\nendobj\n`;
+  }
+  const xref = Buffer.byteLength(source);
+  source += `xref\n0 ${maxObject + 1}\n0000000000 65535 f \n`;
+  for (let objectNumber = 1; objectNumber <= maxObject; objectNumber += 1) {
+    source += offsets.has(objectNumber)
+      ? `${String(offsets.get(objectNumber)).padStart(10, '0')} 00000 n \n`
+      : '0000000000 00000 f \n';
+  }
+  return `${source}trailer\n<< /Size ${maxObject + 1} /Root ${root} 0 R >>\nstartxref\n${xref}\n%%EOF`;
+}
+function shellPrint(pdf) { return `printf '%b' ${JSON.stringify(pdf)}`; }
+
 export function completeV1Fixture(overrides = {}) {
   const long = `完整候选输出 SENTINEL-OUTPUT-甲：这是用于验证 PDF 不截断的完整中文研究交付物。${'包含时点、数据、方法和风险提示。'.repeat(80)}`;
   const review = { reviewer: 'OpenAI 评审', reviewerId: 'gpt', model: 'GPT-5', mode: 'live', score: 87, comment: '完整中文评语 SENTINEL-REVIEW：Card 的定位、Skill 与协议结构清晰。', risk: '仍应说明数据可用性和边界。', dimensions: { positioningClarity: 88, skillDesign: 86, protocolCoherence: 85, ioExampleQuality: 87, boundaryRiskDisclosure: 89 } };
@@ -68,6 +88,17 @@ test('projects supported object-valued data fact selectors through fixed credent
   assert.doesNotMatch(JSON.stringify(fact), /selector-secret|nested-secret|apiKey|bearer/);
 });
 
+test('accepts complete custom persisted reviewer plans and rejects missing or duplicate seats', () => {
+  const reviewPlan = [{ id: 'custom-primary', name: 'Custom Primary', model: 'Model A' }, { id: 'custom-fallback', name: 'Custom Fallback', model: 'Model B' }];
+  const reviews = [
+    { reviewerId: 'custom-primary', reviewer: 'Custom Primary', score: 91, comment: '完成' },
+    { reviewerId: 'custom-fallback', reviewer: 'Custom Fallback', mode: 'failed', error: '上游超时' }
+  ];
+  assert.doesNotThrow(() => projectV1Report(completeV1Fixture({ reviewPlan, professional: { reviews } })));
+  assert.throws(() => projectV1Report(completeV1Fixture({ reviewPlan, professional: { reviews: reviews.slice(0, 1) } })), /Card 评审席位/);
+  assert.throws(() => projectV1Report(completeV1Fixture({ reviewPlan, professional: { reviews: [reviews[0], { ...reviews[0] }] } })), /Card 评审席位/);
+});
+
 test('generates a multi-page A4 PDF with complete Chinese sentinels', async () => {
   const dto = projectV1Report(completeV1Fixture());
   const pdf = await generateV1ReportPdf(dto, { python, timeoutMs: 60_000 });
@@ -93,12 +124,28 @@ test('rejects malformed, failed, timed-out, and oversized renderer output withou
   try {
     const invalid = await script('invalid.sh', "printf '%s' '%PDF-1.7 incomplete'");
     const fakePrefix = '%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n';
-    const shapedButTruncated = await script('shaped-but-truncated.sh', `printf '%b' ${JSON.stringify(`${fakePrefix}xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n${Buffer.byteLength(fakePrefix)}\n%%EOF`)}`);
+    const shapedButTruncated = await script('shaped-but-truncated.sh', shellPrint(`${fakePrefix}xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n${Buffer.byteLength(fakePrefix)}\n%%EOF`));
+    const bogusPage = await script('bogus-page.sh', shellPrint(traditionalPdf({
+      1: '<< /Type /Catalog /Pages 2 0 R >>', 2: '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', 3: '<< /Type /Bogus /Parent 2 0 R /Payload (/Type /Page) >>'
+    })));
+    const cycle = await script('cycle.sh', shellPrint(traditionalPdf({
+      1: '<< /Type /Catalog /Pages 2 0 R >>', 2: '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', 3: '<< /Type /Pages /Kids [2 0 R] /Count 1 /Payload (/Type /Page) >>'
+    })));
+    const badParent = await script('bad-parent.sh', shellPrint(traditionalPdf({
+      1: '<< /Type /Catalog /Pages 2 0 R >>', 2: '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', 3: '<< /Type /Page /Parent 4 0 R >>'
+    })));
+    const missingKids = await script('missing-kids.sh', shellPrint(traditionalPdf({
+      1: '<< /Type /Catalog /Pages 2 0 R >>', 2: '<< /Type /Pages /Count 1 /Bogus 3 0 R >>', 3: '<< /Type /Page /Parent 2 0 R >>'
+    })));
     const failed = await script('failed.sh', "echo renderer-failed >&2; exit 7");
     const delayed = await script('delayed.sh', 'sleep 2; printf %s %PDF-1.7');
     const oversized = await script('oversized.sh', "printf '%s' '%PDF-1.7\\nstartxref\\n0\\n%%EOF'; head -c 512 /dev/zero");
     await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: invalid }), { statusCode: 502 });
     await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: shapedButTruncated }), { statusCode: 502 });
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: bogusPage }), { statusCode: 502 });
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: cycle }), { statusCode: 502 });
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: badParent }), { statusCode: 502 });
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: missingKids }), { statusCode: 502 });
     await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: failed }), { statusCode: 502 });
     await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: delayed, timeoutMs: 50 }), { statusCode: 504 });
     await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: oversized, maxPdfBytes: 128 }), { statusCode: 502 });

@@ -9,6 +9,11 @@ const renderer = path.join(root, 'scripts', 'render-v1-report.py');
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const MAX_PDF_BYTES = 32 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 45_000;
+const MAX_XREF_ENTRIES = 100_000;
+const MAX_PAGE_TREE_DEPTH = 64;
+const MAX_PAGE_TREE_NODES = 100_000;
+const MAX_PDF_OBJECT_BYTES = 1024 * 1024;
+const MAX_PDF_TOKENS = MAX_XREF_ENTRIES * 4;
 const PUBLIC_PANDA_PARAM_KEYS = [
   'symbol', 'symbols', 'code', 'codes', 'ts_code', 'index_code', 'index_codes',
   'start_date', 'end_date', 'begin_date', 'trade_date', 'date', 'cal_date',
@@ -219,7 +224,7 @@ function hasTraditionalPdfStructure(pdf, xrefOffset) {
   if (!source.startsWith('xref', xrefOffset)) return false;
   let cursor = xrefOffset + 4;
   const offsets = new Map();
-  let sawSection = false;
+  let entryCount = 0;
   while (true) {
     const line = nextPdfLine(source, cursor);
     if (!line) return false;
@@ -230,8 +235,8 @@ function hasTraditionalPdfStructure(pdf, xrefOffset) {
     if (!subsection) return false;
     const first = Number(subsection[1]);
     const count = Number(subsection[2]);
-    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(count) || count < 1 || count > 1_000_000) return false;
-    sawSection = true;
+    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(count) || count < 1 || count > MAX_XREF_ENTRIES || entryCount + count > MAX_XREF_ENTRIES) return false;
+    entryCount += count;
     for (let index = 0; index < count; index += 1) {
       const entry = nextPdfLine(source, cursor);
       if (!entry) return false;
@@ -241,23 +246,13 @@ function hasTraditionalPdfStructure(pdf, xrefOffset) {
       if (match[3] === 'n') offsets.set(`${first + index}:${Number(match[2])}`, Number(match[1]));
     }
   }
-  if (!sawSection) return false;
-  const trailerStart = source.indexOf('<<', cursor);
-  if (trailerStart < 0) return false;
-  const trailerEnd = source.indexOf('>>', trailerStart + 2);
-  if (trailerEnd < 0) return false;
-  const trailer = source.slice(trailerStart, trailerEnd + 2);
-  const root = trailer.match(/\/Root\s+(\d+)\s+(\d+)\s+R\b/u);
-  const size = trailer.match(/\/Size\s+(\d+)\b/u);
-  if (!root || !size || Number(size[1]) < 2) return false;
-  const catalog = pdfObjectAt(source, offsets, Number(root[1]), Number(root[2]));
-  if (!catalog || !/\/Type\s*\/Catalog\b/u.test(catalog)) return false;
-  const pagesReference = catalog.match(/\/Pages\s+(\d+)\s+(\d+)\s+R\b/u);
-  if (!pagesReference) return false;
-  const pages = pdfObjectAt(source, offsets, Number(pagesReference[1]), Number(pagesReference[2]));
-  if (!pages || !/\/Type\s*\/Pages\b/u.test(pages) || !/\/Count\s+[1-9]\d*\b/u.test(pages)) return false;
-  const children = [...pages.matchAll(/(\d+)\s+(\d+)\s+R\b/gu)].filter((match) => match[0] !== pagesReference[0]);
-  return children.some((match) => /\/Type\s*\/Page\b/u.test(pdfObjectAt(source, offsets, Number(match[1]), Number(match[2])) || ''));
+  if (!entryCount || offsets.size > MAX_XREF_ENTRIES) return false;
+  const trailer = parsePdfDictionary(source.slice(cursor, cursor + 64 * 1024));
+  const root = trailer?.Root;
+  if (!isPdfReference(root) || !Number.isSafeInteger(trailer?.Size) || trailer.Size < 2) return false;
+  const catalog = pdfDictionaryAt(source, offsets, root);
+  if (!catalog || catalog.Type !== 'Catalog' || !isPdfReference(catalog.Pages)) return false;
+  return validatePageTree(source, offsets, catalog.Pages);
 }
 function nextPdfLine(source, start) {
   if (start > source.length) return null;
@@ -265,21 +260,160 @@ function nextPdfLine(source, start) {
   const end = endOfLine < 0 ? source.length : endOfLine + 1;
   return { text: source.slice(start, endOfLine < 0 ? source.length : endOfLine).replace(/\r$/u, '').trim(), end };
 }
-function pdfObjectAt(source, offsets, objectNumber, generation) {
-  const offset = offsets.get(`${objectNumber}:${generation}`);
+function pdfDictionaryAt(source, offsets, reference) {
+  const offset = offsets.get(`${reference.objectNumber}:${reference.generation}`);
   if (!Number.isSafeInteger(offset) || offset < 0 || offset >= source.length) return null;
-  const header = new RegExp(`^${objectNumber}\\s+${generation}\\s+obj\\b`, 'u');
+  const header = new RegExp(`^${reference.objectNumber}\\s+${reference.generation}\\s+obj\\b`, 'u');
   if (!header.test(source.slice(offset, offset + 64))) return null;
   const end = source.indexOf('endobj', offset);
-  return end < 0 ? null : source.slice(offset, end);
+  if (end < 0 || end - offset > MAX_PDF_OBJECT_BYTES) return null;
+  return parsePdfDictionary(source.slice(offset, end));
 }
+function validatePageTree(source, offsets, rootReference) {
+  const visitedPages = new Set();
+  let visitedNodes = 0;
+  const walk = (reference, parentReference, depth) => {
+    if (depth > MAX_PAGE_TREE_DEPTH || visitedNodes >= MAX_PAGE_TREE_NODES) return null;
+    const key = `${reference.objectNumber}:${reference.generation}`;
+    if (visitedPages.has(key)) return null;
+    visitedPages.add(key);
+    visitedNodes += 1;
+    const dictionary = pdfDictionaryAt(source, offsets, reference);
+    if (!dictionary) return null;
+    if (dictionary.Type === 'Page') {
+      return parentReference && samePdfReference(dictionary.Parent, parentReference) ? 1 : null;
+    }
+    if (dictionary.Type !== 'Pages' || !Array.isArray(dictionary.Kids) || !dictionary.Kids.length || !Number.isSafeInteger(dictionary.Count) || dictionary.Count < 1) return null;
+    if (parentReference && !samePdfReference(dictionary.Parent, parentReference)) return null;
+    let count = 0;
+    for (const child of dictionary.Kids) {
+      if (!isPdfReference(child)) return null;
+      const childCount = walk(child, reference, depth + 1);
+      if (!Number.isSafeInteger(childCount)) return null;
+      count += childCount;
+      if (count > MAX_PAGE_TREE_NODES) return null;
+    }
+    return count === dictionary.Count ? count : null;
+  };
+  return Number.isSafeInteger(walk(rootReference, null, 0));
+}
+function parsePdfDictionary(source) {
+  const dictionary = pdfDictionarySource(source);
+  if (!dictionary) return null;
+  const tokens = pdfTokens(dictionary);
+  if (!tokens) return null;
+  const parsed = parsePdfValue(tokens, 0);
+  return parsed?.value?.kind === 'dictionary' && parsed.index === tokens.length ? parsed.value.entries : null;
+}
+function pdfDictionarySource(source) {
+  const start = source.indexOf('<<');
+  if (start < 0) return null;
+  let depth = 0;
+  let literalDepth = 0;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (literalDepth) {
+      if (character === '\\') index += 1;
+      else if (character === '(') literalDepth += 1;
+      else if (character === ')') literalDepth -= 1;
+      continue;
+    }
+    if (character === '%') { while (index < source.length && source[index] !== '\n' && source[index] !== '\r') index += 1; continue; }
+    if (character === '(') { literalDepth = 1; continue; }
+    if (source.startsWith('<<', index)) { depth += 1; index += 1; continue; }
+    if (source.startsWith('>>', index)) { depth -= 1; index += 1; if (!depth) return source.slice(start, index + 1); }
+  }
+  return null;
+}
+function pdfTokens(source) {
+  const tokens = [];
+  const append = (token) => {
+    if (tokens.length >= MAX_PDF_TOKENS) return false;
+    tokens.push(token);
+    return true;
+  };
+  for (let index = 0; index < source.length;) {
+    const character = source[index];
+    if (/\s/u.test(character)) { index += 1; continue; }
+    if (character === '%') { while (index < source.length && source[index] !== '\n' && source[index] !== '\r') index += 1; continue; }
+    if (source.startsWith('<<', index) || source.startsWith('>>', index)) { if (!append({ kind: source.slice(index, index + 2) })) return null; index += 2; continue; }
+    if (character === '[' || character === ']') { if (!append({ kind: character })) return null; index += 1; continue; }
+    if (character === '<') {
+      const end = source.indexOf('>', index + 1);
+      if (end < 0) return null;
+      if (!append({ kind: 'string' })) return null;
+      index = end + 1; continue;
+    }
+    if (character === '(') {
+      let depth = 1; index += 1;
+      while (index < source.length && depth) { if (source[index] === '\\') index += 2; else { if (source[index] === '(') depth += 1; if (source[index] === ')') depth -= 1; index += 1; } }
+      if (depth) return null;
+      if (!append({ kind: 'string' })) return null;
+      continue;
+    }
+    if (character === '/') {
+      let end = index + 1; while (end < source.length && !/[\s\[\]<>()/]/u.test(source[end])) end += 1;
+      if (!append({ kind: 'name', value: source.slice(index + 1, end) })) return null;
+      index = end; continue;
+    }
+    let end = index + 1; while (end < source.length && !/[\s\[\]<>()/]/u.test(source[end])) end += 1;
+    if (!append({ kind: 'word', value: source.slice(index, end) })) return null;
+    index = end;
+  }
+  return tokens;
+}
+function parsePdfValue(tokens, index) {
+  const token = tokens[index];
+  if (!token) return null;
+  if (token.kind === '<<') {
+    const entries = Object.create(null);
+    let cursor = index + 1;
+    while (tokens[cursor]?.kind !== '>>') {
+      const key = tokens[cursor];
+      if (!key || key.kind !== 'name') return null;
+      const parsed = parsePdfValue(tokens, cursor + 1);
+      if (!parsed) return null;
+      entries[key.value] = parsed.value;
+      cursor = parsed.index;
+    }
+    return { value: { kind: 'dictionary', entries }, index: cursor + 1 };
+  }
+  if (token.kind === '[') {
+    const values = [];
+    let cursor = index + 1;
+    while (tokens[cursor]?.kind !== ']') {
+      const parsed = parsePdfValue(tokens, cursor);
+      if (!parsed) return null;
+      values.push(parsed.value);
+      cursor = parsed.index;
+    }
+    return { value: values, index: cursor + 1 };
+  }
+  if (token.kind === 'name') return { value: token.value, index: index + 1 };
+  if (token.kind === 'string') return { value: null, index: index + 1 };
+  if (token.kind !== 'word') return null;
+  if (/^\d+$/u.test(token.value) && /^\d+$/u.test(tokens[index + 1]?.value || '') && tokens[index + 2]?.value === 'R') {
+    return { value: { kind: 'reference', objectNumber: Number(token.value), generation: Number(tokens[index + 1].value) }, index: index + 3 };
+  }
+  if (/^-?\d+$/u.test(token.value)) return { value: Number(token.value), index: index + 1 };
+  return { value: token.value, index: index + 1 };
+}
+function isPdfReference(value) { return value?.kind === 'reference' && Number.isSafeInteger(value.objectNumber) && Number.isSafeInteger(value.generation); }
+function samePdfReference(left, right) { return isPdfReference(left) && isPdfReference(right) && left.objectNumber === right.objectNumber && left.generation === right.generation; }
 function assertCompleteV1Report(evaluation) {
   const card = evaluation.agentCard;
   if (!nonBlank(card?.name) || !nonBlank(card?.description) || !Array.isArray(card?.skills)) throw new RangeError('完整 V1 报告缺少必需 Agent Card 内容');
   if (!nonBlank(evaluation.scoringConfig?.version)) throw new RangeError('完整 V1 报告缺少评分配置');
-  if (!hasExactIdentifiers(evaluation.professional?.reviews, V1_REVIEWER_IDS, (review) => review?.reviewerId)) throw new RangeError('完整 V1 报告缺少完整 Card 评审席位');
+  const reviewerIds = expectedReviewers(evaluation);
+  if (!reviewerIds || !hasExactIdentifiers(evaluation.professional?.reviews, reviewerIds, (review) => review?.reviewerId)) throw new RangeError('完整 V1 报告缺少完整 Card 评审席位');
   const candidateIds = ['submitted', ...RUNTIMES.map((runtime) => runtime.id)];
   if (!Array.isArray(evaluation.benchmark) || !evaluation.benchmark.length || evaluation.benchmark.some((round) => !nonBlank(round?.case?.name) || !nonBlank(round?.case?.prompt) || !hasExactIdentifiers(round?.entries, candidateIds, (entry) => entry?.id))) throw new RangeError('完整 V1 报告缺少完整 CASE 候选集');
+}
+function expectedReviewers(evaluation) {
+  if (evaluation.reviewPlan === undefined) return V1_REVIEWER_IDS;
+  if (!Array.isArray(evaluation.reviewPlan) || !evaluation.reviewPlan.length) return null;
+  const ids = evaluation.reviewPlan.map((reviewer) => reviewer?.id);
+  return ids.every(nonBlank) && new Set(ids).size === ids.length ? ids : null;
 }
 function hasExactIdentifiers(records, expectedIds, getIdentifier) {
   if (!Array.isArray(records) || records.length !== expectedIds.length) return false;
