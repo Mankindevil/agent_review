@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { RuntimeContextBudgetError } from './runtime-context.js';
 
 const DEFAULT_DOCUMENT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -36,7 +37,10 @@ export function buildPandaInterfaceReference(document, allowedMethods, {
     const responseExample = section.search(/^\*\*响应示例\*\*\s*$/mu);
     if (responseExample >= 0) section = section.slice(0, responseExample);
     section = section.trim().replace(/\n{3,}/gu, '\n\n');
-    sections.push(section.slice(0, maxSectionChars));
+    if (section.length > maxSectionChars) {
+      throwPandaReferenceBudgetError(section, maxSectionChars);
+    }
+    sections.push(section);
   }
   const missing = [...allowed].filter((method) =>
     !sections.some((section) => section.includes(` ${method} -`))
@@ -51,7 +55,22 @@ export function buildPandaInterfaceReference(document, allowedMethods, {
     '',
     ...sections.flatMap((section) => [section, ''])
   ].join('\n').trim();
-  return reference.slice(0, maxTotalChars);
+  if (reference.length > maxTotalChars) {
+    throwPandaReferenceBudgetError(reference, maxTotalChars);
+  }
+  return reference;
+}
+
+function throwPandaReferenceBudgetError(reference, maxInputBytes) {
+  const inputBytes = Buffer.byteLength(reference, 'utf8');
+  throw new RuntimeContextBudgetError({
+    scope: 'panda-interface-reference',
+    inputBytes,
+    estimatedTokens: Math.ceil(inputBytes / 4),
+    maxInputBytes,
+    warnRatio: 1,
+    status: 'exceeded'
+  });
 }
 
 export async function loadPandaInterfaceReference(allowedMethods, {

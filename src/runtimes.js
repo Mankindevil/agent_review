@@ -16,6 +16,7 @@ import { prepareRuntimeWorkspace } from './runtime-sandbox.js';
 import { resolveRuntimeConfig } from './runtime-config.js';
 import { localCliEnv } from './runtime-environment.js';
 import { resolveCliExecutable, runLocalCliProcess } from './runtime-process.js';
+import { compactPandaQueries, inspectRuntimeContext } from './runtime-context.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -93,13 +94,20 @@ export async function buildSkill(runtime, description, mode, {
   signal,
   seed,
   temperature = 0,
-  pandaData
+  pandaData,
+  onContextUsage
 } = {}) {
   const sourceDescription = normalizeSourceDescription(description);
   const config = resolveRuntimeConfig(runtime.id);
   if (mode === 'live' && config?.kind === 'local-cli') {
     const { skill, result } = await generateValidatedSkill(
-      (prompt) => callLocalCli(runtime.id, prompt, signal, { seed, temperature }),
+      (prompt) => {
+        inspectRuntimeContext(runtime.id === 'claude-code' ? CLAUDE_RUNTIME_SYSTEM_PROMPT : '', prompt, {
+          scope: `runtime-build:${runtime.id}`,
+          onUsage: onContextUsage
+        });
+        return callLocalCli(runtime.id, prompt, signal, { seed, temperature });
+      },
       runtimeBuildSkillPrompt(sourceDescription, { pandaData })
     );
     return buildResult(runtime, localRuntimeModel(runtime), 'local-cli', skill, {
@@ -110,23 +118,34 @@ export async function buildSkill(runtime, description, mode, {
   }
   if (mode === 'live' && config?.kind === 'model-api') {
     const { skill } = await generateValidatedSkill(
-      async (prompt) => ({ text: await callRuntimeModel(config, prompt, signal, { seed, temperature }) }),
+      async (prompt) => {
+        inspectRuntimeContext('', prompt, {
+          scope: `runtime-build:${runtime.id}`,
+          onUsage: onContextUsage
+        });
+        return { text: await callRuntimeModel(config, prompt, signal, { seed, temperature }) };
+      },
       runtimeBuildSkillPrompt(sourceDescription, { pandaData })
     );
     return buildResult(runtime, config.model, 'model-api', skill, { pandaData, seed });
   }
   if (mode === 'live' && config?.kind === 'remote-http') {
+    const request = {
+      action: 'build_skill',
+      description: sourceDescription,
+      inputPolicy: pandaContext(pandaData) ? 'description+panda-interface' : 'description-only',
+      ...(pandaContext(pandaData) ? { pandaData: publicPandaContext(pandaData) } : {}),
+      seed,
+      temperature
+    };
+    inspectRuntimeContext('', JSON.stringify(request), {
+      scope: `runtime-remote-request:${runtime.id}`,
+      onUsage: onContextUsage
+    });
     const response = await fetch(config.url, {
       method: 'POST',
       headers: runtimeAdapterHeaders(config),
-      body: JSON.stringify({
-        action: 'build_skill',
-        description: sourceDescription,
-        inputPolicy: pandaContext(pandaData) ? 'description+panda-interface' : 'description-only',
-        ...(pandaContext(pandaData) ? { pandaData: publicPandaContext(pandaData) } : {}),
-        seed,
-        temperature
-      }),
+      body: JSON.stringify(request),
       signal: withTimeout(signal, 120_000)
     });
     if (!response.ok) throw new Error(`${runtime.name} runtime 返回 HTTP ${response.status}`);
@@ -192,7 +211,8 @@ export async function runSkill(build, testCase, mode, {
   signal,
   seed,
   temperature = 0,
-  pandaData
+  pandaData,
+  onContextUsage
 } = {}) {
   const config = resolveRuntimeConfig(build.runtimeId);
   if (mode === 'live' && config?.kind === 'local-cli') {
@@ -200,8 +220,15 @@ export async function runSkill(build, testCase, mode, {
       build,
       testCase,
       pandaData,
-      async (prompt) => (await callLocalCli(build.runtimeId, prompt, signal, { seed, temperature })).text,
-      signal
+      async (prompt, scope) => {
+        inspectRuntimeContext(build.runtimeId === 'claude-code' ? CLAUDE_RUNTIME_SYSTEM_PROMPT : '', prompt, {
+          scope: `${scope}:${build.runtimeId}`,
+          onUsage: onContextUsage
+        });
+        return (await callLocalCli(build.runtimeId, prompt, signal, { seed, temperature })).text;
+      },
+      signal,
+      onContextUsage
     );
   }
   if (mode === 'live' && config?.kind === 'model-api') {
@@ -209,15 +236,27 @@ export async function runSkill(build, testCase, mode, {
       build,
       testCase,
       pandaData,
-      (prompt) => callRuntimeModel(config, prompt, signal, { seed, temperature }),
-      signal
+      (prompt, scope) => {
+        inspectRuntimeContext('', prompt, {
+          scope: `${scope}:${build.runtimeId}`,
+          onUsage: onContextUsage
+        });
+        return callRuntimeModel(config, prompt, signal, { seed, temperature });
+      },
+      signal,
+      onContextUsage
     );
   }
   if (mode === 'live' && config?.kind === 'remote-http') {
+    const request = { action: 'run_skill', skill: build.skill, prompt: testCase.prompt, seed, temperature };
+    inspectRuntimeContext('', JSON.stringify(request), {
+      scope: `runtime-remote-request:${build.runtimeId}`,
+      onUsage: onContextUsage
+    });
     const response = await fetch(config.url, {
       method: 'POST',
       headers: runtimeAdapterHeaders(config),
-      body: JSON.stringify({ action: 'run_skill', skill: build.skill, prompt: testCase.prompt, seed, temperature }),
+      body: JSON.stringify(request),
       signal: withTimeout(signal, 120_000)
     });
     if (!response.ok) throw new Error(`${build.runtime} 执行返回 HTTP ${response.status}`);
@@ -239,7 +278,7 @@ async function runLiveSkillWithOptionalPanda(
   const context = pandaContext(pandaData);
   const usesPanda = context && build.skill?.tools?.includes('panda_data');
   if (!usesPanda) {
-    return invoke(runtimeRunSkillPrompt(build.skill, testCase.prompt));
+    return invoke(runtimeRunSkillPrompt(build.skill, testCase.prompt), 'runtime-final');
   }
   if (typeof pandaData.query !== 'function') {
     throw new Error('Panda Data Runtime 查询网关未配置');
@@ -248,14 +287,14 @@ async function runLiveSkillWithOptionalPanda(
     build.skill,
     testCase.prompt,
     context
-  ));
+  ), 'runtime-panda-plan');
   const plan = normalizePandaQueryPlan(safeJson(planText), context.allowedMethods);
   const queries = [];
   for (const query of plan) {
     signal?.throwIfAborted();
     try {
       const result = await pandaData.query(query.method, query.params, { signal });
-      queries.push({ ...query, status: 'ready', result: compactPandaResult(result) });
+      queries.push({ ...query, status: 'ready', result });
     } catch (error) {
       if (signal?.aborted) throw signal.reason || error;
       queries.push({
@@ -265,13 +304,18 @@ async function runLiveSkillWithOptionalPanda(
       });
     }
   }
+  const compacted = compactPandaQueries(queries);
   const pandaEvidence = {
     provider: 'pandaai',
     sdk: 'panda_data',
     interfaceDocument: '接口文档.md',
-    queries
+    queries: compacted.queries,
+    budget: compacted.budget
   };
-  return invoke(runtimeRunSkillPrompt(build.skill, testCase.prompt, { pandaEvidence }));
+  const finalPrompt = `${runtimeRunSkillPrompt(build.skill, testCase.prompt, { pandaEvidence })}
+
+PANDA_DATA_TRUNCATION_DISCLOSURE：若任一查询结果的 truncated 为 true，最终答复必须明确披露该查询的 originalRows、keptRows 与 droppedRows，并说明截断对结论的影响。`;
+  return invoke(finalPrompt, 'runtime-final');
 }
 
 function normalizePandaQueryPlan(value, allowedMethods) {
@@ -308,18 +352,6 @@ function normalizePandaQueryPlan(value, allowedMethods) {
   });
 }
 
-function compactPandaResult(result) {
-  const source = result && typeof result === 'object' && !Array.isArray(result)
-    ? result
-    : { data: result };
-  return {
-    provider: source.provider || 'pandaai',
-    ...(source.method ? { method: source.method } : {}),
-    ...(Number.isFinite(source.rowCount) ? { rowCount: source.rowCount } : {}),
-    truncated: source.truncated === true,
-    data: Array.isArray(source.data) ? source.data.slice(0, 500) : source.data
-  };
-}
 
 function buildResult(runtime, model, adapterKind, skill, {
   pandaData,

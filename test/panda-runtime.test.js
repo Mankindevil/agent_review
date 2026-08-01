@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runtimeBuildSkillPrompt } from '../src/prompts.js';
-import { createSkillBundle, runSkill } from '../src/runtimes.js';
+import { buildSkill, createSkillBundle, runSkill } from '../src/runtimes.js';
 
 test('Panda interface reference exposes only allowlisted contracts and omits bulky response samples', async () => {
   const { buildPandaInterfaceReference } = await import('../src/panda-runtime.js');
@@ -30,6 +30,56 @@ FACTOR_RESPONSE_SENTINEL
   assert.match(reference, /get_factor/u);
   assert.match(reference, /start_date/u);
   assert.doesNotMatch(reference, /get_secret_data|FACTOR_RESPONSE_SENTINEL|token/u);
+});
+
+test('Panda interface reference rejects a budget that cannot contain every allowlisted method', async () => {
+  const { buildPandaInterfaceReference } = await import('../src/panda-runtime.js');
+  const document = `**1. get_factor - 因子**
+
+| date | string | 日期 |
+
+**2. get_fina_reports - 财务**
+
+| report_date | string | 报告期 |
+`;
+
+  assert.throws(
+    () => buildPandaInterfaceReference(document, ['get_factor', 'get_fina_reports'], {
+      maxSectionChars: 500,
+      maxTotalChars: 100
+    }),
+    (error) => error.code === 'MODEL_CONTEXT_BUDGET_EXCEEDED'
+  );
+});
+
+test('Runtime build preflight reports exceeded remote context without calling the provider', async () => {
+  const originalAdapters = process.env.RUNTIME_ADAPTERS_JSON;
+  const originalFetch = globalThis.fetch;
+  const usageRecords = [];
+  let providerCalls = 0;
+  process.env.RUNTIME_ADAPTERS_JSON = JSON.stringify({
+    doubao: { kind: 'remote-http', url: 'https://runtime.example/build' }
+  });
+  globalThis.fetch = async () => {
+    providerCalls += 1;
+    throw new Error('provider must not be called');
+  };
+
+  try {
+    await assert.rejects(
+      () => buildSkill({ id: 'doubao', name: 'Doubao Agent', model: 'Seed' }, '中'.repeat(500_000), 'live', {
+        onContextUsage: (usage) => usageRecords.push(usage)
+      }),
+      (error) => error.code === 'MODEL_CONTEXT_BUDGET_EXCEEDED'
+    );
+    assert.equal(providerCalls, 0);
+    assert.deepEqual(usageRecords.map((usage) => usage.scope), ['runtime-remote-request:doubao']);
+    assert.deepEqual(usageRecords.map((usage) => usage.status), ['exceeded']);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalAdapters === undefined) delete process.env.RUNTIME_ADAPTERS_JSON;
+    else process.env.RUNTIME_ADAPTERS_JSON = originalAdapters;
+  }
 });
 
 test('financial reconstruction receives the Panda interface contract during Skill construction', () => {
