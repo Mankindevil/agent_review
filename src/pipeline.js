@@ -1545,8 +1545,17 @@ async function measureV1Execution(monotonicNow, invoke) {
 }
 
 function readMonotonic(monotonicNow) {
-  const value = Number(monotonicNow());
-  return Number.isFinite(value) ? value : 0;
+  let raw;
+  try {
+    raw = monotonicNow();
+  } catch (error) {
+    throw new Error(`单调时钟不可用：${error?.message || '读取失败'}`, { cause: error });
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    throw new TypeError('单调时钟必须返回有限数值');
+  }
+  return value;
 }
 
 function elapsedMonotonic(monotonicNow, startedAt) {
@@ -1554,9 +1563,12 @@ function elapsedMonotonic(monotonicNow, startedAt) {
 }
 
 function executionSnapshot(status, durationMs, contextUsage = [], failureStage) {
+  if (!Number.isFinite(durationMs) || durationMs < 0) {
+    throw new TypeError('执行耗时必须是有限的非负数');
+  }
   return {
     status,
-    durationMs: Math.max(0, Math.round(Number(durationMs) || 0)),
+    durationMs: Math.round(durationMs),
     timingScope: 'end-to-end-wall-clock',
     includesNetwork: true,
     toolObservation: 'unavailable',

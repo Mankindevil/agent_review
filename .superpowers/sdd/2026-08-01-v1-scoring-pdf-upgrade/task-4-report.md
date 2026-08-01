@@ -50,3 +50,26 @@ The pipeline-control invocation was run outside the restricted sandbox because t
 - `contextUsage` is intentionally diagnostic metadata: it is retained in the persisted entry/build trace but is not supplied to the model judge.
 - The actual internal tool-invocation duration remains unavailable; the stored duration is explicitly end-to-end wall-clock and includes network/protocol/runtime/model work.
 - Existing V2 code paths were not changed; only V1 entry creation/retry scoring behavior was touched.
+
+## Fix round 1 — monotonic clock authority
+
+### RED
+
+```text
+$ node --test --test-name-pattern='undefined, NaN|end monotonic clock' test/pipeline-control.test.js
+✖ V1 rejects undefined, NaN, Infinity, and thrown monotonic clock starts instead of assigning zero-duration capability
+  expected failed, received completed
+✖ V1 v2 retry keeps the prior CASE when the end monotonic clock is unavailable
+  retry history exposed the raw clock error rather than a declared timing failure
+```
+
+### GREEN
+
+```text
+$ node --test --test-name-pattern='undefined, NaN|end monotonic clock|V1 v2 benchmark retry|Panda interface' test/pipeline-control.test.js test/pipeline-panda-runtime.test.js
+tests 4
+pass 4
+fail 0
+```
+
+`readMonotonic` now rejects undefined, NaN, Infinity, and thrown clock reads with an explicit timing error. `executionSnapshot` also rejects non-finite durations rather than coercing them to zero. A timing error blocks the fresh run; during retry it is caught before the detached CASE can commit, so the prior complete CASE remains intact and no scorer call receives a fabricated 0ms record.

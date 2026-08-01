@@ -1839,6 +1839,67 @@ test('V1 v2 records failed calls and build failures as zero-capability execution
   assert.equal(buildFailure.detail.capability.capabilityScore, 0);
 });
 
+test('V1 rejects undefined, NaN, Infinity, and thrown monotonic clock starts instead of assigning zero-duration capability', async () => {
+  const invalidClocks = [
+    ['undefined', () => undefined],
+    ['NaN', () => Number.NaN],
+    ['Infinity', () => Number.POSITIVE_INFINITY],
+    ['throws', () => { throw new Error('clock unavailable'); }]
+  ];
+  for (const [label, monotonicNow] of invalidClocks) {
+    const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-v2-invalid-clock-${label}-${process.pid}.json`));
+    const pipeline = new EvaluationPipeline(store, new EventEmitter(), { monotonicNow });
+    const created = await pipeline.create({
+      mode: 'demo',
+      agentCard: evaluation('template').agentCard,
+      cases: [{ name: 'case', prompt: 'test prompt' }]
+    });
+    const result = await waitFor(store, created.id, (value) => value.status === 'failed');
+    assert.equal(result.status, 'failed');
+    assert.match(result.error, /单调时钟/);
+    assert.equal(result.benchmark?.[0]?.entries?.some((entry) => entry.execution?.durationMs === 0), false);
+  }
+});
+
+test('V1 v2 retry keeps the prior CASE when the end monotonic clock is unavailable', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-v2-retry-clock-${process.pid}.json`));
+  let clockCalls = 0;
+  let scoreCalls = 0;
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    monotonicNow: () => {
+      clockCalls += 1;
+      if (clockCalls === 1) return 100;
+      throw new Error('clock exhausted');
+    },
+    scoreV1Case: async (input) => {
+      scoreCalls += 1;
+      return successfulV1ScoringResult(input);
+    }
+  });
+  const item = completedV1Evaluation('eval_v1_v2_retry_clock');
+  item.scoringConfig = { version: 'v1-model-arena/v2', mode: 'single', reviewerId: 'deepseek' };
+  item.benchmark[0].entries.forEach((entry) => {
+    entry.execution = {
+      status: 'succeeded',
+      durationMs: 999,
+      timingScope: 'end-to-end-wall-clock',
+      includesNetwork: true,
+      toolObservation: 'unavailable',
+      contextUsage: []
+    };
+  });
+  const previousRound = structuredClone(item.benchmark[0]);
+  await store.set(item);
+
+  await pipeline.retry(item.id, { type: 'benchmark', key: 'submitted', caseIndex: 0 });
+  const updated = await waitFor(store, item.id, (value) => value.retryHistory?.length === 1);
+
+  assert.equal(scoreCalls, 0);
+  assert.equal(updated.status, 'completed');
+  assert.deepEqual(updated.benchmark[0], previousRound);
+  assert.match(updated.retryHistory[0].result.error, /单调时钟/);
+});
+
 test('keeps the live V1 CASE and derived verdict unchanged while benchmark rescoring is pending', async () => {
   const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-retry-atomic-pending-${process.pid}.json`));
   const scoringStarted = deferredValue();
