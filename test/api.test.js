@@ -2248,15 +2248,29 @@ test('rejects an out-of-range evaluation seed', async () => {
   assert.match((await response.json()).error, /Seed/);
 });
 
-test('downloads a completed V1 report and rejects unavailable records without partial PDFs', async () => {
-  const completed = {
-    id: 'eval v1+pdf api', schemaVersion: 1, status: 'completed', mode: 'demo', createdAt: '2026-08-01T00:00:00Z', completedAt: '2026-08-01T00:01:00Z',
+function completeV1ReportFixture(id) {
+  const reviewers = [
+    ['gpt', 'OpenAI 评审'], ['claude', 'Anthropic 评审'], ['doubao', '豆包评审'], ['deepseek', 'DeepSeek 评审']
+  ].map(([reviewerId, reviewer]) => ({ reviewerId, reviewer, model: reviewer, score: 80, comment: 'Card 审阅完成', dimensions: {} }));
+  const entries = [
+    ['submitted', '提交 Agent'], ['claude-code', 'Claude Code'], ['cursor', 'Cursor'], ['doubao', '豆包']
+  ].map(([id, name]) => ({ id, name, output: `${name} 报告正文`, score: 80, dimensions: {}, detail: {}, execution: {}, judgeReviews: [] }));
+  return {
+    id, schemaVersion: 1, status: 'completed', mode: 'demo', createdAt: '2026-08-01T00:00:00Z', completedAt: '2026-08-01T00:01:00Z',
     agentCard: { name: 'PDF Agent', description: '用于下载测试的公开 Card', skills: [] },
-    scoringConfig: { version: 'v1-model-arena/v2', mode: 'panel' }, complexity: { score: 80, verdict: '值得 Agent 化', reason: '多步骤' }, professional: { reviews: [{ reviewer: 'OpenAI', model: 'GPT', score: 80, comment: 'Card 审阅完成', dimensions: {} }] }, averages: { submitted: 80 }, roast: { tier: { code: 'NPC', label: 'NPC' }, headline: '完成' }, builds: [], benchmark: [{ case: { name: '下载案例', prompt: '输出完整分析' }, entries: [{ id: 'submitted', name: '提交 Agent', output: '报告正文', score: 80, dimensions: {}, detail: {}, execution: {}, judgeReviews: [] }] }], logs: []
+    scoringConfig: { version: 'v1-model-arena/v2', mode: 'panel' }, complexity: { score: 80, verdict: '值得 Agent 化', reason: '多步骤' }, professional: { reviews: reviewers }, averages: { submitted: 80 }, roast: { tier: { code: 'NPC', label: 'NPC' }, headline: '完成' }, builds: [], benchmark: [{ case: { name: '下载案例', prompt: '输出完整分析' }, entries }], logs: []
   };
+}
+
+test('downloads a completed V1 report and rejects unavailable records without partial PDFs', async () => {
+  const completed = completeV1ReportFixture('eval v1+pdf api');
   const running = { ...completed, id: 'eval_v1_pdf_running', status: 'running' };
+  const incompleteSeats = { ...completed, id: 'eval_v1_pdf_missing-seat', professional: { reviews: completed.professional.reviews.slice(0, 3) } };
+  const incompleteCandidates = { ...completed, id: 'eval_v1_pdf_missing-candidate', benchmark: completed.benchmark.map((round) => ({ ...round, entries: round.entries.slice(0, 3) })) };
   await evaluationStore.set(completed);
   await evaluationStore.set(running);
+  await evaluationStore.set(incompleteSeats);
+  await evaluationStore.set(incompleteCandidates);
   try {
     const ok = await fetch(`${origin}/api/evaluations/${encodeURIComponent(completed.id)}/report.pdf`);
     const bytes = Buffer.from(await ok.arrayBuffer());
@@ -2267,6 +2281,12 @@ test('downloads a completed V1 report and rejects unavailable records without pa
     assert.equal(bytes.subarray(0, 5).toString(), '%PDF-');
     assert.equal((await fetch(`${origin}/api/evaluations/missing/report.pdf`)).status, 404);
     assert.equal((await fetch(`${origin}/api/evaluations/${running.id}/report.pdf`)).status, 409);
+    for (const incomplete of [incompleteSeats, incompleteCandidates]) {
+      const response = await fetch(`${origin}/api/evaluations/${incomplete.id}/report.pdf`);
+      assert.equal(response.status, 409);
+      assert.match(response.headers.get('content-type'), /application\/json/);
+      assert.doesNotMatch(await response.text(), /%PDF-/);
+    }
     assert.equal((await fetch(`${origin}/api/evaluations/%E0%A4%A/report.pdf`)).status, 400);
     const oldPython = process.env.REPORT_PDF_PYTHON;
     process.env.REPORT_PDF_PYTHON = '/definitely/not/a/python';
@@ -2279,29 +2299,49 @@ test('downloads a completed V1 report and rejects unavailable records without pa
     }
     const rendererDir = await mkdtemp(path.join(tmpdir(), 'v1-report-api-'));
     const invalidRenderer = path.join(rendererDir, 'invalid-renderer.sh');
+    const failedRenderer = path.join(rendererDir, 'failed-renderer.sh');
+    const oversizedRenderer = path.join(rendererDir, 'oversized-renderer.sh');
     const delayedRenderer = path.join(rendererDir, 'delayed-renderer.sh');
     await writeFile(invalidRenderer, "#!/bin/sh\ncat >/dev/null\nprintf '%s' '%PDF-1.7 incomplete'\n");
+    await writeFile(failedRenderer, "#!/bin/sh\ncat >/dev/null\nprintf '%s' '%PDF-1.7 partial'; exit 7\n");
+    await writeFile(oversizedRenderer, "#!/bin/sh\ncat >/dev/null\nprintf '%s' '%PDF-1.7'; head -c 512 /dev/zero\n");
     await writeFile(delayedRenderer, "#!/bin/sh\ncat >/dev/null\nsleep 1\nprintf '%s' '%PDF-1.7'\n");
     await chmod(invalidRenderer, 0o755);
+    await chmod(failedRenderer, 0o755);
+    await chmod(oversizedRenderer, 0o755);
     await chmod(delayedRenderer, 0o755);
     const beforePython = process.env.REPORT_PDF_PYTHON;
     const beforeTimeout = process.env.REPORT_PDF_TIMEOUT_MS;
+    const beforeMaxBytes = process.env.REPORT_PDF_MAX_BYTES;
     try {
       process.env.REPORT_PDF_PYTHON = invalidRenderer;
       const invalid = await fetch(`${origin}/api/evaluations/${encodeURIComponent(completed.id)}/report.pdf`);
       assert.equal(invalid.status, 502);
       assert.match(invalid.headers.get('content-type'), /application\/json/);
       assert.doesNotMatch(await invalid.text(), /%PDF-/);
+      process.env.REPORT_PDF_PYTHON = failedRenderer;
+      const failed = await fetch(`${origin}/api/evaluations/${encodeURIComponent(completed.id)}/report.pdf`);
+      assert.equal(failed.status, 502);
+      assert.match(failed.headers.get('content-type'), /application\/json/);
+      assert.doesNotMatch(await failed.text(), /%PDF-/);
+      process.env.REPORT_PDF_PYTHON = oversizedRenderer;
+      process.env.REPORT_PDF_MAX_BYTES = '128';
+      const oversized = await fetch(`${origin}/api/evaluations/${encodeURIComponent(completed.id)}/report.pdf`);
+      assert.equal(oversized.status, 502);
+      assert.match(await oversized.text(), /超过输出上限/);
       process.env.REPORT_PDF_PYTHON = delayedRenderer;
       process.env.REPORT_PDF_TIMEOUT_MS = '25';
       assert.equal((await fetch(`${origin}/api/evaluations/${encodeURIComponent(completed.id)}/report.pdf`)).status, 504);
     } finally {
       if (beforePython === undefined) delete process.env.REPORT_PDF_PYTHON; else process.env.REPORT_PDF_PYTHON = beforePython;
       if (beforeTimeout === undefined) delete process.env.REPORT_PDF_TIMEOUT_MS; else process.env.REPORT_PDF_TIMEOUT_MS = beforeTimeout;
+      if (beforeMaxBytes === undefined) delete process.env.REPORT_PDF_MAX_BYTES; else process.env.REPORT_PDF_MAX_BYTES = beforeMaxBytes;
       await rm(rendererDir, { recursive: true, force: true });
     }
   } finally {
     await evaluationStore.delete(completed.id);
     await evaluationStore.delete(running.id);
+    await evaluationStore.delete(incompleteSeats.id);
+    await evaluationStore.delete(incompleteCandidates.id);
   }
 });

@@ -628,7 +628,7 @@ export const server = createServer(async (request, response) => {
       }
       let pdf;
       try {
-        pdf = await generateV1ReportPdf(dto, { timeoutMs: reportPdfTimeoutMs() });
+        pdf = await generateV1ReportPdf(dto, { timeoutMs: reportPdfTimeoutMs(), maxPdfBytes: reportPdfMaxBytes() });
       } catch (error) {
         return json(response, error.statusCode || 502, { error: error.message || 'PDF 报告生成失败' });
       }
@@ -810,6 +810,7 @@ function authorizedBearer(request, expected) {
 function json(response, status, payload) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); response.end(JSON.stringify(payload)); }
 function safeAttachmentName(value) { return String(value || 'report').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80) || 'report'; }
 function reportPdfTimeoutMs() { const value = Number(process.env.REPORT_PDF_TIMEOUT_MS); return Number.isSafeInteger(value) && value > 0 ? value : undefined; }
+function reportPdfMaxBytes() { const value = Number(process.env.REPORT_PDF_MAX_BYTES); return Number.isSafeInteger(value) && value > 0 ? value : undefined; }
 function summary(item) { return { id: item.id, name: item.agentCard.name, createdAt: item.createdAt, status: item.status, progress: item.progress, tier: item.roast?.tier, score: item.averages?.submitted }; }
 
 export function serializeEvaluationForResponse(item) {

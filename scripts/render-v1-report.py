@@ -49,7 +49,7 @@ def candidate_table(entries, styles):
         professional_text = '\n'.join([f"{label}={text(professional_dimensions.get(key))}" for key, label in [('taskCompletion', '任务完成'), ('methodProfessionalism', '方法专业性'), ('evidenceDataQuality', '数据证据质量'), ('riskUncertainty', '风险与不确定性'), ('artifactUsability', '产物可用性')]])
         capability_text = f"端到端耗时={text(capability.get('durationMs'))}ms\n执行成功评分={text(capability.get('executionSuccessScore'))}\n耗时评分={text(capability.get('latencyScore'))}\n能力总分={text(capability.get('capabilityScore'))}\n工具调用观测={text(capability.get('toolObservation'))}\n包含网络与协议开销={text(capability.get('includesNetwork'))}"
         data.append([p(entry.get('name', entry.get('id', '候选')), styles['small']), p(f"总分={text(entry.get('score'))}\n{dimensions}", styles['small']), p(professional_text, styles['small']), p(capability_text, styles['small'])])
-    table = Table(data, colWidths=[27*mm, 36*mm, 62*mm, 45*mm], repeatRows=1)
+    table = LongTable(data, colWidths=[27*mm, 36*mm, 62*mm, 45*mm], repeatRows=1)
     table.setStyle(TableStyle([
         ('FONTNAME', (0,0), (-1,-1), FONT), ('BACKGROUND', (0,0), (-1,0), INK), ('TEXTCOLOR', (0,0), (-1,0), colors.white),
         ('GRID', (0,0), (-1,-1), .3, colors.HexColor('#b6cbc7')), ('VALIGN', (0,0), (-1,-1), 'TOP'),

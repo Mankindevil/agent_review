@@ -1777,7 +1777,7 @@ function showLanding() {
 
 function syncV1ReportDownload(item) {
   const link = $('#download-v1-report');
-  const available = item?.schemaVersion === 1 && item?.status === 'completed' && Boolean(item?.id);
+  const available = item && item.schemaVersion === 1 && item.status === 'completed' && Boolean(item.id);
   link.classList.toggle('hidden', !available);
   if (available) link.href = `/api/evaluations/${encodeURIComponent(item.id)}/report.pdf`;
   else link.removeAttribute('href');

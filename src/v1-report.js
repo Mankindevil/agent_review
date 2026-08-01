@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { V1_REVIEWER_IDS } from './v1-model-scoring.js';
+import { RUNTIMES } from './runtimes.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const renderer = path.join(root, 'scripts', 'render-v1-report.py');
@@ -14,7 +16,8 @@ const PUBLIC_PANDA_PARAM_KEYS = [
   'is_open', 'adj', 'freq', 'period', 'report_date', 'ann_date', 'market',
   'currency', 'indicator', 'type', 'asset', 'asset_type', 'limit', 'offset'
 ];
-const PUBLIC_FACT_KEYS = ['label', 'field', 'where', 'aliases', 'tolerance', 'multiplier', 'unit', 'required', 'status', 'value', 'sourceDate', 'sourceSymbol'];
+const PUBLIC_FACT_KEYS = ['label', 'field', 'aliases', 'tolerance', 'multiplier', 'unit', 'required', 'status', 'value', 'sourceDate', 'sourceSymbol'];
+const CREDENTIAL_SELECTOR_KEY = /(?:api)?key|auth(?:orization)?|bearer|credential|secret|password|token|cookie|session/iu;
 
 export function projectV1Report(evaluation) {
   if (!evaluation || typeof evaluation !== 'object' || Array.isArray(evaluation)) throw new TypeError('评测记录不存在');
@@ -167,7 +170,25 @@ function projectExecution(value) { return value ? { ...strings(value, ['status',
 function projectContextUsage(value) { return { ...strings(value, ['phase', 'query', 'queryMethod', 'status', 'warning']), ...numbers(value, ['inputBytes', 'budgetBytes', 'originalRows', 'keptRows', 'droppedRows', 'truncatedRows', 'rowCount']) }; }
 function projectDataEvidence(value) { return value ? { ...strings(value, ['status', 'source', 'fetchedAt']), queries: array(value.queries).map((query) => ({ ...strings(query, ['id', 'label', 'method', 'status', 'error', 'fingerprint']), ...numbers(query, ['minRows', 'rowCount', 'returnedRows']), ...bools(query, ['truncated']), requiredFields: stringArray(query?.requiredFields), fields: stringArray(query?.fields), missingFields: stringArray(query?.missingFields), params: projectDataParams(query?.params), facts: array(query?.facts).map(projectFact) })) } : null; }
 function projectDataParams(value) { return Object.fromEntries(PUBLIC_PANDA_PARAM_KEYS.filter((key) => isPublicDataValue(value?.[key])).map((key) => [key, projectDataValue(value[key])])); }
-function projectFact(value) { const aliases = stringArray(value?.aliases); return { ...strings(value, PUBLIC_FACT_KEYS), ...numbers(value, ['tolerance', 'multiplier', 'value']), ...bools(value, ['required']), ...(value?.where === 'first' || value?.where === 'last' ? { where: value.where } : {}), ...(aliases.length ? { aliases } : {}) }; }
+function projectFact(value) {
+  const aliases = stringArray(value?.aliases);
+  const where = projectFactSelector(value?.where);
+  return {
+    ...strings(value, PUBLIC_FACT_KEYS), ...numbers(value, ['tolerance', 'multiplier', 'value']), ...bools(value, ['required']),
+    ...(where === 'first' || where === 'last' || where?.length ? { where } : {}), ...(aliases.length ? { aliases } : {})
+  };
+}
+function projectFactSelector(value) {
+  if (value === 'first' || value === 'last') return value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return Object.entries(value)
+    .filter(([field, expected]) => isPublicFactSelectorField(field) && isPublicDataValue(expected))
+    .slice(0, 10)
+    .map(([field, expected]) => ({ field, expected: projectDataValue(expected) }));
+}
+function isPublicFactSelectorField(value) {
+  return /^[A-Za-z_][A-Za-z0-9_]{0,63}$/u.test(value) && !CREDENTIAL_SELECTOR_KEY.test(value);
+}
 function isPublicDataValue(value) { return typeof value === 'string' || typeof value === 'boolean' || Number.isFinite(value) || Array.isArray(value) && value.every((item) => typeof item === 'string' || typeof item === 'boolean' || Number.isFinite(item)); }
 function projectDataValue(value) { return Array.isArray(value) ? [...value] : value; }
 function projectDataVerification(value) { return value ? { ...strings(value, ['status', 'summary']), ...numbers(value, ['score', 'matched', 'mismatched', 'missing', 'total']), checks: array(value.checks).map((check) => ({ ...strings(check, ['id', 'queryId', 'label', 'status', 'reason', 'unit', 'sourceDate']), ...numbers(check, ['expected', 'actual', 'observed', 'tolerance']) })) } : null; }
@@ -187,13 +208,82 @@ function reportError(statusCode, message) { return Object.assign(new Error(messa
 function isStructurallyValidPdf(pdf) {
   if (!Buffer.isBuffer(pdf) || pdf.length < 32 || !pdf.subarray(0, Math.min(pdf.length, 1024)).includes(Buffer.from('%PDF-'))) return false;
   const tail = pdf.subarray(Math.max(0, pdf.length - 4096)).toString('latin1');
-  return /startxref\s+\d+\s+%%EOF\s*$/u.test(tail);
+  const startxref = tail.match(/startxref\s+(\d+)\s+%%EOF\s*$/u);
+  if (!startxref) return false;
+  const offset = Number(startxref[1]);
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset >= pdf.length) return false;
+  return hasTraditionalPdfStructure(pdf, offset);
+}
+function hasTraditionalPdfStructure(pdf, xrefOffset) {
+  const source = pdf.toString('latin1');
+  if (!source.startsWith('xref', xrefOffset)) return false;
+  let cursor = xrefOffset + 4;
+  const offsets = new Map();
+  let sawSection = false;
+  while (true) {
+    const line = nextPdfLine(source, cursor);
+    if (!line) return false;
+    cursor = line.end;
+    if (!line.text) continue;
+    if (line.text === 'trailer') break;
+    const subsection = line.text.match(/^(\d+)\s+(\d+)$/u);
+    if (!subsection) return false;
+    const first = Number(subsection[1]);
+    const count = Number(subsection[2]);
+    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(count) || count < 1 || count > 1_000_000) return false;
+    sawSection = true;
+    for (let index = 0; index < count; index += 1) {
+      const entry = nextPdfLine(source, cursor);
+      if (!entry) return false;
+      cursor = entry.end;
+      const match = entry.text.match(/^(\d{10})\s+(\d{5})\s+([nf])\s*$/u);
+      if (!match) return false;
+      if (match[3] === 'n') offsets.set(`${first + index}:${Number(match[2])}`, Number(match[1]));
+    }
+  }
+  if (!sawSection) return false;
+  const trailerStart = source.indexOf('<<', cursor);
+  if (trailerStart < 0) return false;
+  const trailerEnd = source.indexOf('>>', trailerStart + 2);
+  if (trailerEnd < 0) return false;
+  const trailer = source.slice(trailerStart, trailerEnd + 2);
+  const root = trailer.match(/\/Root\s+(\d+)\s+(\d+)\s+R\b/u);
+  const size = trailer.match(/\/Size\s+(\d+)\b/u);
+  if (!root || !size || Number(size[1]) < 2) return false;
+  const catalog = pdfObjectAt(source, offsets, Number(root[1]), Number(root[2]));
+  if (!catalog || !/\/Type\s*\/Catalog\b/u.test(catalog)) return false;
+  const pagesReference = catalog.match(/\/Pages\s+(\d+)\s+(\d+)\s+R\b/u);
+  if (!pagesReference) return false;
+  const pages = pdfObjectAt(source, offsets, Number(pagesReference[1]), Number(pagesReference[2]));
+  if (!pages || !/\/Type\s*\/Pages\b/u.test(pages) || !/\/Count\s+[1-9]\d*\b/u.test(pages)) return false;
+  const children = [...pages.matchAll(/(\d+)\s+(\d+)\s+R\b/gu)].filter((match) => match[0] !== pagesReference[0]);
+  return children.some((match) => /\/Type\s*\/Page\b/u.test(pdfObjectAt(source, offsets, Number(match[1]), Number(match[2])) || ''));
+}
+function nextPdfLine(source, start) {
+  if (start > source.length) return null;
+  const endOfLine = source.indexOf('\n', start);
+  const end = endOfLine < 0 ? source.length : endOfLine + 1;
+  return { text: source.slice(start, endOfLine < 0 ? source.length : endOfLine).replace(/\r$/u, '').trim(), end };
+}
+function pdfObjectAt(source, offsets, objectNumber, generation) {
+  const offset = offsets.get(`${objectNumber}:${generation}`);
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset >= source.length) return null;
+  const header = new RegExp(`^${objectNumber}\\s+${generation}\\s+obj\\b`, 'u');
+  if (!header.test(source.slice(offset, offset + 64))) return null;
+  const end = source.indexOf('endobj', offset);
+  return end < 0 ? null : source.slice(offset, end);
 }
 function assertCompleteV1Report(evaluation) {
   const card = evaluation.agentCard;
   if (!nonBlank(card?.name) || !nonBlank(card?.description) || !Array.isArray(card?.skills)) throw new RangeError('完整 V1 报告缺少必需 Agent Card 内容');
   if (!nonBlank(evaluation.scoringConfig?.version)) throw new RangeError('完整 V1 报告缺少评分配置');
-  if (!Array.isArray(evaluation.professional?.reviews) || !evaluation.professional.reviews.length) throw new RangeError('完整 V1 报告缺少 Card 评审');
-  if (!Array.isArray(evaluation.benchmark) || !evaluation.benchmark.length || evaluation.benchmark.some((round) => !nonBlank(round?.case?.name) || !nonBlank(round?.case?.prompt) || !Array.isArray(round?.entries) || !round.entries.length)) throw new RangeError('完整 V1 报告缺少 CASE 内容');
+  if (!hasExactIdentifiers(evaluation.professional?.reviews, V1_REVIEWER_IDS, (review) => review?.reviewerId)) throw new RangeError('完整 V1 报告缺少完整 Card 评审席位');
+  const candidateIds = ['submitted', ...RUNTIMES.map((runtime) => runtime.id)];
+  if (!Array.isArray(evaluation.benchmark) || !evaluation.benchmark.length || evaluation.benchmark.some((round) => !nonBlank(round?.case?.name) || !nonBlank(round?.case?.prompt) || !hasExactIdentifiers(round?.entries, candidateIds, (entry) => entry?.id))) throw new RangeError('完整 V1 报告缺少完整 CASE 候选集');
+}
+function hasExactIdentifiers(records, expectedIds, getIdentifier) {
+  if (!Array.isArray(records) || records.length !== expectedIds.length) return false;
+  const actual = records.map(getIdentifier);
+  return actual.every((id) => typeof id === 'string') && new Set(actual).size === actual.length && expectedIds.every((id) => actual.includes(id));
 }
 function nonBlank(value) { return typeof value === 'string' && value.trim().length > 0; }

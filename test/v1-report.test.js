@@ -49,6 +49,23 @@ test('strictly projects only complete V1 report data without recursive secrets o
   assert.throws(() => projectV1Report(completeV1Fixture({ scoringConfig: {} })), /评分配置/);
   assert.throws(() => projectV1Report(completeV1Fixture({ professional: { reviews: [] } })), /Card 评审/);
   assert.throws(() => projectV1Report(completeV1Fixture({ benchmark: [{ case: { name: '空案例', prompt: '' }, entries: [] }] })), /CASE/);
+  assert.throws(() => projectV1Report(completeV1Fixture({ professional: { reviews: fixture.professional.reviews.slice(0, 3) } })), /Card 评审席位/);
+  assert.throws(() => projectV1Report(completeV1Fixture({ professional: { reviews: [...fixture.professional.reviews.slice(0, 3), fixture.professional.reviews[0]] } })), /Card 评审席位/);
+  assert.throws(() => projectV1Report(completeV1Fixture({ benchmark: fixture.benchmark.map((round) => ({ ...round, entries: round.entries.slice(0, 3) })) })), /候选集/);
+  assert.throws(() => projectV1Report(completeV1Fixture({ benchmark: fixture.benchmark.map((round) => ({ ...round, entries: [...round.entries.slice(0, 3), round.entries[0]] })) })), /候选集/);
+});
+
+test('projects supported object-valued data fact selectors through fixed credential-safe fields', () => {
+  const fixture = completeV1Fixture();
+  fixture.benchmark[0].dataEvidence.queries[0].facts = [{
+    label: '期末收盘', field: 'close', where: { trade_date: '20250131', symbol: '000300.SH', apiKey: 'selector-secret', nested: { bearer: 'nested-secret' } }, value: 4000
+  }];
+  const fact = projectV1Report(fixture).benchmark[0].dataEvidence.queries[0].facts[0];
+  assert.deepEqual(fact.where, [
+    { field: 'trade_date', expected: '20250131' },
+    { field: 'symbol', expected: '000300.SH' }
+  ]);
+  assert.doesNotMatch(JSON.stringify(fact), /selector-secret|nested-secret|apiKey|bearer/);
 });
 
 test('generates a multi-page A4 PDF with complete Chinese sentinels', async () => {
@@ -75,10 +92,13 @@ test('rejects malformed, failed, timed-out, and oversized renderer output withou
   };
   try {
     const invalid = await script('invalid.sh', "printf '%s' '%PDF-1.7 incomplete'");
+    const fakePrefix = '%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n';
+    const shapedButTruncated = await script('shaped-but-truncated.sh', `printf '%b' ${JSON.stringify(`${fakePrefix}xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n${Buffer.byteLength(fakePrefix)}\n%%EOF`)}`);
     const failed = await script('failed.sh', "echo renderer-failed >&2; exit 7");
     const delayed = await script('delayed.sh', 'sleep 2; printf %s %PDF-1.7');
     const oversized = await script('oversized.sh', "printf '%s' '%PDF-1.7\\nstartxref\\n0\\n%%EOF'; head -c 512 /dev/zero");
     await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: invalid }), { statusCode: 502 });
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: shapedButTruncated }), { statusCode: 502 });
     await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: failed }), { statusCode: 502 });
     await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: delayed, timeoutMs: 50 }), { statusCode: 504 });
     await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: oversized, maxPdfBytes: 128 }), { statusCode: 502 });
