@@ -231,8 +231,8 @@ function deterministicDemoJudge({ reviewer, candidateIds, seed, testCase }) {
         candidateId,
         dimensions,
         total: weightedTotal(dimensions),
-        rationale: 'Deterministic demo evaluation.',
-        uncertainties: ['Demo mode does not call a live reviewer.']
+        rationale: '确定性演示评分，仅用于展示竞技评分流程。',
+        uncertainties: ['演示模式未调用真实评审模型。']
       };
     })
   };
@@ -248,8 +248,8 @@ function validateJudgeResponse(value, candidateIds) {
   const allowed = new Set(candidateIds);
   const seen = new Set();
   return value.scores.map((item) => {
-    if (!isObject(item) || !sameKeys(item, SCORE_ITEM_KEYS)) {
-      throw new TypeError('judge score item has invalid keys');
+    if (!isObject(item) || !hasKeys(item, SCORE_ITEM_KEYS)) {
+      throw new TypeError('judge score item is missing required keys');
     }
     if (!allowed.has(item.candidateId) || seen.has(item.candidateId)) {
       throw new TypeError('judge response has an unknown or duplicate candidateId');
@@ -263,9 +263,14 @@ function validateJudgeResponse(value, candidateIds) {
       normalizeScore(item.dimensions[key], `dimensions.${key}`)
     ]));
     normalizeScore(item.total, 'total');
-    if (typeof item.rationale !== 'string') throw new TypeError('judge rationale must be a string');
+    if (typeof item.rationale !== 'string' || !containsCjk(item.rationale)) {
+      throw new TypeError('judge rationale must be written in Simplified Chinese');
+    }
     if (!Array.isArray(item.uncertainties) || item.uncertainties.some((item) => typeof item !== 'string')) {
       throw new TypeError('judge uncertainties must be an array of strings');
+    }
+    if (item.uncertainties.some((text) => text.trim() && !containsCjk(text))) {
+      throw new TypeError('judge uncertainties must be written in Simplified Chinese');
     }
     return {
       candidateId: item.candidateId,
@@ -274,6 +279,10 @@ function validateJudgeResponse(value, candidateIds) {
       uncertainties: [...item.uncertainties]
     };
   });
+}
+
+function containsCjk(value) {
+  return /[\p{Script=Han}]/u.test(String(value || ''));
 }
 
 function weightedTotal(dimensions) {
@@ -391,6 +400,10 @@ function normalizeScore(value, field) {
 
 function sameKeys(value, expected) {
   return JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
+}
+
+function hasKeys(value, expected) {
+  return expected.every((key) => Object.hasOwn(value, key));
 }
 
 function isObject(value) {

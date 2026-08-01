@@ -1,5 +1,9 @@
 import { stableNumber, safeJson, withTimeout } from './utils.js';
-import { runtimeBuildSkillPrompt, runtimeRunSkillPrompt } from './prompts.js';
+import {
+  runtimeBuildSkillPrompt,
+  runtimePandaQueryPlanPrompt,
+  runtimeRunSkillPrompt
+} from './prompts.js';
 import {
   applyArkClaudeEnv,
   applyDeepSeekClaudeEnv,
@@ -38,8 +42,11 @@ export function createSkillBundle(build, description) {
   const skill = validateGeneratedSkill(build.skill);
   const root = slug(skill.name);
   const sourceDescription = normalizeSourceDescription(description);
-  const descriptionOnly = build.baselineInput === 'description-only';
-  const inputPolicy = descriptionOnly ? 'description-only' : 'legacy-full-card-possible';
+  const baselineInput = build.baselineInput;
+  const publicBaseline = baselineInput === 'description-only' ||
+    baselineInput === 'description+panda-interface';
+  const inputPolicy = publicBaseline ? baselineInput : 'legacy-full-card-possible';
+  const pandaData = normalizePandaBuildMetadata(build.pandaData);
   const metadata = {
     schemaVersion: 2,
     source: 'normalized-runtime-output',
@@ -50,14 +57,22 @@ export function createSkillBundle(build, description) {
     mode: build.mode,
     adapterKind: build.adapterKind || (build.mode === 'demo' ? 'demo' : null),
     seed: Number.isInteger(build.seed) ? build.seed : null,
-    fingerprint: skill.fingerprint || null
+    fingerprint: skill.fingerprint || null,
+    ...(pandaData ? { pandaData } : {})
   };
   const files = [
     { path: 'SKILL.md', language: 'markdown', content: skillMarkdown(skill) },
     { path: 'skill.json', language: 'json', content: JSON.stringify(skill, null, 2) },
     { path: 'references/source-description.txt', language: 'text', content: sourceDescription }
   ];
-  if (!descriptionOnly) {
+  if (pandaData) {
+    files.push({
+      path: 'references/panda-data-interface.json',
+      language: 'json',
+      content: JSON.stringify(pandaData, null, 2)
+    });
+  }
+  if (!publicBaseline) {
     files.push({
       path: 'references/legacy-input-warning.txt',
       language: 'text',
@@ -69,33 +84,49 @@ export function createSkillBundle(build, description) {
     root,
     source: metadata.source,
     inputPolicy,
-    legacyBaseline: !descriptionOnly,
+    legacyBaseline: !publicBaseline,
     files
   };
 }
 
-export async function buildSkill(runtime, description, mode, { signal, seed, temperature = 0 } = {}) {
+export async function buildSkill(runtime, description, mode, {
+  signal,
+  seed,
+  temperature = 0,
+  pandaData
+} = {}) {
   const sourceDescription = normalizeSourceDescription(description);
   const config = resolveRuntimeConfig(runtime.id);
   if (mode === 'live' && config?.kind === 'local-cli') {
     const { skill, result } = await generateValidatedSkill(
       (prompt) => callLocalCli(runtime.id, prompt, signal, { seed, temperature }),
-      runtimeBuildSkillPrompt(sourceDescription)
+      runtimeBuildSkillPrompt(sourceDescription, { pandaData })
     );
-    return { runtime: runtime.name, runtimeId: runtime.id, model: localRuntimeModel(runtime), mode: 'live', adapterKind: 'local-cli', baselineInput: 'description-only', skill, trace: result.trace, seed };
+    return buildResult(runtime, localRuntimeModel(runtime), 'local-cli', skill, {
+      pandaData,
+      trace: result.trace,
+      seed
+    });
   }
   if (mode === 'live' && config?.kind === 'model-api') {
     const { skill } = await generateValidatedSkill(
       async (prompt) => ({ text: await callRuntimeModel(config, prompt, signal, { seed, temperature }) }),
-      runtimeBuildSkillPrompt(sourceDescription)
+      runtimeBuildSkillPrompt(sourceDescription, { pandaData })
     );
-    return { runtime: runtime.name, runtimeId: runtime.id, model: config.model, mode: 'live', adapterKind: 'model-api', baselineInput: 'description-only', skill, seed };
+    return buildResult(runtime, config.model, 'model-api', skill, { pandaData, seed });
   }
   if (mode === 'live' && config?.kind === 'remote-http') {
     const response = await fetch(config.url, {
       method: 'POST',
       headers: runtimeAdapterHeaders(config),
-      body: JSON.stringify({ action: 'build_skill', description: sourceDescription, inputPolicy: 'description-only', seed, temperature }),
+      body: JSON.stringify({
+        action: 'build_skill',
+        description: sourceDescription,
+        inputPolicy: pandaContext(pandaData) ? 'description+panda-interface' : 'description-only',
+        ...(pandaContext(pandaData) ? { pandaData: publicPandaContext(pandaData) } : {}),
+        seed,
+        temperature
+      }),
       signal: withTimeout(signal, 120_000)
     });
     if (!response.ok) throw new Error(`${runtime.name} runtime 返回 HTTP ${response.status}`);
@@ -106,13 +137,17 @@ export async function buildSkill(runtime, description, mode, { signal, seed, tem
       model: typeof payload.model === 'string' ? payload.model : runtime.model,
       mode: 'live',
       adapterKind: 'remote-http',
-      baselineInput: 'description-only',
-      skill: validateGeneratedSkill(payload.skill),
+      baselineInput: pandaContext(pandaData) ? 'description+panda-interface' : 'description-only',
+      skill: pandaContext(pandaData)
+        ? attachPandaDataCapability(validateGeneratedSkill(payload.skill))
+        : validateGeneratedSkill(payload.skill),
+      ...(pandaContext(pandaData) ? { pandaData: pandaBuildMetadata(pandaData) } : {}),
       trace: payload.trace,
       seed
     };
   }
   const tools = inferTools(sourceDescription);
+  if (pandaContext(pandaData)) tools.push('panda_data');
   const generatedName = slug(sourceDescription).slice(0, 64).replace(/-$/g, '') || 'description-baseline-skill';
   return {
     runtime: runtime.name,
@@ -120,7 +155,8 @@ export async function buildSkill(runtime, description, mode, { signal, seed, tem
     model: runtime.model,
     mode: 'demo',
     adapterKind: 'demo',
-    baselineInput: 'description-only',
+    baselineInput: pandaContext(pandaData) ? 'description+panda-interface' : 'description-only',
+    ...(pandaContext(pandaData) ? { pandaData: pandaBuildMetadata(pandaData) } : {}),
     seed,
     skill: {
       name: generatedName,
@@ -152,13 +188,30 @@ export async function generateValidatedSkill(generate, prompt, attempts = 2) {
   throw new Error(`Runtime 连续 ${attempts} 次未返回有效 Skill：${lastError?.message || '未知格式错误'}`);
 }
 
-export async function runSkill(build, testCase, mode, { signal, seed, temperature = 0 } = {}) {
+export async function runSkill(build, testCase, mode, {
+  signal,
+  seed,
+  temperature = 0,
+  pandaData
+} = {}) {
   const config = resolveRuntimeConfig(build.runtimeId);
   if (mode === 'live' && config?.kind === 'local-cli') {
-    return (await callLocalCli(build.runtimeId, runtimeRunSkillPrompt(build.skill, testCase.prompt), signal, { seed, temperature })).text;
+    return runLiveSkillWithOptionalPanda(
+      build,
+      testCase,
+      pandaData,
+      async (prompt) => (await callLocalCli(build.runtimeId, prompt, signal, { seed, temperature })).text,
+      signal
+    );
   }
   if (mode === 'live' && config?.kind === 'model-api') {
-    return callRuntimeModel(config, runtimeRunSkillPrompt(build.skill, testCase.prompt), signal, { seed, temperature });
+    return runLiveSkillWithOptionalPanda(
+      build,
+      testCase,
+      pandaData,
+      (prompt) => callRuntimeModel(config, prompt, signal, { seed, temperature }),
+      signal
+    );
   }
   if (mode === 'live' && config?.kind === 'remote-http') {
     const response = await fetch(config.url, {
@@ -174,6 +227,176 @@ export async function runSkill(build, testCase, mode, { signal, seed, temperatur
   }
   const lead = build.runtimeId === 'claude-code' ? '我先检查约束并给出可复核结果。' : build.runtimeId === 'cursor' ? '已按任务流程执行并整理产物。' : '任务已完成，下面是处理结果。';
   return `${lead}\n\n1. 任务理解：${testCase.prompt}\n2. 执行依据：使用 ${build.skill.tools.join('、') || '文本推理'}，按技能边界逐项处理。\n3. 结果：已形成结构化交付，并标出需要人工确认的假设。\n4. 风险：真实文件或外部系统未提供时，不声称已经修改。`;
+}
+
+async function runLiveSkillWithOptionalPanda(
+  build,
+  testCase,
+  pandaData,
+  invoke,
+  signal
+) {
+  const context = pandaContext(pandaData);
+  const usesPanda = context && build.skill?.tools?.includes('panda_data');
+  if (!usesPanda) {
+    return invoke(runtimeRunSkillPrompt(build.skill, testCase.prompt));
+  }
+  if (typeof pandaData.query !== 'function') {
+    throw new Error('Panda Data Runtime 查询网关未配置');
+  }
+  const planText = await invoke(runtimePandaQueryPlanPrompt(
+    build.skill,
+    testCase.prompt,
+    context
+  ));
+  const plan = normalizePandaQueryPlan(safeJson(planText), context.allowedMethods);
+  const queries = [];
+  for (const query of plan) {
+    signal?.throwIfAborted();
+    try {
+      const result = await pandaData.query(query.method, query.params, { signal });
+      queries.push({ ...query, status: 'ready', result: compactPandaResult(result) });
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
+      queries.push({
+        ...query,
+        status: 'failed',
+        error: String(error?.message || error).slice(0, 500)
+      });
+    }
+  }
+  const pandaEvidence = {
+    provider: 'pandaai',
+    sdk: 'panda_data',
+    interfaceDocument: '接口文档.md',
+    queries
+  };
+  return invoke(runtimeRunSkillPrompt(build.skill, testCase.prompt, { pandaEvidence }));
+}
+
+function normalizePandaQueryPlan(value, allowedMethods) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(['queries'])) {
+    throw new TypeError('Panda Data 查询计划必须只包含 queries');
+  }
+  if (!Array.isArray(value.queries) || value.queries.length < 1 || value.queries.length > 3) {
+    throw new TypeError('Panda Data 查询计划必须包含 1-3 项查询');
+  }
+  const allowed = new Set(allowedMethods);
+  return value.queries.map((query, index) => {
+    if (!query || typeof query !== 'object' || Array.isArray(query) ||
+        JSON.stringify(Object.keys(query).sort()) !== JSON.stringify(['method', 'params', 'purpose'])) {
+      throw new TypeError(`Panda Data 查询 ${index + 1} 字段无效`);
+    }
+    if (typeof query.method !== 'string' || !allowed.has(query.method)) {
+      throw new TypeError(`Panda Data 方法不在白名单：${String(query.method || '')}`);
+    }
+    if (!query.params || typeof query.params !== 'object' || Array.isArray(query.params)) {
+      throw new TypeError(`Panda Data 查询 ${index + 1} 的 params 必须是对象`);
+    }
+    if (Buffer.byteLength(JSON.stringify(query.params), 'utf8') > 20_000) {
+      throw new TypeError(`Panda Data 查询 ${index + 1} 的 params 超过长度限制`);
+    }
+    if (typeof query.purpose !== 'string' || !query.purpose.trim()) {
+      throw new TypeError(`Panda Data 查询 ${index + 1} 缺少 purpose`);
+    }
+    return {
+      method: query.method,
+      params: structuredClone(query.params),
+      purpose: query.purpose.trim().slice(0, 300)
+    };
+  });
+}
+
+function compactPandaResult(result) {
+  const source = result && typeof result === 'object' && !Array.isArray(result)
+    ? result
+    : { data: result };
+  return {
+    provider: source.provider || 'pandaai',
+    ...(source.method ? { method: source.method } : {}),
+    ...(Number.isFinite(source.rowCount) ? { rowCount: source.rowCount } : {}),
+    truncated: source.truncated === true,
+    data: Array.isArray(source.data) ? source.data.slice(0, 500) : source.data
+  };
+}
+
+function buildResult(runtime, model, adapterKind, skill, {
+  pandaData,
+  trace,
+  seed
+} = {}) {
+  const context = pandaContext(pandaData);
+  return {
+    runtime: runtime.name,
+    runtimeId: runtime.id,
+    model,
+    mode: 'live',
+    adapterKind,
+    baselineInput: context ? 'description+panda-interface' : 'description-only',
+    skill: context ? attachPandaDataCapability(skill) : skill,
+    ...(context ? { pandaData: pandaBuildMetadata(context) } : {}),
+    ...(trace ? { trace } : {}),
+    seed
+  };
+}
+
+function attachPandaDataCapability(skill) {
+  return {
+    ...skill,
+    instructions: [
+      '先阅读平台提供的 Panda Data 接口合同，选择白名单方法获取真实数据，再执行计算；记录方法、参数、数据截止时点与失败项。',
+      ...skill.instructions
+    ],
+    tools: [...new Set([...skill.tools, 'panda_data'])]
+  };
+}
+
+function pandaContext(value) {
+  if (!value || value.enabled === false) return null;
+  const allowedMethods = Array.isArray(value.allowedMethods)
+    ? [...new Set(value.allowedMethods.filter((item) => typeof item === 'string' && item.trim()))]
+    : [];
+  const interfaceReference = typeof value.interfaceReference === 'string'
+    ? value.interfaceReference.trim()
+    : '';
+  return allowedMethods.length && interfaceReference
+    ? { allowedMethods, interfaceReference }
+    : null;
+}
+
+function publicPandaContext(value) {
+  const context = pandaContext(value);
+  return context ? {
+    provider: 'pandaai',
+    sdk: 'panda_data',
+    allowedMethods: context.allowedMethods,
+    interfaceReference: context.interfaceReference
+  } : null;
+}
+
+function pandaBuildMetadata(value) {
+  const context = pandaContext(value);
+  return {
+    provider: 'pandaai',
+    sdk: 'panda_data',
+    interfaceDocument: '接口文档.md',
+    allowedMethods: context.allowedMethods
+  };
+}
+
+function normalizePandaBuildMetadata(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const allowedMethods = Array.isArray(value.allowedMethods)
+    ? [...new Set(value.allowedMethods.filter((item) => typeof item === 'string' && item.trim()))]
+    : [];
+  if (!allowedMethods.length) return null;
+  return {
+    provider: 'pandaai',
+    sdk: 'panda_data',
+    interfaceDocument: '接口文档.md',
+    allowedMethods
+  };
 }
 
 function runtimeAdapterHeaders(config, env = process.env) {

@@ -19,7 +19,8 @@ import { buildRoast, scoreComplexity } from './scoring.js';
 import { buildSkill, RUNTIMES, runSkill } from './runtimes.js';
 import { average, deriveSeed, id, normalizeSeed, normalizeTemperature, now, round, stableNumber } from './utils.js';
 import { buildDataPlan, collectDataEvidence, normalizeTestCases, verifyOutputAgainstEvidence } from './data-verifier.js';
-import { queryPandaData } from './panda-data.js';
+import { pandaDataConfig, queryPandaData } from './panda-data.js';
+import { loadPandaInterfaceReference } from './panda-runtime.js';
 import {
   assertV1ScoringReady,
   normalizeV1ScoringConfig,
@@ -46,6 +47,7 @@ export class EvaluationPipeline {
     this.activeRuns = new Map();
     this.dataQuery = options.dataQuery || queryPandaData;
     this.dataVerificationEnabled = options.dataVerificationEnabled ?? (process.env.NODE_ENV !== 'test' && process.env.PANDA_DATA_AUTO_VERIFY === 'true');
+    const pandaConfig = pandaDataConfig();
     const blackBoxEnabled = options.blackBoxEnabled === true;
     PIPELINE_PRIVATE.set(this, {
       blackBoxEnabled,
@@ -59,8 +61,35 @@ export class EvaluationPipeline {
       createId: options.createId || id,
       policy: options.policy || PHASE1_EXECUTION_POLICY,
       v1Reviewers: options.v1Reviewers ?? configuredReviewers(),
-      scoreV1Case: options.scoreV1Case || scoreV1ArenaCase
+      scoreV1Case: options.scoreV1Case || scoreV1ArenaCase,
+      buildSkill: options.buildSkillFn || buildSkill,
+      runSkill: options.runSkillFn || runSkill,
+      pandaRuntimeEnabled: options.pandaRuntimeEnabled ?? (
+        process.env.NODE_ENV !== 'test' && pandaConfig.ready
+      ),
+      pandaAllowedMethods: options.pandaAllowedMethods ?? pandaConfig.allowedMethods,
+      pandaInterfaceLoader: options.pandaInterfaceLoader || loadPandaInterfaceReference,
+      pandaInterfacePromise: null
     });
+  }
+
+  async pandaRuntimeContext() {
+    const state = privateState(this);
+    if (!state.pandaRuntimeEnabled) return undefined;
+    if (!state.pandaInterfacePromise) {
+      state.pandaInterfacePromise = Promise.resolve(
+        state.pandaInterfaceLoader(state.pandaAllowedMethods)
+      ).catch((error) => {
+        state.pandaInterfacePromise = null;
+        throw error;
+      });
+    }
+    return {
+      enabled: true,
+      allowedMethods: [...state.pandaAllowedMethods],
+      interfaceReference: await state.pandaInterfacePromise,
+      query: this.dataQuery
+    };
   }
 
   async create(input) {
@@ -582,7 +611,11 @@ export class EvaluationPipeline {
     const index = builds.findIndex((build) => build.runtimeId === step.key);
     let next;
     try {
-      next = await buildSkill(runtime, item.agentCard.description, item.mode, { signal, ...phaseSampling(item, `build:${runtime.id}`) });
+      next = await privateState(this).buildSkill(runtime, item.agentCard.description, item.mode, {
+        signal,
+        ...phaseSampling(item, `build:${runtime.id}`),
+        pandaData: await this.pandaRuntimeContext()
+      });
     } catch (error) {
       if (signal.aborted) throw signal.reason || error;
       next = { runtime: runtime.name, runtimeId: runtime.id, mode: item.mode, error: error.message };
@@ -652,7 +685,11 @@ export class EvaluationPipeline {
         if (!build || build.error) throw new Error(build?.error || '对应 Runtime Skill 尚未生成');
         name = build.runtime;
         mode = build.mode;
-        output = await runSkill(build, testCase, item.mode, { signal, ...phaseSampling(item, `run:${caseIndex}:${competitorId}`) });
+        output = await privateState(this).runSkill(build, testCase, item.mode, {
+          signal,
+          ...phaseSampling(item, `run:${caseIndex}:${competitorId}`),
+          pandaData: await this.pandaRuntimeContext()
+        });
       }
     } catch (error) {
       if (signal.aborted) throw signal.reason || error;
@@ -748,19 +785,27 @@ export class EvaluationPipeline {
     const validProfessional = professionalReviews.filter((review) => review.score > 0);
     const professional = professionalSnapshot(professionalReviews);
     const professionalMode = professional.mode;
-    await this.update(item, { professional, progress: 52, stage: 'Runtime description-only 直出', activeWork: null }, { level: 'success', source: 'MODEL', phase: 'review', text: `${reviewers.length} 位模型评审已交卷`, detail: `有效评审 ${validProfessional.length} · 均分 ${professional.score}`, mode: professionalMode });
+    const pandaRuntime = await this.pandaRuntimeContext();
+    const runtimeInputLabel = pandaRuntime
+      ? 'description + Panda 接口文档'
+      : 'description-only';
+    await this.update(item, { professional, progress: 52, stage: `Runtime ${runtimeInputLabel} 直出`, activeWork: null }, { level: 'success', source: 'MODEL', phase: 'review', text: `${reviewers.length} 位模型评审已交卷`, detail: `有效评审 ${validProfessional.length} · 均分 ${professional.score}`, mode: professionalMode });
 
     const builds = [];
     for (const runtime of RUNTIMES) {
       signal?.throwIfAborted();
       const startedAt = Date.now();
       await this.update(item, {
-        activeWork: { type: 'build', key: runtime.id, label: `${runtime.name} 正在直出 Skill`, target: runtime.name, detail: '唯一输入：Agent 顶层 description 原文', index: builds.length + 1, total: RUNTIMES.length, retry: false }
-      }, { level: 'info', source: 'RUNTIME', phase: 'build', text: `${runtime.name} 开始仅凭 description 直出 Skill`, mode: item.mode });
+        activeWork: { type: 'build', key: runtime.id, label: `${runtime.name} 正在直出 Skill`, target: runtime.name, detail: `输入：Agent 顶层 description 原文${pandaRuntime ? ' + 主办方 Panda 白名单接口文档' : ''}`, index: builds.length + 1, total: RUNTIMES.length, retry: false }
+      }, { level: 'info', source: 'RUNTIME', phase: 'build', text: `${runtime.name} 开始按 ${runtimeInputLabel} 直出 Skill`, mode: item.mode });
       try {
-        const build = await buildSkill(runtime, item.agentCard.description, item.mode, { signal, ...phaseSampling(item, `build:${runtime.id}`) });
+        const build = await privateState(this).buildSkill(runtime, item.agentCard.description, item.mode, {
+          signal,
+          ...phaseSampling(item, `build:${runtime.id}`),
+          pandaData: pandaRuntime
+        });
         builds.push(build);
-        await this.update(item, { builds: [...builds] }, { level: 'success', source: 'RUNTIME', phase: 'build', text: `${runtime.name} description-only 直出完成`, detail: build.skill?.name, mode: build.mode, durationMs: Date.now() - startedAt });
+        await this.update(item, { builds: [...builds] }, { level: 'success', source: 'RUNTIME', phase: 'build', text: `${runtime.name} ${runtimeInputLabel} 直出完成`, detail: build.skill?.name, mode: build.mode, durationMs: Date.now() - startedAt });
       } catch (error) {
         if (signal?.aborted) throw signal.reason || error;
         builds.push({ runtime: runtime.name, runtimeId: runtime.id, mode: item.mode, error: error.message });
@@ -781,7 +826,7 @@ export class EvaluationPipeline {
         await this.update(item, {
           benchmark,
           stage: `参考数据验真 ${index + 1}/${item.cases.length}`,
-          activeWork: { type: 'data', key: `case-${index}`, caseIndex: index, label: '正在获取 PandaAI 参考数据', target: testCase.name, detail: `${dataPlan.length} 个只读查询 · 不向参赛 Agent 泄露`, index: index + 1, total: item.cases.length, retry: false }
+          activeWork: { type: 'data', key: `case-${index}`, caseIndex: index, label: '正在获取 PandaAI 参考数据', target: testCase.name, detail: `${dataPlan.length} 个只读查询 · 仅用于独立验真，不进入评分 Prompt`, index: index + 1, total: item.cases.length, retry: false }
         }, { level: 'info', source: 'DATA', phase: 'evidence', text: `开始为「${testCase.name}」建立参考数据快照`, detail: dataPlan.map((query) => query.method).join(' · '), mode: item.mode });
         dataEvidence = await collectDataEvidence(testCase, {
           enabled: item.mode === 'live' && this.dataVerificationEnabled,
@@ -832,7 +877,11 @@ export class EvaluationPipeline {
         }
         startedAt = Date.now();
         try {
-          const output = await runSkill(build, testCase, item.mode, { signal, ...phaseSampling(item, `run:${index}:${build.runtimeId}`) });
+          const output = await privateState(this).runSkill(build, testCase, item.mode, {
+            signal,
+            ...phaseSampling(item, `run:${index}:${build.runtimeId}`),
+            pandaData: pandaRuntime
+          });
           entries.push(makeUnscoredEntry(build.runtimeId, build.runtime, output, build.mode, deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence));
         } catch (error) {
           if (signal?.aborted) throw signal.reason || error;

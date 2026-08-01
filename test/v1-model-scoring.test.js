@@ -106,8 +106,8 @@ test('single judge scores all successful candidates anonymously and server recom
     reviewers: [liveReviewer('deepseek', { name: 'DeepSeek', model: 'ds' })],
     evaluationMode: 'live',
     seed: 7,
-    invokeJudge: async ({ prompt, candidateIds }) => {
-      seen.push(prompt);
+    invokeJudge: async ({ system, prompt, candidateIds }) => {
+      seen.push({ system, prompt });
       return {
         scores: candidateIds.map((candidateId) => ({
           candidateId,
@@ -118,7 +118,7 @@ test('single judge scores all successful candidates anonymously and server recom
             artifactUsability: 50
           },
           total: 1,
-          rationale: 'visible quality',
+          rationale: '可见输出质量清晰。',
           uncertainties: []
         }))
       };
@@ -130,7 +130,9 @@ test('single judge scores all successful candidates anonymously and server recom
   assert.equal(result.entries.find((item) => item.id === 'cursor').scoreStatus, 'execution-failed');
   assert.equal(result.judging.successfulSeats, 1);
   assert.equal(result.judging.status, 'scored');
-  assert.doesNotMatch(seen[0], /Secret Agent|Doubao Agent|submitted|cursor/u);
+  assert.doesNotMatch(seen[0].prompt, /Secret Agent|Doubao Agent|submitted|cursor/u);
+  assert.match(seen[0].system, /rationale.*uncertainties.*简体中文/su);
+  assert.match(seen[0].prompt, /评语文本必须使用简体中文/u);
 });
 
 test('propagates caller cancellation after reviewer promises settle', async () => {
@@ -189,7 +191,7 @@ test('panel keeps successful executions unscored when only one reviewer seat suc
     model: 'gpt-model',
     mode: 'live',
     status: 'scored',
-    rationale: 'gpt rationale',
+    rationale: 'gpt 评语。',
     uncertainties: []
   }]);
 });
@@ -217,6 +219,67 @@ test('all execution failures receive zeroes without calling a judge', async () =
   assert.deepEqual(result.entries.map((entry) => entry.score), [0, 0]);
 });
 
+test('rejects an English-only public rationale instead of publishing an English review', async () => {
+  const result = await scoreV1ArenaCase({
+    testCase: { name: '因子研究', prompt: '报告 Rank IC' },
+    entries: [{ id: 'submitted', name: 'Agent', output: '结果', mode: 'live' }],
+    config: { version: 'v1-model-arena/v1', mode: 'single', reviewerId: 'deepseek' },
+    reviewers: [liveReviewer('deepseek')],
+    evaluationMode: 'live',
+    seed: 11,
+    invokeJudge: async ({ candidateIds }) => ({
+      scores: candidateIds.map((candidateId) => ({
+        candidateId,
+        dimensions: {
+          taskConstraint: 70,
+          professionalQuality: 70,
+          evidenceRisk: 70,
+          artifactUsability: 70
+        },
+        total: 70,
+        rationale: 'This output is clear but does not contain real results.',
+        uncertainties: ['The data source cannot be verified.']
+      }))
+    })
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.entries[0].score, null);
+  assert.equal(result.entries[0].scoreStatus, 'model-failed');
+  assert.equal(result.entries[0].judgeReviews.length, 0);
+});
+
+test('ignores harmless extra score-item prose from OpenAI while preserving the scoring schema', async () => {
+  const result = await scoreV1ArenaCase({
+    testCase: { name: '因子研究', prompt: '报告 Rank IC' },
+    entries: [{ id: 'submitted', name: 'Agent', output: '结果', mode: 'live' }],
+    config: { version: 'v1-model-arena/v1', mode: 'single', reviewerId: 'gpt' },
+    reviewers: [liveReviewer('gpt')],
+    evaluationMode: 'live',
+    seed: 12,
+    invokeJudge: async ({ candidateIds }) => ({
+      scores: candidateIds.map((candidateId) => ({
+        candidateId,
+        dimensions: {
+          taskConstraint: 80,
+          professionalQuality: 70,
+          evidenceRisk: 60,
+          artifactUsability: 50
+        },
+        total: 70,
+        rationale: '任务结构清楚，但真实数据仍不足。',
+        uncertainties: ['部分外部事实无法复核。'],
+        overallAssessment: 'This provider-added prose is non-scoring metadata.'
+      }))
+    })
+  });
+
+  assert.equal(result.status, 'scored');
+  assert.equal(result.entries[0].score, 70);
+  assert.equal(result.entries[0].judgeReviews[0].overallAssessment, undefined);
+  assert.equal(result.entries[0].judgeReviews[0].rationale, '任务结构清楚，但真实数据仍不足。');
+});
+
 function panelFixture(outcomes) {
   return {
     testCase: { name: '日报', prompt: '生成日报' },
@@ -240,7 +303,7 @@ function panelFixture(outcomes) {
             artifactUsability: outcome
           },
           total: 0,
-          rationale: `${reviewer.id} rationale`,
+          rationale: `${reviewer.id} 评语。`,
           uncertainties: []
         }))
       };

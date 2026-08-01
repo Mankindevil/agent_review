@@ -57,11 +57,11 @@ Card URL / 服务发现还检查 HTTP(S)、私网 URL 策略、1 MB 响应上限
 
 后端使用模型返回的 `score` 作为该模型总分。仅成功且 `score > 0` 的评审进入算术平均；全部失败时专业度为 0。专业度用于报告和审计，目前不直接改变最终四档决策树。
 
-## 3. Description-only 研究基线
+## 3. Description + Panda 公开研究基线
 
-Claude Code、Cursor Agent 与 Doubao Agent 只收到顶层 `description` 原文，不能看到 name、skills、examples、tags、capabilities、接口、源码或提交 Agent 的输出。
+Claude Code、Cursor Agent 与 Doubao Agent 只收到顶层 `description` 原文，不能看到 name、skills、examples、tags、capabilities、Agent 接口、源码或提交 Agent 的输出。启用 Panda Data 时，三者还会收到相同的比赛 `接口文档.md` 白名单摘录；这属于主办方统一数据底座，不包含提交 Agent 的私有能力或任何凭据。
 
-生成的金融 Skill 必须记录数据来源、口径、截止时点、样本区间，防范未来数据泄漏，报告基准、交易成本、风险与局限，并声明不构成投资建议。构建失败时该 Runtime 的各局实战分为 0，其他选手继续执行。
+生成的金融 Skill 必须声明 `panda_data` 工具并记录数据来源、口径、截止时点、样本区间，防范未来数据泄漏，报告基准、交易成本、风险与局限，并声明不构成投资建议。每局执行前，Runtime 先生成 1–3 项白名单查询计划；平台校验后通过受限 Python bridge 执行，再把不含凭据的真实结果交给 Runtime。越权方法或畸形参数失败关闭。构建或执行失败时该 Runtime 的该局实战分为 0，其他选手继续执行。
 
 ## 4. 同题研究实战分
 
@@ -70,7 +70,7 @@ Claude Code、Cursor Agent 与 Doubao Agent 只收到顶层 `description` 原文
 - `single`：由所选的一位评审模型为同一 CASE 内的全部成功输出匿名评分；可选 OpenAI、Anthropic、豆包或 DeepSeek，缺省配置与进入单模型模式时均默认 DeepSeek。
 - `panel`：固定使用 OpenAI、Anthropic、豆包和 DeepSeek 四席匿名盲评；至少两席成功才形成该 CASE 的正式分数。
 
-每个 CASE 会先收齐提交 Agent 与全部 Runtime 的输出，再移除候选名称、Runtime ID 和顺序特征，为每席生成独立的不透明候选 ID。评审只比较共享任务下的可见输出，不能浏览或调用工具。服务端严格校验每席返回值，并用固定权重重新计算总分；模型自报的总分不参与最终计算：
+每个 CASE 会先收齐提交 Agent 与全部 Runtime 的输出，再移除候选名称、Runtime ID 和顺序特征，为每席生成独立的不透明候选 ID。评审只比较共享任务下的可见输出，不能浏览或调用工具。服务端严格校验每席返回值，`rationale` 与 `uncertainties` 必须包含简体中文，否则该席失败；总分按固定权重重算，模型自报的总分不参与最终计算：
 
 ```text
 单局分 = 0.40 × 任务完成与约束满足
