@@ -99,23 +99,19 @@ A2A 1.0 JSON-RPC 使用 `SendMessage`，0.3 兼容调用使用 `message/send`。
 
 ### 3.3 多模型专业度盲审
 
-每个模型独立返回总分、评语、主要风险，并评价：
-
-- 领域深度；
-- 流程设计；
-- 异常处理；
-- 输出契约；
-- 可评测性。
+新建 V1 的 Card 审稿版本为 `v1-card-review/v2`。四席只接收公开 Agent Card，分别评价 `positioningClarity`、`skillDesign`、`protocolCoherence`、`ioExampleQuality` 与 `boundaryRiskDisclosure` 五项等权设计质量；服务端重算总分，评语与风险必须为简体中文。评审不能把 Card 的自述视作工具调用、数据访问或研究结果已经发生的证据。成功席按维度取算术平均，失败席保留错误但不阻断后续流水线。
 
 模型调用失败不会中止整场评测，失败评审会保留错误且不进入专业度平均分。OpenAI 与 Anthropic 默认通过 `OPENAI_BASE_URL` / `OPENAI_API_KEY` 接入 LLMX；豆包与 DeepSeek 通过 `ARK_BASE_URL` / `ARK_API_KEY` 接入火山方舟在线推理，分别使用独立 endpoint ID。豆包评审属于短结构化评分，Chat Completions 请求设置 `thinking.type=disabled` 并受 `MODEL_REVIEW_MAX_TOKENS` 限制，避免为短 JSON 生成长推理；超时由 `MODEL_REVIEW_TIMEOUT_MS` 统一控制。任一网关未配置 Key 时，只把对应模型降级为演示评审，其余已配置模型仍可真实运行。`MODEL_REVIEWERS_JSON` 可覆盖为任意数量的 OpenAI-compatible 或 Anthropic Messages API。
 
+模型上下文分两级管理。Prompt 构造层先用 `MODEL_REVIEW_EVIDENCE_ITEM_CHARS` 和 `MODEL_REVIEW_EVIDENCE_BUDGET_BYTES` 压缩可选证据 payload，保留 evidenceId、grade、kind、原始字节数和 UTF-8 安全预览；Provider 层再用 `MODEL_CONTEXT_MAX_BYTES` 检查完整 system + user 输入。系统指令、输出契约和 ID 白名单不会被无声截断，必保内容仍超限时会在网络请求前抛出 `MODEL_CONTEXT_BUDGET_EXCEEDED`。每次真实 Phase 2 调用记录 scope、system/prompt/input 字节数、约算 token、剩余预算、使用率和 `ok|warning|exceeded` 状态，四席评审统计随 `modelPanel.contextUsage` 持久化。A2A 多轮上下文与模型 prompt 分开：平台只在同一测试样例内复用 Agent 返回的 `contextId`/`taskId`，不同测试和重复运行从空上下文开始，远端 Agent 自行负责该 `contextId` 对应的记忆生命周期。
+
 模型评审、Runtime 构建 Skill 和 Runtime 执行 Skill 的 prompt 集中在 `src/prompts.js`。Runtime 构建要求单个 JSON 对象，但平台不会假设 CLI 永远严格服从格式：`safeJson()` 会从代码围栏或前后说明文字中提取第一个完整、可解析的平衡 JSON 值，随后再校验 Skill 的 `name`、`description`、`instructions` 和 `tools` 契约。这避免 Claude Code 或 Cursor Agent 输出简短前言时被误判为 0 分。
 
-### 3.4 Runtime description-only 现场直出
+### 3.4 Runtime 公开基线现场直出
 
-`src/runtimes.js` 当前声明 Claude Code、Cursor Agent、Doubao Agent 三个 adapter。Runtime 构建边界只接收 Agent Card 顶层 `description` 字符串，再生成统一结构的 skill：名称、描述、指令、工具和 fingerprint。完整 Card 只用于协议校验、必要性与专业度评审，以及调用提交 Agent；它不会跨入复刻边界。
+`src/runtimes.js` 当前声明 Claude Code、Cursor Agent、Doubao Agent 三个 adapter。Runtime 构建边界接收 Agent Card 顶层 `description` 字符串；启用 Panda 时还接收由比赛 `接口文档.md` 按 `PANDA_DATA_ALLOWED_METHODS` 提炼出的公开合同，再生成统一结构的 skill：名称、描述、指令、工具和 fingerprint。完整 Card 只用于协议校验、必要性与专业度评审，以及调用提交 Agent；它不会跨入复刻边界。
 
-这道 description-only 信息防火墙同时存在于四层：流水线调用 `buildSkill(runtime, item.agentCard.description, ...)`；`buildSkill()` 拒绝非字符串输入；本地 CLI / 模型 API prompt 只插入 description；远程 adapter 请求体只发送 `description` 与 `inputPolicy`，不含 `agentCard`。因此 Runtime 看不到 name、skills、examples、tags、capabilities、接口地址和提交 Agent 输出。
+这道公开输入防火墙同时存在于四层：流水线调用 `buildSkill(runtime, item.agentCard.description, ...)`；`buildSkill()` 拒绝非字符串输入；本地 CLI / 模型 API prompt 只插入 description 与平台统一的 Panda 白名单合同；远程 adapter 请求体不含 `agentCard`。因此 Runtime 看不到 name、skills、examples、tags、capabilities、Agent 接口地址和提交 Agent 输出。金融执行分为“查询计划 → 平台校验并调用 `panda_data` bridge → 带真实结果执行 Skill”三步；模型不接触 Panda 账号、密码或 token，越权方法在查询前失败关闭。
 
 演示模式会生成确定性 skill 与输出。真实模式按优先级使用 `RUNTIME_ADAPTERS_JSON` 外部隔离服务、显式启用的本地 Claude/Cursor CLI，或火山方舟豆包 model API。所有实现只接收平台生成的 prompt，不执行用户提交的 shell 命令。
 
@@ -133,22 +129,37 @@ Runtime 构建阶段的跨执行器契约是结构化 Skill JSON，而不是允�
 <skill-name>/
 ├── SKILL.md                       人类可读的用途、边界、执行流程与工具声明
 ├── skill.json                     Runtime 返回并通过校验的原始结构化 Skill
-├── references/source-description.txt  构建时唯一可见的任务描述原文
+├── references/source-description.txt  构建时可见的 Agent 任务描述原文
+├── references/panda-data-interface.json  可选；公开接口文档来源与方法白名单
 └── .agent-roast/manifest.json         Runtime、输入策略、模型、模式、adapter、seed 与 fingerprint
 ```
 
-这个目录是规范化产物快照，不冒充已被清理的 CLI 临时工作区，也不会暴露完整 Agent Card、环境变量、认证头或 API Key。新产物在 manifest 中记录 `inputPolicy: description-only`。信息防火墙上线前的旧评测缺少该字段，详情接口会增加 `references/legacy-input-warning.txt` 并在前端警告“不能作为公平基线”，用户必须“重建并对测”后才能得到合规基线。前端使用目录树和带行号的只读预览展示；文件内容进入 DOM 前统一 HTML 转义。
+这个目录是规范化产物快照，不冒充已被清理的 CLI 临时工作区，也不会暴露完整 Agent Card、环境变量、认证头或 API Key。新产物在 manifest 中记录 `inputPolicy: description-only` 或 `description+panda-interface`；后一种同时记录 Panda 文档来源与方法白名单。信息防火墙上线前的旧评测缺少该字段，详情接口会增加 `references/legacy-input-warning.txt` 并在前端警告“不能作为公平基线”，用户必须“重建并对测”后才能得到合规基线。前端使用目录树和带行号的只读预览展示；文件内容进入 DOM 前统一 HTML 转义。
 
-### 3.5 同 prompt 对测与锐评分档
+### 3.5 V1 同 prompt 对测与锐评分档
 
 每个用例同时发送给：
 
 - 用户提交的 A2A Agent；
-- Claude Code description 直出 skill；
-- Cursor description 直出 skill；
+- Claude Code 公开基线直出 skill；
+- Cursor 公开基线直出 skill；
 - Doubao description 直出 skill。
 
-当前金融 output judge 使用任务完成、数据证据、方法严谨与风险披露四维启发式打分。它能审查是否交代数据来源、截止时点、样本区间、基准、成本、回撤和风险提示，但不能在没有 Data / Research Skills 时验证金融数字真伪。生产版应增加 point-in-time 数据复算、结构化断言、独立 judge 与人工抽检，并随机化选手顺序以减少位置偏差。
+新建 V1 使用 `v1-model-arena/v2`，而 `v1-model-arena/v1` 仍是历史四维规则。存量记录按持久化版本展示，不会后台迁移或静默重算。
+
+每个成功候选的单局总分由服务端计算：
+
+```text
+总分 = 0.20 × 场景价值 + 0.60 × 专业度 + 0.20 × Agent 能力
+场景价值 = 0.50 × 问题复杂度 + 0.50 × Agent 适用性
+专业度 = 0.30 × 任务完成 + 0.25 × 方法专业性 + 0.20 × 证据/数据质量
+       + 0.15 × 风险/不确定性 + 0.10 × 产物可用性
+能力分 = 执行失败 ? 0 : 0.70 × 100 + 0.30 × 耗时分
+```
+
+场景在每个 CASE 中由匿名模型席评一次并由所有成功候选共享；专业度只由匿名可见输出评定。单模型需要选定席成功，四模型 panel 至少两席成功；服务端分别对成功席子维度取中位数并重算总分。执行失败、Runtime 构建失败或无最终输出的候选硬置 0，不因共享场景获得保底分。
+
+耗时分在 `durationMs ≤ 60,000` 时为 100、在 `durationMs ≥ 600,000` 时为 0，中间线性递减。`durationMs` 是一次候选调用的端到端墙钟时间，包含网络、A2A 协议、Runtime 启动和模型处理。记录固定带有 `timingScope: end-to-end-wall-clock`、`includesNetwork: true` 与 `toolObservation: unavailable`：平台没有内部工具追踪，不能把候选文本中的工具调用声明当作已验证事实。
 
 最终只使用四个分档：
 
@@ -157,6 +168,8 @@ Runtime 构建阶段的跨执行器契约是结构化 Skill JSON，而不是允�
 - 提交 Agent 不低于 Claude Code、但领先少于 3 分：`人上人`；
 - 提交 Agent 低于 Claude Code、但不低于豆包基线：`NPC`；
 - 提交 Agent 低于豆包基线：`拉`。
+
+首页公开 intake 固定创建 V1 `live`，不渲染 V2 或 demo 开关。该 UI 策略不删除 V2/demo API、持久化数据或历史详情；它们继续按各自真实模式展示。
 
 ### 3.6 单步重试与派生结果重算
 
@@ -212,6 +225,10 @@ OpenAI-compatible 模型、方舟模型 API 和 Claude Code 的 Ark 协议桥会
 ### `GET /api/evaluations/:id`
 
 返回评测快照，包括 `progress`、`stage`、`logs`、各阶段结果和最终锐评。
+
+### `GET /api/evaluations/:id/report.pdf`
+
+只为已完成的 `schemaVersion: 1` V1 评测生成即时中文 PDF。成功返回 `application/pdf`、attachment 文件名和 `Cache-Control: no-store`；缺失记录为 `404`，V2 或非完成记录为 `409`，生成器不可用/超时/无效输出返回受控 JSON 错误而不泄露部分 PDF。投影使用 allowlist，只含公开 Card、评分、输出、审计和日志，不含凭据、环境变量、私有 V2 evidence、内部路径或模型思维过程。Python 选择 `REPORT_PDF_PYTHON`、`PANDA_DATA_PYTHON`、`.venv/bin/python` 的顺序，通过受限子进程运行 ReportLab。
 
 ### `GET /api/evaluations/:id/builds/:runtimeId/skill`
 

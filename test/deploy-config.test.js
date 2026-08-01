@@ -311,3 +311,20 @@ test('diagnostics key rotation atomically keeps the environment and retrieval co
   const guardedRestart = rotation.indexOf('if [ "$restoration_ok" -eq 1 ]; then');
   assert.ok(restoredEnv < restoredKey && restoredKey < restoredValidation && restoredValidation < guardedRestart);
 });
+
+test('V1 release runbook installs and smoke-tests the complete PDF report path', async () => {
+  const [operations, environment] = await Promise.all([
+    readDoc('PRODUCTION_OPERATIONS.md'),
+    readFile(new URL('../.env.example', import.meta.url), 'utf8')
+  ]);
+  assert.match(environment, /^REPORT_PDF_PYTHON=\.venv\/bin\/python$/m);
+  assert.match(environment, /^MODEL_CONTEXT_MAX_BYTES=1500000$/m);
+  assert.match(environment, /^MODEL_CONTEXT_WARN_RATIO=0\.8$/m);
+  assert.match(operations, /\.venv\/bin\/python -m pip install -r requirements-data\.txt/);
+  assert.match(operations, /\.venv\/bin\/python -c ['"]import reportlab['"]/);
+  assert.match(operations, /\/api\/evaluations\/\$\{?evaluation_id\}?\/report\.pdf/);
+  assert.match(operations, /Content-Type:\s*application\/pdf/i);
+  assert.match(operations, /pdfinfo/);
+  assert.match(operations, /completed V1/i);
+  assert.match(operations, /rollback/i);
+});

@@ -142,7 +142,7 @@ Do not downgrade or rewrite persisted state in place.
 
 ## Service inventory
 
-- Public application surface: diagnostics allowlist only; all other HTTPS paths return `404`
+- Public full application: <https://14.103.143.171/>
 - Browser diagnostics: <https://14.103.143.171/agent-check>
 - Private full application: <http://127.0.0.1:4173/> through an SSH tunnel
 - Services: `agent-review` (application) and Nginx (TLS reverse proxy)
@@ -152,7 +152,7 @@ Do not downgrade or rewrite persisted state in place.
 - State: `/var/lib/agent-review/evaluations.json`
 - Environment: `/etc/agent-review/agent-review.env`, owned by `root:root`, mode `0600`
 
-Manage the app only through systemd; do not start an additional Node process. Nginx remains the public TLS endpoint and exposes only `/agent-check`, its JS/CSS, `/api/agent-diagnostics`, and `/api/health`.
+Manage the app only through systemd; do not start an additional Node process. Nginx remains the public TLS endpoint and proxies the application, including long-running evaluation and SSE routes, to the loopback-only Node service. The public homepage intake must expose only V1 `live`; V2 and demo APIs/history remain retained backend capabilities and must not be advertised as public intake.
 
 This private deployment intentionally sets `ALLOW_PRIVATE_AGENT_URLS=true`. The setting applies to diagnostics, Agent Card discovery, and formal evaluation A2A calls. Targets are resolved and reached from the production host, so `127.0.0.1` means this server rather than the submitter's browser or workstation. Keep the flag disabled for an untrusted multi-tenant deployment.
 
@@ -209,15 +209,19 @@ require_200 https://14.103.143.171/agent-check.js
 require_200 https://14.103.143.171/agent-check.css
 require_308 https://14.103.143.171/agent-check.html
 require_401_post https://14.103.143.171/api/agent-diagnostics
-require_404 https://14.103.143.171/
-require_404 https://14.103.143.171/api/evaluations
-require_404 https://14.103.143.171/methodology.html
+require_200 https://14.103.143.171/
+require_200 https://14.103.143.171/app.js
+require_200 https://14.103.143.171/styles.css
+require_200 https://14.103.143.171/methodology.html
+require_200 https://14.103.143.171/judge.html
+require_200 https://14.103.143.171/appeal.html
+require_200 https://14.103.143.171/api/evaluations
 sudo journalctl -u agent-review --since '24 hours ago' --no-pager
 sudo systemctl status nginx --no-pager
 sudo journalctl -u nginx --since '24 hours ago' --no-pager
 ```
 
-The health response must contain JSON with `ok: true`; the diagnostics page and assets must return exactly `200`, the old HTML entry must return `308`, and an unauthenticated diagnostics POST must return `401`. The full evaluation UI and non-allowlisted APIs must return exactly `404`. These checks do not follow redirects. The existing failed `cloud-monitor-agent` and `console-setup` units are unrelated to this platform; record and investigate them separately unless evidence links them to the incident.
+The health response must contain JSON with `ok: true`; the application, its primary pages, assets, and evaluation collection API must return exactly `200`; the old diagnostics HTML entry must return `308`; and an unauthenticated diagnostics POST must return `401`. These checks do not follow redirects. Inspect the homepage source or rendered controls during release acceptance: it must contain neither a V2 intake switch nor a demo intake switch. Existing V2/demo records may still be opened directly and retain their original type. The existing failed `cloud-monitor-agent` and `console-setup` units are unrelated to this platform; record and investigate them separately unless evidence links them to the incident.
 
 ## Restart and reboot validation
 
@@ -294,7 +298,7 @@ release_dir="$(readlink -f "$expected_release_dir")"
 test "$release_dir" = "$expected_release_dir"
 test -d "$release_dir"
 test -f "$release_dir/package.json"
-sudo -u agent-review -- sh -c 'cd "$1" && npm test && npm run check' sh "$release_dir"
+sudo -u agent-review -- sh -c 'cd "$1" && npm ci && python3 -m venv .venv && .venv/bin/python -m pip install -r requirements-data.txt && .venv/bin/python -c "import reportlab" && npm test && npm run check' sh "$release_dir"
 nginx_template="$release_dir/deploy/nginx-production.conf"
 test -f "$nginx_template"
 nginx_live=/etc/nginx/sites-available/agent-review
@@ -367,6 +371,29 @@ trap - EXIT
 ```
 
 The rendered Nginx configuration is installed only after the existing file is backed up. Any failure after promotion restores that backup, validates it with `nginx -t`, reloads Nginx, and restores the previous application symlink if it had already moved. Record every printed rollback input with the release: the previous release, Nginx backup, root-only environment backup, retrieval-key state, and retrieval-key backup path when the state is `present`. A `missing` state is deliberate and must also be recorded. Both root-only backups must survive until the release is accepted.
+
+### Completed V1 PDF acceptance
+
+After health is green, select a known completed `schemaVersion: 1` V1 evaluation ID from the release state; do not use a V2, running, demo-only fixture, or a guessed ID. The report is generated on demand, so this also verifies the release virtual environment rather than a cached static file.
+
+```bash
+set -euo pipefail
+evaluation_id='<completed V1 evaluation id>'
+case "$evaluation_id" in ''|*[^A-Za-z0-9_-]*) echo 'set one completed V1 evaluation id' >&2; exit 1;; esac
+report_headers="$(mktemp)"
+report_pdf="$(mktemp --suffix=.pdf)"
+trap 'rm -f -- "$report_headers" "$report_pdf"' EXIT
+curl --fail --silent --show-error --max-redirs 0 \
+  --dump-header "$report_headers" \
+  --output "$report_pdf" \
+  "https://14.103.143.171/api/evaluations/${evaluation_id}/report.pdf"
+grep -qi '^Content-Type: application/pdf' "$report_headers"
+grep -qi '^Cache-Control: no-store' "$report_headers"
+pdfinfo "$report_pdf"
+test -s "$report_pdf"
+```
+
+The endpoint is only valid for a completed V1 record: missing IDs return `404`; V2 and non-completed records return `409`. If the request is not `200`, lacks `Content-Type: application/pdf`, or `pdfinfo` cannot parse it, treat the release as failed and run the recorded rollback before attempting another PDF request. The report route must never stream a partial PDF on renderer failure.
 
 If post-deployment acceptance fails, use the exact paths and retrieval-key state recorded by the release command. Do not guess a SHA or select the newest backup:
 

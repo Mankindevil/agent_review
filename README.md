@@ -44,6 +44,14 @@ verifies the cache and provider-call contract with that interpreter.
 
 未接入主办方 Data / Research Skills 时，平台只审查研究设计与输出纪律，不验证金融数字真伪，也不会把模拟结果包装成真实回测。接入数据能力后可在现有同题执行层增加 point-in-time 数据复算、回测结果校验和结构化验收断言。
 
+## 当前公开入口：V1 真实对测
+
+首页固定创建 V1 `live` 评测，不展示 V2 切换和演示入口。V2 与 demo 的服务端能力、历史记录和直接结果页仍保留，便于既有记录审计；它们不会被公开首页伪装成 V1 live。
+
+新建 V1 的四方审稿只评价公开 Agent Card 的定位、Skills、协议、输入输出示例和边界风险。随后同 Prompt 对打采用 `v1-model-arena/v2`：`20% 场景价值 + 60% 专业度 + 20% 服务端可观测能力`。能力分由成功状态和端到端耗时计算，包含网络与协议开销；平台不观测 Agent 内部工具调用。完整公式、版本兼容和阈值见 [评测与打分规则](./docs/SCORING.md)。
+
+完成的 V1 结果可下载中文完整 PDF（`GET /api/evaluations/:id/report.pdf`），包括 Card、四方审稿、场景、逐候选评分/耗时、评语、原始输出和 Panda/上下文审计。生成器使用 `REPORT_PDF_PYTHON`（默认 `.venv/bin/python`）并要求 `requirements-data.txt` 中的 ReportLab；不存在记录返回 404，V2 或未完成记录返回 409。
+
 ## 已实现功能
 
 - A2A 1.0 Agent Card 校验，兼容 0.3 顶层 `url` 形态；
