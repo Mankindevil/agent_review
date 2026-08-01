@@ -40,3 +40,30 @@ Syntax OK · 203 JavaScript files
 
 - `git diff --check` is clean. Responsive CSS was reviewed for the existing 1000px/700px breakpoints and reduced-motion rule. I attempted to connect an in-app browser for a visual check, but this environment reported no available browser; no visual screenshot was produced.
 - The full repository suite was not run because the shared worktree contains unrelated in-progress changes. The focused UI suite and repository syntax check above are green.
+
+## Fix round 1/5
+
+### Review findings addressed
+
+1. Restored the direct/historical V2 UI state path: `evaluationVersionUiState({ selectedVersion: 'v2', healthResolved: true, v2Available: true })` now returns a usable V2 state without adding any public V2 entry.
+2. Escaped unknown Card-review and Arena-scenario dimension keys before inserting them into HTML.
+3. Added executed renderer coverage for Card design review version selection, five labels, zero values, absent dimensions, unsafe reviewer/comment/risk/key text, legacy labels, zero duration/score, and malformed V1 Arena v2 details.
+
+### TDD evidence
+
+RED:
+
+```text
+node --test test/evaluation-version-ui.test.js test/result-ui.test.js
+3 failures: undefined isV2 in direct V2 state; raw scenario key; Card renderer edge assertions
+```
+
+GREEN:
+
+```text
+node --test test/evaluation-version-ui.test.js test/result-ui.test.js test/v1-scoring-ui.test.js test/browser-evaluation-actions.test.js
+20 passed, 0 failed
+
+npm run check
+Syntax OK · 203 JavaScript files
+```

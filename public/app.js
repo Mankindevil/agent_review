@@ -1129,7 +1129,13 @@ function renderReviews(reviews, item) {
   const cards = reviews.map((review) => {
     const key = review.reviewerId || review.model;
     const working = activityMatches(activity, key);
-    return `<article class="review-card${working ? ' work-active' : ''}"><div class="reviewer"><b>${escapeHtml(review.reviewer)}</b><span>${escapeHtml(review.model)} · ${review.mode?.toUpperCase()}</span></div><div class="review-score">${review.score}<small> / 100</small></div>${review.error?`<div class="risk"><b>执行失败</b>${renderStructuredText(review.error)}</div>`:`<div class="mini-bars">${Object.entries(review.dimensions||{}).map(([dimension,score])=>`<div><span>${labels[dimension]||dimension}</span><i style="--value:${score}%"></i><b>${score}</b></div>`).join('')}</div>${renderStructuredText(review.comment, 'review-comment')}<div class="risk"><b>⚠ 首要风险</b>${renderStructuredText(review.risk)}</div>`}<div class="review-actions">${retryButton('review', key, '重跑该模型')}</div>${working ? renderWorkLoader(activity, 'card') : ''}</article>`;
+    const reviewScore = Number.isFinite(review.score) ? review.score : '—';
+    const dimensions = Object.entries(review.dimensions || {}).map(([dimension, score]) => {
+      const value = Number.isFinite(score) ? score : 0;
+      const display = Number.isFinite(score) ? score : '—';
+      return `<div><span>${escapeHtml(labels[dimension] || dimension)}</span><i style="--value:${value}%"></i><b>${display}</b></div>`;
+    }).join('');
+    return `<article class="review-card${working ? ' work-active' : ''}"><div class="reviewer"><b>${escapeHtml(review.reviewer)}</b><span>${escapeHtml(review.model)} · ${escapeHtml((review.mode || '').toUpperCase())}</span></div><div class="review-score">${reviewScore}<small> / 100</small></div>${review.error?`<div class="risk"><b>执行失败</b>${renderStructuredText(review.error)}</div>`:`<div class="mini-bars">${dimensions}</div>${renderStructuredText(review.comment, 'review-comment')}<div class="risk"><b>⚠ 首要风险</b>${renderStructuredText(review.risk)}</div>`}<div class="review-actions">${retryButton('review', key, '重跑该模型')}</div>${working ? renderWorkLoader(activity, 'card') : ''}</article>`;
   });
   if (activity && !reviews.some((review) => activityMatches(activity, review.reviewerId || review.model))) cards.push(`<article class="review-card review-card-loading work-active">${renderWorkLoader(activity, 'card')}</article>`);
   plan.forEach((reviewer, index) => {
@@ -1379,7 +1385,7 @@ function renderV1ArenaV2Scenario(judging) {
   const scenario = judging?.scenario;
   if (!scenario?.dimensions) return '';
   const labels = { problemComplexity: '问题复杂度', agentSuitability: 'Agent 适配度' };
-  const rows = Object.entries(scenario.dimensions).map(([key, value]) => `<div><span>${labels[key] || key}</span><i style="--value:${Number.isFinite(value) ? value : 0}%"></i><b>${Number.isFinite(value) ? value : '—'}</b></div>`).join('');
+  const rows = Object.entries(scenario.dimensions).map(([key, value]) => `<div><span>${escapeHtml(labels[key] || key)}</span><i style="--value:${Number.isFinite(value) ? value : 0}%"></i><b>${Number.isFinite(value) ? value : '—'}</b></div>`).join('');
   const reviews = (scenario.reviews || []).map((review) => `<article><header><b>${escapeHtml(review.reviewerName || review.reviewerId || '评审席')}</b><span>${escapeHtml(review.model || '—')} · ${escapeHtml((review.mode || '').toUpperCase())}</span></header><p>${escapeHtml(review.rationale || '未提供场景评语')}</p></article>`).join('');
   return `<section class="v1-arena-scenario"><header><div><small>SHARED SCENARIO / 20%</small><h4>场景价值 <b>${Number.isFinite(scenario.score) ? scenario.score : '—'}</b></h4></div><p>同一 Prompt 共享评分，不随候选 Agent 改变。</p></header><div class="v1-dimension-grid">${rows}</div>${reviews ? `<div class="v1-review-list">${reviews}</div>` : ''}</section>`;
 }

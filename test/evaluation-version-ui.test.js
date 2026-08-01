@@ -72,6 +72,17 @@ test('keeps direct V2 request construction while forcing public V1 requests live
   });
 });
 
+test('keeps historical direct V2 state callable without restoring a public V2 entry', () => {
+  const state = { healthResolved: true, selectedVersion: 'v2', v2Available: true };
+  assert.deepEqual(evaluationVersionUiState(state), {
+    selectedVersion: 'v2',
+    usable: true,
+    label: '启动 A2A 证据评测',
+    message: ''
+  });
+  assert.equal(selectedSubmissionVersion(state), 'v2');
+});
+
 test('keeps the V1 landing control usable when health metadata is unavailable', () => {
   const label = { textContent: '正在确认评测模式' };
   const button = { disabled: true, querySelector: (selector) => selector === 'span' ? label : null };

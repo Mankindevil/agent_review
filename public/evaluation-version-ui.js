@@ -29,7 +29,7 @@ export function evaluationVersionUiState({ healthResolved, selectedVersion, v2Av
   return {
     selectedVersion,
     usable,
-    label: isV2 ? '启动 A2A 证据评测' : '送进研究终审台',
+    label: '启动 A2A 证据评测',
     message: usable ? '' : V2_UNAVAILABLE_MESSAGE
   };
 }

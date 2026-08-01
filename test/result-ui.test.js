@@ -32,6 +32,18 @@ function v1ArenaRendererHarness(source) {
   );
 }
 
+function cardReviewRendererHarness(source) {
+  const escape = sourceBetween(source, 'function escapeHtml', 'function escapeAttr');
+  const structuredText = sourceBetween(source, 'function renderStructuredText', 'async function loadHistory');
+  const review = sourceBetween(source, 'function renderReviews', 'function renderBuilds');
+  return Function(
+    'activityOfType', 'reviewPlanFor', 'activityMatches', 'renderQueuedWork', 'retryButton', 'renderWorkLoader',
+    `${escape}\n${structuredText}\n${review}\nreturn renderReviews;`
+  )(
+    () => null, () => [], () => false, () => '', () => '', () => ''
+  );
+}
+
 test('publishes the ordered evidence-led dual-track result surface', async () => {
   const [renderer, evidencePage, evidenceScript, evidenceStyle, app] = await Promise.all([
     readFile(new URL('public/result-v2.js', root), 'utf8'),
@@ -232,4 +244,77 @@ test('renders V1 Arena v2 in audit order while preserving legacy v1 names', asyn
   }], { scoringConfig: { version: 'v1-model-arena/v1', mode: 'single', reviewerId: 'deepseek' } });
   for (const label of ['任务约束', '专业质量', '证据风险', '产物可用性']) assert.match(legacyMarkup, new RegExp(label));
   assert.doesNotMatch(legacyMarkup, /端到端耗时/);
+});
+
+test('renders Card review labels from its version and safely handles missing or unsafe fields', async () => {
+  const app = await readFile(new URL('public/app.js', root), 'utf8');
+  const renderReviews = cardReviewRendererHarness(app);
+  const markup = renderReviews([{
+    version: 'v1-card-review/v2',
+    reviewer: '<img src=x onerror=alert(1)>',
+    model: 'GPT <unsafe>',
+    mode: 'live',
+    score: 0,
+    dimensions: {
+      positioningClarity: 0,
+      skillDesign: 0,
+      protocolCoherence: 0,
+      ioExampleQuality: 0,
+      boundaryRiskDisclosure: 0,
+      '<script>dimension</script>': 42
+    },
+    comment: '<script>comment</script>',
+    risk: '<img src=x>'
+  }, {
+    version: 'v1-card-review/v2',
+    reviewer: '缺字段评审',
+    model: 'GPT-5',
+    mode: 'live',
+    score: 0,
+    dimensions: null,
+    comment: '',
+    risk: ''
+  }], { professional: { version: 'v1-card-review/v2' } });
+
+  for (const label of [
+    'AGENT CARD DESIGN REVIEW', '定位清晰度', 'Skill 设计', '协议一致性', '输入输出示例质量', '边界与风险披露'
+  ]) assert.match(markup, new RegExp(label));
+  assert.match(markup, /<div class="review-score">0<small> \/ 100<\/small><\/div>/);
+  assert.match(markup, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(markup, /&lt;script&gt;comment&lt;\/script&gt;/);
+  assert.match(markup, /&lt;script&gt;dimension&lt;\/script&gt;/);
+  assert.doesNotMatch(markup, /<script>comment<\/script>/);
+  assert.doesNotMatch(markup, /<img src=x onerror/);
+
+  const legacy = renderReviews([{
+    reviewer: '旧评审', model: '旧模型', mode: 'demo', score: 0,
+    dimensions: { researchRigor: 0 }, comment: '', risk: ''
+  }], { professional: {} });
+  assert.match(legacy, /MULTI-MODEL FINANCE REVIEW/);
+  assert.match(legacy, /研究严谨性/);
+  assert.doesNotMatch(legacy, /AGENT CARD DESIGN REVIEW/);
+});
+
+test('escapes malformed V1 Arena v2 scenario dimension keys and renders zero metrics', async () => {
+  const app = await readFile(new URL('public/app.js', root), 'utf8');
+  const renderBattle = v1ArenaRendererHarness(app);
+  const markup = renderBattle([{
+    case: { name: '边界', prompt: '边界 Prompt' },
+    judging: {
+      version: 'v1-model-arena/v2', mode: 'single', status: 'scored', successfulSeats: 1,
+      scenario: { score: 0, dimensions: { '<img src=x onerror=alert(1)>': 0 }, reviews: [] }
+    },
+    entries: [{
+      id: 'submitted', name: '<script>Agent</script>', mode: 'live', score: 0, scoreStatus: 'scored', output: '<unsafe>',
+      dimensions: { scenarioValue: 0, professionalQuality: 0, agentCapability: 0 },
+      detail: { professionalism: { dimensions: null }, capability: { durationMs: 0, toolObservation: 'unavailable' } },
+      judgeReviews: []
+    }]
+  }], { scoringConfig: { version: 'v1-model-arena/v2', mode: 'single' } });
+
+  assert.match(markup, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(markup, /<img src=x onerror/);
+  assert.match(markup, /0\.00 s/);
+  assert.match(markup, /<strong class="winner">0<\/strong>/);
+  assert.match(markup, /&lt;script&gt;Agent&lt;\/script&gt;/);
 });
