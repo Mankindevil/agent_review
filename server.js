@@ -615,7 +615,10 @@ export const server = createServer(async (request, response) => {
     }
     const reportMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/report\.pdf$/);
     if (request.method === 'GET' && reportMatch) {
-      const item = store.get(reportMatch[1]);
+      let reportId;
+      try { reportId = decodeURIComponent(reportMatch[1]); }
+      catch { return json(response, 400, { error: '评测编号编码无效' }); }
+      const item = store.get(reportId);
       if (!item) return json(response, 404, { error: '评测不存在' });
       let dto;
       try {
@@ -625,7 +628,7 @@ export const server = createServer(async (request, response) => {
       }
       let pdf;
       try {
-        pdf = await generateV1ReportPdf(dto);
+        pdf = await generateV1ReportPdf(dto, { timeoutMs: reportPdfTimeoutMs() });
       } catch (error) {
         return json(response, error.statusCode || 502, { error: error.message || 'PDF 报告生成失败' });
       }
@@ -806,6 +809,7 @@ function authorizedBearer(request, expected) {
 }
 function json(response, status, payload) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); response.end(JSON.stringify(payload)); }
 function safeAttachmentName(value) { return String(value || 'report').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80) || 'report'; }
+function reportPdfTimeoutMs() { const value = Number(process.env.REPORT_PDF_TIMEOUT_MS); return Number.isSafeInteger(value) && value > 0 ? value : undefined; }
 function summary(item) { return { id: item.id, name: item.agentCard.name, createdAt: item.createdAt, status: item.status, progress: item.progress, tier: item.roast?.tier, score: item.averages?.submitted }; }
 
 export function serializeEvaluationForResponse(item) {

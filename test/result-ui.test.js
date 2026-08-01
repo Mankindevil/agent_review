@@ -327,7 +327,7 @@ test('exposes the final-report download only for completed V1 evaluations', asyn
 
   assert.match(page, /id="download-v1-report"/);
   assert.match(app, /function syncV1ReportDownload\(item\)/);
-  assert.match(app, /item\.schemaVersion !== 2/);
+  assert.match(app, /item\.schemaVersion === 1/);
   assert.match(app, /item\.status === 'completed'/);
   assert.match(app, /\/api\/evaluations\/\$\{encodeURIComponent\(item\.id\)\}\/report\.pdf/);
 });

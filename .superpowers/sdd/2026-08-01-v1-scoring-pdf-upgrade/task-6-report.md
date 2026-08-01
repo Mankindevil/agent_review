@@ -60,3 +60,60 @@ the complete-output and Chinese-review sentinels.
 - `public/index.html`, `public/app.js`, `public/styles.css`
 - `requirements-data.txt`
 - `test/v1-report.test.js`, `test/api.test.js`, `test/result-ui.test.js`
+
+## Fix round 1 / 5
+
+### Root cause and red phase
+
+- The earlier V1 guard only rejected one historical schema version, so other
+  non-V1 shapes and partially populated completed records could reach the
+  renderer.
+- A recursive copy followed by a blacklist allowed unrecognised nested fields
+  to cross the public-report boundary, including a plausible credential-shaped
+  value in Panda data parameters/facts.
+- The report omitted several final-result sections (tier/CASE ranking, all five
+  professionalism dimensions, capability components and audit uncertainty),
+  and its PDF check accepted a header-only/truncated renderer response.
+
+Focused tests were written first for each failure: schema 2/3 and incomplete
+completed records, nested unknown/credential sentinels, all required report
+sentinels, bad renderer output, non-zero renderer exit, timeout and oversize
+output. They failed against the previous implementation before the fixes.
+
+### Green implementation
+
+- `projectV1Report` now accepts *only* `schemaVersion === 1`, requires the
+  completed V1 Card/config/Card-review/CASE-entry shape, and uses named nested
+  projections rather than cloning then filtering. Panda query parameters and
+  facts are separately allowlisted at their own boundaries.
+- The download route safely decodes the evaluation id and maps malformed id,
+  unavailable renderer, invalid renderer output and timeout to distinct HTTP
+  failures without returning partial PDF bytes.
+- The report now has a final-tier cover, Card summary and per-CASE rankings,
+  five professionalism dimensions, execution/latency/capability components,
+  audit uncertainty, white table-header text and running header/footer.
+- Renderer acceptance requires a bounded PDF with a header, `startxref` and
+  terminal `%%EOF`; the generator rejects invalid, timed-out, non-zero and
+  oversized output.
+
+### Final verification and visual QA
+
+Commands passed:
+
+```text
+node --test test/v1-report.test.js test/api.test.js test/result-ui.test.js
+npm run check
+git diff --check
+```
+
+Final fixture: `output/pdf/v1-agent-review-fixture.pdf` (not staged).
+`pdfinfo` reports 15 A4 pages (595.276 x 841.89 points). `pdfplumber` confirmed
+all 10 report titles, every candidate output sentinel, Chinese reviews,
+uncertainty/capability labels, and the running header/footer on all 15 pages.
+
+I rendered r6 and the final r9 pages with `pdftoppm`; their 15 page PNGs are
+pixel-identical (matching hashes), so the previously completed page-by-page
+inspection applies to the final artifact. The inspection found readable Chinese
+text, white table headers, no clipping, unsupported-glyph boxes, accidental blank
+pages or orphan headings. Earlier r1/r4 pagination defects (candidate-table
+continuation and a one-row audit tail) were eliminated before the final render.

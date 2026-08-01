@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { projectV1Report, generateV1ReportPdf } from '../src/v1-report.js';
 
 const exec = promisify(execFile);
@@ -17,7 +19,7 @@ export function completeV1Fixture(overrides = {}) {
     agentCard: { name: '完整报告 Agent', description: '覆盖金融研究全流程的 Agent。', version: '1.0.0', protocolVersion: '1.0', skills: [{ id: 'research', name: '研究', description: '完整研究。', tags: ['金融'], examples: ['输出完整报告'] }], internalPath: 'internal-path', secret: 'agent-secret' },
     scoringConfig: { version: 'v1-model-arena/v2', mode: 'panel' }, complexity: { score: 80, verdict: '值得 Agent 化', reason: '多阶段任务', dimensions: { taskComplexity: 80 } },
     professional: { version: 'v1-card-review/v2', score: 87, mode: 'live', reviews: [review, { ...review, reviewer: 'Anthropic 评审', reviewerId: 'claude', model: 'Claude', score: 86 }, { ...review, reviewer: '豆包评审', reviewerId: 'doubao', model: 'Doubao', score: 85 }, { ...review, reviewer: 'DeepSeek 评审', reviewerId: 'deepseek', model: 'DeepSeek', score: 84 }] },
-    averages: { submitted: 86, 'claude-code': 82, cursor: 79, doubao: 80 }, roast: { headline: '值得继续打磨', summary: '完整结论。' },
+    averages: { submitted: 86, 'claude-code': 82, cursor: 79, doubao: 80 }, roast: { tier: { code: 'HARD', label: '夯', stamp: '夯' }, headline: '值得继续打磨', summary: '完整结论。', deltaClaude: 4, deltaDoubao: 6, professionalAverage: 87 },
     builds: [{ runtime: 'Claude Code', runtimeId: 'claude-code', mode: 'live', skill: { name: '复刻 Skill', description: '完整 Skill', instructions: ['读取接口文档'], tools: ['panda-data'] }, contextUsage: [{ phase: 'skill-build', inputBytes: 500, budgetBytes: 240000 }] }],
     benchmark: ['因子研究', '组合风险'].map((name, index) => ({ case: { id: `case-${index + 1}`, name, prompt: `完整 Prompt ${name}，需要展示长段落与 JSON。`, constraints: ['不能编造'], expectedDeliverable: '完整报告' }, judging: { version: 'v1-model-arena/v2', status: 'scored', mode: 'panel', requiredSeats: 4, successfulSeats: 4, scenario: { score: 80, dimensions: { problemComplexity: 82, agentSuitability: 78 }, reviews: [{ reviewerName: 'OpenAI 评审', model: 'GPT-5', rationale: '复杂场景', dimensions: { problemComplexity: 82, agentSuitability: 78 } }] } }, dataEvidence: { status: 'verified', source: 'pandaai', fetchedAt: '2026-08-01T00:10:00Z', queries: [{ id: 'panda', label: '行情', method: 'get_index_daily', status: 'verified', params: { symbol: '000300.SH', pandaPassword: 'panda-password' }, facts: [{ close: 4000 }] }] }, entries: [entry('submitted', '提交 Agent'), entry('claude-code', 'Claude Code'), entry('cursor', 'Cursor'), entry('doubao', '豆包')] })),
     logs: [{ at: '2026-08-01T00:00:00Z', level: 'success', source: 'ARENA', phase: 'benchmark', text: '完成', detail: 'network' }],
@@ -25,14 +27,28 @@ export function completeV1Fixture(overrides = {}) {
   };
 }
 
-test('strictly projects completed V1 report data without secrets', () => {
-  const dto = projectV1Report(completeV1Fixture());
+test('strictly projects only complete V1 report data without recursive secrets or unknown fields', () => {
+  const fixture = completeV1Fixture();
+  fixture.benchmark[0].dataEvidence.queries[0].params = {
+    symbol: '000300.SH', start_date: '20250101', apiKey: 'api-key-sentinel', nested: { bearer: 'bearer-sentinel' }
+  };
+  fixture.benchmark[0].dataEvidence.queries[0].facts = [{
+    label: '收盘', field: 'close', value: 4000, sourceDate: '20250101', unknownFact: 'unknown-fact-sentinel', credential: 'credential-sentinel'
+  }];
+  const dto = projectV1Report(fixture);
   const serialized = JSON.stringify(dto);
   assert.match(serialized, /完整候选输出/);
   assert.match(serialized, /完整中文评语/);
-  assert.doesNotMatch(serialized, /agent-secret|panda-password|internal-path/);
+  assert.doesNotMatch(serialized, /agent-secret|panda-password|internal-path|api-key-sentinel|bearer-sentinel|unknown-fact-sentinel|credential-sentinel/);
+  assert.deepEqual(dto.benchmark[0].dataEvidence.queries[0].params, { symbol: '000300.SH', start_date: '20250101' });
+  assert.deepEqual(dto.benchmark[0].dataEvidence.queries[0].facts, [{ label: '收盘', field: 'close', value: 4000, sourceDate: '20250101' }]);
   assert.throws(() => projectV1Report(completeV1Fixture({ schemaVersion: 2 })), /V1/);
+  assert.throws(() => projectV1Report(completeV1Fixture({ schemaVersion: 3 })), /V1/);
   assert.throws(() => projectV1Report(completeV1Fixture({ status: 'running' })), /完成/);
+  assert.throws(() => projectV1Report(completeV1Fixture({ agentCard: { name: '' } })), /Card/);
+  assert.throws(() => projectV1Report(completeV1Fixture({ scoringConfig: {} })), /评分配置/);
+  assert.throws(() => projectV1Report(completeV1Fixture({ professional: { reviews: [] } })), /Card 评审/);
+  assert.throws(() => projectV1Report(completeV1Fixture({ benchmark: [{ case: { name: '空案例', prompt: '' }, entries: [] }] })), /CASE/);
 });
 
 test('generates a multi-page A4 PDF with complete Chinese sentinels', async () => {
@@ -41,8 +57,32 @@ test('generates a multi-page A4 PDF with complete Chinese sentinels', async () =
   assert.equal(pdf.subarray(0, 5).toString(), '%PDF-');
   await mkdir('tmp/pdfs', { recursive: true });
   await writeFile('tmp/pdfs/v1-report-test.pdf', pdf);
-  const check = `import pdfplumber\np='tmp/pdfs/v1-report-test.pdf'\nwith pdfplumber.open(p) as f:\n t='\\n'.join((x.extract_text() or '') for x in f.pages)\n print(len(f.pages))\n print('SENTINEL-OUTPUT-submitted' in t)\n print('完整中文评语' in t)\n print(f.pages[0].width, f.pages[0].height)`;
+  const check = `import pdfplumber\np='tmp/pdfs/v1-report-test.pdf'\nwith pdfplumber.open(p) as f:\n t='\\n'.join((x.extract_text() or '') for x in f.pages)\n print(len(f.pages))\n for s in ['V1 Agent 完整评测报告','一、评分口径与免责声明','二、评测概览','三、完整 Agent Card','四、四方 Agent Card 设计评审','五、逐 CASE 场景评估','六、逐候选同题对打与能力评估','七、逐席模型评审审计','八、完整候选原始输出','九、Runtime、数据、上下文与时间线附录','提交 Agent','Claude Code','Cursor','豆包','SENTINEL-OUTPUT-submitted','SENTINEL-OUTPUT-claude-code','SENTINEL-OUTPUT-cursor','SENTINEL-OUTPUT-doubao','完整中文评语','仅基于本次公开输出。','任务完成','方法专业性','数据证据质量','风险与不确定性','产物可用性','执行成功评分','耗时评分','能力总分','最终评级']:\n  print(s in t)\n print('Agent 锐评系统 - V1 完整评测报告' in t)\n print(f.pages[0].width, f.pages[0].height)`;
   const { stdout } = await exec(python, ['-c', check]);
-  assert.match(stdout, /^\d+\nTrue\nTrue\n595\./m);
-  assert.ok(Number(stdout.split('\n')[0]) > 1);
+  const values = stdout.trim().split('\n');
+  assert.ok(Number(values[0]) > 1);
+  assert.deepEqual(values.slice(1, -1), Array(30).fill('True'));
+  assert.match(values.at(-1), /^595\./);
+});
+
+test('rejects malformed, failed, timed-out, and oversized renderer output without returning partial PDF bytes', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'v1-report-renderer-'));
+  const script = async (name, body) => {
+    const filename = path.join(directory, name);
+    await writeFile(filename, `#!/bin/sh\ncat >/dev/null\n${body}\n`);
+    await chmod(filename, 0o755);
+    return filename;
+  };
+  try {
+    const invalid = await script('invalid.sh', "printf '%s' '%PDF-1.7 incomplete'");
+    const failed = await script('failed.sh', "echo renderer-failed >&2; exit 7");
+    const delayed = await script('delayed.sh', 'sleep 2; printf %s %PDF-1.7');
+    const oversized = await script('oversized.sh', "printf '%s' '%PDF-1.7\\nstartxref\\n0\\n%%EOF'; head -c 512 /dev/zero");
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: invalid }), { statusCode: 502 });
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: failed }), { statusCode: 502 });
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: delayed, timeoutMs: 50 }), { statusCode: 504 });
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: oversized, maxPdfBytes: 128 }), { statusCode: 502 });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

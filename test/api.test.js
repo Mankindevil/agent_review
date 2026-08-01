@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -2250,15 +2250,15 @@ test('rejects an out-of-range evaluation seed', async () => {
 
 test('downloads a completed V1 report and rejects unavailable records without partial PDFs', async () => {
   const completed = {
-    id: 'eval_v1_pdf_api', schemaVersion: 1, status: 'completed', mode: 'demo', createdAt: '2026-08-01T00:00:00Z', completedAt: '2026-08-01T00:01:00Z',
+    id: 'eval v1+pdf api', schemaVersion: 1, status: 'completed', mode: 'demo', createdAt: '2026-08-01T00:00:00Z', completedAt: '2026-08-01T00:01:00Z',
     agentCard: { name: 'PDF Agent', description: '用于下载测试的公开 Card', skills: [] },
-    scoringConfig: { version: 'v1-model-arena/v2', mode: 'panel' }, complexity: { score: 80, verdict: '值得 Agent 化', reason: '多步骤' }, professional: { reviews: [] }, averages: { submitted: 80 }, roast: { headline: '完成' }, builds: [], benchmark: [], logs: []
+    scoringConfig: { version: 'v1-model-arena/v2', mode: 'panel' }, complexity: { score: 80, verdict: '值得 Agent 化', reason: '多步骤' }, professional: { reviews: [{ reviewer: 'OpenAI', model: 'GPT', score: 80, comment: 'Card 审阅完成', dimensions: {} }] }, averages: { submitted: 80 }, roast: { tier: { code: 'NPC', label: 'NPC' }, headline: '完成' }, builds: [], benchmark: [{ case: { name: '下载案例', prompt: '输出完整分析' }, entries: [{ id: 'submitted', name: '提交 Agent', output: '报告正文', score: 80, dimensions: {}, detail: {}, execution: {}, judgeReviews: [] }] }], logs: []
   };
   const running = { ...completed, id: 'eval_v1_pdf_running', status: 'running' };
   await evaluationStore.set(completed);
   await evaluationStore.set(running);
   try {
-    const ok = await fetch(`${origin}/api/evaluations/${completed.id}/report.pdf`);
+    const ok = await fetch(`${origin}/api/evaluations/${encodeURIComponent(completed.id)}/report.pdf`);
     const bytes = Buffer.from(await ok.arrayBuffer());
     assert.equal(ok.status, 200);
     assert.match(ok.headers.get('content-type'), /application\/pdf/);
@@ -2267,6 +2267,7 @@ test('downloads a completed V1 report and rejects unavailable records without pa
     assert.equal(bytes.subarray(0, 5).toString(), '%PDF-');
     assert.equal((await fetch(`${origin}/api/evaluations/missing/report.pdf`)).status, 404);
     assert.equal((await fetch(`${origin}/api/evaluations/${running.id}/report.pdf`)).status, 409);
+    assert.equal((await fetch(`${origin}/api/evaluations/%E0%A4%A/report.pdf`)).status, 400);
     const oldPython = process.env.REPORT_PDF_PYTHON;
     process.env.REPORT_PDF_PYTHON = '/definitely/not/a/python';
     try {
@@ -2275,6 +2276,29 @@ test('downloads a completed V1 report and rejects unavailable records without pa
       assert.match(unavailable.headers.get('content-type'), /application\/json/);
     } finally {
       if (oldPython === undefined) delete process.env.REPORT_PDF_PYTHON; else process.env.REPORT_PDF_PYTHON = oldPython;
+    }
+    const rendererDir = await mkdtemp(path.join(tmpdir(), 'v1-report-api-'));
+    const invalidRenderer = path.join(rendererDir, 'invalid-renderer.sh');
+    const delayedRenderer = path.join(rendererDir, 'delayed-renderer.sh');
+    await writeFile(invalidRenderer, "#!/bin/sh\ncat >/dev/null\nprintf '%s' '%PDF-1.7 incomplete'\n");
+    await writeFile(delayedRenderer, "#!/bin/sh\ncat >/dev/null\nsleep 1\nprintf '%s' '%PDF-1.7'\n");
+    await chmod(invalidRenderer, 0o755);
+    await chmod(delayedRenderer, 0o755);
+    const beforePython = process.env.REPORT_PDF_PYTHON;
+    const beforeTimeout = process.env.REPORT_PDF_TIMEOUT_MS;
+    try {
+      process.env.REPORT_PDF_PYTHON = invalidRenderer;
+      const invalid = await fetch(`${origin}/api/evaluations/${encodeURIComponent(completed.id)}/report.pdf`);
+      assert.equal(invalid.status, 502);
+      assert.match(invalid.headers.get('content-type'), /application\/json/);
+      assert.doesNotMatch(await invalid.text(), /%PDF-/);
+      process.env.REPORT_PDF_PYTHON = delayedRenderer;
+      process.env.REPORT_PDF_TIMEOUT_MS = '25';
+      assert.equal((await fetch(`${origin}/api/evaluations/${encodeURIComponent(completed.id)}/report.pdf`)).status, 504);
+    } finally {
+      if (beforePython === undefined) delete process.env.REPORT_PDF_PYTHON; else process.env.REPORT_PDF_PYTHON = beforePython;
+      if (beforeTimeout === undefined) delete process.env.REPORT_PDF_TIMEOUT_MS; else process.env.REPORT_PDF_TIMEOUT_MS = beforeTimeout;
+      await rm(rendererDir, { recursive: true, force: true });
     }
   } finally {
     await evaluationStore.delete(completed.id);
