@@ -1,8 +1,23 @@
 const UNRESOLVED_MODE_MESSAGE = '无法从服务确认评测模式，请稍后刷新重试。';
 const V2_UNAVAILABLE_MESSAGE = 'V2 证据评测当前未启用，请切换到 V1 经典评测。';
 
+// The public desk intentionally has one entry point. V2 records remain
+// addressable through their historical URLs, but must never be selected by a
+// homepage query or capability probe.
+export function publicEvaluationVersion(_search = '') {
+  return 'v1';
+}
+
 export function evaluationVersionUiState({ healthResolved, selectedVersion, v2Available }) {
-  if (!healthResolved || !['v1', 'v2'].includes(selectedVersion)) {
+  if (selectedVersion === 'v1') {
+    return {
+      selectedVersion,
+      usable: true,
+      label: '送进研究终审台',
+      message: ''
+    };
+  }
+  if (!healthResolved || selectedVersion !== 'v2') {
     return {
       selectedVersion,
       usable: false,
@@ -10,8 +25,7 @@ export function evaluationVersionUiState({ healthResolved, selectedVersion, v2Av
       message: UNRESOLVED_MODE_MESSAGE
     };
   }
-  const isV2 = selectedVersion === 'v2';
-  const usable = !isV2 || v2Available === true;
+  const usable = v2Available === true;
   return {
     selectedVersion,
     usable,
@@ -51,7 +65,7 @@ export function buildEvaluationCreateRequest(version, {
     return {
       agentCard,
       agentExamples,
-      mode,
+      mode: 'live',
       scoringConfig,
       ...(seed !== undefined ? { seed } : {}),
       ...(agentAuthorization ? { agentAuthorization } : {})

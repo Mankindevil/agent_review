@@ -4,6 +4,34 @@ import { readFile } from 'node:fs/promises';
 
 const root = new URL('../', import.meta.url);
 
+function sourceBetween(source, start, end) {
+  const startIndex = source.indexOf(start);
+  const endIndex = source.indexOf(end, startIndex + start.length);
+  assert.notEqual(startIndex, -1, `missing production source marker: ${start}`);
+  assert.notEqual(endIndex, -1, `missing production source marker: ${end}`);
+  return source.slice(startIndex, endIndex);
+}
+
+function v1ArenaRendererHarness(source) {
+  const escape = sourceBetween(source, 'function escapeHtml', 'function escapeAttr');
+  const modelEra = sourceBetween(source, 'function isV1ModelScoredRound', 'function renderV1Judging');
+  const arenaV2 = sourceBetween(source, 'function isV1ArenaV2Round', 'function renderV1Judging');
+  const judging = sourceBetween(source, 'function renderV1Judging', 'function renderV1JudgeReviews');
+  const audit = sourceBetween(source, 'function renderV1JudgeReviews', 'function formatExecutionDuration');
+  const duration = sourceBetween(source, 'function formatExecutionDuration', 'function renderV1ArenaV2Scenario');
+  const scenario = sourceBetween(source, 'function renderV1ArenaV2Scenario', 'function renderV1ArenaV2Totals');
+  const totals = sourceBetween(source, 'function renderV1ArenaV2Totals', 'function renderBattle');
+  const battle = sourceBetween(source, 'function renderBattle', 'function renderDataEvidence');
+  return Function(
+    'activityOfType', 'competitorPlanFor', 'renderDataVerificationBadge', 'retryButton',
+    'renderDataChecks', 'renderWorkLoader', 'activityMatches', 'renderQueuedWork',
+    'renderDataEvidence',
+    `${escape}\n${modelEra}\n${arenaV2}\n${judging}\n${audit}\n${duration}\n${scenario}\n${totals}\n${battle}\nreturn renderBattle;`
+  )(
+    () => null, () => [], () => '', () => '', () => '', () => '', () => false, () => '', () => ''
+  );
+}
+
 test('publishes the ordered evidence-led dual-track result surface', async () => {
   const [renderer, evidencePage, evidenceScript, evidenceStyle, app] = await Promise.all([
     readFile(new URL('public/result-v2.js', root), 'utf8'),
@@ -119,9 +147,89 @@ test('surfaces dual-track progress, replica-human hand-off, and finalize control
   assert.match(app, /formatV2CreateError/);
   assert.match(app, /REPLICA_RUNTIME_NOT_READY/);
 
-  assert.match(indexHtml, /id="skip-human-review"/);
-  assert.match(indexHtml, /id="replica-policy-visibility"/);
-  assert.match(indexHtml, /id="replica-policy-required-primaries"/);
-  assert.match(indexHtml, /id="replica-policy-force-separate-judges"/);
-  assert.match(styles, /\.replica-policy-panel/);
+  assert.doesNotMatch(indexHtml, /id="skip-human-review"/);
+  assert.doesNotMatch(indexHtml, /id="replica-policy-visibility"/);
+  assert.doesNotMatch(indexHtml, /id="replica-policy-required-primaries"/);
+  assert.doesNotMatch(indexHtml, /id="replica-policy-force-separate-judges"/);
+  assert.match(app, /function submitV2Evaluation/);
+  assert.match(app, /renderV2ResultView\(item/);
+  assert.match(styles, /\.v2-resume-panel/);
+});
+
+test('keeps Card design review labels distinct from the V1 Arena v2 audit stack', async () => {
+  const app = await readFile(new URL('public/app.js', root), 'utf8');
+
+  for (const label of [
+    '定位清晰度',
+    'Skill 设计',
+    '协议一致性',
+    '输入输出示例质量',
+    '边界与风险披露',
+    'AGENT CARD DESIGN REVIEW'
+  ]) assert.match(app, new RegExp(label));
+
+  for (const label of [
+    '场景价值',
+    '专业度',
+    'Agent 能力',
+    '任务完成度',
+    '方法专业度',
+    '证据与数据质量',
+    '风险与不确定性',
+    '产物可用性',
+    '端到端耗时',
+    '包含网络及协议开销',
+    '未观测 Agent 内部工具调用'
+  ]) assert.match(app, new RegExp(label));
+
+  assert.match(app, /v1-model-arena\/v2/);
+  assert.match(app, /任务约束/);
+  assert.match(app, /专业质量/);
+  assert.match(app, /证据风险/);
+  assert.match(app, /产物可用性/);
+});
+
+test('renders V1 Arena v2 in audit order while preserving legacy v1 names', async () => {
+  const app = await readFile(new URL('public/app.js', root), 'utf8');
+  const renderBattle = v1ArenaRendererHarness(app);
+  const v2Markup = renderBattle([{
+    case: { name: '因子研究', prompt: '在沪深 300 验证现金流因子。' },
+    judging: {
+      version: 'v1-model-arena/v2', mode: 'panel', status: 'scored', successfulSeats: 2,
+      scenario: {
+        score: 82,
+        dimensions: { problemComplexity: 84, agentSuitability: 80 },
+        reviews: [{ reviewerName: 'OpenAI 评审', model: 'GPT-5', mode: 'live', rationale: '涉及多阶段数据与研究判断。' }]
+      }
+    },
+    entries: [{
+      id: 'submitted', name: '提交 Agent', mode: 'live', score: 87, scoreStatus: 'scored', output: '完整研究报告',
+      dimensions: { scenarioValue: 82, professionalQuality: 89, agentCapability: 85 },
+      detail: {
+        professionalism: { dimensions: { taskCompletion: 95, methodProfessionalism: 90, evidenceDataQuality: 85, riskUncertainty: 80, artifactUsability: 88 } },
+        capability: { durationMs: 123456, toolObservation: 'unavailable' }
+      },
+      judgeReviews: [{ reviewerName: 'OpenAI 评审', model: 'GPT-5', mode: 'live', rationale: '方法完整，边界清楚。', uncertainties: ['未取得内部工具轨迹。'] }]
+    }]
+  }], { scoringConfig: { version: 'v1-model-arena/v2', mode: 'panel' } });
+
+  for (const label of [
+    '场景价值', '问题复杂度', 'Agent 适配度', '专业度', 'Agent 能力',
+    '任务完成度', '方法专业度', '证据与数据质量', '风险与不确定性', '产物可用性',
+    '端到端耗时', '包含网络及协议开销', '未观测 Agent 内部工具调用', 'OpenAI 评审'
+  ]) assert.match(v2Markup, new RegExp(label));
+  assert.match(v2Markup, /123\.5 s/);
+  assert.ok(v2Markup.indexOf('场景价值') < v2Markup.indexOf('任务完成度'));
+  assert.ok(v2Markup.indexOf('任务完成度') < v2Markup.indexOf('端到端耗时'));
+
+  const legacyMarkup = renderBattle([{
+    case: { name: '旧记录', prompt: '旧 Prompt' },
+    judging: { version: 'v1-model-arena/v1', mode: 'single', reviewerId: 'deepseek', status: 'scored', successfulSeats: 1, seats: [] },
+    entries: [{
+      id: 'submitted', name: '旧 Agent', mode: 'live', score: 70, scoreStatus: 'scored', output: '旧报告',
+      dimensions: { taskConstraint: 70, professionalQuality: 70, evidenceRisk: 70, artifactUsability: 70 }, judgeReviews: []
+    }]
+  }], { scoringConfig: { version: 'v1-model-arena/v1', mode: 'single', reviewerId: 'deepseek' } });
+  for (const label of ['任务约束', '专业质量', '证据风险', '产物可用性']) assert.match(legacyMarkup, new RegExp(label));
+  assert.doesNotMatch(legacyMarkup, /端到端耗时/);
 });

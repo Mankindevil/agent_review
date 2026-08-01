@@ -6,7 +6,7 @@
   <meta name="description" content="Panda AI锐评局：金融 A2A Agent 公开评测，审数据、查回测、压基线，判断一套投研智能体到底夯不夯。">
   <title>Panda AI锐评局 · 金融 Agent 研究终审台</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/styles.css?v=20260731-version-switch2">
+  <link rel="stylesheet" href="/styles.css?v=20260802-v1-live-only">
 </head>
 <body>
   <div class="noise" aria-hidden="true"></div>
@@ -47,23 +47,9 @@
       </div>
 
       <div class="intake-card" id="submission-panel">
-        <nav class="evaluation-version-switch" aria-label="评测版本">
-          <a href="/?version=v1" data-evaluation-version="v1">
-            <span>V1 经典评测</span>
-            <small>模型竞技 · 同题对测</small>
-          </a>
-          <a href="/?version=v2" data-evaluation-version="v2">
-            <span>V2 证据评测</span>
-            <small>证据链 · Replica 复刻</small>
-          </a>
-        </nav>
-        <div class="card-kicker"><span>INTAKE / 送检入口</span><strong>01</strong></div>
-        <div id="legacy-intake" class="legacy-only">
+        <div class="card-kicker"><span>V1 LIVE / 送检入口</span><strong>01</strong></div>
+        <div id="legacy-intake">
           <div class="evaluation-controls">
-          <div class="mode-switch" role="group" aria-label="评测模式">
-            <button class="selected" data-mode="demo"><span>演示评测</span><small>零配置，跑完整流程</small></button>
-            <button data-mode="live"><span>真实对测</span><small>调用 Agent 与已配置模型</small></button>
-          </div>
           <label class="seed-control" for="evaluation-seed">
             <span>SEED</span>
             <input id="evaluation-seed" type="number" min="0" max="2147483646" step="1" placeholder="读取中" inputmode="numeric">
@@ -88,12 +74,6 @@
           </fieldset>
           <div class="runtime-health data-health" id="data-source-health" aria-live="polite"><span>DATA SOURCE</span><i>正在检查 PandaAI Quant…</i></div>
           <div class="runtime-health" id="runtime-health" aria-live="polite"><span>RUNTIME PROBE</span><i>正在检查本机执行器…</i></div>
-        </div>
-
-        <div id="v2-card-heading" class="a2a-section-heading hidden">
-          <span>CUSTODY / SOURCE 01</span>
-          <b>A2A Agent Card</b>
-          <small>冻结本次评测使用的公开身份与协议入口。</small>
         </div>
 
         <div class="source-switch" role="group" aria-label="Agent 提交方式">
@@ -122,72 +102,25 @@
           <div class="resolved-card hidden" id="resolved-card"></div>
         </div>
 
-        <div class="example-picks legacy-only">
+        <div class="example-picks">
           <span>本地真实样本</span>
           <button type="button" data-example="factor">因子显微镜</button>
           <button type="button" data-example="backtest">策略验钞机</button>
           <button type="button" data-example="portfolio">组合风控台</button>
         </div>
 
-        <div class="cases-head legacy-cases hidden" hidden>
+        <div class="cases-head">
           <div><b>同题对测用例</b><small>所有选手收到完全相同的 prompt</small></div>
           <button class="text-button" id="add-case" type="button">＋ 添加用例</button>
         </div>
-        <div id="case-list" class="case-list legacy-cases hidden" hidden></div>
+        <div id="case-list" class="case-list"></div>
 
-        <section id="v2-intake" class="a2a-intake hidden" aria-labelledby="v2-examples-heading">
-          <div class="a2a-section-heading">
-            <span>CUSTODY / CONTRACT 02</span>
-            <b id="v2-examples-heading">Agent 使用示例</b>
-            <small id="v2-examples-blurb">按 Example → Turn → Part → Criterion 登记公开样本。</small>
-          </div>
-          <div class="a2a-example-import">
-            <div class="a2a-example-import-actions">
-              <button class="text-button" id="fill-examples-from-card" type="button">从 Agent Card 填充</button>
-              <button class="text-button" id="apply-example-paste" type="button">解析下方粘贴文本</button>
-            </div>
-            <label class="a2a-field-wide" for="example-paste">
-              粘贴多示例说明（自动识别「### 示例 N：标题」+ 输入 JSON + 预期要点）
-              <textarea id="example-paste" rows="8" spellcheck="false" placeholder="### 示例 1：……&#10;&#10;**输入**&#10;```json&#10;{&quot;text&quot;: &quot;……&quot;, &quot;riskLevel&quot;: &quot;balanced&quot;}&#10;```&#10;&#10;**预期输出要点**&#10;- ……"></textarea>
-            </label>
-            <p id="example-import-status" class="a2a-example-import-status" role="status" aria-live="polite"></p>
-          </div>
-          <div id="v2-example-list" class="a2a-example-list"></div>
-          <button class="text-button a2a-add-root" id="add-v2-example" type="button">＋ 添加 Example</button>
-
-          <label class="agent-auth-panel" for="agent-authorization">
-            <span>CONNECTION ONLY / 可选</span>
-            <b>Agent connection authorization</b>
-            <small>只发往 Agent 端点；请求进入内存后立即清空，不会写入浏览器存储。</small>
-            <input id="agent-authorization" type="password" autocomplete="off" spellcheck="false" placeholder="例如 Bearer …">
-          </label>
-
-          <label class="skip-human-review-panel v2-only hidden" for="skip-human-review">
-            <input id="skip-human-review" type="checkbox">
-            <span>跳过人工打分</span>
-            <small>模型四席评审锁定后直接以模型中位数结算终审，不进入人工评审阶段。</small>
-          </label>
-
-          <fieldset class="replica-policy-panel v2-only hidden" id="replica-policy-panel">
-            <legend>复刻人工评审策略（可选，双轨并行）</legend>
-            <label>可见性
-              <select id="replica-policy-visibility">
-                <option value="full_blind" selected>full_blind · 复刻结果全程密封</option>
-                <option value="semi_blind">semi_blind</option>
-                <option value="open">open</option>
-                <option value="split_blind">split_blind · 绝对分公开，复刻强制密封</option>
-              </select>
-            </label>
-            <label>所需人工主评人数
-              <input id="replica-policy-required-primaries" type="number" min="1" step="1" value="1">
-            </label>
-            <label class="a2a-check">
-              <input id="replica-policy-force-separate-judges" type="checkbox">
-              禁止同一人同时评审绝对分与复刻
-            </label>
-            <small>复刻结果密封、模型 Arena 评分后并行开放；人工评分与绝对分复核互不阻塞，双轨都锁定后才结算终审。</small>
-          </fieldset>
-        </section>
+        <label class="agent-auth-panel" for="agent-authorization">
+          <span>CONNECTION ONLY / 可选</span>
+          <b>Agent connection authorization</b>
+          <small>只发往 Agent 端点；请求进入内存后立即清空，不会写入浏览器存储。</small>
+          <input id="agent-authorization" type="password" autocomplete="off" spellcheck="false" placeholder="例如 Bearer …">
+        </label>
 
         <div class="form-actions single"><button class="primary-button" id="start-evaluation" type="button" disabled><span>正在确认评测模式</span><i>↗</i></button></div>
         <p class="form-error" id="form-error" role="alert"></p>
@@ -211,7 +144,7 @@
         <p id="agent-description"></p>
       </div>
       <div class="run-controls">
-        <div class="mode-pill" id="run-mode">DEMO</div>
+        <div class="mode-pill" id="run-mode">LIVE</div>
         <button class="stop-run hidden" id="stop-evaluation" type="button"><i aria-hidden="true"></i><span>停止本次评测</span></button>
       </div>
     </section>

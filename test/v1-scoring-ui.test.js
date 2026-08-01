@@ -148,7 +148,7 @@ test('excludes failed historical entries from all-failed and tied-zero winners',
   assert.doesNotMatch(tiedAtZero, /<h4>Failed zero<\/h4><strong class="winner">/);
 });
 
-test('mode clicks and reviewer changes affect only the V1 create payload', async () => {
+test('reviewer changes keep the public V1 create payload live', async () => {
   const source = await appSource();
   const controlsSource = sourceBetween(
     source,
@@ -161,7 +161,7 @@ test('mode clicks and reviewer changes affect only the V1 create payload', async
     'async function submitV1Evaluation'
   );
   const state = {
-    mode: 'demo',
+    mode: 'live',
     scoringMode: 'panel',
     scoringReviewerId: 'deepseek'
   };
@@ -233,7 +233,7 @@ test('mode clicks and reviewer changes affect only the V1 create payload', async
 
   const v1 = builders.buildV1CreateRequest(input);
   assert.deepEqual(v1.scoringConfig, { mode: 'single', reviewerId: 'claude' });
-  assert.equal(v1.mode, 'demo');
+  assert.equal(v1.mode, 'live');
   assert.equal(v1.seed, 7);
   assert.equal(v1.agentAuthorization, 'Bearer secret');
 

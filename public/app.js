@@ -1,10 +1,7 @@
 import {
-  evaluationModeFromHealth,
   nextAvailableEditorId,
   recordActionCopy,
   recordActionFailure,
-  requestedEvaluationVersion,
-  resolveEvaluationVersion,
   runtimeStatusLabel
 } from './a2a-ui-helpers.js?v=20260801-runtime-probe1';
 import {
@@ -21,12 +18,12 @@ import {
   buildEvaluationCreateRequest,
   evaluationVersionUiState,
   homepageHistoryUrl,
+  publicEvaluationVersion,
   restoreLandingStartButton,
   selectedSubmissionVersion
-} from './evaluation-version-ui.js?v=20260731-version-switch2';
+} from './evaluation-version-ui.js?v=20260802-v1-live-only';
 
-const state = { mode: 'demo', scoringMode: 'panel', scoringReviewerId: 'deepseek', sourceType: 'direct', selectedVersion: null, v2Available: null, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), skillRequestToken: 0, activeWorkTimer: null, activeWorkKey: null };
-const requestedVersion = requestedEvaluationVersion(location.search);
+const state = { mode: 'live', scoringMode: 'panel', scoringReviewerId: 'deepseek', sourceType: 'direct', selectedVersion: 'v1', v2Available: null, healthResolved: false, current: null, eventSource: null, resolvedCard: null, lastStage: null, completedRendered: null, stopping: false, verdictRevealToken: 0, openEvaluationToken: 0, historyLoadToken: 0, skillBundles: new Map(), skillRequestToken: 0, activeWorkTimer: null, activeWorkKey: null };
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const DEFAULT_REVIEW_PLAN = [
@@ -81,8 +78,8 @@ async function init() {
   requestAnimationFrame(() => document.body.classList.add('ready'));
   const initialCase = exampleCatalog.factor.cases[0];
   addCase(initialCase.name, initialCase.prompt, initialCase.dataQueries);
-  addV2Example();
   bindEvents();
+  applyPublicEvaluationVersion();
   loadEvaluationDefaults();
   loadDataSourceHealth();
   loadRuntimeHealth();
@@ -107,16 +104,9 @@ function bindV1ScoringControls() {
 }
 
 function bindEvents() {
-  $$('.mode-switch button').forEach((button) => button.addEventListener('click', () => {
-    state.mode = button.dataset.mode;
-    $$('.mode-switch button').forEach((item) => item.classList.toggle('selected', item === button));
-  }));
   bindV1ScoringControls();
   $$('.source-switch button').forEach((button) => button.addEventListener('click', () => setSourceType(button.dataset.source)));
   $('#add-case').addEventListener('click', () => addCase('', ''));
-  $('#add-v2-example').addEventListener('click', () => addV2Example());
-  $('#fill-examples-from-card').addEventListener('click', fillExamplesFromAgentCard);
-  $('#apply-example-paste').addEventListener('click', applyExamplePaste);
   $('#resume-evaluation').addEventListener('click', resumeEvaluation);
   $$('[data-example]').forEach((button) => button.addEventListener('click', () => loadSample(button.dataset.example)));
   $('#resolve-agent').addEventListener('click', resolveRemoteCard);
@@ -186,6 +176,21 @@ function addCase(name, prompt, dataQueries) {
 }
 
 function updateCaseNumbers() { $$('.case-row').forEach((row, index) => $('.case-index', row).textContent = String(index + 1).padStart(2, '0')); }
+
+function collectV1AgentExamples() {
+  const rows = $$('.case-row');
+  if (!rows.length) throw new Error('至少添加一个同题对测用例。');
+  return rows.map((row, index) => {
+    const name = $('.case-name', row).value.trim();
+    const prompt = $('.case-prompt', row).value.trim();
+    if (!name || !prompt) throw new Error(`用例 ${index + 1} 需要名称和 Prompt。`);
+    return {
+      id: `case-${index + 1}`,
+      name,
+      turns: [{ input: { parts: [{ type: 'text', text: prompt }] } }]
+    };
+  });
+}
 
 function addV2Example(draft = null) {
   const root = $('#v2-example-list');
@@ -505,15 +510,6 @@ function loadSample(id = 'factor') {
   $('#file-name').textContent = `已载入：${example.card.name}.a2a.json`;
   $('#case-list').innerHTML = '';
   example.cases.forEach((testCase) => addCase(testCase.name, testCase.prompt, testCase.dataQueries));
-  const drafts = example.cases.map((testCase, index) => ({
-    id: `example-${index + 1}`,
-    name: testCase.name,
-    turns: [{
-      parts: [{ type: 'text', text: testCase.prompt }],
-      criteria: []
-    }]
-  }));
-  replaceV2ExamplesWithDrafts(drafts, `已载入本地样本「${example.card.name}」的 ${drafts.length} 个示例。`);
 }
 
 function setSourceType(sourceType) {
@@ -566,7 +562,6 @@ async function submitEvaluation() {
   } else {
     try { agentCard = state.resolvedCard || await resolveRemoteCard(); } catch { return; }
   }
-  if (version === 'v2') return submitV2Evaluation(agentCard);
   return submitV1Evaluation(agentCard);
 }
 
@@ -608,7 +603,7 @@ function buildV2CreateRequest({
 
 async function submitV1Evaluation(agentCard) {
   let agentExamples;
-  try { agentExamples = collectAgentExamples(); }
+  try { agentExamples = collectV1AgentExamples(); }
   catch (error) { return showError(error.message); }
   const authorizationInput = $('#agent-authorization');
   const agentAuthorization = authorizationInput.value.trim();
@@ -1118,7 +1113,17 @@ function renderComplexity(value) {
 }
 
 function renderReviews(reviews, item) {
-  const labels = { researchRigor:'研究严谨性', dataDiscipline:'数据纪律', backtestIntegrity:'回测可信度', riskCompliance:'风险合规', reproducibility:'可复现性' };
+  const cardDesignReview = item?.professional?.version === 'v1-card-review/v2'
+    || reviews.some((review) => review?.version === 'v1-card-review/v2');
+  const labels = cardDesignReview
+    ? {
+      positioningClarity: '定位清晰度',
+      skillDesign: 'Skill 设计',
+      protocolCoherence: '协议一致性',
+      ioExampleQuality: '输入输出示例质量',
+      boundaryRiskDisclosure: '边界与风险披露'
+    }
+    : { researchRigor:'研究严谨性', dataDiscipline:'数据纪律', backtestIntegrity:'回测可信度', riskCompliance:'风险合规', reproducibility:'可复现性' };
   const activity = activityOfType(item, 'review');
   const plan = activity ? reviewPlanFor(item, reviews) : [];
   const cards = reviews.map((review) => {
@@ -1132,7 +1137,9 @@ function renderReviews(reviews, item) {
     const active = activityMatches(activity, reviewer.id);
     if (!completed && !active) cards.push(`<article class="review-card review-card-queued">${renderQueuedWork(reviewer.name, reviewer.model, index + 1, plan.length)}</article>`);
   });
-  return `<div class="section-title"><h3>四方研究审稿</h3><span>MULTI-MODEL FINANCE REVIEW</span></div><div class="review-grid model-review-grid">${cards.join('')}</div>`;
+  const heading = cardDesignReview ? '四方 Agent Card 设计审稿' : '四方研究审稿';
+  const kicker = cardDesignReview ? 'AGENT CARD DESIGN REVIEW' : 'MULTI-MODEL FINANCE REVIEW';
+  return `<div class="section-title"><h3>${heading}</h3><span>${kicker}</span></div><div class="review-grid model-review-grid">${cards.join('')}</div>`;
 }
 
 function renderBuilds(builds, item) {
@@ -1289,6 +1296,10 @@ function isV1ModelScoredRound(round, item) {
     && ['single', 'panel'].includes(round.judging.mode);
 }
 
+function isV1ArenaV2Round(round) {
+  return round?.judging?.version === 'v1-model-arena/v2';
+}
+
 function renderV1Judging(round, item) {
   const judging = round.judging || {};
   const scoringConfig = item?.scoringConfig || (isV1ModelScoredRound(round, item) ? judging : null);
@@ -1316,20 +1327,31 @@ function renderV1Judging(round, item) {
   return `<div class="v1-judging-summary${judging.status === 'failed' ? ' failed' : ''}"><div><small>SCORING SOURCE</small><b>${escapeHtml(label)}</b></div><span>${escapeHtml(status)} · 阵容 ${requiredSeats} 席</span>${failures ? `<div class="v1-judge-failures">${failures}</div>` : ''}</div>`;
 }
 
-function renderV1JudgeReviews(entry) {
+function renderV1JudgeReviews(entry, arenaV2 = false) {
   if (entry.scoreStatus === 'execution-failed') {
     return `<div class="v1-judge-audit execution-failed"><b>执行失败 · 固定 0 分</b><span>该输出未发送给评分模型</span></div>`;
   }
-  const dimensions = entry.dimensions && typeof entry.dimensions === 'object'
-    ? Object.entries(entry.dimensions)
+  const dimensions = arenaV2
+    ? entry.detail?.professionalism?.dimensions
+    : entry.dimensions;
+  const entries = dimensions && typeof dimensions === 'object'
+    ? Object.entries(dimensions)
     : [];
-  const dimensionLabels = {
-    taskConstraint: '任务约束',
-    professionalQuality: '专业质量',
-    evidenceRisk: '证据风险',
-    artifactUsability: '产物可用性'
-  };
-  const dimensionRows = dimensions.map(([key, value]) => `
+  const dimensionLabels = arenaV2
+    ? {
+      taskCompletion: '任务完成度',
+      methodProfessionalism: '方法专业度',
+      evidenceDataQuality: '证据与数据质量',
+      riskUncertainty: '风险与不确定性',
+      artifactUsability: '产物可用性'
+    }
+    : {
+      taskConstraint: '任务约束',
+      professionalQuality: '专业质量',
+      evidenceRisk: '证据风险',
+      artifactUsability: '产物可用性'
+    };
+  const dimensionRows = entries.map(([key, value]) => `
     <div><span>${escapeHtml(dimensionLabels[key] || key)}</span><i style="--value:${Number.isFinite(value) ? value : 0}%"></i><b>${Number.isFinite(value) ? value : '—'}</b></div>
   `).join('');
   const reviews = (Array.isArray(entry.judgeReviews) ? entry.judgeReviews : []).map((review) => {
@@ -1341,8 +1363,31 @@ function renderV1JudgeReviews(entry) {
   const pending = entry.scoreStatus === 'model-failed'
     ? `<p class="v1-audit-empty">模型评分未形成有效数字，保留输出等待重试。</p>`
     : '';
-  if (!dimensionRows && !reviews && !pending) return '';
-  return `<details class="v1-judge-audit"${entry.scoreStatus === 'model-failed' ? ' open' : ''}><summary>模型评分审计</summary>${pending}${dimensionRows ? `<div class="v1-dimension-grid">${dimensionRows}</div>` : ''}${reviews ? `<div class="v1-review-list">${reviews}</div>` : ''}</details>`;
+  const execution = entry.detail?.capability;
+  const executionMetrics = arenaV2 && execution ? `<section class="v1-execution-metrics"><div><small>OBJECTIVE EXECUTION</small><b>端到端耗时</b><strong>${formatExecutionDuration(execution.durationMs)}</strong></div><p>包含网络及协议开销；${escapeHtml(execution.toolObservation === 'unavailable' ? '未观测 Agent 内部工具调用' : `工具观测：${execution.toolObservation || '未提供'}`)}</p></section>` : '';
+  if (!dimensionRows && !reviews && !pending && !executionMetrics) return '';
+  const summary = arenaV2 ? '模型审计与专业五项' : '模型评分审计';
+  return `<details class="v1-judge-audit"${entry.scoreStatus === 'model-failed' ? ' open' : ''}><summary>${summary}</summary>${pending}${dimensionRows ? `<div class="v1-dimension-grid">${dimensionRows}</div>` : ''}${executionMetrics}${reviews ? `<div class="v1-review-list">${reviews}</div>` : ''}</details>`;
+}
+
+function formatExecutionDuration(durationMs) {
+  if (!Number.isFinite(durationMs)) return '—';
+  return `${(durationMs / 1000).toFixed(durationMs >= 10_000 ? 1 : 2)} s`;
+}
+
+function renderV1ArenaV2Scenario(judging) {
+  const scenario = judging?.scenario;
+  if (!scenario?.dimensions) return '';
+  const labels = { problemComplexity: '问题复杂度', agentSuitability: 'Agent 适配度' };
+  const rows = Object.entries(scenario.dimensions).map(([key, value]) => `<div><span>${labels[key] || key}</span><i style="--value:${Number.isFinite(value) ? value : 0}%"></i><b>${Number.isFinite(value) ? value : '—'}</b></div>`).join('');
+  const reviews = (scenario.reviews || []).map((review) => `<article><header><b>${escapeHtml(review.reviewerName || review.reviewerId || '评审席')}</b><span>${escapeHtml(review.model || '—')} · ${escapeHtml((review.mode || '').toUpperCase())}</span></header><p>${escapeHtml(review.rationale || '未提供场景评语')}</p></article>`).join('');
+  return `<section class="v1-arena-scenario"><header><div><small>SHARED SCENARIO / 20%</small><h4>场景价值 <b>${Number.isFinite(scenario.score) ? scenario.score : '—'}</b></h4></div><p>同一 Prompt 共享评分，不随候选 Agent 改变。</p></header><div class="v1-dimension-grid">${rows}</div>${reviews ? `<div class="v1-review-list">${reviews}</div>` : ''}</section>`;
+}
+
+function renderV1ArenaV2Totals(entry) {
+  const labels = { scenarioValue: '场景价值', professionalQuality: '专业度', agentCapability: 'Agent 能力' };
+  const dimensions = entry.dimensions && typeof entry.dimensions === 'object' ? entry.dimensions : {};
+  return `<div class="v1-arena-totals">${Object.entries(labels).map(([key, label]) => `<div><span>${label}</span><b>${Number.isFinite(dimensions[key]) ? dimensions[key] : '—'}</b></div>`).join('')}</div>`;
 }
 
 function renderBattle(rounds, item) {
@@ -1357,11 +1402,12 @@ function renderBattle(rounds, item) {
       && (!modelScoredRound || entry.scoreStatus === 'scored');
     const scored = entries.filter(winnerEligible).map((entry) => entry.score);
     const max = scored.length ? Math.max(...scored) : null;
+    const arenaV2 = isV1ArenaV2Round(round);
     const cards = entries.map((entry) => {
       const working = activity?.caseIndex === index && activityMatches(activity, entry.id);
       const displayScore = Number.isFinite(entry.score) ? entry.score : '—';
       const winner = winnerEligible(entry) && entry.score === max;
-      return `<div class="battle-entry${working ? ' work-active' : ''}"><header><h4>${escapeHtml(entry.name)}</h4><strong class="${winner?'winner':''}">${displayScore}</strong></header><div class="battle-actions"><span class="mode">${escapeHtml((entry.mode || '').toUpperCase())}</span>${renderDataVerificationBadge(entry.dataVerification)}${retryButton('benchmark', entry.id, '重跑这一局', index)}</div><details><summary>查看完整输出</summary><pre>${escapeHtml(entry.output)}</pre></details>${renderDataChecks(entry.dataVerification)}${renderV1JudgeReviews(entry)}${working ? renderWorkLoader(activity, 'card') : ''}</div>`;
+      return `<div class="battle-entry${working ? ' work-active' : ''}"><header><h4>${escapeHtml(entry.name)}</h4><strong class="${winner?'winner':''}">${displayScore}</strong></header><div class="battle-actions"><span class="mode">${escapeHtml((entry.mode || '').toUpperCase())}</span>${renderDataVerificationBadge(entry.dataVerification)}${retryButton('benchmark', entry.id, '重跑这一局', index)}</div>${arenaV2 ? renderV1ArenaV2Totals(entry) : ''}<details><summary>查看完整输出</summary><pre>${escapeHtml(entry.output)}</pre></details>${renderDataChecks(entry.dataVerification)}${renderV1JudgeReviews(entry, arenaV2)}${working ? renderWorkLoader(activity, 'card') : ''}</div>`;
     });
     if (activity?.caseIndex === index && !entries.some((entry) => activityMatches(activity, entry.id))) {
       cards.push(`<div class="battle-entry battle-entry-loading work-active"><header><h4>${escapeHtml(activity.target || '对测选手')}</h4><strong>···</strong></header>${renderWorkLoader(activity, 'card')}</div>`);
@@ -1371,7 +1417,7 @@ function renderBattle(rounds, item) {
         cards.push(`<div class="battle-entry battle-entry-queued">${renderQueuedWork(competitor.name, '等待同 Prompt 执行', competitorIndex + 1, competitorPlan.length)}</div>`);
       }
     });
-    return `<article class="battle-round"><div class="battle-prompt"><span>CASE ${String(index+1).padStart(2,'0')}<br>${escapeHtml(round.case.name)}</span><p>${escapeHtml(round.case.prompt)}</p></div>${renderV1Judging(round, item)}${renderDataEvidence(round.dataEvidence)}<div class="battle-grid">${cards.join('')}</div></article>`;
+    return `<article class="battle-round"><div class="battle-prompt"><span>CASE ${String(index+1).padStart(2,'0')}<br>${escapeHtml(round.case.name)}</span><p>${escapeHtml(round.case.prompt)}</p></div>${renderV1Judging(round, item)}${arenaV2 ? renderV1ArenaV2Scenario(round.judging) : ''}${renderDataEvidence(round.dataEvidence)}<div class="battle-grid">${cards.join('')}</div></article>`;
   }).join('')}`;
 }
 
@@ -1530,49 +1576,21 @@ async function loadEvaluationDefaults() {
     const response = await fetch('/api/health');
     const payload = await response.json();
     if (!response.ok) throw new Error('health unavailable');
-    const mode = evaluationModeFromHealth(payload);
-    if (!mode.resolved) throw new Error('health capability unavailable');
     const input = $('#evaluation-seed');
     if (!input.dataset.edited && Number.isInteger(payload.evaluationSeed)) input.value = payload.evaluationSeed;
     input.title = `服务默认 seed：${payload.evaluationSeed} · temperature：${payload.modelTemperature}`;
-    const versionState = resolveEvaluationVersion(requestedVersion, mode.enabled);
-    applyEvaluationVersion(versionState, mode.enabled);
+    applyPublicEvaluationVersion();
   } catch {
     $('#evaluation-seed').placeholder = '20260720';
-    setEvaluationHealthUnavailable();
+    applyPublicEvaluationVersion();
   }
 }
 
-function applyEvaluationVersion({ selectedVersion }, v2Available) {
-  const isV2 = selectedVersion === 'v2';
-  state.selectedVersion = selectedVersion;
-  state.v2Available = v2Available;
+function applyPublicEvaluationVersion() {
+  state.selectedVersion = publicEvaluationVersion(location.search);
   state.healthResolved = true;
-  $$('[data-evaluation-version]').forEach((link) => {
-    const selected = link.dataset.evaluationVersion === selectedVersion;
-    link.classList.toggle('selected', selected);
-    if (selected) link.setAttribute('aria-current', 'page');
-    else link.removeAttribute('aria-current');
-  });
-  $$('.legacy-only').forEach((element) => element.classList.toggle('hidden', isV2));
-  $('#v2-card-heading').classList.toggle('hidden', !isV2);
-  // Example editor + agent token are shared by V1 and V2; skip-human / replica stay V2-only.
-  $('#v2-intake').classList.remove('hidden');
-  $$('.v2-only').forEach((element) => element.classList.toggle('hidden', !isV2));
-  const blurb = $('#v2-examples-blurb');
-  if (blurb) {
-    blurb.textContent = isV2
-      ? '按 Example → Turn → Part → Criterion 的执行顺序登记公开样本；每个 Example 固定采样三次。'
-      : '按 Example → Turn → Part → Criterion 登记公开样本；live 时按 turn 顺序调用并复用 context。';
-  }
   const versionState = restoreLandingStartButton($('#start-evaluation'), state);
   if (!versionState.usable) showError(versionState.message);
-}
-
-function setEvaluationHealthUnavailable() {
-  state.healthResolved = false;
-  const versionState = restoreLandingStartButton($('#start-evaluation'), state);
-  showError(versionState.message);
 }
 
 function animateCounters(root) {
