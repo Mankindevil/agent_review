@@ -6,11 +6,13 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { projectV1Report, generateV1ReportPdf } from '../src/v1-report.js';
+import { validateAgentCard } from '../src/a2a.js';
 import { inspectRuntimeContext } from '../src/runtime-context.js';
 import { scoreComplexity } from '../src/scoring.js';
+import { resolveReportPython } from './report-python.js';
 
 const exec = promisify(execFile);
-const python = '/Users/jintingzhou/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3';
+const python = resolveReportPython();
 
 function traditionalPdf(objects, root = 1) {
   const maxObject = Math.max(...Object.keys(objects).map(Number));
@@ -157,6 +159,141 @@ test('projects complete accepted Card fields and real scoring/context audit shap
     usageRatio: 0.019
   });
   assert.deepEqual(dto.benchmark[0].entries[0].execution.contextUsage[0], dto.builds[0].contextUsage[0]);
+});
+
+test('accepted Card projections remove nested credential keys without losing public protocol metadata', () => {
+  const fixture = completeV1Fixture();
+  let accessorReads = 0;
+  const extensionMetadata = {
+    uri: 'urn:agent:public-metadata',
+    description: '公开扩展',
+    modes: ['live', 'batch'],
+    nested: {
+      publicFlag: true,
+      apiToken: 'provider-token-secret',
+      API_TOKEN: 'uppercase-token-secret',
+      'pass%77ord': 'encoded-password-secret'
+    }
+  };
+  Object.defineProperty(extensionMetadata.nested, 'computed', {
+    enumerable: true,
+    get() {
+      accessorReads += 1;
+      return 'accessor-secret';
+    }
+  });
+  const extensions = [extensionMetadata];
+  Object.defineProperty(extensions, '1', {
+    enumerable: true,
+    get() {
+      accessorReads += 1;
+      return { uri: 'urn:accessor', description: 'array-accessor-secret' };
+    }
+  });
+  fixture.agentCard = {
+    ...fixture.agentCard,
+    supportedInterfaces: [{
+      url: 'https://agent.example/a2a', protocolBinding: 'HTTP+JSON', protocolVersion: '1.0', tenant: 'research'
+    }],
+    defaultInputModes: ['text/plain', 'application/json'],
+    defaultOutputModes: ['text/markdown', 'application/json'],
+    capabilities: {
+      streaming: true,
+      pushNotifications: false,
+      stateTransitionHistory: true,
+      extendedAgentCard: false,
+      extensions: [{ uri: 'urn:capability:public', modes: ['stream', 'batch'], password: 'capability-secret' }]
+    },
+    provider: {
+      organization: '公开机构',
+      url: 'https://provider.example',
+      apiToken: 'provider-secret',
+      nested: { password: 'provider-nested-secret' }
+    },
+    securitySchemes: {
+      bearer: {
+        type: 'http', scheme: 'bearer', bearerFormat: 'JWT', description: '公开 Bearer 说明', token: 'scheme-secret'
+      },
+      oauth: {
+        type: 'oauth2',
+        description: '公开 OAuth 说明',
+        flows: {
+          clientCredentials: {
+            tokenUrl: 'https://provider.example/oauth/token',
+            refreshUrl: 'https://provider.example/oauth/refresh',
+            scopes: { 'reports:read': '读取公开报告' },
+            clientSecret: 'oauth-secret'
+          }
+        }
+      }
+    },
+    security: [{ bearer: ['reports:read'] }, { oauth: ['reports:read'] }],
+    signatures: [{ protected: 'public-header', signature: 'public-signature', token: 'signature-secret' }],
+    extensions
+  };
+
+  const validation = validateAgentCard(fixture.agentCard);
+  assert.equal(validation.valid, true, validation.errors.join('; '));
+  const card = projectV1Report(fixture).agentCard;
+  const serialized = JSON.stringify(card);
+
+  assert.equal(accessorReads, 0);
+  assert.deepEqual(card.provider, {
+    organization: '公开机构', url: 'https://provider.example'
+  });
+  assert.deepEqual(card.securitySchemes, {
+    bearer: {
+      type: 'http', scheme: 'bearer', bearerFormat: 'JWT', description: '公开 Bearer 说明'
+    },
+    oauth: {
+      type: 'oauth2',
+      description: '公开 OAuth 说明',
+      flows: {
+        clientCredentials: {
+          tokenUrl: 'https://provider.example/oauth/token',
+          refreshUrl: 'https://provider.example/oauth/refresh',
+          scopes: { 'reports:read': '读取公开报告' }
+        }
+      }
+    }
+  });
+  assert.deepEqual(card.security, [{ bearer: ['reports:read'] }, { oauth: ['reports:read'] }]);
+  assert.deepEqual(card.signatures, [{ protected: 'public-header', signature: 'public-signature' }]);
+  assert.deepEqual(card.extensions, [{
+    uri: 'urn:agent:public-metadata',
+    description: '公开扩展',
+    modes: ['live', 'batch'],
+    nested: { publicFlag: true }
+  }]);
+  assert.deepEqual(card.capabilities, {
+    streaming: true,
+    pushNotifications: false,
+    stateTransitionHistory: true,
+    extendedAgentCard: false,
+    extensions: [{ uri: 'urn:capability:public', modes: ['stream', 'batch'] }]
+  });
+  assert.deepEqual(card.defaultInputModes, ['text/plain', 'application/json']);
+  assert.deepEqual(card.defaultOutputModes, ['text/markdown', 'application/json']);
+  assert.doesNotMatch(serialized, /provider-secret|scheme-secret|oauth-secret|signature-secret|capability-secret|uppercase-token-secret|encoded-password-secret|accessor-secret|array-accessor-secret/);
+});
+
+test('resolves report Python from explicit environment or the platform repository venv', () => {
+  assert.equal(resolveReportPython({
+    env: { REPORT_PDF_PYTHON: '/opt/report-python', PANDA_DATA_PYTHON: '/opt/panda-python' },
+    root: '/srv/app', exists: () => false
+  }), '/opt/report-python');
+  assert.equal(resolveReportPython({
+    env: { PANDA_DATA_PYTHON: '/opt/panda-python' }, root: '/srv/app', exists: () => false
+  }), '/opt/panda-python');
+  assert.equal(resolveReportPython({
+    env: {}, platform: 'linux', root: '/srv/app', exists: () => true
+  }), path.join('/srv/app', '.venv/bin/python'));
+  assert.equal(resolveReportPython({
+    env: {}, platform: 'win32', root: 'C:\\agent-review', exists: () => true
+  }), path.join('C:\\agent-review', '.venv/Scripts/python.exe'));
+  assert.throws(() => resolveReportPython({
+    env: {}, platform: 'linux', root: '/srv/app', exists: () => false
+  }), /REPORT_PDF_PYTHON|PANDA_DATA_PYTHON|\.venv/u);
 });
 
 test('projects supported object-valued data fact selectors through fixed credential-safe fields', () => {

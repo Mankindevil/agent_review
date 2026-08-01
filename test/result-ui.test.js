@@ -109,8 +109,7 @@ test('production loadHistory dispatches schema-v2 records through the retained V
   assert.match(runningMarkup, /data-evaluation-id="eval_v2_history"/);
   assert.match(runningMarkup, />100%<\/span>/);
   assert.match(runningMarkup, /running · replica-human · 2 evidence/);
-  assert.match(runningMarkup, /data-record-kind="v2"/);
-  assert.match(runningMarkup, /title="请先停止本次评测" disabled/);
+  assert.doesNotMatch(runningMarkup, /data-delete-evaluation|data-record-kind="v2"/);
 
   const completed = {
     ...running,
@@ -122,8 +121,7 @@ test('production loadHistory dispatches schema-v2 records through the retained V
   const completedMarkup = completedHarness.elements.get('#history-list').innerHTML;
   assert.match(completedMarkup, />62%<\/span>/);
   assert.match(completedMarkup, /completed · qualification · 2 evidence/);
-  assert.match(completedMarkup, /title="删除这条卷宗"/);
-  assert.doesNotMatch(completedMarkup, / disabled/);
+  assert.doesNotMatch(completedMarkup, /data-delete-evaluation|删除这条卷宗/);
 
   const dispatch = 'item.schemaVersion === 2 ? renderV2HistoryItem(item) : renderLegacyHistoryItem(item)';
   const reversedDispatch = 'item.schemaVersion === 2 ? renderLegacyHistoryItem(item) : renderV2HistoryItem(item)';
@@ -161,12 +159,10 @@ test('production V2 history rendering escapes hostile identifiers and projected 
   const escapedId = 'eval&quot; autofocus onfocus=&quot;alert(1)&quot;&gt;&lt;svg&gt;';
 
   assert.ok(markup.includes(`data-evaluation-id="${escapedId}"`));
-  assert.ok(markup.includes(`data-delete-evaluation="${escapedId}"`));
   assert.match(markup, /&lt;img src=x onerror=&quot;alert\(2\)&quot;&gt;completed/);
   assert.match(markup, /&quot;&gt;&lt;script&gt;alert\(3\)&lt;\/script&gt;/);
-  assert.match(markup, /title="请先停止本次评测" disabled/);
   assert.doesNotMatch(markup, /data-evaluation-id="eval" autofocus/);
-  assert.doesNotMatch(markup, /data-delete-evaluation="eval" autofocus/);
+  assert.doesNotMatch(markup, /data-delete-evaluation/);
   assert.doesNotMatch(markup, /alert\(4\)/, 'untrusted item title must not enter V2 history markup');
   assert.doesNotMatch(markup, /<svg>|<img|<script>|<iframe/);
 });
@@ -218,8 +214,7 @@ test('publishes the ordered evidence-led dual-track result surface', async () =>
     /#result-content[\s\S]*?innerHTML\s*=\s*renderV2ResultView\(item,\s*\{\s*escapeHtml\s*\}\)/
   );
   assert.match(app, /renderLegacyResult\(item\)/);
-  assert.match(app, /replica\/runtimes/);
-  assert.match(app, /loadReplicaOutputDetail/);
+  assert.doesNotMatch(app, /replica\/runtimes|replica\/cases|loadReplicaOutputDetail/);
   assert.doesNotMatch(app, /function renderV2Result\(item\)/);
   assert.doesNotMatch(app, /if \(!item\.resultV2\) return renderLegacyResult/);
   assert.match(renderer, /data-result-section="v2-live-progress"/);
@@ -256,7 +251,7 @@ test('publishes the ordered evidence-led dual-track result surface', async () =>
   assert.match(evidenceStyle, /prefers-reduced-motion/);
 });
 
-test('surfaces dual-track progress, replica-human hand-off, and finalize control', async () => {
+test('surfaces passive dual-track progress without public mutation or recovery controls', async () => {
   const [renderer, app, indexHtml, styles, projection] = await Promise.all([
     readFile(new URL('public/result-v2.js', root), 'utf8'),
     readFile(new URL('public/app.js', root), 'utf8'),
@@ -270,19 +265,16 @@ test('surfaces dual-track progress, replica-human hand-off, and finalize control
   assert.match(projection, /等双轨/);
   assert.match(projection, /等绝对分/);
   assert.match(projection, /等复刻人工/);
-  assert.match(renderer, /function renderFinalizePanel/);
-  assert.match(renderer, /data-finalize-dual-track="/);
-  assert.match(renderer, /trackStatus\.canFinalize/);
+  assert.doesNotMatch(renderer, /function renderFinalizePanel|data-finalize-dual-track="|trackStatus\.canFinalize/);
   assert.match(renderer, /function replicaTrackCopy/);
   assert.match(renderer, /replicaHumanReview\?\.trackPhase/);
-  assert.match(renderer, /前往复刻人工评审台/);
+  assert.doesNotMatch(renderer, /前往复刻人工评审台|href=["']\/judge(?:\.html)?["']/);
 
-  assert.match(app, /data-finalize-dual-track/);
-  assert.match(app, /finalize-dual-track/);
+  assert.doesNotMatch(app, /data-finalize-dual-track|finalize-dual-track/);
   assert.match(app, /function collectReplicaReviewPolicy/);
   assert.match(app, /function applyReplicaReviewPolicy/);
   assert.match(app, /replica-review-policy/);
-  assert.match(app, /skip-human-review/);
+  assert.doesNotMatch(app, /\/skip-human-review|\/resume|\/replica\/(?:runtimes|cases)\//);
   assert.match(app, /skipHumanReview/);
   assert.match(app, /formatV2CreateError/);
   assert.match(app, /REPLICA_RUNTIME_NOT_READY/);
@@ -293,7 +285,8 @@ test('surfaces dual-track progress, replica-human hand-off, and finalize control
   assert.doesNotMatch(indexHtml, /id="replica-policy-force-separate-judges"/);
   assert.match(app, /function submitV2Evaluation/);
   assert.match(app, /renderV2ResultView\(item/);
-  assert.match(styles, /\.v2-resume-panel/);
+  assert.doesNotMatch(indexHtml, /v2-resume-panel|resume-agent-authorization|resume-evaluation/);
+  assert.doesNotMatch(styles, /\.v2-resume-panel/);
 });
 
 test('keeps Card design review labels distinct from the V1 Arena v2 audit stack', async () => {

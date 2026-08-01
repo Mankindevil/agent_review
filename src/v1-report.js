@@ -23,6 +23,11 @@ const PUBLIC_PANDA_PARAM_KEYS = [
 ];
 const PUBLIC_FACT_KEYS = ['label', 'field', 'aliases', 'tolerance', 'multiplier', 'unit', 'required', 'status', 'value', 'sourceDate', 'sourceSymbol'];
 const CREDENTIAL_SELECTOR_KEY = /(?:api)?key|auth(?:orization)?|bearer|credential|secret|password|token|cookie|session/iu;
+const PUBLIC_METADATA_MAX_DEPTH = 10;
+const PUBLIC_METADATA_MAX_NODES = 2_048;
+const PUBLIC_METADATA_MAX_CONTAINER_ITEMS = 128;
+const PUBLIC_METADATA_MAX_STRING_LENGTH = 65_536;
+const OMIT_PUBLIC_METADATA = Symbol('omit-public-metadata');
 
 export function projectV1Report(evaluation) {
   if (!evaluation || typeof evaluation !== 'object' || Array.isArray(evaluation)) throw new TypeError('评测记录不存在');
@@ -110,11 +115,11 @@ function projectCard(card) {
       inputModes: stringArray(skill?.inputModes),
       outputModes: stringArray(skill?.outputModes)
     })),
-    ...(isPlainObject(card?.provider) ? { provider: projectPublicJson(card.provider) } : {}),
-    ...(isPlainObject(card?.securitySchemes) ? { securitySchemes: projectPublicJson(card.securitySchemes) } : {}),
-    ...(Array.isArray(card?.security) ? { security: projectPublicJson(card.security) } : {}),
-    ...(Array.isArray(card?.signatures) ? { signatures: projectPublicJson(card.signatures) } : {}),
-    ...(Array.isArray(card?.extensions) ? { extensions: projectPublicJson(card.extensions) } : {})
+    ...(isPlainObject(card?.provider) ? { provider: projectProvider(card.provider) } : {}),
+    ...(isPlainObject(card?.securitySchemes) ? { securitySchemes: projectSecuritySchemes(card.securitySchemes) } : {}),
+    ...(Array.isArray(card?.security) ? { security: projectSecurityRequirements(card.security) } : {}),
+    ...(Array.isArray(card?.signatures) ? { signatures: projectSignatures(card.signatures) } : {}),
+    ...(Array.isArray(card?.extensions) ? { extensions: projectPublicMetadataList(card.extensions) } : {})
   };
 }
 
@@ -122,8 +127,76 @@ function projectCapabilities(value) {
   if (!isPlainObject(value)) return {};
   return {
     ...bools(value, ['streaming', 'pushNotifications', 'stateTransitionHistory', 'extendedAgentCard']),
-    ...(Array.isArray(value.extensions) ? { extensions: projectPublicJson(value.extensions) } : {})
+    ...(Array.isArray(value.extensions) ? { extensions: projectPublicMetadataList(value.extensions) } : {})
   };
+}
+
+function projectProvider(value) {
+  return ownStrings(value, ['organization', 'url']);
+}
+
+function projectSecuritySchemes(value) {
+  return Object.fromEntries(ownDataEntries(value, PUBLIC_METADATA_MAX_CONTAINER_ITEMS)
+    .map(([name, scheme]) => [name, projectSecurityScheme(scheme)])
+    .filter(([, scheme]) => scheme !== null));
+}
+
+function projectSecurityScheme(value) {
+  if (!isSafeRecord(value)) return null;
+  const scheme = ownStrings(value, [
+    'type', 'description', 'scheme', 'bearerFormat', 'name', 'in',
+    'openIdConnectUrl', 'oauth2MetadataUrl'
+  ]);
+  const flows = ownDataValue(value, 'flows');
+  if (isSafeRecord(flows)) scheme.flows = projectOauthFlows(flows);
+  return scheme;
+}
+
+function projectOauthFlows(value) {
+  const flows = {};
+  for (const name of ['authorizationCode', 'clientCredentials', 'implicit', 'password', 'deviceAuthorization']) {
+    const flow = ownDataValue(value, name);
+    if (!isSafeRecord(flow)) continue;
+    const projected = ownStrings(flow, ['authorizationUrl', 'tokenUrl', 'refreshUrl', 'deviceAuthorizationUrl']);
+    const scopes = ownDataValue(flow, 'scopes');
+    if (isSafeRecord(scopes)) {
+      projected.scopes = Object.fromEntries(ownDataEntries(scopes, PUBLIC_METADATA_MAX_CONTAINER_ITEMS)
+        .filter(([, description]) => typeof description === 'string'));
+    }
+    flows[name] = projected;
+  }
+  return flows;
+}
+
+function projectSecurityRequirements(value) {
+  return value.slice(0, PUBLIC_METADATA_MAX_CONTAINER_ITEMS).flatMap((requirement) => {
+    if (!isSafeRecord(requirement)) return [];
+    return [Object.fromEntries(ownDataEntries(requirement, PUBLIC_METADATA_MAX_CONTAINER_ITEMS)
+      .filter(([, scopes]) => Array.isArray(scopes))
+      .map(([name, scopes]) => [name, stringArray(scopes)]))];
+  });
+}
+
+function projectSignatures(value) {
+  return value.slice(0, PUBLIC_METADATA_MAX_CONTAINER_ITEMS).flatMap((signature) =>
+    isSafeRecord(signature)
+      ? [ownStrings(signature, ['protected', 'signature'])]
+      : []
+  );
+}
+
+function projectPublicMetadataList(value) {
+  if (value.length > PUBLIC_METADATA_MAX_CONTAINER_ITEMS) throw new RangeError('Agent Card 公开扩展数组过大');
+  const state = { nodes: 0 };
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const projected = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')) continue;
+    const item = projectPublicMetadata(descriptor.value, state, 0);
+    if (item !== OMIT_PUBLIC_METADATA) projected.push(item);
+  }
+  return projected;
 }
 
 function projectProfessional(value) {
@@ -240,17 +313,74 @@ function scoreObject(value) { return { ...strings(value, ['verdict', 'reason']),
 function array(value) { return Array.isArray(value) ? value : []; }
 function stringArray(value) { return array(value).filter((item) => typeof item === 'string'); }
 function isPlainObject(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
-function projectPublicJson(value, depth = 0) {
-  if (depth > 20) throw new RangeError('Agent Card 公开扩展层级过深');
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
-  if (Number.isFinite(value)) return value;
-  if (Array.isArray(value)) return value.map((item) => projectPublicJson(item, depth + 1));
-  if (isPlainObject(value)) {
-    return Object.fromEntries(Object.entries(value)
-      .filter(([, item]) => item !== undefined && typeof item !== 'function' && typeof item !== 'symbol')
-      .map(([key, item]) => [key, projectPublicJson(item, depth + 1)]));
+function isSafeRecord(value) {
+  if (!isPlainObject(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+function ownDataValue(value, key) {
+  const descriptor = isSafeRecord(value) ? Object.getOwnPropertyDescriptor(value, key) : null;
+  return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+}
+function ownDataEntries(value, maxItems) {
+  if (!isSafeRecord(value)) return [];
+  return Object.entries(Object.getOwnPropertyDescriptors(value))
+    .filter(([key, descriptor]) => descriptor.enumerable && Object.hasOwn(descriptor, 'value') && !isPrototypeKey(key))
+    .slice(0, maxItems)
+    .map(([key, descriptor]) => [key, descriptor.value]);
+}
+function ownStrings(value, keys) {
+  return Object.fromEntries(keys.flatMap((key) => {
+    const item = ownDataValue(value, key);
+    return typeof item === 'string' ? [[key, item]] : [];
+  }));
+}
+function projectPublicMetadata(value, state, depth) {
+  state.nodes += 1;
+  if (state.nodes > PUBLIC_METADATA_MAX_NODES) throw new RangeError('Agent Card 公开扩展规模过大');
+  if (depth > PUBLIC_METADATA_MAX_DEPTH) throw new RangeError('Agent Card 公开扩展层级过深');
+  if (value === null || typeof value === 'boolean' || Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    if (value.length > PUBLIC_METADATA_MAX_STRING_LENGTH) throw new RangeError('Agent Card 公开扩展字符串过长');
+    return value;
   }
-  throw new TypeError('Agent Card 公开字段包含不可序列化值');
+  if (Array.isArray(value)) {
+    if (value.length > PUBLIC_METADATA_MAX_CONTAINER_ITEMS) throw new RangeError('Agent Card 公开扩展数组过大');
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const projected = [];
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) continue;
+      const item = projectPublicMetadata(descriptor.value, state, depth + 1);
+      if (item !== OMIT_PUBLIC_METADATA) projected.push(item);
+    }
+    return projected;
+  }
+  if (!isSafeRecord(value)) return OMIT_PUBLIC_METADATA;
+  const entries = ownDataEntries(value, PUBLIC_METADATA_MAX_CONTAINER_ITEMS + 1);
+  if (entries.length > PUBLIC_METADATA_MAX_CONTAINER_ITEMS) throw new RangeError('Agent Card 公开扩展对象过大');
+  return Object.fromEntries(entries.flatMap(([key, item]) => {
+    if (isSensitiveMetadataKey(key)) return [];
+    const projected = projectPublicMetadata(item, state, depth + 1);
+    return projected === OMIT_PUBLIC_METADATA ? [] : [[key, projected]];
+  }));
+}
+function isSensitiveMetadataKey(value) {
+  let normalized = String(value).normalize('NFKC');
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const decoded = decodeURIComponent(normalized);
+      if (decoded === normalized) break;
+      normalized = decoded;
+    } catch {
+      break;
+    }
+  }
+  const compact = normalized.toLowerCase().replace(/[^a-z0-9]/gu, '');
+  return /(?:apikey|accesskey|authorization|auth|bearer|credential|secret|password|token|cookie|session|privatekey)/u.test(compact);
+}
+function isPrototypeKey(value) {
+  return value === '__proto__' || value === 'prototype' || value === 'constructor';
 }
 function positiveInteger(value, fallback) { return Number.isSafeInteger(value) && value > 0 ? value : fallback; }
 function safeError(error) { return String(error?.message || error).replace(/[\r\n]+/g, ' ').slice(0, 300); }

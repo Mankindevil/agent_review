@@ -4,13 +4,14 @@ import { EventEmitter } from 'node:events';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { resolveReportPython } from './report-python.js';
 
 process.env.NODE_ENV = 'test';
 process.env.DATA_FILE = path.join(tmpdir(), `agent-roast-v1-report-route-${process.pid}.json`);
 process.env.A2A_BLACK_BOX_V1_ENABLED = 'false';
 
 const { server, evaluationStore, pipeline } = await import('../server.js');
-const reportPython = '/Users/jintingzhou/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3';
+const reportPython = resolveReportPython();
 
 function completeV1ReportFixture(id) {
   const reviews = ['gpt', 'claude', 'doubao', 'deepseek'].map((reviewerId) => ({ reviewerId, reviewer: reviewerId, model: reviewerId, score: 80, comment: '完成', dimensions: {} }));

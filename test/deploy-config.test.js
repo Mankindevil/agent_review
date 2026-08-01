@@ -110,28 +110,69 @@ test('nginx allows only the public evaluation methods, then rejects destructive 
   assert.doesNotMatch(tlsFallback, /proxy_pass http:\/\/127\.0\.0\.1:4173;/);
 });
 
-test('retained V2 detail suppresses controls whose private endpoints Nginx blocks', async () => {
+test('retained V2 public states are passive and never emit controls for Nginx-blocked routes', async () => {
   const production = await read('nginx-production.conf');
-  const markup = renderV2Result({
-    id: 'eval-v2-retained',
-    schemaVersion: 2,
-    governance: { phase: 'final', modelLockedAt: '2026-08-02T00:00:00Z' },
-    trackStatus: { overall: 'final' },
-    resultV2: {
-      absolute: { total: 80, confidence: 0.8 },
-      rating: {},
-      replica: {
-        status: 'released',
-        skills: [{ runtimeId: 'claude-code', runtimeName: 'Claude Code', skillName: 'replica-skill' }],
-        cases: [{ testId: 'case-1', prompt: '公开 Prompt', scores: { submitted: 80, 'replica:claude-code': 70 } }]
+  const [app, page, styles, renderer] = await Promise.all([
+    readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
+    readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
+    readFile(new URL('../public/styles.css', import.meta.url), 'utf8'),
+    readFile(new URL('../public/result-v2.js', import.meta.url), 'utf8')
+  ]);
+  const common = {
+    id: 'eval-v2-retained', schemaVersion: 2,
+    resultV2: { absolute: { total: 80, confidence: 0.8 }, rating: {}, replica: {} }
+  };
+  const states = [
+    {
+      ...common,
+      governance: { phase: 'human_open', modelLockedAt: '2026-08-02T00:00:00Z' },
+      trackStatus: { overall: 'model-locked' },
+      resultV2: { ...common.resultV2, replica: { status: 'unavailable' } }
+    },
+    {
+      ...common,
+      governance: { phase: 'human_locked', modelLockedAt: '2026-08-02T00:00:00Z' },
+      trackStatus: { overall: 'ready', canFinalize: true },
+      replicaHumanReview: { trackPhase: 'open' },
+      resultV2: { ...common.resultV2, replica: { status: 'sealed' } }
+    },
+    {
+      ...common,
+      execution: { status: 'credentials-required', stage: 'agent-run', progress: 30 },
+      governance: { phase: 'collecting' },
+      trackStatus: { overall: 'running' },
+      resultV2: { absolute: {}, rating: {}, replica: { status: 'unavailable' } }
+    },
+    {
+      ...common,
+      governance: { phase: 'final', modelLockedAt: '2026-08-02T00:00:00Z' },
+      trackStatus: { overall: 'final' },
+      resultV2: {
+        ...common.resultV2,
+        replica: {
+          status: 'released',
+          skills: [{ runtimeId: 'claude-code', runtimeName: 'Claude Code', skillName: 'replica-skill' }],
+          cases: [{ testId: 'case-1', prompt: '公开 Prompt', scores: { submitted: 80, 'replica:claude-code': 70 } }]
+        }
       }
     }
-  }, { escapeHtml: String });
+  ];
+  const markup = states.map((state) => renderV2Result(state, { escapeHtml: String })).join('\n');
 
   assert.match(production, /location ~ \^\/api\/evaluations\/\[\^\/\]\+\/\(\?:appeals\|evidence/);
   assert.doesNotMatch(production, /location ~ \^\/api\/evaluations\/\[\^\/\]\+\/replica/);
-  assert.doesNotMatch(markup, /data-skill-api="replica"|data-replica-output=/);
+  assert.doesNotMatch(markup, /data-skip-human-review|data-finalize-dual-track|\/judge(?:\.html)?|data-skill-api="replica"|data-replica-output=|\/resume(?:["'/?]|$)/u);
   assert.match(markup, /完整 Skill 与原始输出仅在私有管理入口可查/);
+  assert.doesNotMatch(app, /\/api\/evaluations\/\$\{[^}]+\}\/(?:skip-human-review|finalize-dual-track|resume)/u);
+  assert.doesNotMatch(app, /\/replica\/(?:runtimes|cases)\//u);
+  assert.match(
+    app,
+    /stopButton\.classList\.toggle\(\s*'hidden',\s*isV2\s*\|\|\s*!canStopEvaluation\(item\)\s*\)/u,
+    'retained V2 detail must stay read-only even while its backend execution is running'
+  );
+  assert.doesNotMatch(page, /v2-resume-panel|resume-agent-authorization|resume-evaluation/u);
+  assert.doesNotMatch(styles, /\.v2-resume-panel/u);
+  assert.doesNotMatch(renderer, /href=["']\/judge(?:\.html)?["']/u);
 });
 
 test('nginx rejects methods outside each public route contract', async () => {
@@ -438,6 +479,17 @@ test('V1 release runbook installs and smoke-tests the complete PDF report path',
     'test/pipeline-panda-runtime.test.js', 'test/evaluation-version-ui.test.js',
     'test/result-ui.test.js', 'test/v1-report.test.js', 'test/v1-report-route.test.js'
   ]) assert.match(packageJson.scripts['test:v1-release'], new RegExp(filename.replaceAll('.', '\\.')));
+
+  const releaseTestFiles = [...packageJson.scripts['test:v1-release'].matchAll(/test\/[A-Za-z0-9._/-]+\.test\.js/gu)]
+    .map((match) => match[0]);
+  const releaseTestSources = await Promise.all(
+    releaseTestFiles.map((filename) => readFile(new URL(`../${filename}`, import.meta.url), 'utf8'))
+  );
+  assert.doesNotMatch(
+    releaseTestSources.join('\n'),
+    /\/Users\/[^\s'"`]+\/(?:python|python3)(?:\b|$)/u,
+    'release tests must resolve Python from environment or the repository .venv'
+  );
 
   const releaseStart = operations.indexOf('## Safe release and rollback');
   const releaseEnd = operations.indexOf('The rendered Nginx configuration', releaseStart);

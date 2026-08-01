@@ -34,8 +34,6 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
     item.humanReviews,
     escapeHtml
   );
-  const skipPanel = renderSkipHumanReviewPanel(item, escapeHtml);
-  const finalizePanel = renderFinalizePanel(item, trackStatus, escapeHtml);
   const ratingLabel = trackStatus.overall === 'final' ? (rating.label || '待定') : '进行中';
   const ratingSub = trackStatus.overall === 'final'
     ? (item.evaluationTrack || item.qualification?.selectedInterface?.binding || 'same-track only')
@@ -51,7 +49,7 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
   const seats = buildSeatViews(item.absoluteReview?.modelPanel, item.resultV2?.humor);
   const modelPanel = renderModelPanel(seats, modelLocked, escapeHtml);
   const leafContrast = renderLeafContrast(seats, item.absoluteReview?.modelPanel, escapeHtml);
-  const replicaDetail = released ? renderReplicaReleasedDetail(replica, item.id, escapeHtml) : '';
+  const replicaDetail = released ? renderReplicaReleasedDetail(replica, escapeHtml) : '';
 
   if (stillCollecting) {
     return `
@@ -84,8 +82,6 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
 
   return `
     ${progressPanel}
-    ${skipPanel}
-    ${finalizePanel}
     <article class="v2-result-report v2-verdict-hero" data-result-section="verdict-hero">
       <header class="v2-verdict-hero__head">
         <div class="v2-verdict-seal">
@@ -108,7 +104,7 @@ export function renderV2Result(item, { escapeHtml = String } = {}) {
       </header>
       <p>${absoluteReady
         ? `总置信度 ${value(absolute.confidence)}。该分数由服务端锁定；Replica results never enter the absolute total.`
-        : '模型四席已锁定；绝对分将在人工终审（或跳过人工）后写入。当前不会显示 Claude Code / Cursor 等复刻进度，除非 Phase 3 Replica 已接入。'}</p>
+        : '模型四席已锁定；绝对分将在终审结算后写入。当前不会显示 Claude Code / Cursor 等复刻进度，除非 Phase 3 Replica 已接入。'}</p>
       <ul class="v2-result-dimensions">${dimensionRows}</ul>
     </article>
     <article class="v2-rating-strip" data-result-section="rating-status">
@@ -232,7 +228,7 @@ function renderLeafContrast(seats, panel, escapeHtml) {
     </article>`;
 }
 
-function renderReplicaReleasedDetail(replica, evaluationId, escapeHtml) {
+function renderReplicaReleasedDetail(replica, escapeHtml) {
   const skills = Array.isArray(replica.skills) ? replica.skills : [];
   const cases = Array.isArray(replica.cases) ? replica.cases : [];
   const skillRows = skills.length
@@ -420,26 +416,6 @@ function stageLabel(item) {
   return item.execution?.stage || item.governance?.phase || item.execution?.status || 'queued';
 }
 
-function renderSkipHumanReviewPanel(item, escapeHtml) {
-  if (item.governance?.phase !== 'human_open') return '';
-  return `
-    <article class="v2-result-report v2-skip-panel" data-result-section="human-review-skip">
-      <header><div><small>HUMAN REVIEW OPEN</small><h3>人工复核开放中</h3></div></header>
-      <p>模型四席评审已锁定；任何人都可以提交一次人工打分，或直接跳过并以模型中位数结算终审。</p>
-      <button type="button" class="text-button" data-skip-human-review="${escapeHtml(item.id)}">跳过人工打分</button>
-    </article>`;
-}
-
-function renderFinalizePanel(item, trackStatus, escapeHtml) {
-  if (!trackStatus.canFinalize || trackStatus.overall === 'final') return '';
-  return `
-    <article class="v2-result-report v2-finalize-panel" data-result-section="dual-track-finalize">
-      <header><div><small>DUAL TRACK READY</small><h3>双轨均已就绪，可以结算终审</h3></div></header>
-      <p>绝对分与复刻人工评审均已锁定；点击结算生成最终 Δc 与评级。</p>
-      <button type="button" class="text-button" data-finalize-dual-track="${escapeHtml(item.id)}">结算双轨终审</button>
-    </article>`;
-}
-
 function replicaTrackCopy(item, pendingReplica) {
   if (pendingReplica) {
     const status = item.resultV2?.replica?.status;
@@ -450,7 +426,7 @@ function replicaTrackCopy(item, pendingReplica) {
   }
   const trackPhase = item.replicaHumanReview?.trackPhase;
   if (trackPhase === 'open') {
-    return '模型 Arena 已密封评分，复刻人工评审进行中；<a href="/judge.html">前往复刻人工评审台 ↗</a>。';
+    return '模型 Arena 已密封评分，复刻人工评审进行中；公开页面仅展示只读状态。';
   }
   if (trackPhase === 'locked') {
     return '复刻人工评审已锁定；等待绝对分一起结算终审。';
