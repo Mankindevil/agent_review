@@ -4,8 +4,9 @@ import {
   recordActionCopy,
   recordActionFailure,
   requestedEvaluationVersion,
-  resolveEvaluationVersion
-} from './a2a-ui-helpers.js?v=20260731-version-switch1';
+  resolveEvaluationVersion,
+  runtimeStatusLabel
+} from './a2a-ui-helpers.js?v=20260801-runtime-probe1';
 import {
   canDeleteEvaluation,
   canStopEvaluation,
@@ -1505,7 +1506,7 @@ async function loadRuntimeHealth() {
   try {
     const response = await fetch('/api/runtimes');
     const runtimes = await response.json();
-    root.innerHTML = `<span>RUNTIME PROBE</span>${runtimes.map((runtime) => `<span class="runtime-chip ${runtime.installed ? 'installed' : ''} ${runtime.runtimeReady ? 'ready' : ''}" title="${escapeHtml(runtime.note)}">${escapeHtml(runtime.name)} · ${runtime.runtimeReady ? 'READY' : !runtime.installed ? '缺失' : !runtime.authenticated ? '未登录' : '未启用'}</span>`).join('')}`;
+    root.innerHTML = `<span>RUNTIME PROBE</span>${runtimes.map((runtime) => `<span class="runtime-chip ${runtime.installed ? 'installed' : ''} ${runtime.runtimeReady ? 'ready' : ''}" title="${escapeHtml(runtime.note)}">${escapeHtml(runtime.name)} · ${runtimeStatusLabel(runtime)}</span>`).join('')}`;
   } catch {
     root.innerHTML = '<span>RUNTIME PROBE</span><i>探测失败</i>';
   }

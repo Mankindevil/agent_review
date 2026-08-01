@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as uiHelpers from '../public/a2a-ui-helpers.js';
 import {
   evaluationModeFromHealth,
   nextAvailableEditorId,
@@ -8,6 +9,16 @@ import {
   requestedEvaluationVersion,
   resolveEvaluationVersion
 } from '../public/a2a-ui-helpers.js';
+
+test('distinguishes enabled probe failures from disabled runtimes', () => {
+  assert.equal(typeof uiHelpers.runtimeStatusLabel, 'function');
+  const installed = { installed: true, authenticated: true, enabled: true, runtimeReady: false };
+  assert.equal(uiHelpers.runtimeStatusLabel({ ...installed, runtimeReady: true }), 'READY');
+  assert.equal(uiHelpers.runtimeStatusLabel({ ...installed, installed: false }), '缺失');
+  assert.equal(uiHelpers.runtimeStatusLabel({ ...installed, authenticated: false }), '未登录');
+  assert.equal(uiHelpers.runtimeStatusLabel({ ...installed, enabled: false }), '未启用');
+  assert.equal(uiHelpers.runtimeStatusLabel(installed), '调用失败');
+});
 
 test('requires an explicit boolean health capability before resolving evaluation mode', () => {
   assert.deepEqual(

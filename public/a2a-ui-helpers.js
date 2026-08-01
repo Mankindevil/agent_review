@@ -22,6 +22,14 @@ export function resolveEvaluationVersion(requestedVersion, v2Available) {
   };
 }
 
+export function runtimeStatusLabel(runtime) {
+  if (runtime.runtimeReady) return 'READY';
+  if (!runtime.installed) return '缺失';
+  if (!runtime.authenticated) return '未登录';
+  if (!runtime.enabled) return '未启用';
+  return '调用失败';
+}
+
 export function nextAvailableEditorId(values, prefix) {
   const occupied = new Set(values);
   let ordinal = 1;
