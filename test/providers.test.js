@@ -63,7 +63,7 @@ test('disables deep thinking and caps output for the Doubao short-form review', 
   process.env.MODEL_REVIEW_MAX_TOKENS = '777';
   globalThis.fetch = async (_url, options) => {
     requestBody = JSON.parse(options.body);
-    return new Response(JSON.stringify({ choices: [{ message: { content: '{"score":20,"dimensions":{"researchRigor":20,"dataDiscipline":20,"backtestIntegrity":20,"riskCompliance":20,"reproducibility":20},"comment":"short","risk":"none"}' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"score":20,"dimensions":{"positioningClarity":20,"skillDesign":20,"protocolCoherence":20,"ioExampleQuality":20,"boundaryRiskDisclosure":20},"comment":"定位简短。","risk":"风险已知。"}' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   try {
     const result = await reviewAgent({ id: 'doubao', name: '豆包评审', model: 'ep-test', kind: 'openai-compatible', baseUrl: 'https://ark.example/api/v3', apiKeyEnv: 'ARK_API_KEY' }, { name: 'A', description: 'B', skills: [] }, { score: 10 }, 'live', undefined, { seed: 73021, temperature: 0 });
@@ -84,6 +84,20 @@ test('rejects reviewer payloads that violate the scoring contract', () => {
   assert.throws(() => normalizeProfessionalReview({ ...valid, score: 130 }), /0–100/);
   assert.throws(() => normalizeProfessionalReview({ ...valid, dimensions: { ...valid.dimensions, reproducibility: '80' } }), /0–100/);
   assert.throws(() => normalizeProfessionalReview({ ...valid, comment: '' }), /comment/);
+});
+
+test('reviewAgent labels all newly generated Card reviews with the V1 version', async () => {
+  const review = await reviewAgent(
+    { id: 'mock', name: 'Mock', model: 'Mock', kind: 'mock' },
+    { name: 'Card', description: '声明边界', skills: [] },
+    { score: 60 },
+    'demo'
+  );
+  assert.equal(review.version, 'v1-card-review/v2');
+  assert.deepEqual(Object.keys(review.dimensions), [
+    'positioningClarity', 'skillDesign', 'protocolCoherence',
+    'ioExampleQuality', 'boundaryRiskDisclosure'
+  ]);
 });
 
 test('configures exactly four primary reviewers and one distinct arbitrator', () => {

@@ -1,4 +1,5 @@
 import { average, clamp, round, stableNumber } from './utils.js';
+import { CARD_REVIEW_DIMENSIONS, normalizeV1CardReview } from './v1-card-review.js';
 
 const COMPLEX_SIGNALS = [
   /行情|财务|指数|行业|交易日历|data skill|数据查询|数据库|api/i,
@@ -39,22 +40,24 @@ export function mockProfessionalReview(reviewer, card, complexity, evaluationSee
   const seed = `${evaluationSeed ?? 'default'}:${reviewer.id}:${card.name}:${card.description}`;
   const base = stableNumber(seed, 66, 88) + (complexity.score >= 60 ? 2 : -2);
   const dimensions = {
-    researchRigor: clamp(base + stableNumber(`${seed}:research`, -7, 6)),
-    dataDiscipline: clamp(base + stableNumber(`${seed}:data`, -8, 7)),
-    backtestIntegrity: clamp(base + stableNumber(`${seed}:backtest`, -13, 3)),
-    riskCompliance: clamp(base + stableNumber(`${seed}:risk`, -8, 6)),
-    reproducibility: clamp(base + stableNumber(`${seed}:reproducibility`, -9, 6))
+    positioningClarity: clamp(base + stableNumber(`${seed}:positioning`, -7, 6)),
+    skillDesign: clamp(base + stableNumber(`${seed}:skills`, -8, 7)),
+    protocolCoherence: clamp(base + stableNumber(`${seed}:protocol`, -13, 3)),
+    ioExampleQuality: clamp(base + stableNumber(`${seed}:io`, -8, 6)),
+    boundaryRiskDisclosure: clamp(base + stableNumber(`${seed}:boundaries`, -9, 6))
   };
-  const score = round(average(Object.values(dimensions)));
+  const score = round(average(CARD_REVIEW_DIMENSIONS.map((key) => dimensions[key])));
   const strongest = Object.entries(dimensions).sort((a, b) => b[1] - a[1])[0][0];
   const weakest = Object.entries(dimensions).sort((a, b) => a[1] - b[1])[0][0];
   return {
     reviewer: reviewer.name,
     model: reviewer.model,
-    score,
-    dimensions,
-    comment: `能力边界写得清楚，${labelDimension(strongest)}是亮点；${labelDimension(weakest)}仍缺少可验证的约束与异常样例。`,
-    risk: 'Agent Card 描述无法单独证明真实执行质量，必须结合现场对测。',
+    ...normalizeV1CardReview({
+      score,
+      dimensions,
+      comment: `Agent Card 的${labelDimension(strongest)}是亮点；${labelDimension(weakest)}仍缺少可验证的约束与异常样例。`,
+      risk: '仅凭 Agent Card 无法证明真实执行或工具调用成功，必须结合现场对测。'
+    }),
     mode: 'demo',
     seed: evaluationSeed
   };
@@ -109,5 +112,5 @@ export function buildRoast(submittedAverage, claudeAverage, doubaoAverage, profe
 }
 
 function labelDimension(key) {
-  return ({ researchRigor: '研究严谨性', dataDiscipline: '数据纪律', backtestIntegrity: '回测可信度', riskCompliance: '风险合规', reproducibility: '可复现性' })[key] || key;
+  return ({ positioningClarity: '定位清晰度', skillDesign: 'Skills 设计', protocolCoherence: '协议一致性', ioExampleQuality: '输入输出示例质量', boundaryRiskDisclosure: '能力边界与风险披露' })[key] || key;
 }

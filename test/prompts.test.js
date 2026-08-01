@@ -10,6 +10,7 @@ import {
   humorRewritePrompt,
   replicaBuildPrompt,
   replicaRunPrompt,
+  professionalReviewPrompt,
   v1ArenaPrompt
 } from '../src/prompts.js';
 
@@ -44,6 +45,19 @@ test('hidden generation prompt freezes scope and requests JSON-only allowed tran
   assert.match(prompt, /Do NOT invent criterion ids/u);
   assert.match(prompt, /"allowedDomains":\["portfolio-risk"\]/u);
 });
+
+test('V1 Card review prompt scores declarations only with the five design dimensions', () => {
+  const prompt = professionalReviewPrompt({ name: 'Card', skills: [] }, { score: 66 });
+  assert.match(prompt, /定位、Skills、协议、输入输出与能力边界/u);
+  assert.match(prompt, /不得根据.*执行|不得推断.*工具/u);
+  assert.match(prompt, /positioningClarity/u);
+  assert.match(prompt, /skillDesign/u);
+  assert.match(prompt, /protocolCoherence/u);
+  assert.match(prompt, /ioExampleQuality/u);
+  assert.match(prompt, /boundaryRiskDisclosure/u);
+  assert.doesNotMatch(prompt, /researchRigor|dataDiscipline|backtestIntegrity|riskCompliance|reproducibility/u);
+});
+
 
 test('scope prompt exposes candidate changes but not generator rationale', () => {
   const prompt = hiddenScopeReviewPrompt(compilation, [{

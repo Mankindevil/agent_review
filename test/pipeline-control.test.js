@@ -1645,6 +1645,7 @@ test('persists each completed reviewer, runtime and benchmark entry incrementall
   assert.equal(store.get(created.id).temperature, 0);
   assert.equal(store.get(created.id).reviewPlan.length, 4);
   assert.equal(store.get(created.id).runtimePlan.length, 3);
+  assert.equal(store.get(created.id).professional.version, 'v1-card-review/v2');
   assert.deepEqual(Object.keys(store.get(created.id).reviewPlan[0]).sort(), ['id', 'model', 'name']);
   assert.equal(store.get(created.id).professional.reviews.every((review) => Number.isInteger(review.seed)), true);
   assert.equal(store.get(created.id).builds.every((build) => Number.isInteger(build.seed)), true);
@@ -1664,6 +1665,8 @@ test('retries an individual stage and recalculates the derived verdict', async (
   item = await waitFor(store, created.id, (value) => value.status === 'completed' && value.retryHistory?.length === 1);
   assert.equal(item.retryHistory[0].type, 'review');
   assert.equal(item.professional.reviews.find((review) => review.reviewerId === 'gpt').score > 0, true);
+  assert.equal(item.professional.version, 'v1-card-review/v2');
+  assert.equal(item.professional.reviews.filter((review) => review.reviewerId === 'gpt').length, 1);
   assert.ok(item.roast?.tier);
   assert.equal(item.activeWork, null);
 

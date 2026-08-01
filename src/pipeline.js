@@ -16,6 +16,7 @@ import {
 } from './submission.js';
 import { configuredReviewers, reviewAgent } from './providers.js';
 import { buildRoast, scoreComplexity } from './scoring.js';
+import { aggregateV1CardReviews, V1_CARD_REVIEW_VERSION } from './v1-card-review.js';
 import { buildSkill, RUNTIMES, runSkill } from './runtimes.js';
 import { average, deriveSeed, id, normalizeSeed, normalizeTemperature, now, round, stableNumber } from './utils.js';
 import { buildDataPlan, collectDataEvidence, normalizeTestCases, verifyOutputAgainstEvidence } from './data-verifier.js';
@@ -599,7 +600,7 @@ export class EvaluationPipeline {
       next = { ...(await reviewAgent(reviewer, item.agentCard, item.complexity, item.mode, signal, phaseSampling(item, `review:${reviewer.id}`))), reviewerId: reviewer.id };
     } catch (error) {
       if (signal.aborted) throw signal.reason || error;
-      next = { reviewerId: reviewer.id, reviewer: reviewer.name, model: reviewer.model, score: 0, error: error.message, mode: 'failed' };
+      next = { reviewerId: reviewer.id, reviewer: reviewer.name, model: reviewer.model, version: V1_CARD_REVIEW_VERSION, score: 0, error: error.message, mode: 'failed' };
     }
     if (index === -1) reviews.push(next); else reviews[index] = next;
     item.professional = professionalSnapshot(reviews);
@@ -768,7 +769,7 @@ export class EvaluationPipeline {
       await this.update(item, {
         progress: 28 + professionalReviews.length * 8,
         stage: `${reviewer.name} 正在审稿`,
-        activeWork: { type: 'review', key: reviewer.id, label: `${reviewer.name} 正在审稿`, target: reviewer.model, detail: '五项金融研究指标、评语与首要风险生成中', index: professionalReviews.length + 1, total: reviewers.length, retry: false }
+        activeWork: { type: 'review', key: reviewer.id, label: `${reviewer.name} 正在审稿`, target: reviewer.model, detail: '定位、Skills、协议、输入输出与能力边界五项设计审稿中', index: professionalReviews.length + 1, total: reviewers.length, retry: false }
       }, {
         level: 'info', source: 'MODEL', phase: 'review', text: `${reviewer.model} 接过了答卷`, mode: item.mode
       });
@@ -778,7 +779,7 @@ export class EvaluationPipeline {
         await this.update(item, { professional: professionalSnapshot(professionalReviews) }, { level: 'success', source: 'MODEL', phase: 'review', text: `${reviewer.model} 完成盲审 · ${review.score}/100`, mode: review.mode, durationMs: Date.now() - startedAt });
       } catch (error) {
         if (signal?.aborted) throw signal.reason || error;
-        professionalReviews.push({ reviewerId: reviewer.id, reviewer: reviewer.name, model: reviewer.model, score: 0, error: error.message, mode: 'failed' });
+        professionalReviews.push({ reviewerId: reviewer.id, reviewer: reviewer.name, model: reviewer.model, version: V1_CARD_REVIEW_VERSION, score: 0, error: error.message, mode: 'failed' });
         await this.update(item, { professional: professionalSnapshot(professionalReviews) }, { level: 'error', source: 'MODEL', phase: 'review', text: `${reviewer.model} 调用失败`, detail: error.message, mode: 'failed', durationMs: Date.now() - startedAt });
       }
     }
@@ -1220,6 +1221,9 @@ function sha256(value) {
 }
 
 function professionalSnapshot(reviews) {
+  if (reviews.some((review) => review?.version === V1_CARD_REVIEW_VERSION)) {
+    return aggregateV1CardReviews(reviews);
+  }
   const valid = reviews.filter((review) => review.score > 0);
   return { score: round(average(valid.map((review) => review.score)), 1), mode: summarizeModes(reviews.map((review) => review.error ? 'failed' : review.mode), 'failed'), reviews: [...reviews] };
 }

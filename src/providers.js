@@ -1,5 +1,6 @@
 import { mockProfessionalReview } from './scoring.js';
 import { PROFESSIONAL_REVIEW_SYSTEM_PROMPT, professionalReviewPrompt } from './prompts.js';
+import { normalizeV1CardReview } from './v1-card-review.js';
 import {
   networkFailureMessage,
   safeJson,
@@ -216,7 +217,7 @@ export async function reviewAgent(reviewer, card, complexity, mode, signal, samp
   const responseText = reviewer.kind === 'anthropic'
     ? await callAnthropic(reviewer, system, prompt, signal, sampling)
     : await callOpenAICompatible(reviewer, system, prompt, signal, sampling);
-  const parsed = normalizeProfessionalReview(safeJson(responseText));
+  const parsed = normalizeV1CardReview(safeJson(responseText));
   return { reviewer: reviewer.name, model: reviewer.model, ...parsed, mode: 'live', seed: sampling.seed };
 }
 
