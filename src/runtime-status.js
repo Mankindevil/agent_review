@@ -157,7 +157,7 @@ export async function probeCursorAuthentication(executable, {
   try {
     const { stdout, stderr } = await execFileImpl(executable, ['status'], {
       cwd: workspace,
-      timeout: 5_000,
+      timeout: 30_000,
       maxBuffer: 64_000,
       env: localCliEnv('cursor', workspace, env, {
         cursorConfigHome: cursorAuthConfigHome(env)

@@ -14,10 +14,11 @@ test('distinguishes enabled probe failures from disabled runtimes', () => {
   assert.equal(typeof uiHelpers.runtimeStatusLabel, 'function');
   const installed = { installed: true, authenticated: true, enabled: true, runtimeReady: false };
   assert.equal(uiHelpers.runtimeStatusLabel({ ...installed, runtimeReady: true }), 'READY');
-  assert.equal(uiHelpers.runtimeStatusLabel({ ...installed, installed: false }), '缺失');
+  assert.equal(uiHelpers.runtimeStatusLabel({ installed: false, authenticated: false, enabled: false, runtimeReady: false }), '缺失');
   assert.equal(uiHelpers.runtimeStatusLabel({ ...installed, authenticated: false }), '未登录');
   assert.equal(uiHelpers.runtimeStatusLabel({ ...installed, enabled: false }), '未启用');
   assert.equal(uiHelpers.runtimeStatusLabel(installed), '调用失败');
+  assert.equal(uiHelpers.runtimeStatusLabel({ ...installed, installed: false }), '调用失败');
 });
 
 test('requires an explicit boolean health capability before resolving evaluation mode', () => {
