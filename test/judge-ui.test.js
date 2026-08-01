@@ -29,7 +29,8 @@ test('open review desk exposes the public queue controls and safety copy without
   assert.match(html, /双轨终审结算前保持密封/u);
   assert.match(html, /TRACK \/ 绝对分/u);
   assert.match(html, /TRACK \/ 复刻/u);
-  assert.match(index, /href="\/judge.html"/);
+  assert.doesNotMatch(index, /href="\/judge.html"/);
+  assert.doesNotMatch(index, /href="\/appeal.html"/);
   assert.match(script, /\/api\/review-queue/);
   assert.match(script, /\/skip-human-review/);
   assert.match(script, /\/human-reviews/);

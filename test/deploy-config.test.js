@@ -81,18 +81,18 @@ test('nginx keeps ACME on HTTP and exposes only the allowlisted public V1 surfac
 test('nginx allows only the public evaluation methods, then rejects destructive and unmatched routes', async () => {
   const production = await read('nginx-production.conf');
   const evaluationCollection = exactLocation(production, '/api/evaluations');
-  assert.match(evaluationCollection, /\^\(GET\|HEAD\|POST\)\$/);
+  assert.match(evaluationCollection, /\^\(GET\|POST\)\$/);
   for (const route of [
     String.raw`location ~ ^/api/evaluations/[^/]+$`,
     String.raw`location ~ ^/api/evaluations/[^/]+/(?:events|report\.pdf)$`,
     String.raw`location ~ ^/api/evaluations/[^/]+/builds/[^/]+/skill$`
   ]) {
-    assert.match(production, new RegExp(`${route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?\\^\\(GET\\|HEAD\\)\\$`), route);
+    assert.match(production, new RegExp(`${route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?\\$request_method != GET`), route);
   }
   assert.match(
     production,
-    /location ~ \^\/api\/evaluations\/\[\^\/\]\+\$\s*\{\s*if \(\$request_method !~ "\^\(GET\|HEAD\)\$"\) \{ return 405; \}/,
-    'DELETE /api/evaluations/:id is rejected by the GET/HEAD-only detail contract'
+    /location ~ \^\/api\/evaluations\/\[\^\/\]\+\$\s*\{\s*if \(\$request_method != GET\) \{ return 405; \}/,
+    'DELETE and HEAD /api/evaluations/:id are rejected by the GET-only detail contract'
   );
   for (const route of [
     String.raw`location ~ ^/api/evaluations/[^/]+/(?:cancel|retry)$`
@@ -125,7 +125,7 @@ test('nginx rejects methods outside each public route contract', async () => {
   ]) {
     assert.match(
       exactLocation(production, pathname),
-      /if \(\$request_method !~ "\^\(GET\|HEAD\)\$"\)\s*\{\s*return 405;/,
+      /if \(\$request_method != GET\)\s*\{\s*return 405;/,
       pathname
     );
   }
@@ -222,6 +222,8 @@ test('production operations document the public V1 allowlist and private V2 acce
   assert.match(operations, /Browser diagnostics: <https:\/\/14\.103\.143\.171\/agent-check>/);
   assert.match(operations, /ssh -N -L 4173:127\.0\.0\.1:4173 root@14\.103\.143\.171/);
   assert.match(operations, /does not pass through the public Nginx allowlist/);
+  assert.match(operations, /shared public create\/list\/detail\/events API still supports direct V2\/history/);
+  assert.match(operations, /Admin, appeal, evidence, and full operations are loopback\/SSH-only/);
   assert.match(operations, /^require_200 https:\/\/14\.103\.143\.171\/$/m);
   assert.match(operations, /require_200 https:\/\/14\.103\.143\.171\/app\.js/);
   assert.match(operations, /require_200 https:\/\/14\.103\.143\.171\/api\/evaluations/);

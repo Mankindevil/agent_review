@@ -325,7 +325,7 @@ test('participant appeal APIs require idempotency and preserve append-only timel
       resultHash: 'd'.repeat(64),
       evidenceManifestHash: 'e'.repeat(64)
     },
-    finalizedAt: '2026-07-25T00:00:00.000Z',
+    finalizedAt: new Date().toISOString(),
     resultV2: {
       absolute: { status: 'locked', resultHash: 'd'.repeat(64) },
       resultVersions: []
@@ -392,7 +392,7 @@ test('appeal admin routes require probe attribution and append recalculated resu
     ...structuredClone(v2Fixture),
     id: 'eval_appeal_recalculation_api',
     governance: { phase: 'final', resultHash: 'f'.repeat(64), evidenceManifestHash: 'e'.repeat(64) },
-    finalizedAt: '2026-07-25T00:00:00.000Z',
+    finalizedAt: new Date().toISOString(),
     resultV2: { absolute: { status: 'locked', resultHash: 'f'.repeat(64) }, resultVersions: [] },
     runtimeState: {
       runIndex: [{
@@ -1238,10 +1238,10 @@ test('serves localized loading effects with reduced-motion support', async () =>
   const indexResponse = await fetch(`${origin}/`);
   const index = await indexResponse.text();
   assert.match(index, /app\.js\?v=20260801-runtime-probe1/);
-  assert.match(index, /styles\.css\?v=20260731-version-switch2/);
+  assert.match(index, /styles\.css\?v=20260802-v1-live-only/);
 });
 
-test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
+test('serves the V1-only public intake while retaining the direct V2 builder internally', async () => {
   const [pageResponse, scriptResponse, styleResponse] = await Promise.all([
     fetch(`${origin}/`),
     fetch(`${origin}/app.js`),
@@ -1256,37 +1256,13 @@ test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
   assert.equal(scriptResponse.status, 200);
   assert.equal(styleResponse.status, 200);
 
-  assert.match(html, /id="start-evaluation"[^>]*disabled/);
+  assert.match(html, /V1 LIVE \/ 送检入口/);
   assert.match(html, /id="legacy-intake"/);
-  assert.match(html, /id="v2-intake"[^>]*class="[^"]*hidden/);
-  assert.match(html, />A2A Agent Card</);
-  assert.match(html, />Agent 使用示例</);
-  assert.match(html, /id="v2-example-list"/);
-  assert.match(html, /id="add-v2-example"/);
+  assert.doesNotMatch(html, /id="v2-intake"|v2-only|data-a2a-/);
   assert.match(html, /id="agent-authorization"[^>]*type="password"/);
-  assert.match(html, /class="[^"]*v2-only[^"]*"/);
-  assert.doesNotMatch(html, /participant-token-receipt/);
-  assert.doesNotMatch(html, /Skill 使用示例|skillId/);
-
-  for (const level of ['example', 'turn', 'part', 'criterion']) {
-    assert.match(script, new RegExp(`data-a2a-${level}`), level);
-  }
-  for (const partType of ['text', 'data', 'raw', 'url']) {
-    assert.match(script, new RegExp(`value="${partType}"`), partType);
-  }
-  for (const criterionType of ['contains', 'exact', 'json-schema', 'numeric', 'model']) {
-    assert.match(script, new RegExp(`value="${criterionType}"`), criterionType);
-  }
-  assert.match(script, /expectedDeliverable/);
-  assert.match(script, /acceptanceCriteria/);
-  assert.match(script, /constraints/);
-  assert.match(script, /evaluationModeFromHealth\(payload\)/);
-  assert.match(script, /function applyEvaluationVersion/);
-  assert.match(script, /function setEvaluationHealthUnavailable/);
-  assert.match(script, /\$\('#v2-intake'\)\.classList\.remove\('hidden'\)/);
   assert.match(script, /function submitV1Evaluation/);
-  assert.match(script, /scoringMode:\s*'panel'/);
-  assert.match(script, /scoringReviewerId:\s*'deepseek'/);
+  assert.match(script, /function buildV2CreateRequest/);
+  assert.doesNotMatch(script, /function applyEvaluationVersion|function setEvaluationHealthUnavailable/);
   const v1RequestBuilder = script.slice(
     script.indexOf('function buildV1CreateRequest'),
     script.indexOf('function buildV2CreateRequest')
@@ -1295,37 +1271,15 @@ test('serves the feature-gated V2 chain-of-custody intake editor', async () => {
     script.indexOf('function buildV2CreateRequest'),
     script.indexOf('async function submitV1Evaluation')
   );
+  assert.match(v1RequestBuilder, /buildEvaluationCreateRequest\('v1'/);
   assert.match(v1RequestBuilder, /mode:\s*state\.mode/);
   assert.match(v1RequestBuilder, /scoringConfig:\s*selectedV1ScoringConfig\(\)/);
-  assert.doesNotMatch(v2RequestBuilder, /scoringConfig/);
-  assert.match(script, /nextAvailableEditorId\(/);
-  assert.match(script, /data-record-kind="v2"/);
-  assert.match(script, /recordActionCopy\(isV2\)/);
-  assert.match(script, /recordActionFailure\(isV2, payload\.error\)/);
-  assert.match(script, /recordActionFailure\(isV2, error\.message\)/);
-
-  assert.match(css, /\.a2a-custody-rail/);
+  assert.match(v2RequestBuilder, /buildEvaluationCreateRequest\('v2'/);
   assert.match(css, /\.agent-auth-panel/);
-  for (const selector of [
-    'a2a-example-list',
-    'a2a-custody-rail',
-    'a2a-turn-list',
-    'a2a-turn'
-  ]) {
-    assert.match(
-      css,
-      new RegExp(`\\.${selector}\\s*\\{[^}]*min-width:0;`),
-      `${selector} must shrink inside the intake card`
-    );
-  }
-  assert.match(css, /\.a2a-part\s*\{[^}]*grid-template-columns:[^;}]*minmax\(0,/);
-  assert.match(css, /\.a2a-criterion\s*\{[^}]*grid-template-columns:[^;}]*minmax\(0,/);
-  assert.match(css, /\.a2a-check input\s*\{[^}]*min-width:16px;[^}]*height:16px;/);
-  assert.match(css, /@media \(max-width: 700px\)/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
 });
 
-test('keeps V2 browser secrets memory-only and renders nested projections safely', async () => {
+test('keeps direct V2 browser support memory-only without exposing a public intake', async () => {
   const [response, actionsResponse] = await Promise.all([
     fetch(`${origin}/app.js`),
     fetch(`${origin}/evaluation-actions.js`)
@@ -1339,14 +1293,11 @@ test('keeps V2 browser secrets memory-only and renders nested projections safely
 
   assert.doesNotMatch(script, /participantTokens:\s*new Map\(\)/);
   assert.match(script, /from '.\/evaluation-actions\.js/);
-  assert.match(script, /function statusOf\(item\)/);
-  assert.match(script, /function stageOf\(item\)/);
-  assert.match(script, /function progressOf\(item\)/);
   assert.match(script, /renderV2Result as renderV2ResultView/);
   assert.doesNotMatch(script, /function renderV2Result\(item\)/);
   assert.match(script, /renderV2ResultView\(item, \{ escapeHtml \}\)/);
-  assert.match(script, /function renderV2HistoryItem\(item\)/);
-  assert.match(script, /schemaVersion:\s*2,\s*agentCard,\s*agentExamples/);
+  assert.match(script, /function buildV2CreateRequest/);
+  assert.doesNotMatch(script, /id="v2-intake"/);
   assert.match(script, /agent-authorization'\)\.value = ''/);
   assert.match(script, /'idempotency-key':\s*crypto\.randomUUID\(\)/);
   assert.doesNotMatch(script, /participantAccessToken/);
@@ -1419,8 +1370,7 @@ test('serves an Agent Card upload readiness console with isolated credentials an
   assert.match(html, /内部多 Agent/);
   assert.match(html, /最终报名表/);
   assert.match(html, /再次真实执行 Prompt/);
-  assert.doesNotMatch(html, /href="\/"/);
-  assert.match(html, /<div class="brand"/);
+  assert.match(html, /<a class="brand" href="\//);
   assert.match(html, /<a class="back-link" href="\/agent-check"/);
   assert.doesNotMatch(html, /平台访问密钥|platform-key|AGENT_DIAGNOSTICS_ACCESS_KEY/);
   assert.match(script, /\/api\/agent-diagnostics/);
@@ -2115,7 +2065,7 @@ test('creates a V1 demo evaluation from agentExamples and optional authorization
   assert.equal(created.authorizationRequired, true);
   assert.equal(Object.hasOwn(created, 'agentAuthorization'), false);
   assert.deepEqual(created.scoringConfig, {
-    version: 'v1-model-arena/v1',
+    version: 'v1-model-arena/v2',
     mode: 'single',
     reviewerId: 'deepseek'
   });
@@ -2262,11 +2212,42 @@ function completeV1ReportFixture(id) {
   };
 }
 
+function traditionalPdf(objects, root = 1) {
+  const maxObject = Math.max(...Object.keys(objects).map(Number));
+  let source = '%PDF-1.7\n';
+  const offsets = new Map();
+  for (let objectNumber = 1; objectNumber <= maxObject; objectNumber += 1) {
+    const body = objects[objectNumber];
+    if (!body) continue;
+    offsets.set(objectNumber, Buffer.byteLength(source));
+    source += `${objectNumber} 0 obj\n${body}\nendobj\n`;
+  }
+  const xref = Buffer.byteLength(source);
+  source += `xref\n0 ${maxObject + 1}\n0000000000 65535 f \n`;
+  for (let objectNumber = 1; objectNumber <= maxObject; objectNumber += 1) {
+    source += offsets.has(objectNumber)
+      ? `${String(offsets.get(objectNumber)).padStart(10, '0')} 00000 n \n`
+      : '0000000000 00000 f \n';
+  }
+  return `${source}trailer\n<< /Size ${maxObject + 1} /Root ${root} 0 R >>\nstartxref\n${xref}\n%%EOF`;
+}
+
 test('downloads a completed V1 report and rejects unavailable records without partial PDFs', async () => {
   const completed = completeV1ReportFixture('eval v1+pdf api');
   const running = { ...completed, id: 'eval_v1_pdf_running', status: 'running' };
   const incompleteSeats = { ...completed, id: 'eval_v1_pdf_missing-seat', professional: { reviews: completed.professional.reviews.slice(0, 3) } };
   const incompleteCandidates = { ...completed, id: 'eval_v1_pdf_missing-candidate', benchmark: completed.benchmark.map((round) => ({ ...round, entries: round.entries.slice(0, 3) })) };
+  const rendererDir = await mkdtemp(path.join(tmpdir(), 'v1-report-api-'));
+  const validRenderer = path.join(rendererDir, 'valid-renderer.sh');
+  const validPdf = traditionalPdf({
+    1: '<< /Type /Catalog /Pages 2 0 R >>',
+    2: '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    3: '<< /Type /Page /Parent 2 0 R >>'
+  });
+  await writeFile(validRenderer, `#!/bin/sh\ncat >/dev/null\nprintf '%b' ${JSON.stringify(validPdf)}\n`);
+  await chmod(validRenderer, 0o755);
+  const originalPython = process.env.REPORT_PDF_PYTHON;
+  process.env.REPORT_PDF_PYTHON = validRenderer;
   await evaluationStore.set(completed);
   await evaluationStore.set(running);
   await evaluationStore.set(incompleteSeats);
@@ -2297,7 +2278,6 @@ test('downloads a completed V1 report and rejects unavailable records without pa
     } finally {
       if (oldPython === undefined) delete process.env.REPORT_PDF_PYTHON; else process.env.REPORT_PDF_PYTHON = oldPython;
     }
-    const rendererDir = await mkdtemp(path.join(tmpdir(), 'v1-report-api-'));
     const invalidRenderer = path.join(rendererDir, 'invalid-renderer.sh');
     const failedRenderer = path.join(rendererDir, 'failed-renderer.sh');
     const oversizedRenderer = path.join(rendererDir, 'oversized-renderer.sh');
@@ -2339,6 +2319,7 @@ test('downloads a completed V1 report and rejects unavailable records without pa
       await rm(rendererDir, { recursive: true, force: true });
     }
   } finally {
+    if (originalPython === undefined) delete process.env.REPORT_PDF_PYTHON; else process.env.REPORT_PDF_PYTHON = originalPython;
     await evaluationStore.delete(completed.id);
     await evaluationStore.delete(running.id);
     await evaluationStore.delete(incompleteSeats.id);
