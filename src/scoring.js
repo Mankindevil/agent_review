@@ -63,6 +63,32 @@ export function mockProfessionalReview(reviewer, card, complexity, evaluationSee
   };
 }
 
+// Compatibility-only mock path for retries of historical, versionless records.
+export function mockLegacyProfessionalReview(reviewer, card, complexity, evaluationSeed) {
+  const seed = `${evaluationSeed ?? 'default'}:${reviewer.id}:${card.name}:${card.description}`;
+  const base = stableNumber(seed, 66, 88) + (complexity.score >= 60 ? 2 : -2);
+  const dimensions = {
+    researchRigor: clamp(base + stableNumber(`${seed}:research`, -7, 6)),
+    dataDiscipline: clamp(base + stableNumber(`${seed}:data`, -8, 7)),
+    backtestIntegrity: clamp(base + stableNumber(`${seed}:backtest`, -13, 3)),
+    riskCompliance: clamp(base + stableNumber(`${seed}:risk`, -8, 6)),
+    reproducibility: clamp(base + stableNumber(`${seed}:reproducibility`, -9, 6))
+  };
+  const score = round(average(Object.values(dimensions)));
+  const strongest = Object.entries(dimensions).sort((a, b) => b[1] - a[1])[0][0];
+  const weakest = Object.entries(dimensions).sort((a, b) => a[1] - b[1])[0][0];
+  return {
+    reviewer: reviewer.name,
+    model: reviewer.model,
+    score,
+    dimensions,
+    comment: `能力边界写得清楚，${legacyLabelDimension(strongest)}是亮点；${legacyLabelDimension(weakest)}仍缺少可验证的约束与异常样例。`,
+    risk: 'Agent Card 描述无法单独证明真实执行质量，必须结合现场对测。',
+    mode: 'demo',
+    seed: evaluationSeed
+  };
+}
+
 // Legacy compatibility scorer only. No new V1 pipeline path may invoke this helper.
 export function judgeOutput(prompt, output, identity, dataVerification) {
   const content = String(output || '');
@@ -113,4 +139,8 @@ export function buildRoast(submittedAverage, claudeAverage, doubaoAverage, profe
 
 function labelDimension(key) {
   return ({ positioningClarity: '定位清晰度', skillDesign: 'Skills 设计', protocolCoherence: '协议一致性', ioExampleQuality: '输入输出示例质量', boundaryRiskDisclosure: '能力边界与风险披露' })[key] || key;
+}
+
+function legacyLabelDimension(key) {
+  return ({ researchRigor: '研究严谨性', dataDiscipline: '数据纪律', backtestIntegrity: '回测可信度', riskCompliance: '风险合规', reproducibility: '可复现性' })[key] || key;
 }

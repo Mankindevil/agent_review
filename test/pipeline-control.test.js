@@ -2020,6 +2020,12 @@ test('retains entry-presence completeness for historical V1 retry records', asyn
     cursor: 0,
     doubao: 0
   });
+  assert.equal(Object.hasOwn(updated.professional, 'version'), false);
+  assert.equal(updated.professional.reviews[0].version, undefined);
+  assert.deepEqual(
+    Object.keys(updated.professional.reviews[0].dimensions).sort(),
+    ['backtestIntegrity', 'dataDiscipline', 'reproducibility', 'researchRigor', 'riskCompliance']
+  );
   assert.ok(updated.roast?.tier);
 });
 

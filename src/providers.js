@@ -1,5 +1,10 @@
-import { mockProfessionalReview } from './scoring.js';
-import { PROFESSIONAL_REVIEW_SYSTEM_PROMPT, professionalReviewPrompt } from './prompts.js';
+import { mockLegacyProfessionalReview, mockProfessionalReview } from './scoring.js';
+import {
+  LEGACY_PROFESSIONAL_REVIEW_SYSTEM_PROMPT,
+  PROFESSIONAL_REVIEW_SYSTEM_PROMPT,
+  legacyProfessionalReviewPrompt,
+  professionalReviewPrompt
+} from './prompts.js';
 import { normalizeV1CardReview } from './v1-card-review.js';
 import {
   networkFailureMessage,
@@ -211,13 +216,20 @@ export function configuredReviewers() {
 }
 
 export async function reviewAgent(reviewer, card, complexity, mode, signal, sampling = {}) {
-  if (mode !== 'live' || reviewer.kind === 'mock') return mockProfessionalReview(reviewer, card, complexity, sampling.seed);
-  const system = PROFESSIONAL_REVIEW_SYSTEM_PROMPT;
-  const prompt = professionalReviewPrompt(card, complexity);
+  const isLegacyRetry = sampling.reviewVersion === 'legacy';
+  if (mode !== 'live' || reviewer.kind === 'mock') {
+    return isLegacyRetry
+      ? mockLegacyProfessionalReview(reviewer, card, complexity, sampling.seed)
+      : mockProfessionalReview(reviewer, card, complexity, sampling.seed);
+  }
+  const system = isLegacyRetry ? LEGACY_PROFESSIONAL_REVIEW_SYSTEM_PROMPT : PROFESSIONAL_REVIEW_SYSTEM_PROMPT;
+  const prompt = isLegacyRetry ? legacyProfessionalReviewPrompt(card, complexity) : professionalReviewPrompt(card, complexity);
   const responseText = reviewer.kind === 'anthropic'
     ? await callAnthropic(reviewer, system, prompt, signal, sampling)
     : await callOpenAICompatible(reviewer, system, prompt, signal, sampling);
-  const parsed = normalizeV1CardReview(safeJson(responseText));
+  const parsed = isLegacyRetry
+    ? normalizeProfessionalReview(safeJson(responseText))
+    : normalizeV1CardReview(safeJson(responseText));
   return { reviewer: reviewer.name, model: reviewer.model, ...parsed, mode: 'live', seed: sampling.seed };
 }
 

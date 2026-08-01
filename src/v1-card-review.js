@@ -15,6 +15,7 @@ export function normalizeV1CardReview(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError('Agent Card 评审必须返回 JSON 对象');
   }
+  assertScore(value.score, 'score');
   if (!value.dimensions || typeof value.dimensions !== 'object' || Array.isArray(value.dimensions)) {
     throw new TypeError('Agent Card 评审缺少 dimensions 对象');
   }
@@ -49,11 +50,16 @@ export function aggregateV1CardReviews(reviews) {
     review?.version === V1_CARD_REVIEW_VERSION &&
     !review.error &&
     Number.isFinite(review.score) &&
-    review.score > 0
+    review.score > 0 &&
+    CARD_REVIEW_DIMENSIONS.every((key) => Number.isFinite(review.dimensions?.[key]))
   );
   return {
     version: V1_CARD_REVIEW_VERSION,
     score: round(average(valid.map((review) => review.score)), 1),
+    dimensions: Object.fromEntries(CARD_REVIEW_DIMENSIONS.map((key) => [
+      key,
+      round(average(valid.map((review) => review.dimensions[key])), 1)
+    ])),
     mode: summarizeModes(normalizedReviews.map((review) => review?.error ? 'failed' : review?.mode), 'failed'),
     reviews: normalizedReviews
   };

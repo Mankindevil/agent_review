@@ -595,12 +595,24 @@ export class EvaluationPipeline {
     const reviewer = configuredReviewers().find((candidate) => retryReviewerKey(candidate) === step.key || candidate.model === step.key || candidate.name === step.key);
     const reviews = [...(item.professional?.reviews || [])];
     const index = reviews.findIndex((review) => retryReviewResultKey(review) === step.key || review.model === step.key || review.reviewer === step.key || review.reviewer === step.reviewerName);
+    const isCardReview = item.professional?.version === V1_CARD_REVIEW_VERSION;
     let next;
     try {
-      next = { ...(await reviewAgent(reviewer, item.agentCard, item.complexity, item.mode, signal, phaseSampling(item, `review:${reviewer.id}`))), reviewerId: reviewer.id };
+      next = { ...(await reviewAgent(reviewer, item.agentCard, item.complexity, item.mode, signal, {
+        ...phaseSampling(item, `review:${reviewer.id}`),
+        reviewVersion: isCardReview ? V1_CARD_REVIEW_VERSION : 'legacy'
+      })), reviewerId: reviewer.id };
     } catch (error) {
       if (signal.aborted) throw signal.reason || error;
-      next = { reviewerId: reviewer.id, reviewer: reviewer.name, model: reviewer.model, version: V1_CARD_REVIEW_VERSION, score: 0, error: error.message, mode: 'failed' };
+      next = {
+        reviewerId: reviewer.id,
+        reviewer: reviewer.name,
+        model: reviewer.model,
+        ...(isCardReview ? { version: V1_CARD_REVIEW_VERSION } : {}),
+        score: 0,
+        error: error.message,
+        mode: 'failed'
+      };
     }
     if (index === -1) reviews.push(next); else reviews[index] = next;
     item.professional = professionalSnapshot(reviews);

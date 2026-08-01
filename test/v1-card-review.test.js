@@ -38,6 +38,32 @@ test('Card review recomputes an equal-weight score and drops provider prose', ()
 test('Card review rejects a changed design contract and non-Chinese findings', () => {
   assert.throws(
     () => normalizeV1CardReview({
+      dimensions: validDimensions,
+      comment: '边界明确。',
+      risk: '风险已说明。'
+    }),
+    /score.*0–100/u
+  );
+  assert.throws(
+    () => normalizeV1CardReview({
+      score: '60',
+      dimensions: validDimensions,
+      comment: '边界明确。',
+      risk: '风险已说明。'
+    }),
+    /score.*0–100/u
+  );
+  assert.throws(
+    () => normalizeV1CardReview({
+      score: 101,
+      dimensions: validDimensions,
+      comment: '边界明确。',
+      risk: '风险已说明。'
+    }),
+    /score.*0–100/u
+  );
+  assert.throws(
+    () => normalizeV1CardReview({
       score: 60,
       dimensions: { ...validDimensions, extra: 20 },
       comment: '边界明确。',
@@ -54,12 +80,32 @@ test('Card review rejects a changed design contract and non-Chinese findings', (
     }),
     /0–100/u
   );
+  const missing = { ...validDimensions };
+  delete missing.skillDesign;
+  assert.throws(
+    () => normalizeV1CardReview({
+      score: 60,
+      dimensions: missing,
+      comment: '边界明确。',
+      risk: '风险已说明。'
+    }),
+    /缺少 dimensions/u
+  );
   assert.throws(
     () => normalizeV1CardReview({
       score: 60,
       dimensions: validDimensions,
       comment: 'English only comment',
       risk: '风险已说明。'
+    }),
+    /简体中文/u
+  );
+  assert.throws(
+    () => normalizeV1CardReview({
+      score: 60,
+      dimensions: validDimensions,
+      comment: '边界明确。',
+      risk: 'English only risk'
     }),
     /简体中文/u
   );
@@ -74,6 +120,18 @@ test('Card review rejects a changed design contract and non-Chinese findings', (
   );
 });
 
+test('Card review rounds decimal dimensions before recomputing the official score', () => {
+  const review = normalizeV1CardReview({
+    score: 20.5,
+    dimensions: { ...validDimensions, positioningClarity: 80.6, skillDesign: 70.6 },
+    comment: '定位清晰。',
+    risk: '边界完整。'
+  });
+  assert.equal(review.dimensions.positioningClarity, 81);
+  assert.equal(review.dimensions.skillDesign, 71);
+  assert.equal(review.score, 60);
+});
+
 test('Card review aggregation retains the version and averages valid seats', () => {
   const snapshot = aggregateV1CardReviews([
     { ...normalizeV1CardReview({ score: 0, dimensions: validDimensions, comment: '定位清晰。', risk: '风险充分。' }), mode: 'demo' },
@@ -82,6 +140,13 @@ test('Card review aggregation retains the version and averages valid seats', () 
   ]);
   assert.equal(snapshot.version, V1_CARD_REVIEW_VERSION);
   assert.equal(snapshot.score, 62);
+  assert.deepEqual(snapshot.dimensions, {
+    positioningClarity: 90,
+    skillDesign: 70,
+    protocolCoherence: 60,
+    ioExampleQuality: 50,
+    boundaryRiskDisclosure: 40
+  });
   assert.equal(snapshot.mode, 'mixed');
   assert.equal(snapshot.reviews.length, 3);
 });
