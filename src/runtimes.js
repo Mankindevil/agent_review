@@ -1,4 +1,9 @@
-import { stableNumber, safeJson, withTimeout } from './utils.js';
+import {
+  stableNumber,
+  safeJson,
+  withTimeout,
+  withTransientNetworkRetry
+} from './utils.js';
 import {
   runtimeBuildSkillPrompt,
   runtimePandaQueryPlanPrompt,
@@ -659,12 +664,12 @@ async function callRuntimeModel(
   const baseUrl = config.baseUrl.replace(/\/$/, '');
   const endpoint = baseUrl.endsWith('/chat/completions') ? baseUrl : baseUrl + '/chat/completions';
   const timeout = localRuntimeTimeout(env.LOCAL_RUNTIME_TIMEOUT_MS);
-  const response = await fetchImpl(endpoint, {
+  const response = await withTransientNetworkRetry(() => fetchImpl(endpoint, {
     method: 'POST',
     headers: runtimeAdapterHeaders(config, env),
     body: JSON.stringify({ model: config.model, temperature: sampling.temperature ?? 0, ...(Number.isInteger(sampling.seed) ? { seed: sampling.seed } : {}), max_tokens: maxTokens, ...(config.thinking ? { thinking: config.thinking } : {}), messages: [{ role: 'user', content: prompt }] }),
     signal: withTimeout(signal, timeout)
-  });
+  }));
   if (!response.ok) throw new Error(`Model API runtime 返回 HTTP ${response.status}`);
   const payload = await response.json();
   const content = payload.choices?.[0]?.message?.content;

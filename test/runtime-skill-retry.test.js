@@ -81,6 +81,40 @@ test('uses an unambiguous exact-token prompt for local readiness', async () => {
   assert.match(receivedPrompt, /"required_output":"READY"/);
 });
 
+test('retries transient model API connection failures during runtime readiness', async () => {
+  let attempts = 0;
+  const ready = await probeRuntimeReadiness('doubao', {
+    source: 'local',
+    kind: 'model-api',
+    baseUrl: 'https://ark.example/api/v3',
+    apiKeyEnv: 'ARK_API_KEY',
+    model: 'ep-doubao'
+  }, {
+    env: {
+      ARK_API_KEY: 'test-only-key',
+      RUNTIME_PROBE_TIMEOUT_MS: '10000',
+      LOCAL_RUNTIME_TIMEOUT_MS: '10000'
+    },
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw Object.assign(new Error('fetch failed'), {
+          cause: { code: 'UND_ERR_CONNECT_TIMEOUT' }
+        });
+      }
+      return {
+        ok: true,
+        async json() {
+          return { choices: [{ message: { content: 'READY' } }] };
+        }
+      };
+    }
+  });
+
+  assert.equal(ready, true);
+  assert.equal(attempts, 2);
+});
+
 test('writes deny-by-default Cursor permissions only inside the temporary workspace', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'cursor-sandbox-'));
   try {
