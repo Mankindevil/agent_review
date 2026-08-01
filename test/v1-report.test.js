@@ -15,20 +15,37 @@ function traditionalPdf(objects, root = 1) {
   let source = '%PDF-1.7\n';
   const offsets = new Map();
   for (let objectNumber = 1; objectNumber <= maxObject; objectNumber += 1) {
-    if (!objects[objectNumber]) continue;
-    offsets.set(objectNumber, Buffer.byteLength(source));
-    source += `${objectNumber} 0 obj\n${objects[objectNumber]}\nendobj\n`;
+    const value = objects[objectNumber];
+    if (!value) continue;
+    const object = typeof value === 'string' ? { body: value } : value;
+    const generation = object.generation ?? 0;
+    offsets.set(objectNumber, { offset: Buffer.byteLength(source), generation });
+    source += `${objectNumber} ${generation} obj\n${object.body}\n`;
+    if (object.endobj !== false) source += 'endobj\n';
   }
   const xref = Buffer.byteLength(source);
   source += `xref\n0 ${maxObject + 1}\n0000000000 65535 f \n`;
   for (let objectNumber = 1; objectNumber <= maxObject; objectNumber += 1) {
     source += offsets.has(objectNumber)
-      ? `${String(offsets.get(objectNumber)).padStart(10, '0')} 00000 n \n`
+      ? `${String(offsets.get(objectNumber).offset).padStart(10, '0')} ${String(offsets.get(objectNumber).generation).padStart(5, '0')} n \n`
       : '0000000000 00000 f \n';
   }
-  return `${source}trailer\n<< /Size ${maxObject + 1} /Root ${root} 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  const rootReference = typeof root === 'number' ? `${root} 0` : `${root.objectNumber} ${root.generation}`;
+  return `${source}trailer\n<< /Size ${maxObject + 1} /Root ${rootReference} R >>\nstartxref\n${xref}\n%%EOF`;
 }
 function shellPrint(pdf) { return `printf '%b' ${JSON.stringify(pdf)}`; }
+
+async function withInjectedRendererPdf(name, pdf, callback) {
+  const directory = await mkdtemp(path.join(tmpdir(), 'v1-report-parser-'));
+  const filename = path.join(directory, `${name}.sh`);
+  await writeFile(filename, `#!/bin/sh\ncat >/dev/null\n${shellPrint(pdf)}\n`);
+  await chmod(filename, 0o755);
+  try {
+    return await callback(filename);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 export function completeV1Fixture(overrides = {}) {
   const long = `完整候选输出 SENTINEL-OUTPUT-甲：这是用于验证 PDF 不截断的完整中文研究交付物。${'包含时点、数据、方法和风险提示。'.repeat(80)}`;
@@ -111,6 +128,53 @@ test('generates a multi-page A4 PDF with complete Chinese sentinels', async () =
   assert.ok(Number(values[0]) > 1);
   assert.deepEqual(values.slice(1, -1), Array(30).fill('True'));
   assert.match(values.at(-1), /^595\./);
+});
+
+test('rejects a page object that borrows a following indirect object endobj', async () => {
+  const pdf = traditionalPdf({
+    1: '<< /Type /Catalog /Pages 2 0 R >>',
+    2: '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    3: { body: '<< /Type /Page /Parent 2 0 R >>', endobj: false },
+    4: '<< /Type /Bogus >>'
+  });
+  await withInjectedRendererPdf('shared-endobj', pdf, async (rendererPath) => {
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: rendererPath }), { statusCode: 502 });
+  });
+});
+
+test('rejects a page object whose missing endobj lies beyond the object byte bound', async () => {
+  const pdf = traditionalPdf({
+    1: '<< /Type /Catalog /Pages 2 0 R >>',
+    2: '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    3: { body: `<< /Type /Page /Parent 2 0 R >>\n%${'x'.repeat(1024 * 1024 + 64)}`, endobj: false },
+    4: '<< /Type /Bogus >>'
+  });
+  await withInjectedRendererPdf('oversized-missing-endobj', pdf, async (rendererPath) => {
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: rendererPath }), { statusCode: 502 });
+  });
+});
+
+test('rejects a root Pages dictionary that declares a Parent', async () => {
+  const pdf = traditionalPdf({
+    1: '<< /Type /Catalog /Pages 2 0 R >>',
+    2: '<< /Type /Pages /Parent 9 0 R /Kids [3 0 R] /Count 1 >>',
+    3: '<< /Type /Page /Parent 2 0 R >>'
+  });
+  await withInjectedRendererPdf('root-pages-parent', pdf, async (rendererPath) => {
+    await assert.rejects(generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: rendererPath }), { statusCode: 502 });
+  });
+});
+
+test('accepts a valid traditional PDF whose live objects use nonzero xref generations', async () => {
+  const pdf = traditionalPdf({
+    1: { generation: 2, body: '<< /Type /Catalog /Pages 2 4 R >>' },
+    2: { generation: 4, body: '<< /Type /Pages /Kids [3 7 R] /Count 1 >>' },
+    3: { generation: 7, body: '<< /Type /Page /Parent 2 4 R >>' }
+  }, { objectNumber: 1, generation: 2 });
+  await withInjectedRendererPdf('xref-generations', pdf, async (rendererPath) => {
+    const generated = await generateV1ReportPdf(projectV1Report(completeV1Fixture()), { python: rendererPath });
+    assert.equal(generated.toString('latin1'), pdf);
+  });
 });
 
 test('rejects malformed, failed, timed-out, and oversized renderer output without returning partial PDF bytes', async () => {

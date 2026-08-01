@@ -216,3 +216,54 @@ reports a 15-page A4 PDF; `pdfplumber` confirms the title, running footer and
 submitted-output sentinel. As in round 2, the sandbox-wide API suite remains
 blocked before route execution by loopback `listen` returning `EPERM`; the
 no-socket route harness above remains green.
+
+## Fix round 4 / 5
+
+### Root cause and focused TDD RED
+
+- `pdfDictionaryAt` used an unbounded `source.indexOf('endobj', offset)` before
+  comparing the result with the 1 MiB object cap. It could therefore scan far
+  beyond the cap, and a malformed page object without `endobj` could borrow a
+  later indirect object's terminator because only the first dictionary in the
+  combined slice was parsed.
+- The page-tree walk validated `/Parent` only when a parent reference had been
+  supplied. Consequently the root `/Pages` dictionary could declare a bogus
+  `/Parent` and still pass.
+
+Four focused parser cases were added before the production change. The
+shared-later-`endobj` and root-`/Parent` cases failed with “Missing expected
+rejection”; the oversized missing-`endobj` bound control and a valid PDF using
+nonzero xref generations passed.
+
+### GREEN implementation
+
+- The traditional-xref parser now builds one reader with sorted physical xref
+  offsets and a per-reference dictionary cache. Every object is bounded by the
+  nearer of its following live xref object and `MAX_PDF_OBJECT_BYTES` before any
+  dictionary search or allocation.
+- Dictionary boundaries are scanned directly within that window. The parsed
+  dictionary must be followed only by PDF whitespace/comments and its own
+  genuine, token-delimited `endobj`; it cannot overlap or swallow a following
+  indirect object header. The exact bounded dictionary is then tokenized once.
+- Root `/Pages` requires `/Parent` to be absent. Descendant `/Pages` and `/Page`
+  nodes continue to require the exact generation-aware parent reference.
+
+### Self-review and verification
+
+Self-review removed a redundant second dictionary-boundary scan, confirmed that
+the xref boundary index is computed once rather than once per page-tree node,
+and checked that all source lookahead is constrained to the established object
+window. The renderer, route, UI and topology code were not changed.
+
+Commands passed:
+
+```text
+node --test test/v1-report.test.js test/v1-report-route.test.js test/result-ui.test.js
+npm run check
+git diff --check
+```
+
+The focused command reports 17/17 passing tests. The existing untracked fixture
+remains a 15-page A4 ReportLab PDF; `pdfplumber` reconfirmed its report title,
+running footer and submitted-output sentinel. The known full `api.test.js`
+loopback `EPERM` suite was not rerun; the no-socket route suite above passed.

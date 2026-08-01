@@ -250,9 +250,10 @@ function hasTraditionalPdfStructure(pdf, xrefOffset) {
   const trailer = parsePdfDictionary(source.slice(cursor, cursor + 64 * 1024));
   const root = trailer?.Root;
   if (!isPdfReference(root) || !Number.isSafeInteger(trailer?.Size) || trailer.Size < 2) return false;
-  const catalog = pdfDictionaryAt(source, offsets, root);
+  const readDictionary = createPdfDictionaryReader(source, offsets);
+  const catalog = readDictionary(root);
   if (!catalog || catalog.Type !== 'Catalog' || !isPdfReference(catalog.Pages)) return false;
-  return validatePageTree(source, offsets, catalog.Pages);
+  return validatePageTree(readDictionary, catalog.Pages);
 }
 function nextPdfLine(source, start) {
   if (start > source.length) return null;
@@ -260,16 +261,39 @@ function nextPdfLine(source, start) {
   const end = endOfLine < 0 ? source.length : endOfLine + 1;
   return { text: source.slice(start, endOfLine < 0 ? source.length : endOfLine).replace(/\r$/u, '').trim(), end };
 }
-function pdfDictionaryAt(source, offsets, reference) {
-  const offset = offsets.get(`${reference.objectNumber}:${reference.generation}`);
-  if (!Number.isSafeInteger(offset) || offset < 0 || offset >= source.length) return null;
-  const header = new RegExp(`^${reference.objectNumber}\\s+${reference.generation}\\s+obj\\b`, 'u');
-  if (!header.test(source.slice(offset, offset + 64))) return null;
-  const end = source.indexOf('endobj', offset);
-  if (end < 0 || end - offset > MAX_PDF_OBJECT_BYTES) return null;
-  return parsePdfDictionary(source.slice(offset, end));
+function createPdfDictionaryReader(source, offsets) {
+  const orderedOffsets = [...new Set(offsets.values())]
+    .filter((offset) => Number.isSafeInteger(offset) && offset >= 0)
+    .sort((left, right) => left - right);
+  const followingOffset = new Map();
+  for (let index = 0; index + 1 < orderedOffsets.length; index += 1) followingOffset.set(orderedOffsets[index], orderedOffsets[index + 1]);
+  const cache = new Map();
+  return (reference) => {
+    if (!isPdfReference(reference)) return null;
+    const key = `${reference.objectNumber}:${reference.generation}`;
+    if (cache.has(key)) return cache.get(key);
+    const offset = offsets.get(key);
+    const dictionary = pdfDictionaryAt(source, offset, followingOffset.get(offset), reference);
+    cache.set(key, dictionary);
+    return dictionary;
+  };
 }
-function validatePageTree(source, offsets, rootReference) {
+function pdfDictionaryAt(source, offset, nextOffset, reference) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset >= source.length) return null;
+  const limit = Math.min(source.length, offset + MAX_PDF_OBJECT_BYTES, Number.isSafeInteger(nextOffset) && nextOffset > offset ? nextOffset : source.length);
+  if (limit <= offset) return null;
+  const header = new RegExp(`^${reference.objectNumber}\\s+${reference.generation}\\s+obj\\b`, 'u');
+  const headerMatch = source.slice(offset, Math.min(limit, offset + 64)).match(header);
+  if (!headerMatch) return null;
+  const dictionaryStart = skipPdfWhitespaceAndComments(source, offset + headerMatch[0].length, limit);
+  const dictionary = pdfDictionaryBounds(source, dictionaryStart, limit);
+  if (!dictionary || dictionary.start !== dictionaryStart) return null;
+  const endobjStart = skipPdfWhitespaceAndComments(source, dictionary.end, limit);
+  const endobjEnd = endobjStart + 'endobj'.length;
+  if (endobjEnd >= limit || !source.startsWith('endobj', endobjStart) || !isPdfTokenBoundary(source[endobjEnd])) return null;
+  return parseCompletePdfDictionary(source.slice(dictionary.start, dictionary.end));
+}
+function validatePageTree(readDictionary, rootReference) {
   const visitedPages = new Set();
   let visitedNodes = 0;
   const walk = (reference, parentReference, depth) => {
@@ -278,13 +302,13 @@ function validatePageTree(source, offsets, rootReference) {
     if (visitedPages.has(key)) return null;
     visitedPages.add(key);
     visitedNodes += 1;
-    const dictionary = pdfDictionaryAt(source, offsets, reference);
+    const dictionary = readDictionary(reference);
     if (!dictionary) return null;
     if (dictionary.Type === 'Page') {
       return parentReference && samePdfReference(dictionary.Parent, parentReference) ? 1 : null;
     }
     if (dictionary.Type !== 'Pages' || !Array.isArray(dictionary.Kids) || !dictionary.Kids.length || !Number.isSafeInteger(dictionary.Count) || dictionary.Count < 1) return null;
-    if (parentReference && !samePdfReference(dictionary.Parent, parentReference)) return null;
+    if (parentReference ? !samePdfReference(dictionary.Parent, parentReference) : Object.hasOwn(dictionary, 'Parent')) return null;
     let count = 0;
     for (const child of dictionary.Kids) {
       if (!isPdfReference(child)) return null;
@@ -300,6 +324,9 @@ function validatePageTree(source, offsets, rootReference) {
 function parsePdfDictionary(source) {
   const dictionary = pdfDictionarySource(source);
   if (!dictionary) return null;
+  return parseCompletePdfDictionary(dictionary);
+}
+function parseCompletePdfDictionary(dictionary) {
   const tokens = pdfTokens(dictionary);
   if (!tokens) return null;
   const parsed = parsePdfValue(tokens, 0);
@@ -308,23 +335,44 @@ function parsePdfDictionary(source) {
 function pdfDictionarySource(source) {
   const start = source.indexOf('<<');
   if (start < 0) return null;
+  const dictionary = pdfDictionaryBounds(source, start, source.length);
+  return dictionary ? source.slice(dictionary.start, dictionary.end) : null;
+}
+function pdfDictionaryBounds(source, start, limit) {
+  if (start < 0 || start + 2 > limit || !source.startsWith('<<', start)) return null;
   let depth = 0;
   let literalDepth = 0;
-  for (let index = start; index < source.length; index += 1) {
+  for (let index = start; index < limit; index += 1) {
     const character = source[index];
     if (literalDepth) {
-      if (character === '\\') index += 1;
+      if (character === '\\') { if (index + 1 >= limit) return null; index += 1; }
       else if (character === '(') literalDepth += 1;
       else if (character === ')') literalDepth -= 1;
       continue;
     }
-    if (character === '%') { while (index < source.length && source[index] !== '\n' && source[index] !== '\r') index += 1; continue; }
+    if (character === '%') { while (index < limit && source[index] !== '\n' && source[index] !== '\r') index += 1; continue; }
     if (character === '(') { literalDepth = 1; continue; }
-    if (source.startsWith('<<', index)) { depth += 1; index += 1; continue; }
-    if (source.startsWith('>>', index)) { depth -= 1; index += 1; if (!depth) return source.slice(start, index + 1); }
+    if (index + 2 <= limit && source.startsWith('<<', index)) { depth += 1; index += 1; continue; }
+    if (index + 2 <= limit && source.startsWith('>>', index)) {
+      depth -= 1;
+      index += 1;
+      if (!depth) return { start, end: index + 1 };
+      if (depth < 0) return null;
+    }
   }
   return null;
 }
+function skipPdfWhitespaceAndComments(source, start, limit) {
+  let index = start;
+  while (index < limit) {
+    if (isPdfWhitespace(source.charCodeAt(index))) { index += 1; continue; }
+    if (source[index] !== '%') break;
+    while (index < limit && source[index] !== '\n' && source[index] !== '\r') index += 1;
+  }
+  return index;
+}
+function isPdfWhitespace(code) { return code === 0 || code === 9 || code === 10 || code === 12 || code === 13 || code === 32; }
+function isPdfTokenBoundary(character) { return character !== undefined && (isPdfWhitespace(character.charCodeAt(0)) || /[%()<>{}\[\]\/]/u.test(character)); }
 function pdfTokens(source) {
   const tokens = [];
   const append = (token) => {
