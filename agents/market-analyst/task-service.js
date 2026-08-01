@@ -489,6 +489,72 @@ function projectedMetadata(artifact) {
   return { ...metadata, projected: true };
 }
 
+function sanitizeCollection(value) {
+  return Array.isArray(value)
+    ? value.map((item) => sanitizeTraceValue(item))
+    : value;
+}
+
+function sanitizeRecordCollections(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, rows]) => [
+    key,
+    sanitizeCollection(rows)
+  ]));
+}
+
+function sanitizeEvidencePack(value) {
+  const base = sanitizeTraceValue({
+    ...value,
+    conclusions: [],
+    leaderboards: {},
+    excluded: {},
+    sources: [],
+    missingData: []
+  });
+  const sanitized = {
+    ...base,
+    conclusions: sanitizeCollection(value?.conclusions),
+    leaderboards: sanitizeRecordCollections(value?.leaderboards),
+    sources: sanitizeCollection(value?.sources)
+  };
+  delete sanitized._sanitization;
+  if (value?.excluded !== undefined) {
+    sanitized.excluded = sanitizeRecordCollections(value.excluded);
+  } else {
+    delete sanitized.excluded;
+  }
+  if (value?.missingData !== undefined) {
+    sanitized.missingData = sanitizeCollection(value.missingData);
+  } else {
+    delete sanitized.missingData;
+  }
+  validateEvidencePack(sanitized);
+  return sanitized;
+}
+
+function sanitizeArtifactData(name, value) {
+  return name === 'evidence-pack.json'
+    ? sanitizeEvidencePack(value)
+    : sanitizeTraceValue(value);
+}
+
+function sanitizeArtifactPart(name, part) {
+  if (
+    !part
+    || typeof part !== 'object'
+    || Array.isArray(part)
+    || !Object.hasOwn(part, 'data')
+  ) {
+    return sanitizeTraceValue(part);
+  }
+  const { data, ...metadata } = part;
+  return {
+    ...sanitizeTraceValue(metadata),
+    data: sanitizeArtifactData(name, data)
+  };
+}
+
 function projectAnalyticalArtifacts(operation, artifacts, expectedRunId) {
   const projection = ANALYTICAL_PROJECTIONS[operation];
   if (!projection) return artifacts;
@@ -1185,22 +1251,31 @@ export class MarketTaskService {
     const mediaType = mediaTypeFor(name, descriptor.mediaType);
     let parts;
     if (Array.isArray(descriptor.parts) && descriptor.parts.length) {
-      parts = sanitizeTraceValue(descriptor.parts.slice(0, 16));
+      parts = descriptor.parts.slice(0, 16).map((part) =>
+        sanitizeArtifactPart(name, part)
+      );
     } else if (descriptor.data !== undefined) {
       parts = [{
-        data: sanitizeTraceValue(descriptor.data),
+        data: sanitizeArtifactData(name, descriptor.data),
         mediaType
       }];
     } else {
       const content = descriptor.content ?? '';
       if (mediaType === 'application/json') {
         let data;
+        let parsed = true;
         try {
           data = typeof content === 'string' ? JSON.parse(content) : content;
         } catch {
           data = { invalidJson: true };
+          parsed = false;
         }
-        parts = [{ data: sanitizeTraceValue(data), mediaType }];
+        parts = [{
+          data: parsed
+            ? sanitizeArtifactData(name, data)
+            : sanitizeTraceValue(data),
+          mediaType
+        }];
       } else {
         parts = [{ text: boundedText(content), mediaType }];
       }

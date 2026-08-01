@@ -221,6 +221,58 @@ function analyticalArtifacts(runId = 'run-analytical') {
   ];
 }
 
+function largeAnalyticalArtifacts(runId = 'run-large-analytical', shape = 'data') {
+  const artifacts = analyticalArtifacts(runId);
+  const descriptor = artifacts.find(({ name }) => name === 'evidence-pack.json');
+  const evidence = descriptor.data;
+  evidence.sources.push(
+    ...Array.from({ length: 510 }, (_, index) =>
+      traceableSource(`source-filler-${String(index).padStart(3, '0')}`)
+    )
+  );
+  const cases = [
+    [
+      'hotIndustries',
+      'HOT-AFTER-LIMIT',
+      'source-hot-after-limit',
+      'ret1',
+      'hot-topics'
+    ],
+    [
+      'sellPressure',
+      'SELL-AFTER-LIMIT',
+      'source-sell-after-limit',
+      'downside_volume',
+      'sell-pressure'
+    ],
+    [
+      'potentialWatchlist',
+      'POTENTIAL-AFTER-LIMIT',
+      'source-potential-after-limit',
+      'trend',
+      'potential-watchlist'
+    ]
+  ];
+  for (const [board, identity, sourceId, sourceRole, sectionId] of cases) {
+    const row = traceableRow(board, identity, sourceId, sourceRole);
+    evidence.leaderboards[board].push(row);
+    evidence.conclusions.push(traceableConclusion(board, row, sourceId, sectionId));
+    evidence.sources.push({
+      ...traceableSource(sourceId),
+      apiKey: 'large-lineage-secret-must-never-escape'
+    });
+  }
+  validateEvidencePack(evidence);
+  if (shape === 'content') {
+    descriptor.content = JSON.stringify(evidence);
+    delete descriptor.data;
+  } else if (shape === 'parts') {
+    descriptor.parts = [{ data: evidence, mediaType: 'application/json' }];
+    delete descriptor.data;
+  }
+  return artifacts;
+}
+
 class FakeOrchestrator {
   constructor() {
     this.calls = [];
@@ -1616,6 +1668,60 @@ test('all advertised analytical skills return only their requested report sectio
     assert.equal('workerEvents' in byName['run-trace.json'].data, false);
     assert.equal('modelUsage' in byName['run-trace.json'].data, false);
     assert.equal('emailAttempts' in byName['run-trace.json'].data, false);
+  }
+});
+
+test('large Evidence Pack lineage remains valid for every analytical projection', async (t) => {
+  const cases = [
+    {
+      operation: 'hot-topic-analysis',
+      shape: 'data',
+      leaderboardKeys: ['hotIndustries', 'hotConcepts'],
+      sourceId: 'source-hot-after-limit'
+    },
+    {
+      operation: 'sell-pressure-scan',
+      shape: 'content',
+      leaderboardKeys: ['sellPressure'],
+      sourceId: 'source-sell-after-limit'
+    },
+    {
+      operation: 'potential-watchlist',
+      shape: 'parts',
+      leaderboardKeys: ['potentialWatchlist'],
+      sourceId: 'source-potential-after-limit'
+    }
+  ];
+  const shapeByOperation = Object.fromEntries(cases.map(({ operation, shape }) => [
+    operation,
+    shape
+  ]));
+  const { origin } = await startHarness(t, {
+    artifactLoader: async (summary, { requestedOperation }) =>
+      largeAnalyticalArtifacts(summary.runId, shapeByOperation[requestedOperation])
+  });
+
+  for (const item of cases) {
+    const response = await a2aFetch(origin, '/a2a/v1/message:send', {
+      method: 'POST',
+      body: JSON.stringify(messageRequest(
+        `message-large-lineage-${item.operation}`,
+        { data: { operation: item.operation, date: '2026-07-23', topN: 10 } }
+      ))
+    });
+    assert.equal(response.status, 200, item.operation);
+    const { task } = await json(response);
+    assert.equal(task.status.state, 'TASK_STATE_COMPLETED', item.operation);
+    const evidence = task.artifacts.find(
+      ({ name }) => name === 'evidence-pack.json'
+    ).parts[0].data;
+    assert.deepEqual(Object.keys(evidence.leaderboards), item.leaderboardKeys);
+    assert.doesNotThrow(() => validateEvidencePack(evidence));
+    assert.ok(evidence.sources.some(({ id }) => id === item.sourceId));
+    assert.equal(
+      JSON.stringify(evidence).includes('large-lineage-secret-must-never-escape'),
+      false
+    );
   }
 });
 
