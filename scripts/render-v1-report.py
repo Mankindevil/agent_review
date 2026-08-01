@@ -27,6 +27,13 @@ def text(value):
 def p(value, style):
     return Paragraph(escape(text(value)).replace('\n', '<br/>'), style)
 
+def model_audit(value):
+    model = value.get('model')
+    model_id = value.get('modelId')
+    if model and model_id and model != model_id:
+        return f'{model} / modelId: {model_id}'
+    return model or model_id or '未记录'
+
 def flat_table(rows, styles):
     data = [[p('字段', styles['tableHeader']), p('内容', styles['tableHeader'])]]
     for key, value in rows:
@@ -105,12 +112,15 @@ def main(dto):
     section('三、完整 Agent Card', story, styles, True); add_json('Agent Card 原始公开字段', card, story, styles)
     section('四、四方 Agent Card 设计评审', story, styles)
     for review in scoring.get('professional', {}).get('reviews', []):
-        story += [Paragraph(escape(f"{review.get('reviewer') or review.get('model') or '评审'} - {review.get('score', '—')} 分"), styles['reportH2']), p(review.get('comment') or review.get('error') or '—', styles['body']), p('风险与不确定性：' + text(review.get('risk')), styles['body']), flat_table([(k, v) for k,v in review.get('dimensions', {}).items()], styles), Spacer(1, 3*mm)]
+        story += [Paragraph(escape(f"{review.get('reviewer') or review.get('model') or '评审'} - {review.get('score', '—')} 分"), styles['reportH2']), p('评审模型：' + model_audit(review), styles['body']), p(review.get('comment') or review.get('error') or '—', styles['body']), p('风险与不确定性：' + text(review.get('risk')), styles['body']), flat_table([(k, v) for k,v in review.get('dimensions', {}).items()], styles), Spacer(1, 3*mm)]
     section('五、逐 CASE 场景评估', story, styles, True)
     for index, round_data in enumerate(dto.get('benchmark', []), 1):
-        case = round_data.get('case', {}); scenario = round_data.get('judging', {}).get('scenario', {})
+        case = round_data.get('case', {}); judging = round_data.get('judging', {}); scenario = judging.get('scenario', {})
         story += [Paragraph(escape(f"CASE {index:02d} - {case.get('name', '未命名案例')}"), styles['reportH2']), p('Prompt：' + text(case.get('prompt')), styles['body']), flat_table([(k, v) for k,v in scenario.get('dimensions', {}).items()] + [('场景总分', scenario.get('score'))], styles)]
-        for review in scenario.get('reviews', []): story += [p(f"{review.get('reviewerName') or review.get('model')}：{review.get('rationale', '—')}", styles['body'])]
+        seats = judging.get('seats', [])
+        if seats:
+            story += [Paragraph('评审席位与真实模型标识', styles['reportH2']), flat_table([((seat.get('reviewerName') or seat.get('reviewerId') or '评审'), f"{model_audit(seat)} / 状态: {text(seat.get('status'))}") for seat in seats], styles)]
+        for review in scenario.get('reviews', []): story += [p(f"{review.get('reviewerName') or review.get('model')}（{model_audit(review)}）：{review.get('rationale', '—')}", styles['body'])]
     section('六、逐候选同题对打与能力评估', story, styles, True)
     for round_data in dto.get('benchmark', []):
         story.append(Paragraph(escape(round_data.get('case', {}).get('name', '案例')), styles['reportH2']))
@@ -120,7 +130,7 @@ def main(dto):
         for entry in round_data.get('entries', []):
             for review in entry.get('judgeReviews', []):
                 uncertainty = '；'.join(review.get('uncertainties', [])) or '—'
-                story += [Paragraph(escape(f"{round_data.get('case', {}).get('name', '案例')} - {entry.get('name', '候选')} - {review.get('reviewerName') or review.get('model', '评审')}"), styles['reportH2']), p(review.get('rationale') or review.get('error') or '—', styles['body']), p('审计不确定性：' + uncertainty, styles['body']), flat_table([(k,v) for k,v in review.get('dimensions', {}).items()], styles)]
+                story += [Paragraph(escape(f"{round_data.get('case', {}).get('name', '案例')} - {entry.get('name', '候选')} - {review.get('reviewerName') or review.get('model', '评审')}"), styles['reportH2']), p('评审模型：' + model_audit(review), styles['body']), p(review.get('rationale') or review.get('error') or '—', styles['body']), p('审计不确定性：' + uncertainty, styles['body']), flat_table([(k,v) for k,v in review.get('dimensions', {}).items()], styles)]
     section('八、完整候选原始输出', story, styles, True)
     for round_data in dto.get('benchmark', []):
         for entry in round_data.get('entries', []):

@@ -6,6 +6,7 @@ import {
   v1ArenaPrompt
 } from './prompts.js';
 import { requestJson } from './providers.js';
+import { publicModelFields } from './model-catalog.js';
 import { deriveSeed, round, stableNumber } from './utils.js';
 
 export const LEGACY_V1_SCORING_VERSION = 'v1-model-arena/v1';
@@ -690,7 +691,7 @@ function publicJudgeReview(seat, review) {
   return {
     reviewerId: seat.reviewer.id,
     reviewerName: seat.reviewer.name,
-    model: seat.reviewer.model,
+    ...publicModelFields(seat.reviewer.model),
     mode: seat.mode,
     status: seat.status,
     rationale: review.rationale,
@@ -702,7 +703,7 @@ function publicV2JudgeReview(seat, review) {
   return {
     reviewerId: seat.reviewer.id,
     reviewerName: seat.reviewer.name,
-    model: seat.reviewer.model,
+    ...publicModelFields(seat.reviewer.model),
     mode: seat.mode,
     status: seat.status,
     dimensions: review.dimensions,
@@ -716,7 +717,7 @@ function publicScenarioReview(seat) {
   return {
     reviewerId: seat.reviewer.id,
     reviewerName: seat.reviewer.name,
-    model: seat.reviewer.model,
+    ...publicModelFields(seat.reviewer.model),
     mode: seat.mode,
     status: seat.status,
     dimensions: seat.scenario.dimensions,
@@ -752,7 +753,7 @@ function publicSeat(seat) {
   return {
     reviewerId: seat.reviewer.id,
     reviewerName: seat.reviewer.name,
-    model: seat.reviewer.model,
+    ...publicModelFields(seat.reviewer.model),
     mode: seat.mode,
     status: seat.status,
     ...(seat.failure ? { failure: seat.failure } : {})

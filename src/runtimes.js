@@ -7,10 +7,12 @@ import {
 import {
   applyArkClaudeEnv,
   applyDeepSeekClaudeEnv,
+  applyLlmxClaudeEnv,
   hasClaudeCredential,
   resolveClaudeBackend,
   shouldUseArkClaude
 } from './claude-env.js';
+import { modelDisplayName, publicModelFields } from './model-catalog.js';
 import { startArkAnthropicProxy } from './ark-anthropic-proxy.js';
 import { prepareRuntimeWorkspace } from './runtime-sandbox.js';
 import { resolveRuntimeConfig } from './runtime-config.js';
@@ -33,9 +35,9 @@ const DEFAULT_LOCAL_RUNTIME_TIMEOUT_MS = 180_000;
 const MAX_LOCAL_RUNTIME_TIMEOUT_MS = 1_200_000;
 
 export const RUNTIMES = [
-  { id: 'claude-code', name: 'Claude Code', model: 'Claude Sonnet', badge: 'CC' },
+  { id: 'claude-code', name: 'Claude Code', model: 'Claude Sonnet 4.6', badge: 'CC' },
   { id: 'cursor', name: 'Cursor Agent', model: 'Auto', badge: 'CU' },
-  { id: 'doubao', name: 'Doubao Agent', model: 'Seed', badge: 'DB' }
+  { id: 'doubao', name: 'Doubao Agent', model: 'Doubao-Seed-2.1-pro', badge: 'DB' }
 ];
 
 export function createSkillBundle(build, description) {
@@ -55,6 +57,7 @@ export function createSkillBundle(build, description) {
     runtimeId: build.runtimeId,
     runtime: build.runtime,
     model: build.model || null,
+    modelId: build.modelId || null,
     mode: build.mode,
     adapterKind: build.adapterKind || (build.mode === 'demo' ? 'demo' : null),
     seed: Number.isInteger(build.seed) ? build.seed : null,
@@ -110,8 +113,10 @@ export async function buildSkill(runtime, description, mode, {
       },
       runtimeBuildSkillPrompt(sourceDescription, { pandaData })
     );
-    return buildResult(runtime, localRuntimeModel(runtime), 'local-cli', skill, {
+    const identity = runtimeModelIdentity(runtime);
+    return buildResult(runtime, identity.model, 'local-cli', skill, {
       pandaData,
+      modelId: identity.modelId,
       trace: result.trace,
       seed
     });
@@ -127,7 +132,11 @@ export async function buildSkill(runtime, description, mode, {
       },
       runtimeBuildSkillPrompt(sourceDescription, { pandaData })
     );
-    return buildResult(runtime, config.model, 'model-api', skill, { pandaData, seed });
+    return buildResult(runtime, modelDisplayName(config.model), 'model-api', skill, {
+      pandaData,
+      modelId: config.model,
+      seed
+    });
   }
   if (mode === 'live' && config?.kind === 'remote-http') {
     const request = {
@@ -417,6 +426,7 @@ function normalizePandaQueryPlan(value, allowedMethods) {
 
 function buildResult(runtime, model, adapterKind, skill, {
   pandaData,
+  modelId,
   trace,
   seed
 } = {}) {
@@ -425,6 +435,7 @@ function buildResult(runtime, model, adapterKind, skill, {
     runtime: runtime.name,
     runtimeId: runtime.id,
     model,
+    ...(modelId && modelId !== model ? { modelId } : {}),
     mode: 'live',
     adapterKind,
     baselineInput: context ? 'description+panda-interface' : 'description-only',
@@ -502,14 +513,15 @@ function runtimeAdapterHeaders(config, env = process.env) {
   return { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` };
 }
 
-function localRuntimeModel(runtime) {
-  if (runtime.id !== 'claude-code') return runtime.model;
-  const backend = resolveClaudeBackend(process.env);
-  if (backend === 'ark' && shouldUseArkClaude(process.env)) return process.env.CLAUDE_ARK_MODEL;
-  if (backend === 'deepseek' && hasClaudeCredential(process.env)) {
-    return process.env.DEEPSEEK_CLAUDE_MODEL || 'deepseek-v4-pro[1m]';
+export function runtimeModelIdentity(runtime, env = process.env) {
+  if (runtime.id !== 'claude-code') return { model: runtime.model };
+  const backend = resolveClaudeBackend(env);
+  if (backend === 'llmx' && hasClaudeCredential(env)) return publicModelFields(env.ANTHROPIC_MODEL);
+  if (backend === 'ark' && shouldUseArkClaude(env)) return publicModelFields(env.CLAUDE_ARK_MODEL);
+  if (backend === 'deepseek' && hasClaudeCredential(env)) {
+    return publicModelFields(env.DEEPSEEK_CLAUDE_MODEL || 'deepseek-v4-pro[1m]');
   }
-  return runtime.model;
+  return { model: runtime.model };
 }
 
 export function localCliArgs(runtimeId, prompt, { budget = '0.25', readiness = false } = {}) {
@@ -557,7 +569,13 @@ export async function withRuntimeWorkspace(runtimeId, run, {
   const workspace = await createWorkspace(path.join(tmpdir(), `agent-roast-${runtimeId}-`));
   try {
     await prepareWorkspace(runtimeId, workspace, {
-      cursorAuthConfigHome: parentEnv.CURSOR_AUTH_CONFIG_HOME
+      cursorAuthConfigHome: parentEnv.CURSOR_AUTH_CONFIG_HOME,
+      claudeSettings: runtimeId === 'claude-code' && resolveClaudeBackend(parentEnv) === 'llmx'
+        ? {
+            baseUrl: parentEnv.ANTHROPIC_BASE_URL,
+            model: parentEnv.ANTHROPIC_MODEL
+          }
+        : null
     });
     return await run(workspace);
   } finally {
@@ -594,6 +612,12 @@ async function callLocalCli(runtimeId, prompt, signal, sampling = {}, parentEnv 
       const model = parentEnv.CLAUDE_ARK_MODEL;
       arkProxy = await startArkAnthropicProxy({ baseUrl: parentEnv.ARK_BASE_URL, apiKey: parentEnv.ARK_API_KEY, model, signal, ...sampling });
       applyArkClaudeEnv(commandEnv, arkProxy.baseUrl, model);
+    } else if (
+      runtimeId === 'claude-code'
+      && claudeBackend === 'llmx'
+      && !applyLlmxClaudeEnv(commandEnv, parentEnv)
+    ) {
+      throw new Error('AUTH_REQUIRED: selected LLMX backend is incomplete');
     } else if (
       runtimeId === 'claude-code'
       && claudeBackend === 'deepseek'

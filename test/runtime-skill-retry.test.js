@@ -5,7 +5,7 @@ import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, localRuntimeTimeout, probeRuntimeReadiness, RUNTIME_READINESS_PROMPT, runSkill, withRuntimeWorkspace } from '../src/runtimes.js';
+import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, localRuntimeTimeout, probeRuntimeReadiness, RUNTIME_READINESS_PROMPT, runSkill, runtimeModelIdentity, withRuntimeWorkspace } from '../src/runtimes.js';
 import { prepareRuntimeWorkspace } from '../src/runtime-sandbox.js';
 import { runtimeBuildSkillPrompt } from '../src/prompts.js';
 import { applyArkClaudeEnv } from '../src/claude-env.js';
@@ -27,6 +27,21 @@ test('uses supported read-only Claude Code arguments', () => {
     '--max-turns', '1',
     '--max-budget-usd', '0.25'
   ]);
+});
+
+test('shows Claude Sonnet 4.6 while retaining the configured LLMX model ID', () => {
+  assert.deepEqual(runtimeModelIdentity(
+    { id: 'claude-code', name: 'Claude Code', model: 'Claude Sonnet' },
+    {
+      CLAUDE_BACKEND: 'llmx',
+      ANTHROPIC_BASE_URL: 'https://llmx.tqx.ai',
+      ANTHROPIC_API_KEY: 'test-only-key',
+      ANTHROPIC_MODEL: 'claude-sonnet-4-6'
+    }
+  ), {
+    model: 'Claude Sonnet 4.6',
+    modelId: 'claude-sonnet-4-6'
+  });
 });
 
 test('uses documented Cursor Agent print arguments', () => {
@@ -88,6 +103,42 @@ test('writes deny-by-default Cursor permissions only inside the temporary worksp
     ]) {
       assert.ok(payload.permissions.deny.includes(rule), `missing absolute deny rule ${rule}`);
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('writes non-secret Claude Code project settings inside the temporary workspace', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'claude-settings-'));
+  try {
+    await prepareRuntimeWorkspace('claude-code', root);
+    const payload = JSON.parse(await readFile(path.join(root, '.claude', 'settings.json'), 'utf8'));
+    assert.equal(payload.$schema, 'https://json.schemastore.org/claude-code-settings.json');
+    assert.equal(payload.model, 'claude-sonnet-4-6');
+    assert.equal(payload.skipDangerousModePermissionPrompt, true);
+    assert.equal(payload.theme, 'auto');
+    assert.deepEqual(payload.env, {
+      ANTHROPIC_API_KEY: '',
+      ANTHROPIC_BASE_URL: 'https://llmx.tqx.ai',
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+      CLAUDE_CODE_USE_BEDROCK: '0',
+      CLAUDE_CODE_USE_FOUNDRY: '0',
+      CLAUDE_CODE_USE_VERTEX: '0',
+      ENABLE_TOOL_SEARCH: 'true'
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('does not inject LLMX endpoint settings into an explicitly non-LLMX Claude workspace', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'claude-settings-ark-'));
+  try {
+    await prepareRuntimeWorkspace('claude-code', root, { claudeSettings: null });
+    const payload = JSON.parse(await readFile(path.join(root, '.claude', 'settings.json'), 'utf8'));
+    assert.equal(Object.hasOwn(payload.env, 'ANTHROPIC_BASE_URL'), false);
+    assert.equal(Object.hasOwn(payload, 'model'), false);
+    assert.equal(payload.env.CLAUDE_CODE_USE_BEDROCK, '0');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -364,7 +415,7 @@ test('normalizes local runtime timeout values with a 20-minute ceiling', () => {
 
 test('materializes a read-only portable folder from normalized runtime output', () => {
   const bundle = createSkillBundle({
-    runtime: 'Claude Code', runtimeId: 'claude-code', model: 'test-model', mode: 'live', adapterKind: 'local-cli', seed: 17,
+    runtime: 'Claude Code', runtimeId: 'claude-code', model: 'Test Model', modelId: 'test-model-endpoint', mode: 'live', adapterKind: 'local-cli', seed: 17,
     baselineInput: 'description-only',
     skill: { name: 'contract-review', description: 'Review contracts safely', instructions: ['Read clauses', 'Report evidence'], tools: ['filesystem'] }
   }, 'Review contracts');
@@ -379,6 +430,8 @@ test('materializes a read-only portable folder from normalized runtime output', 
   assert.equal(bundle.files[2].content, 'Review contracts');
   assert.equal(JSON.parse(bundle.files[3].content).seed, 17);
   assert.equal(JSON.parse(bundle.files[3].content).inputPolicy, 'description-only');
+  assert.equal(JSON.parse(bundle.files[3].content).model, 'Test Model');
+  assert.equal(JSON.parse(bundle.files[3].content).modelId, 'test-model-endpoint');
 });
 
 test('marks historical Skill snapshots as an unfair legacy baseline without exposing the Agent Card', () => {
@@ -471,5 +524,39 @@ test('normalizes remote runtime adapter responses to the platform contract', asy
     globalThis.fetch = originalFetch;
     if (originalAdapters === undefined) delete process.env.RUNTIME_ADAPTERS_JSON; else process.env.RUNTIME_ADAPTERS_JSON = originalAdapters;
     if (originalKey === undefined) delete process.env.RUNTIME_TEST_KEY; else process.env.RUNTIME_TEST_KEY = originalKey;
+  }
+});
+
+test('publishes the Doubao model name while retaining its Ark endpoint ID', async () => {
+  const originalFetch = globalThis.fetch;
+  const original = {
+    RUNTIME_ADAPTERS_JSON: process.env.RUNTIME_ADAPTERS_JSON,
+    ARK_BASE_URL: process.env.ARK_BASE_URL,
+    ARK_API_KEY: process.env.ARK_API_KEY,
+    REVIEW_MODEL_DOUBAO: process.env.REVIEW_MODEL_DOUBAO
+  };
+  const endpoint = 'ep-20260720110725-5rbml';
+  process.env.RUNTIME_ADAPTERS_JSON = '{}';
+  process.env.ARK_BASE_URL = 'https://ark.example/api/v3';
+  process.env.ARK_API_KEY = 'test-only-key';
+  process.env.REVIEW_MODEL_DOUBAO = endpoint;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{ message: { content: '{"name":"doubao-skill","description":"valid","instructions":["run"],"tools":[]}' } }]
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+  try {
+    const build = await buildSkill(
+      { id: 'doubao', name: 'Doubao Agent', model: 'Seed' },
+      'Description',
+      'live',
+      { seed: 17, temperature: 0 }
+    );
+    assert.equal(build.model, 'Doubao-Seed-2.1-pro');
+    assert.equal(build.modelId, endpoint);
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [name, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   }
 });

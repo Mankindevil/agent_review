@@ -3,10 +3,51 @@ import assert from 'node:assert/strict';
 import {
   applyArkClaudeEnv,
   applyDeepSeekClaudeEnv,
+  applyLlmxClaudeEnv,
   hasClaudeCredential,
   resolveClaudeBackend,
   shouldUseArkClaude
 } from '../src/claude-env.js';
+
+test('maps the configured LLMX key and Claude Sonnet model into the isolated Claude Code environment', () => {
+  const source = {
+    CLAUDE_BACKEND: 'llmx',
+    ANTHROPIC_BASE_URL: 'https://llmx.tqx.ai',
+    ANTHROPIC_API_KEY: 'test-only-llmx-key',
+    ANTHROPIC_MODEL: 'claude-sonnet-4-6'
+  };
+  const env = { ANTHROPIC_AUTH_TOKEN: 'must-not-survive' };
+
+  assert.equal(resolveClaudeBackend(source), 'llmx');
+  assert.equal(hasClaudeCredential(source), true);
+  assert.equal(applyLlmxClaudeEnv(env, source), true);
+  assert.equal(env.ANTHROPIC_BASE_URL, 'https://llmx.tqx.ai');
+  assert.equal(env.ANTHROPIC_API_KEY, 'test-only-llmx-key');
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, undefined);
+  assert.equal(env.ANTHROPIC_MODEL, 'claude-sonnet-4-6');
+  assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'claude-sonnet-4-6');
+  assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'claude-sonnet-4-6');
+  assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'claude-sonnet-4-6');
+  assert.equal(env.CLAUDE_CODE_SUBAGENT_MODEL, 'claude-sonnet-4-6');
+  assert.equal(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, '1');
+  assert.equal(env.CLAUDE_CODE_USE_BEDROCK, '0');
+  assert.equal(env.CLAUDE_CODE_USE_FOUNDRY, '0');
+  assert.equal(env.CLAUDE_CODE_USE_VERTEX, '0');
+  assert.equal(env.ENABLE_TOOL_SEARCH, 'true');
+});
+
+test('fails closed when the selected LLMX backend is missing its key, URL, or model', () => {
+  for (const source of [
+    { CLAUDE_BACKEND: 'llmx', ANTHROPIC_BASE_URL: 'https://llmx.tqx.ai', ANTHROPIC_MODEL: 'claude-sonnet-4-6' },
+    { CLAUDE_BACKEND: 'llmx', ANTHROPIC_API_KEY: 'key', ANTHROPIC_MODEL: 'claude-sonnet-4-6' },
+    { CLAUDE_BACKEND: 'llmx', ANTHROPIC_BASE_URL: 'https://llmx.tqx.ai', ANTHROPIC_API_KEY: 'key' }
+  ]) {
+    const env = {};
+    assert.equal(hasClaudeCredential(source), false);
+    assert.equal(applyLlmxClaudeEnv(env, source), false);
+    assert.deepEqual(env, {});
+  }
+});
 
 test('prefers a configured Ark DeepSeek endpoint for Claude Code', () => {
   const env = {

@@ -26,6 +26,30 @@ test('defaults new V1 scoring config to the v2 arena contract', () => {
   });
 });
 
+test('publishes Ark model names while retaining endpoint IDs in the scoring audit', async () => {
+  const endpoint = 'ep-20260708162855-pcf9x';
+  const result = await scoreV1ArenaCase({
+    testCase: { name: '因子研究', prompt: '完成 Rank IC 研究' },
+    entries: [{
+      id: 'submitted',
+      name: 'Agent',
+      output: '已完成带数据来源和风险说明的研究报告。',
+      mode: 'live',
+      execution: { status: 'succeeded', durationMs: 60_000 }
+    }],
+    config: { version: V1_SCORING_VERSION, mode: 'single', reviewerId: 'deepseek' },
+    reviewers: [liveReviewer('deepseek', { name: 'DeepSeek 评审', model: endpoint })],
+    evaluationMode: 'live',
+    seed: 41,
+    invokeJudge: async ({ candidateIds }) => v2JudgeResponse(candidateIds)
+  });
+
+  assert.equal(result.judging.seats[0].model, 'DeepSeek-V4-Pro');
+  assert.equal(result.judging.seats[0].modelId, endpoint);
+  assert.equal(result.entries[0].judgeReviews[0].model, 'DeepSeek-V4-Pro');
+  assert.equal(result.entries[0].judgeReviews[0].modelId, endpoint);
+});
+
 test('accepts panel config and rejects a reviewer on panel mode', () => {
   assert.deepEqual(normalizeV1ScoringConfig({ mode: 'panel' }), {
     version: 'v1-model-arena/v2',

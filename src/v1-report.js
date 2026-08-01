@@ -204,7 +204,7 @@ function projectProfessional(value) {
     ...strings(value, ['version', 'mode']), ...numbers(value, ['score']),
     dimensions: numbers(value?.dimensions, ['positioningClarity', 'skillDesign', 'protocolCoherence', 'ioExampleQuality', 'boundaryRiskDisclosure']),
     reviews: array(value?.reviews).map((review) => ({
-      ...strings(review, ['reviewerId', 'reviewer', 'model', 'version', 'mode', 'comment', 'risk', 'error']), ...numbers(review, ['score']),
+      ...strings(review, ['reviewerId', 'reviewer', 'model', 'modelId', 'version', 'mode', 'comment', 'risk', 'error']), ...numbers(review, ['score']),
       dimensions: numbers(review?.dimensions, ['positioningClarity', 'skillDesign', 'protocolCoherence', 'ioExampleQuality', 'boundaryRiskDisclosure'])
     }))
   };
@@ -212,7 +212,7 @@ function projectProfessional(value) {
 
 function projectBuild(value) {
   return {
-    ...strings(value, ['runtime', 'runtimeId', 'mode', 'error']),
+    ...strings(value, ['runtime', 'runtimeId', 'model', 'modelId', 'mode', 'error']),
     skill: value?.skill ? { ...strings(value.skill, ['name', 'description']), instructions: stringArray(value.skill.instructions), tools: stringArray(value.skill.tools) } : null,
     contextUsage: array(value?.contextUsage).map(projectContextUsage)
   };
@@ -244,7 +244,7 @@ function projectEntry(entry) {
 function projectJudging(value) {
   return {
     ...strings(value, ['version', 'status', 'mode', 'reviewerId']), ...numbers(value, ['requiredSeats', 'successfulSeats']),
-    seats: array(value?.seats).map((seat) => strings(seat, ['reviewerId', 'reviewerName', 'model', 'mode', 'status', 'failure'])),
+    seats: array(value?.seats).map((seat) => strings(seat, ['reviewerId', 'reviewerName', 'model', 'modelId', 'mode', 'status', 'failure'])),
     scenario: value?.scenario ? {
       dimensions: numbers(value.scenario.dimensions, ['problemComplexity', 'agentSuitability']), ...numbers(value.scenario, ['score']),
       reviews: array(value.scenario.reviews).map(projectJudgeReview)
@@ -303,7 +303,7 @@ function isPublicFactSelectorField(value) {
 function isPublicDataValue(value) { return typeof value === 'string' || typeof value === 'boolean' || Number.isFinite(value) || Array.isArray(value) && value.every((item) => typeof item === 'string' || typeof item === 'boolean' || Number.isFinite(item)); }
 function projectDataValue(value) { return Array.isArray(value) ? [...value] : value; }
 function projectDataVerification(value) { return value ? { ...strings(value, ['status', 'summary']), ...numbers(value, ['score', 'matched', 'mismatched', 'missing', 'total']), checks: array(value.checks).map((check) => ({ ...strings(check, ['id', 'queryId', 'label', 'status', 'reason', 'unit', 'sourceDate']), ...numbers(check, ['expected', 'actual', 'observed', 'tolerance']) })) } : null; }
-function projectJudgeReview(value) { return { ...strings(value, ['reviewerId', 'reviewerName', 'reviewer', 'model', 'mode', 'status', 'rationale', 'error']), ...numbers(value, ['score', 'total']), dimensions: numbers(value?.dimensions, ['problemComplexity', 'agentSuitability', 'taskCompletion', 'methodProfessionalism', 'evidenceDataQuality', 'riskUncertainty', 'artifactUsability', 'taskConstraint', 'professionalQuality', 'evidenceRisk']), uncertainties: stringArray(value?.uncertainties) }; }
+function projectJudgeReview(value) { return { ...strings(value, ['reviewerId', 'reviewerName', 'reviewer', 'model', 'modelId', 'mode', 'status', 'rationale', 'error']), ...numbers(value, ['score', 'total']), dimensions: numbers(value?.dimensions, ['problemComplexity', 'agentSuitability', 'taskCompletion', 'methodProfessionalism', 'evidenceDataQuality', 'riskUncertainty', 'artifactUsability', 'taskConstraint', 'professionalQuality', 'evidenceRisk']), uncertainties: stringArray(value?.uncertainties) }; }
 function projectScoringConfig(value) { return strings(value, ['version', 'mode', 'reviewerId']); }
 function projectRoast(value) { return { ...strings(value, ['headline', 'summary', 'rationale']), ...numbers(value, ['deltaClaude', 'deltaDoubao', 'professionalAverage']), tier: value?.tier ? strings(value.tier, ['code', 'label', 'stamp', 'tone']) : null }; }
 function strings(value, keys) { return Object.fromEntries(keys.filter((key) => typeof value?.[key] === 'string').map((key) => [key, value[key]])); }

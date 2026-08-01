@@ -3,6 +3,7 @@ import { access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { hasClaudeCredential, resolveClaudeBackend } from './claude-env.js';
+import { modelDisplayName } from './model-catalog.js';
 import { hasOwnEnvValue, resolveRuntimeConfig, runtimeConfigAuthenticated } from './runtime-config.js';
 import { cursorAuthConfigHome, localCliEnv } from './runtime-environment.js';
 import { resolveCliExecutable, runLocalCliProcess } from './runtime-process.js';
@@ -55,7 +56,9 @@ export async function getRuntimeStatus(options = {}) {
     ? '火山方舟 DeepSeek'
     : selectedClaudeBackend === 'deepseek'
       ? 'DeepSeek 直连'
-      : '未配置';
+      : selectedClaudeBackend === 'llmx'
+        ? `LLMX · ${modelDisplayName(env.ANTHROPIC_MODEL)}`
+        : '未配置';
 
   return [
     statusEntry({
@@ -259,7 +262,9 @@ function readinessCacheKey(runtimeId, config, env) {
       ? ['CLAUDE_BACKEND', 'ARK_BASE_URL', 'ARK_API_KEY', 'CLAUDE_ARK_MODEL']
       : backend === 'deepseek'
         ? ['CLAUDE_BACKEND', 'DEEPSEEK_API_KEY', 'DEEPSEEK_CLAUDE_MODEL']
-        : ['CLAUDE_BACKEND'];
+        : backend === 'llmx'
+          ? ['CLAUDE_BACKEND', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL']
+          : ['CLAUDE_BACKEND'];
     for (const name of backendKeys) {
       if (Object.hasOwn(env, name)) credentialMaterial.push(`${name}=${env[name]}`);
     }

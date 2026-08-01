@@ -27,14 +27,14 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const DEFAULT_REVIEW_PLAN = [
   { id:'gpt', name:'OpenAI 评审', model:'GPT-5' },
-  { id:'claude', name:'Anthropic 评审', model:'Claude Sonnet' },
-  { id:'doubao', name:'豆包评审', model:'Doubao Seed' },
-  { id:'deepseek', name:'DeepSeek 评审', model:'DeepSeek' }
+  { id:'claude', name:'Anthropic 评审', model:'Claude Sonnet 4.6' },
+  { id:'doubao', name:'豆包评审', model:'Doubao-Seed-2.1-pro' },
+  { id:'deepseek', name:'DeepSeek 评审', model:'DeepSeek-V4-Pro' }
 ];
 const DEFAULT_RUNTIME_PLAN = [
-  { id:'claude-code', name:'Claude Code', model:'Claude Sonnet' },
+  { id:'claude-code', name:'Claude Code', model:'Claude Sonnet 4.6' },
   { id:'cursor', name:'Cursor Agent', model:'Auto' },
-  { id:'doubao', name:'Doubao Agent', model:'Seed' }
+  { id:'doubao', name:'Doubao Agent', model:'Doubao-Seed-2.1-pro' }
 ];
 
 const sampleCard = {

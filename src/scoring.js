@@ -1,5 +1,6 @@
 import { average, clamp, round, stableNumber } from './utils.js';
 import { CARD_REVIEW_DIMENSIONS, normalizeV1CardReview } from './v1-card-review.js';
+import { publicModelFields } from './model-catalog.js';
 
 const COMPLEX_SIGNALS = [
   /行情|财务|指数|行业|交易日历|data skill|数据查询|数据库|api/i,
@@ -51,7 +52,7 @@ export function mockProfessionalReview(reviewer, card, complexity, evaluationSee
   const weakest = Object.entries(dimensions).sort((a, b) => a[1] - b[1])[0][0];
   return {
     reviewer: reviewer.name,
-    model: reviewer.model,
+    ...publicModelFields(reviewer.model),
     ...normalizeV1CardReview({
       score,
       dimensions,
@@ -79,7 +80,7 @@ export function mockLegacyProfessionalReview(reviewer, card, complexity, evaluat
   const weakest = Object.entries(dimensions).sort((a, b) => a[1] - b[1])[0][0];
   return {
     reviewer: reviewer.name,
-    model: reviewer.model,
+    ...publicModelFields(reviewer.model),
     score,
     dimensions,
     comment: `能力边界写得清楚，${legacyLabelDimension(strongest)}是亮点；${legacyLabelDimension(weakest)}仍缺少可验证的约束与异常样例。`,

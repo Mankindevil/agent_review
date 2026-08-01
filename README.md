@@ -111,31 +111,26 @@ npm run demo:real
 npm run demo:real-runtimes
 ```
 
-### 使用火山方舟 DeepSeek 驱动 Claude Code
+### 使用 LLMX Claude Sonnet 4.6 驱动 Claude Code
 
-当前默认让 Claude Code 使用火山方舟的 DeepSeek 在线推理接入点，不需要登录 Claude 账号。编辑被 Git 忽略的 `.env`：
+当前默认让 Claude Code 通过 LLMX 的 Anthropic-compatible 接口使用 `claude-sonnet-4-6`，不需要登录 Claude 账号。编辑被 Git 忽略的 `.env`：
 
 ```bash
 cd "/Users/jintingzhou/Documents/Agent锐评系统"
-# ARK_API_KEY=你的方舟Key
-# CLAUDE_BACKEND=ark
-# CLAUDE_ARK_MODEL=ep-20260708162855-pcf9x
+# ANTHROPIC_API_KEY=你的 LLMX Key
+# CLAUDE_BACKEND=llmx
+# ANTHROPIC_BASE_URL=https://llmx.tqx.ai
+# ANTHROPIC_MODEL=claude-sonnet-4-6
 npm run demo:deepseek
 ```
 
-方舟在线推理 endpoint 使用 OpenAI Chat Completions，而 Claude Code 使用 Anthropic Messages。项目会为每次 Claude 调用启动一个只监听 `127.0.0.1` 随机端口的短生命周期协议桥：
-
-- Claude Code 把 Anthropic Messages 请求发给本地协议桥；
-- 协议桥转换后调用 `${ARK_BASE_URL}/chat/completions`；
-- 主模型、Haiku、Sonnet、Opus 和 Subagent 都映射到指定 DeepSeek endpoint；
-- 无头执行使用评测专用 system prompt 覆盖 Claude Code 默认代码代理提示，禁止虚构 Bash、Explore 或子代理调用；
-- 调用结束立即关闭协议桥，不把方舟 Key 传给 Claude 子进程。
+项目级与一次性 Runtime 工作区都会写入非敏感 Claude Code 设置：关闭 Bedrock、Foundry、Vertex 和实验 beta，启用 tool search，并把主模型固定为 `claude-sonnet-4-6`。API Key 只从受保护的进程环境注入，不写入设置文件。无头执行仍使用评测专用 system prompt，禁止虚构 Bash、Explore 或子代理调用。
 
 如果模型偶发返回截断 JSON 或缺少 Skill 必填字段，运行时会携带纠错约束自动重试一次；认证、网络和命令执行错误不会被这种格式重试掩盖。
 
-Runtime Probe 与“Description 直出记录”会显示实际后端：Ark 模式下展示方舟 DeepSeek endpoint ID，不再把它误标为 Claude Sonnet。
+Runtime Probe 显示 `LLMX · Claude Sonnet 4.6`；评审、Runtime 记录、同 Prompt 审计与 PDF 使用友好模型名称，并另外保留 `modelId` 作为真实调用标识。
 
-Key 只应写入本机 `.env` 或密钥管理系统，不要写入 `.env.example`。如需恢复 DeepSeek 官方 Anthropic-compatible API，可设置 `CLAUDE_BACKEND=deepseek` 并填写 `DEEPSEEK_API_KEY`。
+Key 只应写入本机 `.env` 或密钥管理系统，不要写入 `.env.example`。如需切换旧后端，可使用 `CLAUDE_BACKEND=ark`（方舟协议桥）或 `CLAUDE_BACKEND=deepseek`（DeepSeek Anthropic API）；三种后端都严格失败关闭。
 
 本地 Runtime 使用受限非交互模式：Claude Code 采用 `--tools "" --permission-mode plan --safe-mode`；Cursor Agent 只使用官方支持的 `-p <prompt> --output-format json --trust`，其中 `--trust` 仅确认平台刚创建的一次性空工作区，并由该工作区内的 `.cursor/cli.json` 禁止 Shell、WebFetch、WebSearch、全部 MCP、全部相对文件读写及 `/proc`、`/run`、`/tmp`、`/var` 等绝对路径读取。两个 CLI 都在独立进程组与一次性 HOME/cache/data/state/TMP 中运行，超时后依次向整个进程组发送 `SIGTERM` 和 `SIGKILL`。Claude 单次调用默认设置 `$0.25` 预算上限，可通过 `CLAUDE_MAX_BUDGET_USD` 调整。Cursor 仍需访问其模型服务，因此生产网络层还应把该服务账户的出口限制为业务所需目标；CLI 权限文件不是网络命名空间或防火墙的替代品。
 
@@ -153,7 +148,7 @@ Key 只应写入本机 `.env` 或密钥管理系统，不要写入 `.env.example
 - V1 “四模型匿名盲评”是网页默认选项，固定需要 OpenAI、Anthropic、豆包和 DeepSeek 四席。`live` 创建阶段会检查所需 ID 均为受支持的 `openai-compatible` / `anthropic` 席位，且 `baseUrl`、`model`、`apiKeyEnv` 和其引用的本地密钥均已配置：单模型检查所选席位，四模型检查全部四席；不满足时请求失败，不会先运行 Agent 或 Runtime。该检查不发送网络请求，因此网关连通性、远端鉴权和模型可用性错误仍可能在评分调用时暴露。
 - V1 CASE 评分时，四模型至少两席成功才产生正式分数；单席失败或四席成功数不足时保留输出和席位错误，但不回退关键词规则分、模拟分或历史分。`demo` 可在无凭据时使用确定性模拟席位并明确标记；已存在的旧 V1 记录不会自动迁移或重算，页面标记为“历史规则评分”。如果操作者显式重跑历史记录中的某一 CASE，缺失的旧评分配置会按 DeepSeek 单模型缺省值处理，并用本次模型评分替换该 CASE 的旧快照。
 
-- Claude Code 继续使用既有的 Ark 协议桥：`CLAUDE_BACKEND=ark` 时只通过 `ARK_BASE_URL`、`ARK_API_KEY` 和 `CLAUDE_ARK_MODEL` 访问方舟 DeepSeek endpoint，方舟 Key 不传入 Claude 子进程。后端选择严格失败关闭：`ark` 或 `deepseek` 的专属配置不完整时，不会回退到另一供应商或继承的 `ANTHROPIC_*` 凭据。
+- Claude Code 默认使用 `CLAUDE_BACKEND=llmx`，通过 `ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY` 和 `ANTHROPIC_MODEL=claude-sonnet-4-6` 调用 LLMX；`ark` 协议桥与 `deepseek` 直连仍可显式选择。任何后端配置不完整时都不会跨供应商回退。
 - Cursor Agent 只使用持久账户登录，不接收 API Key。把 `CURSOR_AUTH_CONFIG_HOME` 设为仅服务账户可访问的绝对目录（生产为 `/var/lib/agent-review/cursor-auth`）；平台为 CLI 设置 `AGENT_CLI_CREDENTIAL_STORE=file`，仅将 `XDG_CONFIG_HOME` 指向该目录，其余 HOME/XDG/TMP 仍是一次性目录。登录凭据位于 `$CURSOR_AUTH_CONFIG_HOME/cursor/auth.json`，模型工具权限同时显式禁止读取该路径。
 - Doubao Runtime 维持原有方舟 API adapter：同时提供 `ARK_BASE_URL`、`ARK_API_KEY` 与 `REVIEW_MODEL_DOUBAO` 即可就绪，或由隔离的 `RUNTIME_ADAPTERS_JSON` adapter 覆盖。
 
@@ -379,7 +374,7 @@ REVIEW_MODEL_DOUBAO=ep-20260720110725-5rbml
 REVIEW_MODEL_DEEPSEEK=ep-20260708162855-pcf9x
 ```
 
-每组只有在自己的 Base URL 和 Key 都存在时才启用真实评审；Key 留空的模型继续使用演示评审，不会产生无意义的鉴权报错。两个网关都按 OpenAI Chat Completions 契约调用 `${BASE_URL}/chat/completions`。方舟控制台给出的裸域名需要补全 `/api/v3`，模型值使用接入点 ID。
+当前默认显示 `Doubao-Seed-2.1-pro` 与 `DeepSeek-V4-Pro`。还可切换 Doubao Seed 2 Pro、Doubao Seed 2.0 lite 或 DeepSeek V4 flash；网络请求始终使用 endpoint ID，公共结果使用友好名称并保留 `modelId`。每组只有在自己的 Base URL 和 Key 都存在时才启用真实评审；Key 留空的模型继续使用演示评审。
 
 需要完全自定义评审数量或不同 endpoint 时，可以使用下面的 `MODEL_REVIEWERS_JSON`。该配置非空时优先级最高。
 
@@ -554,11 +549,13 @@ V2 不会锁定模型席；同一主审先以相同配置重试一次，随后�
 | `CLAUDE_MAX_BUDGET_USD` | `0.25` | Claude Code 单次无头调用预算上限 |
 | `LOCAL_RUNTIME_TIMEOUT_MS` | `180000` | 本地 CLI 单次执行时限 |
 | `RUNTIME_PROBE_TIMEOUT_MS` | `30000` | Runtime 最小非交互就绪探针时限，上限 60 秒 |
-| `CLAUDE_BACKEND` | `ark` | Claude Code 的 DeepSeek 后端：仅支持 `ark` 或 `deepseek`；缺失、未知或对应凭据不完整时失败关闭 |
+| `CLAUDE_BACKEND` | `llmx` | Claude Code 后端：支持 `llmx`、`ark` 或 `deepseek`；配置不完整时失败关闭 |
+| `ANTHROPIC_BASE_URL` | `https://llmx.tqx.ai` | Claude Code 的 LLMX Anthropic-compatible 地址 |
+| `ANTHROPIC_API_KEY` | 空 | Claude Code 的 LLMX Key，只写本机或生产密钥文件 |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Claude Code 实际请求模型；公共显示为 Claude Sonnet 4.6 |
 | `CLAUDE_ARK_MODEL` | `ep-20260708162855-pcf9x` | Claude Code 使用的方舟 DeepSeek 接入点 |
 | `DEEPSEEK_API_KEY` | 空 | 仅供 `CLAUDE_BACKEND=deepseek` 直连回退使用 |
 | `DEEPSEEK_CLAUDE_MODEL` | `deepseek-v4-pro[1m]` | `CLAUDE_BACKEND=deepseek` 时的官方直连模型 |
-| `ANTHROPIC_API_KEY` | 空 | 仅在 `MODEL_REVIEWERS_JSON` / `RUNTIME_ADAPTERS_JSON` 显式引用时使用；本地 Claude Runtime 不继承 |
 | `CLAUDE_CODE_EFFORT_LEVEL` | `max` | 本地 Claude Runtime 的推理强度；不参与后端或凭据选择 |
 | `ENV_FILE` | 项目根目录 `.env` | 从进程环境指定另一份 env 文件 |
 | `ENV_FALLBACK_FILE` | 空 | 共享基础 env 文件；只补充当前分支未定义的变量 |

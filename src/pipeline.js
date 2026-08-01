@@ -15,6 +15,7 @@ import {
   normalizeAgentExamples
 } from './submission.js';
 import { configuredReviewers, reviewAgent } from './providers.js';
+import { modelDisplayName, publicModelFields } from './model-catalog.js';
 import { buildRoast, scoreComplexity } from './scoring.js';
 import { aggregateV1CardReviews, V1_CARD_REVIEW_VERSION } from './v1-card-review.js';
 import { buildSkill, RUNTIMES, runSkill } from './runtimes.js';
@@ -603,13 +604,13 @@ export class EvaluationPipeline {
       next = { ...(await reviewAgent(reviewer, item.agentCard, item.complexity, item.mode, signal, {
         ...phaseSampling(item, `review:${reviewer.id}`),
         reviewVersion: isCardReview ? V1_CARD_REVIEW_VERSION : 'legacy'
-      })), reviewerId: reviewer.id };
+      })), reviewerId: reviewer.id, ...publicModelFields(reviewer.model) };
     } catch (error) {
       if (signal.aborted) throw signal.reason || error;
       next = {
         reviewerId: reviewer.id,
         reviewer: reviewer.name,
-        model: reviewer.model,
+        ...publicModelFields(reviewer.model),
         ...(isCardReview ? { version: V1_CARD_REVIEW_VERSION } : {}),
         score: 0,
         error: error.message,
@@ -824,18 +825,18 @@ export class EvaluationPipeline {
       await this.update(item, {
         progress: 28 + professionalReviews.length * 8,
         stage: `${reviewer.name} 正在审稿`,
-        activeWork: { type: 'review', key: reviewer.id, label: `${reviewer.name} 正在审稿`, target: reviewer.model, detail: '定位、Skills、协议、输入输出与能力边界五项设计审稿中', index: professionalReviews.length + 1, total: reviewers.length, retry: false }
+        activeWork: { type: 'review', key: reviewer.id, label: `${reviewer.name} 正在审稿`, target: modelDisplayName(reviewer.model), detail: '定位、Skills、协议、输入输出与能力边界五项设计审稿中', index: professionalReviews.length + 1, total: reviewers.length, retry: false }
       }, {
-        level: 'info', source: 'MODEL', phase: 'review', text: `${reviewer.model} 接过了答卷`, mode: item.mode
+        level: 'info', source: 'MODEL', phase: 'review', text: `${modelDisplayName(reviewer.model)} 接过了答卷`, mode: item.mode
       });
       try {
-        const review = { ...(await reviewAgent(reviewer, item.agentCard, complexity, item.mode, signal, phaseSampling(item, `review:${reviewer.id}`))), reviewerId: reviewer.id };
+        const review = { ...(await reviewAgent(reviewer, item.agentCard, complexity, item.mode, signal, phaseSampling(item, `review:${reviewer.id}`))), reviewerId: reviewer.id, ...publicModelFields(reviewer.model) };
         professionalReviews.push(review);
-        await this.update(item, { professional: professionalSnapshot(professionalReviews) }, { level: 'success', source: 'MODEL', phase: 'review', text: `${reviewer.model} 完成盲审 · ${review.score}/100`, mode: review.mode, durationMs: Date.now() - startedAt });
+        await this.update(item, { professional: professionalSnapshot(professionalReviews) }, { level: 'success', source: 'MODEL', phase: 'review', text: `${modelDisplayName(reviewer.model)} 完成盲审 · ${review.score}/100`, mode: review.mode, durationMs: Date.now() - startedAt });
       } catch (error) {
         if (signal?.aborted) throw signal.reason || error;
-        professionalReviews.push({ reviewerId: reviewer.id, reviewer: reviewer.name, model: reviewer.model, version: V1_CARD_REVIEW_VERSION, score: 0, error: error.message, mode: 'failed' });
-        await this.update(item, { professional: professionalSnapshot(professionalReviews) }, { level: 'error', source: 'MODEL', phase: 'review', text: `${reviewer.model} 调用失败`, detail: error.message, mode: 'failed', durationMs: Date.now() - startedAt });
+        professionalReviews.push({ reviewerId: reviewer.id, reviewer: reviewer.name, ...publicModelFields(reviewer.model), version: V1_CARD_REVIEW_VERSION, score: 0, error: error.message, mode: 'failed' });
+        await this.update(item, { professional: professionalSnapshot(professionalReviews) }, { level: 'error', source: 'MODEL', phase: 'review', text: `${modelDisplayName(reviewer.model)} 调用失败`, detail: error.message, mode: 'failed', durationMs: Date.now() - startedAt });
       }
     }
     const validProfessional = professionalReviews.filter((review) =>
@@ -1317,7 +1318,7 @@ function professionalSnapshot(reviews) {
 }
 
 function publicReviewPlan(reviewers) {
-  return reviewers.map((reviewer) => ({ id: reviewer.id || reviewer.model || reviewer.name, name: reviewer.name, model: reviewer.model }));
+  return reviewers.map((reviewer) => ({ id: reviewer.id || reviewer.model || reviewer.name, name: reviewer.name, ...publicModelFields(reviewer.model) }));
 }
 
 function publicRuntimePlan() {
@@ -1331,7 +1332,7 @@ function resolveRetryStep(item, input = {}) {
     const existing = item.professional?.reviews?.find((review) => [retryReviewResultKey(review), review.model, review.reviewer].includes(key));
     const reviewer = configuredReviewers().find((candidate) => [retryReviewerKey(candidate), candidate.model, candidate.name].includes(key) || (existing && candidate.name === existing.reviewer));
     if (!reviewer) throw badRetryRequest('评审模型不存在或当前未配置');
-    return { type, key: retryReviewerKey(reviewer), reviewerName: reviewer.name, label: `重新审稿 · ${reviewer.model}`, shortLabel: reviewer.name };
+    return { type, key: retryReviewerKey(reviewer), reviewerName: reviewer.name, label: `重新审稿 · ${modelDisplayName(reviewer.model)}`, shortLabel: reviewer.name };
   }
   if (type === 'build') {
     const runtime = RUNTIMES.find((candidate) => candidate.id === key);
