@@ -29,6 +29,7 @@ import {
   projectEvaluation,
   projectEvidenceRecord
 } from './src/evaluation-projection.js';
+import { generateV1ReportPdf, projectV1Report } from './src/v1-report.js';
 import {
   buildAbsoluteReviewDossier,
   buildReplicaReviewDossier
@@ -612,6 +613,31 @@ export const server = createServer(async (request, response) => {
     if (request.method === 'GET' && resultMatch) {
       return serveResult(request, response, resultMatch[1]);
     }
+    const reportMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/report\.pdf$/);
+    if (request.method === 'GET' && reportMatch) {
+      const item = store.get(reportMatch[1]);
+      if (!item) return json(response, 404, { error: '评测不存在' });
+      let dto;
+      try {
+        dto = projectV1Report(item);
+      } catch (error) {
+        return json(response, error.statusCode || 409, { error: error.message || '该评测暂不可下载报告' });
+      }
+      let pdf;
+      try {
+        pdf = await generateV1ReportPdf(dto);
+      } catch (error) {
+        return json(response, error.statusCode || 502, { error: error.message || 'PDF 报告生成失败' });
+      }
+      response.writeHead(200, {
+        'content-type': 'application/pdf',
+        'content-disposition': `attachment; filename="v1-agent-review-${safeAttachmentName(item.id)}.pdf"`,
+        'cache-control': 'no-store',
+        'content-length': pdf.length
+      });
+      response.end(pdf);
+      return;
+    }
     const skillMatch = url.pathname.match(/^\/api\/evaluations\/([^/]+)\/builds\/([^/]+)\/skill$/);
     if (request.method === 'GET' && skillMatch) {
       const item = store.get(skillMatch[1]);
@@ -779,6 +805,7 @@ function authorizedBearer(request, expected) {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 function json(response, status, payload) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' }); response.end(JSON.stringify(payload)); }
+function safeAttachmentName(value) { return String(value || 'report').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80) || 'report'; }
 function summary(item) { return { id: item.id, name: item.agentCard.name, createdAt: item.createdAt, status: item.status, progress: item.progress, tier: item.roast?.tier, score: item.averages?.submitted }; }
 
 export function serializeEvaluationForResponse(item) {

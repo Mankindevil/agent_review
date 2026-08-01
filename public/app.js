@@ -853,6 +853,7 @@ function showEvaluation(item) {
   stopButton.classList.toggle('hidden', !canStopEvaluation(item));
   stopButton.disabled = state.stopping;
   if (!state.stopping) $('span', stopButton).textContent = '停止本次评测';
+  syncV1ReportDownload(item);
   if (changedStage) {
     $('.stage-copy').classList.remove('flash');
     requestAnimationFrame(() => $('.stage-copy').classList.add('flash'));
@@ -1763,12 +1764,23 @@ function showLanding() {
   state.lastStage = null;
   state.completedRendered = null;
   state.verdictRevealToken += 1;
+  const report = $('#download-v1-report');
+  report.classList.add('hidden');
+  report.removeAttribute('href');
   history.replaceState(null, '', homepageHistoryUrl(location.pathname, location.search));
   $('#evaluation-view').classList.add('hidden');
   $('#landing-view').classList.remove('hidden');
   const versionState = restoreLandingStartButton($('#start-evaluation'), state);
   if (!versionState.usable) showError(versionState.message);
   scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function syncV1ReportDownload(item) {
+  const link = $('#download-v1-report');
+  const available = item?.schemaVersion !== 2 && item?.status === 'completed' && Boolean(item?.id);
+  link.classList.toggle('hidden', !available);
+  if (available) link.href = `/api/evaluations/${encodeURIComponent(item.id)}/report.pdf`;
+  else link.removeAttribute('href');
 }
 function openHistory() { $('#history-drawer').classList.add('open'); $('#drawer-backdrop').classList.add('open'); $('#history-drawer').setAttribute('aria-hidden','false'); loadHistory(); }
 function closeHistory() { $('#history-drawer').classList.remove('open'); $('#drawer-backdrop').classList.remove('open'); $('#history-drawer').setAttribute('aria-hidden','true'); }

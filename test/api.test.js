@@ -2247,3 +2247,37 @@ test('rejects an out-of-range evaluation seed', async () => {
   assert.equal(response.status, 400);
   assert.match((await response.json()).error, /Seed/);
 });
+
+test('downloads a completed V1 report and rejects unavailable records without partial PDFs', async () => {
+  const completed = {
+    id: 'eval_v1_pdf_api', schemaVersion: 1, status: 'completed', mode: 'demo', createdAt: '2026-08-01T00:00:00Z', completedAt: '2026-08-01T00:01:00Z',
+    agentCard: { name: 'PDF Agent', description: '用于下载测试的公开 Card', skills: [] },
+    scoringConfig: { version: 'v1-model-arena/v2', mode: 'panel' }, complexity: { score: 80, verdict: '值得 Agent 化', reason: '多步骤' }, professional: { reviews: [] }, averages: { submitted: 80 }, roast: { headline: '完成' }, builds: [], benchmark: [], logs: []
+  };
+  const running = { ...completed, id: 'eval_v1_pdf_running', status: 'running' };
+  await evaluationStore.set(completed);
+  await evaluationStore.set(running);
+  try {
+    const ok = await fetch(`${origin}/api/evaluations/${completed.id}/report.pdf`);
+    const bytes = Buffer.from(await ok.arrayBuffer());
+    assert.equal(ok.status, 200);
+    assert.match(ok.headers.get('content-type'), /application\/pdf/);
+    assert.match(ok.headers.get('content-disposition'), /attachment/);
+    assert.equal(ok.headers.get('cache-control'), 'no-store');
+    assert.equal(bytes.subarray(0, 5).toString(), '%PDF-');
+    assert.equal((await fetch(`${origin}/api/evaluations/missing/report.pdf`)).status, 404);
+    assert.equal((await fetch(`${origin}/api/evaluations/${running.id}/report.pdf`)).status, 409);
+    const oldPython = process.env.REPORT_PDF_PYTHON;
+    process.env.REPORT_PDF_PYTHON = '/definitely/not/a/python';
+    try {
+      const unavailable = await fetch(`${origin}/api/evaluations/${completed.id}/report.pdf`);
+      assert.equal(unavailable.status, 503);
+      assert.match(unavailable.headers.get('content-type'), /application\/json/);
+    } finally {
+      if (oldPython === undefined) delete process.env.REPORT_PDF_PYTHON; else process.env.REPORT_PDF_PYTHON = oldPython;
+    }
+  } finally {
+    await evaluationStore.delete(completed.id);
+    await evaluationStore.delete(running.id);
+  }
+});
