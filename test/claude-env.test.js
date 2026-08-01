@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import {
   applyArkClaudeEnv,
   applyDeepSeekClaudeEnv,
@@ -8,6 +9,13 @@ import {
   resolveClaudeBackend,
   shouldUseArkClaude
 } from '../src/claude-env.js';
+
+test('keeps the repository Claude settings from overriding the environment key with an empty value', async () => {
+  const settings = JSON.parse(await readFile('.claude/settings.json', 'utf8'));
+  assert.equal(Object.hasOwn(settings.env, 'ANTHROPIC_API_KEY'), false);
+  assert.equal(settings.env.ANTHROPIC_BASE_URL, 'https://llmx.tqx.ai');
+  assert.equal(settings.model, 'claude-sonnet-4-6');
+});
 
 test('maps the configured LLMX key and Claude Sonnet model into the isolated Claude Code environment', () => {
   const source = {

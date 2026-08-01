@@ -26,7 +26,6 @@ export async function prepareRuntimeWorkspace(runtimeId, workspace, {
         CLAUDE_CODE_USE_FOUNDRY: '0',
         CLAUDE_CODE_USE_VERTEX: '0',
         ENABLE_TOOL_SEARCH: 'true',
-        ...(claudeSettings ? { ANTHROPIC_API_KEY: '' } : {}),
         ...(claudeSettings?.baseUrl ? { ANTHROPIC_BASE_URL: claudeSettings.baseUrl } : {})
       },
       ...(claudeSettings?.model ? { model: claudeSettings.model } : {}),

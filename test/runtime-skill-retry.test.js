@@ -118,7 +118,6 @@ test('writes non-secret Claude Code project settings inside the temporary worksp
     assert.equal(payload.skipDangerousModePermissionPrompt, true);
     assert.equal(payload.theme, 'auto');
     assert.deepEqual(payload.env, {
-      ANTHROPIC_API_KEY: '',
       ANTHROPIC_BASE_URL: 'https://llmx.tqx.ai',
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
       CLAUDE_CODE_USE_BEDROCK: '0',
@@ -126,6 +125,7 @@ test('writes non-secret Claude Code project settings inside the temporary worksp
       CLAUDE_CODE_USE_VERTEX: '0',
       ENABLE_TOOL_SEARCH: 'true'
     });
+    assert.equal(Object.hasOwn(payload.env, 'ANTHROPIC_API_KEY'), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
