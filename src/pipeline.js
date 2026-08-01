@@ -24,6 +24,7 @@ import { pandaDataConfig, queryPandaData } from './panda-data.js';
 import { loadPandaInterfaceReference } from './panda-runtime.js';
 import {
   assertV1ScoringReady,
+  LEGACY_V1_SCORING_VERSION,
   normalizeV1ScoringConfig,
   scoreV1ArenaCase,
   V1_SCORING_VERSION
@@ -59,6 +60,7 @@ export class EvaluationPipeline {
         : null,
       runBlackBox: options.runBlackBox || runBlackBoxFoundation,
       now: options.now || now,
+      monotonicNow: options.monotonicNow || (() => performance.now()),
       createId: options.createId || id,
       policy: options.policy || PHASE1_EXECUTION_POLICY,
       v1Reviewers: options.v1Reviewers ?? configuredReviewers(),
@@ -622,16 +624,19 @@ export class EvaluationPipeline {
     const runtime = RUNTIMES.find((candidate) => candidate.id === step.key);
     const builds = [...(item.builds || [])];
     const index = builds.findIndex((build) => build.runtimeId === step.key);
+    const buildContext = contextUsageCollector();
     let next;
     try {
       next = await privateState(this).buildSkill(runtime, item.agentCard.description, item.mode, {
         signal,
         ...phaseSampling(item, `build:${runtime.id}`),
-        pandaData: await this.pandaRuntimeContext()
+        pandaData: await this.pandaRuntimeContext(),
+        onContextUsage: buildContext.onContextUsage
       });
+      next = { ...next, contextUsage: buildContext.contextUsage };
     } catch (error) {
       if (signal.aborted) throw signal.reason || error;
-      next = { runtime: runtime.name, runtimeId: runtime.id, mode: item.mode, error: error.message };
+      next = { runtime: runtime.name, runtimeId: runtime.id, mode: item.mode, error: error.message, contextUsage: buildContext.contextUsage };
     }
     if (index === -1) builds.push(next); else builds[index] = next;
     item.builds = builds;
@@ -652,7 +657,8 @@ export class EvaluationPipeline {
       const entry = item.benchmark[caseIndex].entries.find((candidate) => candidate.id === step.key);
       await this.update(item, { benchmark: item.benchmark, stage: `${step.shortLabel} 对测 ${caseIndex + 1}/${item.benchmark.length}` }, {
         level: entry?.mode === 'failed' ? 'error' : 'success', source: 'RETRY', phase: 'benchmark',
-        text: `${step.shortLabel} 完成「${item.benchmark[caseIndex].case.name}」重新对测`, detail: `score=${entry?.score ?? 0}`, mode: entry?.mode || item.mode
+        text: `${step.shortLabel} 完成「${item.benchmark[caseIndex].case.name}」重新对测`, detail: `score=${entry?.score ?? 0}`, mode: entry?.mode || item.mode,
+        durationMs: entry?.execution?.durationMs
       });
     }
   }
@@ -661,6 +667,14 @@ export class EvaluationPipeline {
     const outputRound = await this.replaceBenchmarkOutput(item, step.caseIndex, step.key, signal);
     const scoredRound = await this.scoreBenchmarkRound(item, step.caseIndex, signal, outputRound);
     this.commitBenchmarkRound(item, step.caseIndex, scoredRound);
+    const entry = item.benchmark[step.caseIndex].entries.find((candidate) => candidate.id === step.key);
+    await this.update(item, { benchmark: item.benchmark }, {
+      level: entry?.mode === 'failed' ? 'error' : 'success', source: 'RETRY', phase: 'benchmark',
+      text: `${step.shortLabel} 完成「${item.benchmark[step.caseIndex].case.name}」重新对测`,
+      detail: `score=${entry?.score ?? 0}`,
+      mode: entry?.mode || item.mode,
+      durationMs: entry?.execution?.durationMs
+    });
   }
 
   async runSubmittedAgent(item, caseIndex, signal) {
@@ -688,29 +702,58 @@ export class EvaluationPipeline {
     let output;
     let mode = item.mode;
     let name = item.agentCard.name;
-    try {
-      if (competitorId === 'submitted') {
-        output = item.mode === 'live'
+    const runtimeContext = contextUsageCollector();
+    let execution;
+    if (competitorId === 'submitted') {
+      const measured = await measureV1Execution(
+        privateState(this).monotonicNow,
+        async () => item.mode === 'live'
           ? (await this.runSubmittedAgent(item, caseIndex, signal)).text
-          : mockSubmittedOutput(item.agentCard, testCase);
+          : mockSubmittedOutput(item.agentCard, testCase)
+      );
+      if (measured.error) {
+        if (signal.aborted) throw signal.reason || measured.error;
+        output = `执行失败：${measured.error.message}`;
+        mode = 'failed';
+        execution = executionSnapshot('failed', measured.durationMs, runtimeContext.contextUsage);
       } else {
-        const build = item.builds?.find((candidate) => candidate.runtimeId === competitorId);
-        if (!build || build.error) throw new Error(build?.error || '对应 Runtime Skill 尚未生成');
-        name = build.runtime;
-        mode = build.mode;
-        output = await privateState(this).runSkill(build, testCase, item.mode, {
-          signal,
-          ...phaseSampling(item, `run:${caseIndex}:${competitorId}`),
-          pandaData: await this.pandaRuntimeContext()
-        });
+        output = measured.value;
+        execution = executionSnapshot('succeeded', measured.durationMs, runtimeContext.contextUsage);
       }
-    } catch (error) {
-      if (signal.aborted) throw signal.reason || error;
-      output = `执行失败：${error.message}`;
-      mode = 'failed';
-      if (competitorId !== 'submitted') name = item.builds?.find((candidate) => candidate.runtimeId === competitorId)?.runtime || competitorId;
+    } else {
+      const build = item.builds?.find((candidate) => candidate.runtimeId === competitorId);
+      name = build?.runtime || competitorId;
+      if (!build || build.error) {
+        output = `执行失败：${build?.error || '对应 Runtime Skill 尚未生成'}`;
+        mode = 'failed';
+        execution = executionSnapshot('failed', 0, build?.contextUsage || [], 'skill-build');
+      } else {
+        mode = build.mode;
+        const measured = await measureV1Execution(
+          privateState(this).monotonicNow,
+          async () => privateState(this).runSkill(build, testCase, item.mode, {
+            signal,
+            ...phaseSampling(item, `run:${caseIndex}:${competitorId}`),
+            pandaData: await this.pandaRuntimeContext(),
+            onContextUsage: runtimeContext.onContextUsage
+          })
+        );
+        if (measured.error) {
+          if (signal.aborted) throw signal.reason || measured.error;
+          output = `执行失败：${measured.error.message}`;
+          mode = 'failed';
+          execution = executionSnapshot('failed', measured.durationMs, runtimeContext.contextUsage);
+        } else {
+          output = measured.value;
+          execution = executionSnapshot('succeeded', measured.durationMs, runtimeContext.contextUsage);
+        }
+      }
     }
-    const next = makeUnscoredEntry(competitorId, name, output, mode, deriveSeed(item.seed, `judge:${caseIndex}:${competitorId}`), roundItem.dataEvidence);
+    const next = makeUnscoredEntry(
+      competitorId, name, output, mode,
+      deriveSeed(item.seed, `judge:${caseIndex}:${competitorId}`), roundItem.dataEvidence,
+      execution
+    );
     const entryIndex = roundItem.entries.findIndex((entry) => entry.id === competitorId);
     if (entryIndex === -1) roundItem.entries.push(next); else roundItem.entries[entryIndex] = next;
     signal?.throwIfAborted();
@@ -723,7 +766,7 @@ export class EvaluationPipeline {
     const scoring = await privateState(this).scoreV1Case({
       testCase: roundItem.case,
       entries: roundItem.entries,
-      config: item.scoringConfig || normalizeV1ScoringConfig(),
+      config: scoringConfigForRound(item, roundItem),
       reviewers: privateState(this).v1Reviewers,
       evaluationMode: item.mode,
       seed: deriveSeed(item.seed, `v1-case:${caseIndex}`),
@@ -808,6 +851,7 @@ export class EvaluationPipeline {
     for (const runtime of RUNTIMES) {
       signal?.throwIfAborted();
       const startedAt = Date.now();
+      const buildContext = contextUsageCollector();
       await this.update(item, {
         activeWork: { type: 'build', key: runtime.id, label: `${runtime.name} 正在直出 Skill`, target: runtime.name, detail: `输入：Agent 顶层 description 原文${pandaRuntime ? ' + 主办方 Panda 白名单接口文档' : ''}`, index: builds.length + 1, total: RUNTIMES.length, retry: false }
       }, { level: 'info', source: 'RUNTIME', phase: 'build', text: `${runtime.name} 开始按 ${runtimeInputLabel} 直出 Skill`, mode: item.mode });
@@ -815,13 +859,14 @@ export class EvaluationPipeline {
         const build = await privateState(this).buildSkill(runtime, item.agentCard.description, item.mode, {
           signal,
           ...phaseSampling(item, `build:${runtime.id}`),
-          pandaData: pandaRuntime
+          pandaData: pandaRuntime,
+          onContextUsage: buildContext.onContextUsage
         });
-        builds.push(build);
+        builds.push({ ...build, contextUsage: buildContext.contextUsage });
         await this.update(item, { builds: [...builds] }, { level: 'success', source: 'RUNTIME', phase: 'build', text: `${runtime.name} ${runtimeInputLabel} 直出完成`, detail: build.skill?.name, mode: build.mode, durationMs: Date.now() - startedAt });
       } catch (error) {
         if (signal?.aborted) throw signal.reason || error;
-        builds.push({ runtime: runtime.name, runtimeId: runtime.id, mode: item.mode, error: error.message });
+        builds.push({ runtime: runtime.name, runtimeId: runtime.id, mode: item.mode, error: error.message, contextUsage: buildContext.contextUsage });
         await this.update(item, { builds: [...builds] }, { level: 'error', source: 'RUNTIME', phase: 'build', text: `${runtime.name} 复刻失败`, detail: error.message, mode: item.mode, durationMs: Date.now() - startedAt });
       }
     }
@@ -857,24 +902,36 @@ export class EvaluationPipeline {
       benchmark.push({ case: testCase, dataEvidence, entries });
       let submittedOutput;
       let submittedMode = item.mode;
-      let startedAt = Date.now();
+      const submittedContext = contextUsageCollector();
       await this.update(item, {
         benchmark,
         stage: `对测 ${index + 1}/${item.cases.length} · 0/${builds.length + 1}`,
         activeWork: benchmarkActivity('submitted', item.agentCard.name, testCase, index, item.cases.length, false)
       }, { level: 'info', source: 'A2A', phase: 'benchmark', text: `${item.agentCard.name} 开始执行「${testCase.name}」`, mode: item.mode });
-      try {
-        submittedOutput = item.mode === 'live'
+      const submittedExecution = await measureV1Execution(
+        privateState(this).monotonicNow,
+        async () => item.mode === 'live'
           ? (await this.runSubmittedAgent(item, index, signal)).text
-          : mockSubmittedOutput(item.agentCard, testCase);
-      } catch (error) {
-        if (signal?.aborted) throw signal.reason || error;
-        submittedOutput = `执行失败：${error.message}`;
+          : mockSubmittedOutput(item.agentCard, testCase)
+      );
+      if (submittedExecution.error) {
+        if (signal?.aborted) throw signal.reason || submittedExecution.error;
+        submittedOutput = `执行失败：${submittedExecution.error.message}`;
         submittedMode = 'failed';
+      } else {
+        submittedOutput = submittedExecution.value;
       }
-      entries.push(makeUnscoredEntry('submitted', item.agentCard.name, submittedOutput, submittedMode, deriveSeed(item.seed, `judge:${index}:submitted`), dataEvidence));
+      entries.push(makeUnscoredEntry(
+        'submitted', item.agentCard.name, submittedOutput, submittedMode,
+        deriveSeed(item.seed, `judge:${index}:submitted`), dataEvidence,
+        executionSnapshot(
+          submittedMode === 'failed' ? 'failed' : 'succeeded',
+          submittedExecution.durationMs,
+          submittedContext.contextUsage
+        )
+      ));
       await this.update(item, { benchmark, progress: 70 + Math.round((index / item.cases.length) * 22), stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, {
-        level: submittedMode === 'failed' ? 'error' : 'success', source: 'A2A', phase: 'benchmark', text: `${item.agentCard.name} 完成「${testCase.name}」`, detail: `scoreStatus=${entries.at(-1).scoreStatus}`, mode: submittedMode, durationMs: Date.now() - startedAt
+        level: submittedMode === 'failed' ? 'error' : 'success', source: 'A2A', phase: 'benchmark', text: `${item.agentCard.name} 完成「${testCase.name}」`, detail: `scoreStatus=${entries.at(-1).scoreStatus}`, mode: submittedMode, durationMs: entries.at(-1).execution.durationMs
       });
       for (const build of builds) {
         signal?.throwIfAborted();
@@ -884,23 +941,39 @@ export class EvaluationPipeline {
           stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}`
         }, { level: 'info', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 开始执行「${testCase.name}」`, mode: build.error ? 'failed' : build.mode });
         if (build.error) {
-          entries.push(makeUnscoredEntry(build.runtimeId, build.runtime, `执行失败：${build.error}`, 'failed', deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence));
+          entries.push(makeUnscoredEntry(
+            build.runtimeId, build.runtime, `执行失败：${build.error}`, 'failed',
+            deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence,
+            executionSnapshot('failed', 0, build.contextUsage || [], 'skill-build')
+          ));
           await this.update(item, { benchmark, stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, { level: 'error', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 无法进入「${testCase.name}」`, detail: build.error, mode: 'failed' });
           continue;
         }
-        startedAt = Date.now();
-        try {
-          const output = await privateState(this).runSkill(build, testCase, item.mode, {
+        const runtimeContext = contextUsageCollector();
+        const runtimeExecution = await measureV1Execution(
+          privateState(this).monotonicNow,
+          () => privateState(this).runSkill(build, testCase, item.mode, {
             signal,
             ...phaseSampling(item, `run:${index}:${build.runtimeId}`),
-            pandaData: pandaRuntime
-          });
-          entries.push(makeUnscoredEntry(build.runtimeId, build.runtime, output, build.mode, deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence));
-        } catch (error) {
-          if (signal?.aborted) throw signal.reason || error;
-          entries.push(makeUnscoredEntry(build.runtimeId, build.runtime, `执行失败：${error.message}`, 'failed', deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence));
+            pandaData: pandaRuntime,
+            onContextUsage: runtimeContext.onContextUsage
+          })
+        );
+        if (runtimeExecution.error) {
+          if (signal?.aborted) throw signal.reason || runtimeExecution.error;
+          entries.push(makeUnscoredEntry(
+            build.runtimeId, build.runtime, `执行失败：${runtimeExecution.error.message}`, 'failed',
+            deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence,
+            executionSnapshot('failed', runtimeExecution.durationMs, runtimeContext.contextUsage)
+          ));
+        } else {
+          entries.push(makeUnscoredEntry(
+            build.runtimeId, build.runtime, runtimeExecution.value, build.mode,
+            deriveSeed(item.seed, `judge:${index}:${build.runtimeId}`), dataEvidence,
+            executionSnapshot('succeeded', runtimeExecution.durationMs, runtimeContext.contextUsage)
+          ));
         }
-        await this.update(item, { benchmark, stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, { level: entries.at(-1).mode === 'failed' ? 'error' : 'success', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 完成「${testCase.name}」`, detail: `scoreStatus=${entries.at(-1).scoreStatus}`, mode: entries.at(-1).mode, durationMs: Date.now() - startedAt });
+        await this.update(item, { benchmark, stage: `对测 ${index + 1}/${item.cases.length} · ${entries.length}/${builds.length + 1}` }, { level: entries.at(-1).mode === 'failed' ? 'error' : 'success', source: 'RUNTIME', phase: 'benchmark', text: `${build.runtime} 完成「${testCase.name}」`, detail: `scoreStatus=${entries.at(-1).scoreStatus}`, mode: entries.at(-1).mode, durationMs: entries.at(-1).execution.durationMs });
       }
       const scoring = await privateState(this).scoreV1Case({
         testCase,
@@ -1368,8 +1441,32 @@ function hasV1ModelScoring(item) {
 
 function isV1ModelScoringRound(item, roundItem) {
   if (['single', 'panel'].includes(item?.scoringConfig?.mode)) return true;
-  return roundItem?.judging?.version === V1_SCORING_VERSION
+  return [V1_SCORING_VERSION, LEGACY_V1_SCORING_VERSION].includes(roundItem?.judging?.version)
     && ['single', 'panel'].includes(roundItem.judging.mode);
+}
+
+function scoringConfigForRound(item, roundItem) {
+  if (item?.scoringConfig) return item.scoringConfig;
+  const judging = roundItem?.judging;
+  if (judging?.version === LEGACY_V1_SCORING_VERSION) {
+    return legacyV1ScoringConfig(judging);
+  }
+  const looksLegacy = roundItem?.entries?.some((entry) =>
+    entry?.dimensions && Object.hasOwn(entry.dimensions, 'taskConstraint')
+  );
+  return looksLegacy
+    ? legacyV1ScoringConfig(judging)
+    : normalizeV1ScoringConfig();
+}
+
+function legacyV1ScoringConfig(judging = {}) {
+  return judging.mode === 'panel'
+    ? { version: LEGACY_V1_SCORING_VERSION, mode: 'panel' }
+    : {
+        version: LEGACY_V1_SCORING_VERSION,
+        mode: 'single',
+        reviewerId: judging.reviewerId || 'deepseek'
+      };
 }
 
 function recalculateDerived(item) {
@@ -1418,18 +1515,63 @@ function phaseSampling(item, scope) {
   return { seed: deriveSeed(item.seed, scope), temperature: normalizeTemperature(item.temperature, 0) };
 }
 
-function makeUnscoredEntry(id, name, output, mode, seed, dataEvidence) {
+function makeUnscoredEntry(id, name, output, mode, seed, dataEvidence, execution) {
+  if (!execution || typeof execution !== 'object') {
+    throw new TypeError('V1 v2 benchmark entries require an execution record');
+  }
   const dataVerification = verifyOutputAgainstEvidence(output, dataEvidence);
   return {
     id,
     name,
     output,
     mode,
+    execution,
     judgeSeed: seed,
     dataVerification,
     scoreStatus: mode === 'failed' ? 'execution-failed' : 'pending',
     score: mode === 'failed' ? 0 : null,
     dimensions: null
+  };
+}
+
+async function measureV1Execution(monotonicNow, invoke) {
+  const startedAt = readMonotonic(monotonicNow);
+  try {
+    const value = await invoke();
+    return { value, durationMs: elapsedMonotonic(monotonicNow, startedAt) };
+  } catch (error) {
+    return { error, durationMs: elapsedMonotonic(monotonicNow, startedAt) };
+  }
+}
+
+function readMonotonic(monotonicNow) {
+  const value = Number(monotonicNow());
+  return Number.isFinite(value) ? value : 0;
+}
+
+function elapsedMonotonic(monotonicNow, startedAt) {
+  return Math.max(0, Math.round(readMonotonic(monotonicNow) - startedAt));
+}
+
+function executionSnapshot(status, durationMs, contextUsage = [], failureStage) {
+  return {
+    status,
+    durationMs: Math.max(0, Math.round(Number(durationMs) || 0)),
+    timingScope: 'end-to-end-wall-clock',
+    includesNetwork: true,
+    toolObservation: 'unavailable',
+    contextUsage: [...contextUsage],
+    ...(failureStage ? { failureStage } : {})
+  };
+}
+
+function contextUsageCollector() {
+  const contextUsage = [];
+  return {
+    contextUsage,
+    onContextUsage: (usage) => {
+      contextUsage.push(structuredClone(usage));
+    }
   };
 }
 

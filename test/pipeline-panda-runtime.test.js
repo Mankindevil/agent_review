@@ -16,11 +16,20 @@ test('V1 pipeline supplies the Panda interface and credential-free query gateway
     new EvaluationStore(path.join(root, 'evaluations.json')),
     new EventEmitter(),
     {
+      monotonicNow: (() => {
+        let current = 0;
+        return () => {
+          const value = current;
+          current += 12_345;
+          return value;
+        };
+      })(),
       pandaRuntimeEnabled: true,
       pandaAllowedMethods: ['get_factor'],
       pandaInterfaceLoader: async () => '# 接口文档.md\n## get_factor',
       dataQuery: query,
       buildSkillFn: async (runtime, description, mode, options) => {
+        options.onContextUsage({ scope: 'skill-build', runtimeId: runtime.id, status: 'ready' });
         buildCalls.push({ runtime, description, mode, options });
         return {
           runtime: runtime.name,
@@ -37,6 +46,7 @@ test('V1 pipeline supplies the Panda interface and credential-free query gateway
         };
       },
       runSkillFn: async (build, testCase, mode, options) => {
+        options.onContextUsage({ scope: 'runtime-query', runtimeId: build.runtimeId, status: 'ready' });
         runCalls.push({ build, testCase, mode, options });
         return 'Panda Data 复现结果';
       },
@@ -107,6 +117,34 @@ test('V1 pipeline supplies the Panda interface and credential-free query gateway
       assert.equal(call.options.pandaData.interfaceReference, '# 接口文档.md\n## get_factor');
       assert.equal(call.options.pandaData.query, query);
     }
+    const expectedExecution = {
+      status: 'succeeded',
+      durationMs: 12_345,
+      timingScope: 'end-to-end-wall-clock',
+      includesNetwork: true,
+      toolObservation: 'unavailable',
+      contextUsage: []
+    };
+    const submitted = completed.benchmark[0].entries.find((entry) => entry.id === 'submitted');
+    assert.deepEqual(submitted.execution, expectedExecution);
+    for (const runtimeId of ['claude-code', 'cursor', 'doubao']) {
+      const entry = completed.benchmark[0].entries.find((candidate) => candidate.id === runtimeId);
+      assert.deepEqual(entry.execution, {
+        ...expectedExecution,
+        contextUsage: [{ scope: 'runtime-query', runtimeId, status: 'ready' }]
+      });
+    }
+    assert.equal(completed.builds.every((build) =>
+      Array.isArray(build.contextUsage) &&
+      build.contextUsage[0]?.scope === 'skill-build'
+    ), true);
+    const completionLogs = completed.logs.filter((log) =>
+      log.phase === 'benchmark' &&
+      ['A2A', 'RUNTIME'].includes(log.source) &&
+      Number.isFinite(log.durationMs)
+    );
+    assert.equal(completionLogs.length, 4);
+    assert.equal(completionLogs.every((log) => log.durationMs === 12_345), true);
   } finally {
     await pipeline.store.writeQueue.catch(() => {});
     await rm(root, { recursive: true, force: true });

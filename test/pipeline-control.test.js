@@ -1373,7 +1373,7 @@ test('normalizes and persists the selected V1 scoring configuration', async () =
   });
 
   assert.deepEqual(created.scoringConfig, {
-    version: 'v1-model-arena/v1',
+    version: 'v1-model-arena/v2',
     mode: 'single',
     reviewerId: 'deepseek'
   });
@@ -1728,6 +1728,115 @@ test('rescoring a retried V1 competitor replaces the complete CASE score snapsho
   assert.equal(scoreCalls[0].entries.find((entry) => entry.id === 'submitted').score, null);
   assert.equal(updated.benchmark[0].judging.version, 'v1-model-arena/v1');
   assert.equal(updated.benchmark[0].entries.every((entry) => entry.score === 80), true);
+});
+
+test('V1 v2 benchmark retry replaces the execution snapshot before rescoring the complete CASE', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-v2-retry-execution-${process.pid}.json`));
+  const scoreCalls = [];
+  let monotonic = 0;
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    monotonicNow: () => {
+      const value = monotonic;
+      monotonic += 12_345;
+      return value;
+    },
+    scoreV1Case: async (input) => {
+      scoreCalls.push(structuredClone(input));
+      return successfulV1ScoringResult(input);
+    }
+  });
+  const item = completedV1Evaluation('eval_v1_v2_retry_execution');
+  item.scoringConfig = { version: 'v1-model-arena/v2', mode: 'single', reviewerId: 'deepseek' };
+  item.benchmark[0].entries.forEach((entry) => {
+    entry.execution = {
+      status: 'succeeded',
+      durationMs: 999,
+      timingScope: 'end-to-end-wall-clock',
+      includesNetwork: true,
+      toolObservation: 'unavailable',
+      contextUsage: []
+    };
+  });
+  await store.set(item);
+
+  await pipeline.retry(item.id, { type: 'benchmark', key: 'submitted', caseIndex: 0 });
+  const updated = await waitFor(store, item.id, (value) =>
+    value.status === 'completed' && value.retryHistory?.length === 1
+  );
+
+  assert.equal(scoreCalls.length, 1);
+  assert.deepEqual(
+    scoreCalls[0].entries.find((entry) => entry.id === 'submitted').execution,
+    {
+      status: 'succeeded',
+      durationMs: 12_345,
+      timingScope: 'end-to-end-wall-clock',
+      includesNetwork: true,
+      toolObservation: 'unavailable',
+      contextUsage: []
+    }
+  );
+  assert.equal(updated.benchmark[0].entries.filter((entry) => entry.id === 'submitted').length, 1);
+  assert.equal(updated.benchmark[0].entries.find((entry) => entry.id === 'submitted').score, 80);
+});
+
+test('V1 v2 records failed calls and build failures as zero-capability executions', async () => {
+  const store = new EvaluationStore(path.join(tmpdir(), `agent-roast-v1-v2-execution-failures-${process.pid}.json`));
+  let monotonic = 0;
+  const pipeline = new EvaluationPipeline(store, new EventEmitter(), {
+    monotonicNow: () => {
+      const value = monotonic;
+      monotonic += 12_345;
+      return value;
+    },
+    buildSkillFn: async (runtime) => {
+      if (runtime.id === 'cursor') throw new Error('skill build rejected');
+      return {
+        runtime: runtime.name,
+        runtimeId: runtime.id,
+        model: runtime.model,
+        mode: 'demo',
+        skill: { name: `${runtime.id}-skill`, description: 'test', instructions: ['run'], tools: [] }
+      };
+    },
+    runSkillFn: async (build) => {
+      if (build.runtimeId === 'claude-code') throw new Error('runtime call rejected');
+      return `${build.runtimeId} output`;
+    }
+  });
+  const created = await pipeline.create({
+    mode: 'demo',
+    agentCard: evaluation('template').agentCard,
+    cases: [{ name: 'case', prompt: 'test prompt' }]
+  });
+  const completed = await waitFor(store, created.id, (value) =>
+    value.status === 'completed' || value.status === 'failed'
+  );
+
+  assert.equal(completed.status, 'completed');
+  const runtimeFailure = completed.benchmark[0].entries.find((entry) => entry.id === 'claude-code');
+  const buildFailure = completed.benchmark[0].entries.find((entry) => entry.id === 'cursor');
+  assert.deepEqual(runtimeFailure.execution, {
+    status: 'failed',
+    durationMs: 12_345,
+    timingScope: 'end-to-end-wall-clock',
+    includesNetwork: true,
+    toolObservation: 'unavailable',
+    contextUsage: []
+  });
+  assert.equal(runtimeFailure.score, 0);
+  assert.equal(runtimeFailure.detail.capability.capabilityScore, 0);
+  assert.deepEqual(buildFailure.execution, {
+    status: 'failed',
+    durationMs: 0,
+    timingScope: 'end-to-end-wall-clock',
+    includesNetwork: true,
+    toolObservation: 'unavailable',
+    contextUsage: [],
+    failureStage: 'skill-build'
+  });
+  assert.equal(buildFailure.score, 0);
+  assert.equal(buildFailure.detail.capability.capabilityScore, 0);
 });
 
 test('keeps the live V1 CASE and derived verdict unchanged while benchmark rescoring is pending', async () => {
