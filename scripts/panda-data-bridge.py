@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import sys
+import tempfile
 
 
 def emit(payload):
@@ -61,17 +62,23 @@ def main():
     if not isinstance(params, dict):
         raise TypeError("params 必须是 JSON 对象")
 
-    import panda_data
+    with tempfile.TemporaryDirectory(prefix="panda-data-auth-") as auth_dir:
+        import panda_data
+        import panda_data.auth_manager as auth_manager
 
-    base_url = os.environ.get("PANDA_DATA_BASE_URL", "http://pandadata.pandaaiquant.com").strip()
-    panda_data.init_token(username=username, password=password, base_url=base_url)
-    function = getattr(panda_data, method, None)
-    if not callable(function):
-        raise AttributeError(f"当前 panda_data SDK 不支持方法：{method}")
+        if not hasattr(auth_manager, "_user_json_dir"):
+            raise RuntimeError("当前 panda_data SDK 不支持隔离认证文件")
+        auth_manager._user_json_dir = auth_dir
 
-    result = function(**params)
-    max_rows = max(1, int(os.environ.get("PANDA_DATA_MAX_ROWS", "500")))
-    data, row_count, truncated = normalize_result(result, max_rows)
+        base_url = os.environ.get("PANDA_DATA_BASE_URL", "http://pandadata.pandaaiquant.com").strip()
+        panda_data.init_token(username=username, password=password, base_url=base_url)
+        function = getattr(panda_data, method, None)
+        if not callable(function):
+            raise AttributeError(f"当前 panda_data SDK 不支持方法：{method}")
+
+        result = function(**params)
+        max_rows = max(1, int(os.environ.get("PANDA_DATA_MAX_ROWS", "500")))
+        data, row_count, truncated = normalize_result(result, max_rows)
     emit({
         "provider": "pandaai",
         "method": method,

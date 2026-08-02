@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getPandaDataStatus, pandaDataConfig, queryPandaData } from '../src/panda-data.js';
+
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const bridgeFile = path.join(repositoryRoot, 'scripts', 'panda-data-bridge.py');
 
 const configuredEnv = {
   PANDA_DATA_ENABLED: 'true',
@@ -65,3 +74,83 @@ test('supports a non-secret package probe status', async () => {
   assert.equal('username' in status, false);
   assert.equal('password' in status, false);
 });
+
+test('isolates Panda SDK user.json from the immutable application directory', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'panda-bridge-auth-'));
+  const appRoot = path.join(root, 'app');
+  const packageRoot = path.join(root, 'packages');
+  const pandaPackage = path.join(packageRoot, 'panda_data');
+  await mkdir(appRoot, { recursive: true });
+  await mkdir(pandaPackage, { recursive: true });
+  await writeFile(path.join(pandaPackage, 'auth_manager.py'), [
+    '_user_json_dir = None',
+    'written_path = None',
+    ''
+  ].join('\n'));
+  await writeFile(path.join(pandaPackage, '__init__.py'), [
+    'import json',
+    'import os',
+    'from . import auth_manager',
+    '',
+    'def init_token(**_kwargs):',
+    '    target = auth_manager._user_json_dir or os.getcwd()',
+    '    os.makedirs(target, exist_ok=True)',
+    '    auth_manager.written_path = os.path.join(target, "user.json")',
+    '    with open(auth_manager.written_path, "w", encoding="utf-8") as handle:',
+    '        json.dump({"encrypted_credentials": "test-only"}, handle)',
+    '    return "test-token"',
+    '',
+    'def get_trade_cal(**_params):',
+    '    return {"auth_path": auth_manager.written_path}',
+    ''
+  ].join('\n'));
+
+  try {
+    const result = await runBridge({
+      cwd: appRoot,
+      env: {
+        PYTHONPATH: packageRoot,
+        PANDA_DATA_USERNAME: '8613800000000',
+        PANDA_DATA_PASSWORD: 'test-password',
+        PANDA_DATA_BASE_URL: 'https://data.example.test',
+        PANDA_DATA_ALLOWED_METHODS: 'get_trade_cal',
+        PANDA_DATA_MAX_ROWS: '10'
+      },
+      input: { method: 'get_trade_cal', params: {} }
+    });
+
+    assert.equal(result.code, 0, result.stderr || result.stdout);
+    const payload = JSON.parse(result.stdout);
+    const authPath = payload.data.auth_path;
+    assert.notEqual(path.dirname(authPath), appRoot);
+    assert.equal(existsSync(path.join(appRoot, 'user.json')), false);
+    assert.equal(existsSync(authPath), false, 'ephemeral auth directory must be removed');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function runBridge({ cwd, env, input }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.env.PANDA_DATA_PYTHON || 'python3', [bridgeFile], {
+      cwd,
+      env: {
+        PATH: process.env.PATH,
+        LANG: 'C.UTF-8',
+        PYTHONIOENCODING: 'utf-8',
+        ...env
+      }
+    });
+    const stdout = [];
+    const stderr = [];
+    child.stdout.on('data', (chunk) => stdout.push(chunk));
+    child.stderr.on('data', (chunk) => stderr.push(chunk));
+    child.once('error', reject);
+    child.once('close', (code) => resolve({
+      code,
+      stdout: Buffer.concat(stdout).toString('utf8'),
+      stderr: Buffer.concat(stderr).toString('utf8')
+    }));
+    child.stdin.end(JSON.stringify(input));
+  });
+}
