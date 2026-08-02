@@ -6,18 +6,18 @@ import { renderV2Result } from '../public/result-v2.js';
 const read = (name) => readFile(new URL(`../deploy/${name}`, import.meta.url), 'utf8');
 const readDoc = (name) => readFile(new URL(`../docs/${name}`, import.meta.url), 'utf8');
 
-const exactLocation = (config, pathname) => {
-  const marker = `location = ${pathname} {`;
+const locationBlock = (config, marker) => {
   const start = config.indexOf(marker);
-  assert.notEqual(start, -1, pathname);
+  assert.notEqual(start, -1, marker);
   let depth = 0;
   for (let index = config.indexOf('{', start); index < config.length; index += 1) {
     if (config[index] === '{') depth += 1;
     if (config[index] === '}') depth -= 1;
     if (depth === 0) return config.slice(start, index + 1);
   }
-  assert.fail(`unterminated location: ${pathname}`);
+  assert.fail(`unterminated location: ${marker}`);
 };
+const exactLocation = (config, pathname) => locationBlock(config, `location = ${pathname} {`);
 
 test('systemd runs as the dedicated user with the root-managed environment-file path', async () => {
   const unit = await read('agent-review.service');
@@ -96,7 +96,8 @@ test('nginx allows only the public evaluation methods, then rejects destructive 
     'DELETE and HEAD /api/evaluations/:id are rejected by the GET-only detail contract'
   );
   for (const route of [
-    String.raw`location ~ ^/api/evaluations/[^/]+/(?:cancel|retry)$`
+    String.raw`location ~ ^/api/evaluations/[^/]+/cancel$`,
+    String.raw`location ~ ^/api/evaluations/[^/]+/retry$`
   ]) {
     assert.match(production, new RegExp(`${route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?\\$request_method != POST`), route);
   }
@@ -108,6 +109,24 @@ test('nginx allows only the public evaluation methods, then rejects destructive 
   assert.match(production, /location \/\s*\{\s*return 404;\s*\}/);
   const tlsFallback = production.slice(production.lastIndexOf('location / {'));
   assert.doesNotMatch(tlsFallback, /proxy_pass http:\/\/127\.0\.0\.1:4173;/);
+});
+
+test('nginx lets a V1 retry outlive the two-hour submitted Agent deadline', async () => {
+  const production = await read('nginx-production.conf');
+  const cancel = locationBlock(
+    production,
+    String.raw`location ~ ^/api/evaluations/[^/]+/cancel$ {`
+  );
+  const retry = locationBlock(
+    production,
+    String.raw`location ~ ^/api/evaluations/[^/]+/retry$ {`
+  );
+
+  assert.match(cancel, /\$request_method != POST/);
+  assert.doesNotMatch(cancel, /proxy_(?:send|read)_timeout 7500s/);
+  assert.match(retry, /\$request_method != POST/);
+  assert.match(retry, /proxy_send_timeout 7500s/);
+  assert.match(retry, /proxy_read_timeout 7500s/);
 });
 
 test('retained V2 public states are passive and never emit controls for Nginx-blocked routes', async () => {

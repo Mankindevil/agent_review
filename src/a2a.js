@@ -331,10 +331,11 @@ export async function callA2AAgent(card, prompt, timeoutMs = 90_000, signal, opt
 /** Run one Agent Example with true multi-turn context reuse. */
 export async function callA2AAgentExample(card, example, options = {}) {
   const { executeA2AExample } = await import('./a2a-executor.js');
+  const timeoutMs = options.timeoutMs ?? 90_000;
   const result = await executeA2AExample({
     card,
     example,
-    policy: { timeoutMs: options.timeoutMs ?? 90_000 },
+    policy: { timeoutMs, totalTimeoutMs: timeoutMs },
     authorization: options.authorization,
     signal: options.signal
   });

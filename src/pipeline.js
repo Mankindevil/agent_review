@@ -42,6 +42,15 @@ const V2_CREATE_FIELDS = new Set([
   'schemaVersion', 'agentCard', 'agentExamples', 'agentAuthorization', 'skipHumanReview'
 ]);
 const V2_RESUME_FIELDS = new Set(['agentAuthorization']);
+const V1_SUBMITTED_AGENT_TIMEOUT_MS = 7_200_000;
+
+export function v1SubmittedAgentTimeoutMs(value) {
+  const timeout = Number(value);
+  if (!Number.isSafeInteger(timeout) || timeout <= 0) {
+    return V1_SUBMITTED_AGENT_TIMEOUT_MS;
+  }
+  return Math.min(timeout, V1_SUBMITTED_AGENT_TIMEOUT_MS);
+}
 
 export class EvaluationPipeline {
   constructor(store, events, options = {}) {
@@ -68,6 +77,11 @@ export class EvaluationPipeline {
       scoreV1Case: options.scoreV1Case || scoreV1ArenaCase,
       buildSkill: options.buildSkillFn || buildSkill,
       runSkill: options.runSkillFn || runSkill,
+      callA2AAgent: options.callA2AAgentFn || callA2AAgent,
+      callA2AAgentExample: options.callA2AAgentExampleFn || callA2AAgentExample,
+      submittedAgentTimeoutMs: v1SubmittedAgentTimeoutMs(
+        options.submittedAgentTimeoutMs ?? process.env.V1_SUBMITTED_AGENT_TIMEOUT_MS
+      ),
       pandaRuntimeEnabled: options.pandaRuntimeEnabled ?? (
         process.env.NODE_ENV !== 'test' && pandaConfig.ready
       ),
@@ -679,11 +693,12 @@ export class EvaluationPipeline {
   }
 
   async runSubmittedAgent(item, caseIndex, signal) {
-    const authorization = privateState(this).credentialVault?.get(item.id);
+    const state = privateState(this);
+    const authorization = state.credentialVault?.get(item.id);
     const example = Array.isArray(item.agentExamples) ? item.agentExamples[caseIndex] : null;
     if (example) {
-      return callA2AAgentExample(item.agentCard, example, {
-        timeoutMs: 90_000,
+      return state.callA2AAgentExample(item.agentCard, example, {
+        timeoutMs: state.submittedAgentTimeoutMs,
         signal,
         authorization
       });
@@ -692,7 +707,13 @@ export class EvaluationPipeline {
     if (typeof prompt !== 'string' || !prompt.trim()) {
       throw new Error(`用例 ${caseIndex + 1} 缺少 prompt`);
     }
-    return callA2AAgent(item.agentCard, prompt, 90_000, signal, { authorization });
+    return state.callA2AAgent(
+      item.agentCard,
+      prompt,
+      state.submittedAgentTimeoutMs,
+      signal,
+      { authorization }
+    );
   }
 
   async replaceBenchmarkOutput(item, caseIndex, competitorId, signal) {

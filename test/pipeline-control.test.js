@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { EvaluationPipeline } from '../src/pipeline.js';
+import * as pipelineModule from '../src/pipeline.js';
 import { runBlackBoxFoundation } from '../src/black-box-pipeline.js';
 import { EvaluationStore } from '../src/store.js';
 
@@ -67,6 +68,62 @@ function evaluation(id, status = 'running') {
     cases: [{ name: 'case', prompt: 'test prompt' }], validation: { valid: true, interfaces: [{ url: 'https://example.com/a2a', binding: 'HTTP+JSON', version: '1.0' }] }
   };
 }
+
+test('bounds the V1 submitted Agent timeout at two hours', () => {
+  assert.equal(typeof pipelineModule.v1SubmittedAgentTimeoutMs, 'function');
+  assert.equal(pipelineModule.v1SubmittedAgentTimeoutMs(undefined), 7_200_000);
+  assert.equal(pipelineModule.v1SubmittedAgentTimeoutMs('7200000'), 7_200_000);
+  assert.equal(pipelineModule.v1SubmittedAgentTimeoutMs('90000'), 90_000);
+  assert.equal(pipelineModule.v1SubmittedAgentTimeoutMs('7200001'), 7_200_000);
+  assert.equal(pipelineModule.v1SubmittedAgentTimeoutMs('invalid'), 7_200_000);
+});
+
+test('passes the configured two-hour deadline to a V1 submitted Agent prompt', async () => {
+  const calls = [];
+  const pipeline = new EvaluationPipeline(
+    { set: async () => {} },
+    new EventEmitter(),
+    {
+      submittedAgentTimeoutMs: 7_200_000,
+      callA2AAgentFn: async (...args) => {
+        calls.push(args);
+        return { text: 'ok' };
+      }
+    }
+  );
+  const item = evaluation('eval_v1_two_hour_prompt');
+  item.mode = 'live';
+  item.agentCard.supportedInterfaces[0].url = 'http://127.0.0.1:1/a2a';
+
+  await pipeline.runSubmittedAgent(item, 0);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][2], 7_200_000);
+});
+
+test('passes the configured two-hour deadline to a V1 submitted Agent Example', async () => {
+  const calls = [];
+  const pipeline = new EvaluationPipeline(
+    { set: async () => {} },
+    new EventEmitter(),
+    {
+      submittedAgentTimeoutMs: 7_200_000,
+      callA2AAgentExampleFn: async (...args) => {
+        calls.push(args);
+        return { text: 'ok' };
+      }
+    }
+  );
+  const item = evaluation('eval_v1_two_hour_example');
+  item.mode = 'live';
+  item.agentExamples = [structuredClone(V2_EXAMPLES[0])];
+  item.agentCard.supportedInterfaces[0].url = 'http://127.0.0.1:1/a2a';
+
+  await pipeline.runSubmittedAgent(item, 0);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][2].timeoutMs, 7_200_000);
+});
 
 function pipelineMemoryVault() {
   const records = new Map();

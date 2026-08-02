@@ -1377,6 +1377,7 @@ test('reuses task IDs only for interrupted continuations and checks adjacent con
   assert.equal(calls[2].contextId, 'ctx-returned');
   assert.equal(calls[2].taskId, undefined);
   assert.equal(result.contextCheck.status, 'passed');
+  assert.deepEqual(calls.map((call) => call.timeoutMs), [4_000, 4_000, 4_000]);
 
   const unavailable = await executeA2AExample({
     card: rpcCard,
@@ -1427,6 +1428,33 @@ test('reuses task IDs only for interrupted continuations and checks adjacent con
     })
   });
   assert.equal(mismatched.contextCheck.status, 'failed');
+});
+
+test('shares one optional total deadline across every Agent Example turn', async () => {
+  const observedTimeouts = [];
+  const result = await executeA2AExample({
+    card: rpcCard,
+    example: {
+      id: 'bounded-multi-turn',
+      turns: [
+        { input: { parts: [{ type: 'text', text: 'first' }] } },
+        { input: { parts: [{ type: 'text', text: 'second' }] } },
+        { input: { parts: [{ type: 'text', text: 'third' }] } }
+      ]
+    },
+    policy: { timeoutMs: 4_000, totalTimeoutMs: 4_000 },
+    clock: sequenceClock([1_000, 1_000, 1_800, 3_000]),
+    executeTurn: async (options) => {
+      observedTimeouts.push(options.timeoutMs);
+      return {
+        outcome: { status: 'succeeded', lifecycle: 'completed' },
+        response: { normalized: { contextId: 'ctx-bounded', taskId: null } }
+      };
+    }
+  });
+
+  assert.equal(result.runs.length, 3);
+  assert.deepEqual(observedTimeouts, [4_000, 3_200, 2_000]);
 });
 
 test('snapshots URL Parts only through an injected persistence boundary and never returns bytes', async () => {

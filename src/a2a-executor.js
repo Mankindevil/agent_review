@@ -344,8 +344,13 @@ export async function executeA2AExample({
   policy = {},
   authorization,
   signal,
+  clock = () => Date.now(),
   executeTurn = executeA2ATurn
 }) {
+  const totalTimeoutMs = Number.isSafeInteger(policy.totalTimeoutMs) && policy.totalTimeoutMs > 0
+    ? policy.totalTimeoutMs
+    : null;
+  const deadline = totalTimeoutMs === null ? null : clock() + totalTimeoutMs;
   let returnedContextId;
   let returnedTaskId;
   const runs = [];
@@ -360,7 +365,9 @@ export async function executeA2AExample({
       ...(returnedContextId ? { contextId: returnedContextId } : {}),
       ...(returnedTaskId ? { taskId: returnedTaskId } : {}),
       streaming: policy.streaming === true,
-      timeoutMs: policy.timeoutMs,
+      timeoutMs: deadline === null
+        ? policy.timeoutMs
+        : Math.min(policy.timeoutMs ?? totalTimeoutMs, remaining(deadline, clock)),
       authorization,
       testId: example.id,
       turnIndex,
