@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import {
   assertSafeAgentUrl,
   buildA2ARequest,
@@ -11,6 +12,7 @@ import {
   parseA2AResponse,
   parseA2AStreamEvent,
   parseSseEvents,
+  resolveAgentCard,
   selectInterface,
   validateAgentCard,
   validateStreamResult
@@ -29,6 +31,32 @@ test('accepts an A2A 1.0 agent card', () => {
   const result = validateAgentCard(card);
   assert.equal(result.valid, true);
   assert.equal(result.interfaces[0].binding, 'HTTP+JSON');
+});
+
+test('Agent Card discovery survives two transient connection failures', async () => {
+  const reservation = createServer();
+  await new Promise((resolve) => reservation.listen(0, '127.0.0.1', resolve));
+  const port = reservation.address().port;
+  await new Promise((resolve) => reservation.close(resolve));
+
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(card));
+  });
+  const delayedStart = setTimeout(() => server.listen(port, '127.0.0.1'), 175);
+  try {
+    const result = await resolveAgentCard(
+      'card-url',
+      `http://127.0.0.1:${port}/.well-known/agent-card.json`,
+      1_000,
+      { allowPrivate: true }
+    );
+    assert.equal(result.card.name, card.name);
+    assert.equal(result.validation.valid, true);
+  } finally {
+    clearTimeout(delayedStart);
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test('rejects malformed field types without throwing', () => {

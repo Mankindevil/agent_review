@@ -38,6 +38,35 @@ const streamingHttpCard = {
   }]
 };
 
+test('defaults A2A execution to a 90 second shared deadline and transient connection retries', async () => {
+  let requestOptions;
+  const run = await executeA2ATurn({
+    card: rpcCard,
+    input: { parts: [{ type: 'text', text: 'run' }] },
+    clock: sequenceClock([1_000, 1_000, 1_000, 1_000]),
+    request: async (_url, options) => {
+      requestOptions = options;
+      const body = JSON.parse(options.body);
+      return jsonResponse({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          message: {
+            messageId: 'reply-policy',
+            role: 'ROLE_AGENT',
+            parts: [{ text: 'ok' }]
+          }
+        }
+      });
+    }
+  });
+
+  assert.equal(run.outcome.status, 'succeeded');
+  assert.equal(requestOptions.timeoutMs, 90_000);
+  assert.equal(requestOptions.maxAttempts, 3);
+  assert.equal(requestOptions.connectTimeoutMs, 10_000);
+});
+
 test('negotiates acceptedOutputModes from Agent Card defaultOutputModes', async () => {
   let acceptedOutputModes = null;
   const card = {

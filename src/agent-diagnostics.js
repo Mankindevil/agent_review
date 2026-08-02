@@ -15,7 +15,7 @@ const MIN_TIMEOUT_MS = 60_000;
 const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_TIMEOUT_MS = 1_200_000;
 const MAX_CARD_BYTES = 1024 * 1024;
-const CARD_RESOLVE_TIMEOUT_MS = 12_000;
+const CARD_RESOLVE_TIMEOUT_MS = 30_000;
 
 export function validateDiagnosticsInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
@@ -124,6 +124,8 @@ export async function runAgentDiagnostics(rawInput, options = {}) {
     allowPrivate,
     signal: options.signal,
     timeoutMs: input.timeoutMs,
+    connectTimeoutMs: 10_000,
+    maxAttempts: 3,
     ...overrides
   });
 

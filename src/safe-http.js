@@ -4,6 +4,7 @@ import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
+const RETRY_DELAYS_MS = [100, 250];
 
 export function validateSafeUrl(rawUrl, options = {}) {
   if (typeof rawUrl !== 'string' || rawUrl.length > 2048) throw safeError('目标 URL 不合法或过长', 'security');
@@ -55,6 +56,9 @@ export async function resolveSafeAddress(rawUrl, options = {}) {
 
 export async function safeHttpRequest(rawUrl, options = {}) {
   const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 30_000;
+  const deadline = Date.now() + timeoutMs;
+  const maxAttempts = normalizeMaxAttempts(options.maxAttempts);
+  const connectTimeoutMs = positiveTimeout(options.connectTimeoutMs);
   const timeoutController = new AbortController();
   const signal = options.signal
     ? AbortSignal.any([options.signal, timeoutController.signal])
@@ -65,7 +69,57 @@ export async function safeHttpRequest(rawUrl, options = {}) {
     timeoutController.abort();
   }, timeoutMs);
   try {
-    return await performSafeHttpRequest(rawUrl, { ...options, signal, timeoutMs });
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let connected = false;
+      let connectTimedOut = false;
+      let connectTimer;
+      const connectController = new AbortController();
+      const attemptSignal = connectTimeoutMs
+        ? AbortSignal.any([signal, connectController.signal])
+        : signal;
+      if (connectTimeoutMs) {
+        connectTimer = setTimeout(() => {
+          connectTimedOut = true;
+          connectController.abort();
+        }, Math.min(connectTimeoutMs, Math.max(1, deadline - Date.now())));
+      }
+      try {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) throw safeError('请求超时', 'timeout');
+        return await performSafeHttpRequest(rawUrl, {
+          ...options,
+          signal: attemptSignal,
+          timeoutMs: remainingMs,
+          onConnected: () => {
+            connected = true;
+            clearTimeout(connectTimer);
+          }
+        });
+      } catch (caught) {
+        let error = caught;
+        if (timedOut || Date.now() >= deadline) throw safeError('请求超时', 'timeout');
+        if (connectTimedOut && error?.code === 'cancelled') {
+          error = safeError('连接建立超时', 'connection');
+        }
+        if (
+          attempt >= maxAttempts ||
+          connected ||
+          !['dns', 'connection', 'tls'].includes(error?.code) ||
+          signal.aborted
+        ) {
+          throw error;
+        }
+        try {
+          await abortableDelay(RETRY_DELAYS_MS[attempt - 1] || RETRY_DELAYS_MS.at(-1), signal);
+        } catch (delayError) {
+          if (timedOut || Date.now() >= deadline) throw safeError('请求超时', 'timeout');
+          throw delayError;
+        }
+      } finally {
+        clearTimeout(connectTimer);
+      }
+    }
+    throw safeError('远程连接失败', 'connection');
   } catch (error) {
     if (timedOut && error?.code === 'cancelled') throw safeError('请求超时', 'timeout');
     throw error;
@@ -158,6 +212,17 @@ async function performSafeHttpRequest(rawUrl, options) {
         body: Buffer.concat(chunks)
       }));
     });
+    request.once('socket', (socket) => {
+      const connected = () => options.onConnected?.();
+      if (resolved.url.protocol === 'https:') {
+        if (socket.encrypted && socket.secureConnecting === false) connected();
+        else socket.once('secureConnect', connected);
+      } else if (socket.connecting) {
+        socket.once('connect', connected);
+      } else {
+        connected();
+      }
+    });
     const onAbort = () => request.destroy(safeError('请求已取消', 'cancelled'));
     request.on('error', fail);
     options.signal?.addEventListener('abort', onAbort, { once: true });
@@ -173,6 +238,31 @@ async function defaultLookup(hostname) {
 
 function normalizeHostname(hostname) {
   return String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+}
+
+function normalizeMaxAttempts(value) {
+  if (!Number.isInteger(value) || value < 1) return 1;
+  return Math.min(value, 4);
+}
+
+function positiveTimeout(value) {
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function abortableDelay(delay, signal) {
+  if (signal.aborted) return Promise.reject(safeError('请求已取消', 'cancelled'));
+  return new Promise((resolve, reject) => {
+    let timer;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(safeError('请求已取消', 'cancelled'));
+    };
+    timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, delay);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function isUnsafeIpv4(address) {

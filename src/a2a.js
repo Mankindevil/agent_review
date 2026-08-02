@@ -286,7 +286,7 @@ export function assertSafeAgentUrl(rawUrl, options = {}) {
   return validateSafeUrl(rawUrl, { allowPrivate });
 }
 
-export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000, options = {}) {
+export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 30_000, options = {}) {
   if (!['card-url', 'service-url'].includes(sourceType)) throw new Error('不支持的 Agent Card 发现方式');
   const allowPrivate = options.allowPrivate ??
     process.env.ALLOW_PRIVATE_AGENT_URLS === 'true';
@@ -298,6 +298,8 @@ export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000, o
     allowPrivate,
     headers: { accept: 'application/json, application/a2a+json' },
     timeoutMs,
+    connectTimeoutMs: 8_000,
+    maxAttempts: 3,
     maxBytes: 1_000_000
   });
   if (response.status < 200 || response.status >= 300) throw new Error(`Agent Card 获取失败：HTTP ${response.status}`);
@@ -309,7 +311,7 @@ export async function resolveAgentCard(sourceType, rawUrl, timeoutMs = 12_000, o
   return { card, resolvedUrl: target.toString(), validation };
 }
 
-export async function callA2AAgent(card, prompt, timeoutMs = 45_000, signal, options = {}) {
+export async function callA2AAgent(card, prompt, timeoutMs = 90_000, signal, options = {}) {
   const { executeA2ATurn } = await import('./a2a-executor.js');
   const run = await executeA2ATurn({
     card,
@@ -332,7 +334,7 @@ export async function callA2AAgentExample(card, example, options = {}) {
   const result = await executeA2AExample({
     card,
     example,
-    policy: { timeoutMs: options.timeoutMs ?? 45_000 },
+    policy: { timeoutMs: options.timeoutMs ?? 90_000 },
     authorization: options.authorization,
     signal: options.signal
   });

@@ -199,6 +199,8 @@ test('nginx rejects methods outside each public route contract', async () => {
     exactLocation(production, '/api/agent-cards/resolve'),
     /if \(\$request_method != POST\)\s*\{\s*return 405;/
   );
+  assert.match(exactLocation(production, '/api/agent-cards/resolve'), /proxy_send_timeout 40s/);
+  assert.match(exactLocation(production, '/api/agent-cards/resolve'), /proxy_read_timeout 40s/);
   assert.match(
     exactLocation(production, '/api/agent-diagnostics'),
     /if \(\$request_method != POST\)\s*\{\s*return 405;/

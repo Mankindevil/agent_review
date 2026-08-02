@@ -209,3 +209,87 @@ test('never exposes an overflow chunk to instrumentation and classifies onChunk 
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test('retries two pre-connection failures and succeeds on the third attempt', async () => {
+  const reservation = createServer();
+  await new Promise((resolve) => reservation.listen(0, '127.0.0.1', resolve));
+  const port = reservation.address().port;
+  await new Promise((resolve) => reservation.close(resolve));
+
+  let lookups = 0;
+  let server;
+  const lookup = async () => {
+    lookups += 1;
+    if (lookups === 3) {
+      server = createServer((_request, response) => response.end('third-attempt'));
+      await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
+    }
+    return [{ address: '127.0.0.1', family: 4 }];
+  };
+
+  try {
+    const response = await safeHttpRequest(`http://agent.example:${port}/retry`, {
+      lookup,
+      allowPrivate: true,
+      timeoutMs: 2_000,
+      connectTimeoutMs: 500,
+      maxAttempts: 3
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.toString(), 'third-attempt');
+    assert.equal(lookups, 3);
+  } finally {
+    if (server?.listening) await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('connection retries consume one shared total deadline', { timeout: 500 }, async () => {
+  let lookups = 0;
+  const startedAt = Date.now();
+  await assert.rejects(
+    safeHttpRequest('http://deadline.example:9/retry', {
+      allowPrivate: true,
+      timeoutMs: 30,
+      connectTimeoutMs: 20,
+      maxAttempts: 3,
+      lookup: async () => {
+        lookups += 1;
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        return [{ address: '127.0.0.1', family: 4 }];
+      }
+    }),
+    (error) => error.code === 'timeout'
+  );
+  assert.ok(Date.now() - startedAt < 200);
+  assert.equal(lookups, 1);
+});
+
+test('does not replay a request after the HTTP connection was established', async () => {
+  let requests = 0;
+  let lookups = 0;
+  const server = createServer((request) => {
+    requests += 1;
+    request.socket.destroy();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    await assert.rejects(
+      safeHttpRequest(`http://agent.example:${port}/no-replay`, {
+        allowPrivate: true,
+        timeoutMs: 1_000,
+        connectTimeoutMs: 200,
+        maxAttempts: 3,
+        lookup: async () => {
+          lookups += 1;
+          return [{ address: '127.0.0.1', family: 4 }];
+        }
+      }),
+      (error) => error.code === 'connection'
+    );
+    assert.equal(requests, 1);
+    assert.equal(lookups, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

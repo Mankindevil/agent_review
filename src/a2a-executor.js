@@ -44,7 +44,7 @@ export async function executeA2ATurn(options) {
     contextId,
     taskId,
     streaming = false,
-    timeoutMs = 45_000,
+    timeoutMs = 90_000,
     authorization,
     testId,
     turnIndex,
@@ -250,7 +250,7 @@ export async function executeA2AProtocolRecoveryProbe(options = {}) {
   const {
     card,
     input,
-    timeoutMs = 45_000,
+    timeoutMs = 90_000,
     authorization,
     signal,
     request = safeHttpRequest,
@@ -799,6 +799,8 @@ async function send(requestDefinition, options) {
     ...(requestDefinition.body === null ? {} : { body: JSON.stringify(requestDefinition.body) }),
     signal: options.signal,
     timeoutMs: options.timeoutMs,
+    connectTimeoutMs: 10_000,
+    maxAttempts: 3,
     maxBytes: MAX_RESPONSE_BYTES,
     onHeaders: options.onHeaders,
     onChunk: options.onChunk

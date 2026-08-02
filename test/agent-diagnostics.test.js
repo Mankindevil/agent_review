@@ -210,6 +210,8 @@ test('uses the uploaded Card directly, propagates tenant, and reports technical 
   assert.equal(calls[0].url, 'https://agent.example/a2a');
   assert.equal(calls[0].options.method, 'POST');
   assert.equal(calls[0].options.timeoutMs, 300_000);
+  assert.equal(calls[0].options.maxAttempts, 3);
+  assert.equal(calls[0].options.connectTimeoutMs, 10_000);
   assert.equal('authorization' in calls[0].options.headers, false);
   assert.deepEqual(report.checks.map(({ id, status }) => [id, status]), [
     ['card-input', 'passed'],
@@ -319,7 +321,7 @@ test('resolves both URL source modes before running the existing diagnostics flo
       }
     });
 
-    assert.deepEqual(resolutions, [[type, url, 12_000, { allowPrivate: true }]]);
+    assert.deepEqual(resolutions, [[type, url, 30_000, { allowPrivate: true }]]);
     assert.deepEqual(calls, ['https://agent.example/a2a']);
     assert.equal(report.ok, true);
     assert.equal(report.checks[0].details.sourceType, type);

@@ -683,7 +683,7 @@ export class EvaluationPipeline {
     const example = Array.isArray(item.agentExamples) ? item.agentExamples[caseIndex] : null;
     if (example) {
       return callA2AAgentExample(item.agentCard, example, {
-        timeoutMs: 45_000,
+        timeoutMs: 90_000,
         signal,
         authorization
       });
@@ -692,7 +692,7 @@ export class EvaluationPipeline {
     if (typeof prompt !== 'string' || !prompt.trim()) {
       throw new Error(`用例 ${caseIndex + 1} 缺少 prompt`);
     }
-    return callA2AAgent(item.agentCard, prompt, 45_000, signal, { authorization });
+    return callA2AAgent(item.agentCard, prompt, 90_000, signal, { authorization });
   }
 
   async replaceBenchmarkOutput(item, caseIndex, competitorId, signal) {
