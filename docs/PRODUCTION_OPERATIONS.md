@@ -199,10 +199,10 @@ require_401_post() {
   status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-redirs 0 --connect-timeout 5 --max-time 15 --request POST --header 'Content-Type: application/json' --data '{}' "$url")"
   test "$status" = '401'
 }
-require_405_delete() {
+require_404_delete() {
   local url="$1" status
   status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-redirs 0 --connect-timeout 5 --max-time 15 --request DELETE "$url")"
-  test "$status" = '405'
+  test "$status" = '404'
 }
 require_404() {
   local url="$1" status
@@ -222,7 +222,7 @@ require_200 https://14.103.143.171/app.js
 require_200 https://14.103.143.171/styles.css
 require_200 https://14.103.143.171/methodology.html
 require_200 https://14.103.143.171/api/evaluations
-require_405_delete https://14.103.143.171/api/evaluations/release-route-contract
+require_404_delete https://14.103.143.171/api/evaluations/release-route-contract
 require_404 https://14.103.143.171/judge.html
 require_404 https://14.103.143.171/appeal.html
 require_404 https://14.103.143.171/api/admin/evaluations/release-route-contract
@@ -232,7 +232,7 @@ sudo systemctl status nginx --no-pager
 sudo journalctl -u nginx --since '24 hours ago' --no-pager
 ```
 
-The health response must contain JSON with `ok: true`; the V1 application, its allowlisted assets, and evaluation collection API must return exactly `200`; the old diagnostics HTML entry must return `308`; an unauthenticated diagnostics POST must return `401`; destructive detail DELETE must return `405`; and V2-only pages/admin/evidence requests must return `404` at public Nginx. These checks do not follow redirects. Inspect the homepage source or rendered controls during release acceptance: it must contain neither a V2 intake switch nor a demo intake switch. Existing V2/demo records may still be opened directly through the loopback SSH tunnel and retain their original type. The existing failed `cloud-monitor-agent` and `console-setup` units are unrelated to this platform; record and investigate them separately unless evidence links them to the incident.
+The health response must contain JSON with `ok: true`; the V1 application, its allowlisted assets, and evaluation collection API must return exactly `200`; the old diagnostics HTML entry must return `308`; an unauthenticated diagnostics POST must return `401`; DELETE of the deliberately missing detail ID must reach Node and return `404`; and V2-only pages/admin/evidence requests must return `404` at public Nginx. These checks do not follow redirects. Inspect the homepage source or rendered controls during release acceptance: it must contain neither a V2 intake switch nor a demo intake switch. Existing V2/demo records may still be opened directly through the loopback SSH tunnel and retain their original type. The existing failed `cloud-monitor-agent` and `console-setup` units are unrelated to this platform; record and investigate them separately unless evidence links them to the incident.
 
 ## Restart and reboot validation
 

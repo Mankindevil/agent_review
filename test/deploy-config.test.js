@@ -79,21 +79,24 @@ test('nginx keeps ACME on HTTP and exposes only the allowlisted public V1 surfac
   assert.match(production, /return 301 https:\/\/__PUBLIC_IP__\$request_uri;/);
 });
 
-test('nginx allows only the public evaluation methods, then rejects destructive and unmatched routes', async () => {
+test('nginx allows deletion only on evaluation details, then rejects unmatched methods and routes', async () => {
   const production = await read('nginx-production.conf');
   const evaluationCollection = exactLocation(production, '/api/evaluations');
   assert.match(evaluationCollection, /\^\(GET\|POST\)\$/);
   for (const route of [
-    String.raw`location ~ ^/api/evaluations/[^/]+$`,
     String.raw`location ~ ^/api/evaluations/[^/]+/(?:events|report\.pdf)$`,
     String.raw`location ~ ^/api/evaluations/[^/]+/builds/[^/]+/skill$`
   ]) {
     assert.match(production, new RegExp(`${route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?\\$request_method != GET`), route);
   }
-  assert.match(
+  const evaluationDetail = locationBlock(
     production,
-    /location ~ \^\/api\/evaluations\/\[\^\/\]\+\$\s*\{\s*if \(\$request_method != GET\) \{ return 405; \}/,
-    'DELETE and HEAD /api/evaluations/:id are rejected by the GET-only detail contract'
+    String.raw`location ~ ^/api/evaluations/[^/]+$ {`
+  );
+  assert.match(
+    evaluationDetail,
+    /\$request_method !~ \^\(GET\|DELETE\)\$/,
+    'GET and DELETE are the only public methods on /api/evaluations/:id'
   );
   for (const route of [
     String.raw`location ~ ^/api/evaluations/[^/]+/cancel$`,
@@ -320,7 +323,7 @@ test('production operations document the public V1 allowlist and private V2 acce
   assert.match(operations, /require_401_post https:\/\/14\.103\.143\.171\/api\/agent-diagnostics/);
   assert.match(operations, /require_404 https:\/\/14\.103\.143\.171\/judge\.html/);
   assert.match(operations, /require_404 https:\/\/14\.103\.143\.171\/appeal\.html/);
-  assert.match(operations, /require_405_delete https:\/\/14\.103\.143\.171\/api\/evaluations\/release-route-contract/);
+  assert.match(operations, /require_404_delete https:\/\/14\.103\.143\.171\/api\/evaluations\/release-route-contract/);
   assert.match(operations, /\$tunnelStatus[\s\S]*http:\/\/127\.0\.0\.1:4173\/[\s\S]*-ne ['"]200['"]/);
 });
 
