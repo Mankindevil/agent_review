@@ -36,8 +36,10 @@ export const RUNTIME_READINESS_PROMPT = JSON.stringify({
   probe: true,
   required_output: 'READY'
 });
-const DEFAULT_LOCAL_RUNTIME_TIMEOUT_MS = 180_000;
-const MAX_LOCAL_RUNTIME_TIMEOUT_MS = 1_200_000;
+const DEFAULT_LOCAL_RUNTIME_TIMEOUT_MS = 1_800_000;
+const MAX_LOCAL_RUNTIME_TIMEOUT_MS = 1_800_000;
+const DEFAULT_RUNTIME_PROBE_TIMEOUT_MS = 180_000;
+const MAX_RUNTIME_PROBE_TIMEOUT_MS = 1_200_000;
 
 export const RUNTIMES = [
   { id: 'claude-code', name: 'Claude Code', model: 'Claude Sonnet 4.6', badge: 'CC' },
@@ -160,7 +162,7 @@ export async function buildSkill(runtime, description, mode, {
       method: 'POST',
       headers: runtimeAdapterHeaders(config),
       body: JSON.stringify(request),
-      signal: withTimeout(signal, 120_000)
+      signal: withTimeout(signal, localRuntimeTimeout(process.env.LOCAL_RUNTIME_TIMEOUT_MS))
     });
     if (!response.ok) throw new Error(`${runtime.name} runtime 返回 HTTP ${response.status}`);
     const payload = await response.json();
@@ -338,7 +340,7 @@ async function callRemoteRuntime(config, runtimeId, request, signal, onContextUs
     method: 'POST',
     headers: runtimeAdapterHeaders(config),
     body: JSON.stringify(request),
-    signal: withTimeout(signal, 120_000)
+    signal: withTimeout(signal, localRuntimeTimeout(process.env.LOCAL_RUNTIME_TIMEOUT_MS))
   });
   if (!response.ok) throw new Error(`${runtimeId} runtime 返回 HTTP ${response.status}`);
   return response.json();
@@ -565,6 +567,14 @@ export function localRuntimeTimeout(value) {
   return Math.min(timeout, MAX_LOCAL_RUNTIME_TIMEOUT_MS);
 }
 
+export function runtimeProbeTimeout(value) {
+  const timeout = Number(value);
+  if (!Number.isFinite(timeout) || !Number.isInteger(timeout) || timeout <= 0) {
+    return DEFAULT_RUNTIME_PROBE_TIMEOUT_MS;
+  }
+  return Math.min(timeout, MAX_RUNTIME_PROBE_TIMEOUT_MS);
+}
+
 export async function withRuntimeWorkspace(runtimeId, run, {
   createWorkspace = mkdtemp,
   prepareWorkspace = prepareRuntimeWorkspace,
@@ -685,8 +695,8 @@ export async function probeRuntimeReadiness(runtimeId, config, {
   signal
 } = {}) {
   // Local CLIs (especially cold-start Cursor on Windows) often exceed 60s.
-  // Keep the probe under the normal local-runtime ceiling, not an extra 60s cap.
-  const probeTimeout = localRuntimeTimeout(env.RUNTIME_PROBE_TIMEOUT_MS || '180000');
+  // Keep probes on their independent shorter ceiling rather than inheriting execution timeouts.
+  const probeTimeout = runtimeProbeTimeout(env.RUNTIME_PROBE_TIMEOUT_MS);
   const probeSignal = withTimeout(signal, probeTimeout);
   try {
     if (config.kind === 'local-cli') {

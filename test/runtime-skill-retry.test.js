@@ -5,7 +5,7 @@ import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, localRuntimeTimeout, probeRuntimeReadiness, RUNTIME_READINESS_PROMPT, runSkill, runtimeModelIdentity, withRuntimeWorkspace } from '../src/runtimes.js';
+import { buildSkill, createSkillBundle, generateValidatedSkill, localCliArgs, localCliEnv, localRuntimeTimeout, probeRuntimeReadiness, runtimeProbeTimeout, RUNTIME_READINESS_PROMPT, runSkill, runtimeModelIdentity, withRuntimeWorkspace } from '../src/runtimes.js';
 import { prepareRuntimeWorkspace } from '../src/runtime-sandbox.js';
 import { runtimeBuildSkillPrompt } from '../src/prompts.js';
 import { applyArkClaudeEnv } from '../src/claude-env.js';
@@ -437,14 +437,22 @@ test('derives Ark bridge variables for Claude without preserving Ark credentials
   }
 });
 
-test('normalizes local runtime timeout values with a 20-minute ceiling', () => {
-  assert.equal(localRuntimeTimeout(), 180_000);
+test('normalizes every Runtime execution timeout to a 30-minute ceiling', () => {
+  assert.equal(localRuntimeTimeout(), 1_800_000);
   assert.equal(localRuntimeTimeout('300000'), 300_000);
-  assert.equal(localRuntimeTimeout('1200001'), 1_200_000);
+  assert.equal(localRuntimeTimeout('1800000'), 1_800_000);
+  assert.equal(localRuntimeTimeout('1800001'), 1_800_000);
 
   for (const invalidValue of ['NaN', 'Infinity', '-Infinity', '0', '-1', '1.5']) {
-    assert.equal(localRuntimeTimeout(invalidValue), 180_000);
+    assert.equal(localRuntimeTimeout(invalidValue), 1_800_000);
   }
+});
+
+test('keeps Runtime readiness probes on their independent shorter timeout policy', () => {
+  assert.equal(runtimeProbeTimeout(), 180_000);
+  assert.equal(runtimeProbeTimeout('60000'), 60_000);
+  assert.equal(runtimeProbeTimeout('1200001'), 1_200_000);
+  assert.equal(runtimeProbeTimeout('invalid'), 180_000);
 });
 
 test('materializes a read-only portable folder from normalized runtime output', () => {
@@ -529,11 +537,19 @@ test('does not retry a valid Skill response', async () => {
 
 test('normalizes remote runtime adapter responses to the platform contract', async () => {
   const originalFetch = globalThis.fetch;
+  const originalAbortTimeout = AbortSignal.timeout;
   const originalAdapters = process.env.RUNTIME_ADAPTERS_JSON;
   const originalKey = process.env.RUNTIME_TEST_KEY;
+  const originalRuntimeTimeout = process.env.LOCAL_RUNTIME_TIMEOUT_MS;
   const requests = [];
+  const timeoutCalls = [];
   process.env.RUNTIME_ADAPTERS_JSON = JSON.stringify({ cursor: { kind: 'remote-http', url: 'https://runtime.example/cursor', apiKeyEnv: 'RUNTIME_TEST_KEY' } });
   process.env.RUNTIME_TEST_KEY = 'test-only';
+  process.env.LOCAL_RUNTIME_TIMEOUT_MS = '1800000';
+  AbortSignal.timeout = (timeoutMs) => {
+    timeoutCalls.push(timeoutMs);
+    return originalAbortTimeout(timeoutMs);
+  };
   globalThis.fetch = async (_url, options) => {
     requests.push({ headers: options.headers, body: JSON.parse(options.body) });
     if (requests.at(-1).body.action === 'build_skill') {
@@ -554,10 +570,13 @@ test('normalizes remote runtime adapter responses to the platform contract', asy
     assert.equal(requests[0].headers.authorization, 'Bearer test-only');
     assert.deepEqual(requests[0].body, { action: 'build_skill', description: 'Description', inputPolicy: 'description-only', seed: 17, temperature: 0 });
     assert.equal('agentCard' in requests[0].body, false);
+    assert.deepEqual(timeoutCalls, [1_800_000, 1_800_000]);
   } finally {
     globalThis.fetch = originalFetch;
+    AbortSignal.timeout = originalAbortTimeout;
     if (originalAdapters === undefined) delete process.env.RUNTIME_ADAPTERS_JSON; else process.env.RUNTIME_ADAPTERS_JSON = originalAdapters;
     if (originalKey === undefined) delete process.env.RUNTIME_TEST_KEY; else process.env.RUNTIME_TEST_KEY = originalKey;
+    if (originalRuntimeTimeout === undefined) delete process.env.LOCAL_RUNTIME_TIMEOUT_MS; else process.env.LOCAL_RUNTIME_TIMEOUT_MS = originalRuntimeTimeout;
   }
 });
 

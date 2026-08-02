@@ -637,10 +637,10 @@ sudo stat -c '%U:%G %a %n' /etc/agent-review/agent-review.env
 sudo systemd-run --quiet --wait --pipe --collect \
   --property=EnvironmentFile=/etc/agent-review/agent-review.env \
   /usr/local/bin/node --eval \
-  'const value=process.env.V1_SUBMITTED_AGENT_TIMEOUT_MS; console.log(JSON.stringify({v1SubmittedAgentTimeoutMs:Number(value)})); if(value!=="7200000") process.exit(1)'
+  'const submitted=process.env.V1_SUBMITTED_AGENT_TIMEOUT_MS; const runtime=process.env.LOCAL_RUNTIME_TIMEOUT_MS; console.log(JSON.stringify({v1SubmittedAgentTimeoutMs:Number(submitted),localRuntimeTimeoutMs:Number(runtime)})); if(submitted!=="7200000"||runtime!=="1800000") process.exit(1)'
 ```
 
-Expected metadata is `root:root 600` and the non-secret timeout check prints `{"v1SubmittedAgentTimeoutMs":7200000}`. The browser diagnostics retrieval copy is `/root/agent-review-access-key.txt`, also `root:root` mode `0600`. Authorized operators retrieve it only through their approved privileged-access procedure.
+Expected metadata is `root:root 600` and the non-secret timeout check prints `{"v1SubmittedAgentTimeoutMs":7200000,"localRuntimeTimeoutMs":1800000}`. The browser diagnostics retrieval copy is `/root/agent-review-access-key.txt`, also `root:root` mode `0600`. Authorized operators retrieve it only through their approved privileged-access procedure.
 
 Rotation creates a unique protected key file and a protected staged environment from that same key, validates the pair without output, then makes exact root-only backups before either live replacement. Each live file is replaced with an atomic rename. Its failure trap verifies ownership, mode, and credential consistency before restarting with restored files; if restoration cannot be verified, it stops the service and leaves an explicit error instead of starting with mismatched credentials.
 

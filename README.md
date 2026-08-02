@@ -548,7 +548,7 @@ V2 不会锁定模型席；同一主审先以相同配置重试一次，随后�
 | `ENABLE_LOCAL_CURSOR_AGENT` | `false` | 允许真实调用已登录的本机 Cursor Agent CLI |
 | `CURSOR_AUTH_CONFIG_HOME` | `/var/lib/agent-review/cursor-auth` | Cursor Agent 专用持久登录目录；只把 `XDG_CONFIG_HOME` 指向这里，内部文件凭据不得暴露给模型工具 |
 | `CLAUDE_MAX_BUDGET_USD` | `0.25` | Claude Code 单次无头调用预算上限 |
-| `LOCAL_RUNTIME_TIMEOUT_MS` | `180000` | 本地 CLI 单次执行时限 |
+| `LOCAL_RUNTIME_TIMEOUT_MS` | `1800000` | Claude Code、Cursor、Doubao 等 Runtime 单次构建或执行时限；默认和最大均为 30 分钟 |
 | `RUNTIME_PROBE_TIMEOUT_MS` | `30000` | Runtime 最小非交互就绪探针时限，上限 60 秒 |
 | `CLAUDE_BACKEND` | `llmx` | Claude Code 后端：支持 `llmx`、`ark` 或 `deepseek`；配置不完整时失败关闭 |
 | `ANTHROPIC_BASE_URL` | `https://llmx.tqx.ai` | Claude Code 的 LLMX Anthropic-compatible 地址 |
